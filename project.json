@@ -1,0 +1,25 @@
+{
+ "name": "Unity LAN",
+ "description": "A peer-to-peer LAN driven by Discord roles / voice channels using Wireguard.",
+ "author": {
+  "name": "Gordon",
+  "email": "gtosh4@gmail.com"
+ },
+ "version": "0.1.0",
+ "binaryname": "unity-lan",
+ "frontend": {
+  "dir": "frontend",
+  "install": "npm install",
+  "build": "npm run build",
+  "bridge": "src",
+  "serve": "npm run serve"
+ },
+ "tags": "",
+ "WailsVersion": "",
+ "CrossCompile": false,
+ "Platform": "",
+ "Architecture": "",
+ "LdFlags": "",
+ "GoPath": "",
+ "UseFirebug": false
+}

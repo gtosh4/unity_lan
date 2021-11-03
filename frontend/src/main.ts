@@ -1,10 +1,15 @@
 import App from './App.svelte';
 
-const app = new App({
-	target: document.body,
-	props: {
-		name: 'world'
-	}
+import * as Wails from '@wailsapp/runtime';
+
+import "smelte/src/tailwind.css";
+
+let app
+
+Wails.Init(() => {
+	app = new App({
+		target: document.body,
+	});
 });
 
 export default app;

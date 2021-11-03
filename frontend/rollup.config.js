@@ -5,7 +5,7 @@ import livereload from 'rollup-plugin-livereload';
 import { terser } from 'rollup-plugin-terser';
 import sveltePreprocess from 'svelte-preprocess';
 import typescript from '@rollup/plugin-typescript';
-import css from 'rollup-plugin-css-only';
+import smelte from "smelte/rollup-plugin-smelte";
 
 const production = !process.env.ROLLUP_WATCH;
 
@@ -46,9 +46,26 @@ export default {
 				dev: !production
 			}
 		}),
-		// we'll extract any component CSS out into
-		// a separate file - better for performance
-		css({ output: 'bundle.css' }),
+
+		smelte({
+      purge: production,
+      output: "public/build/bundle.css",
+      postcss: [],
+      whitelist: [],
+      whitelistPatterns: [],
+      tailwind: {
+        colors: {
+          primary: "#B39DDB",
+          secondary: "#c5db9d",
+          error: "#f44336",
+          success: "#4caf50",
+          alert: "#ff9800",
+          blue: "#2196f3",
+          dark: "#212121",
+        },
+        darkMode: true,
+      },
+    }),
 
 		// If you have external dependencies installed from
 		// npm, you'll most likely need these plugins. In
@@ -61,6 +78,7 @@ export default {
 		}),
 		commonjs(),
 		typescript({
+			rootDir: "./src",
 			sourceMap: !production,
 			inlineSources: !production
 		}),
