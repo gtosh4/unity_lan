@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package unitylan.v1;
+
+message Address {
+  bytes ip = 1;
+  uint64 port = 2;
+}
+
+message Peer {
+  bytes ip = 1;
+  bytes public_key = 2;
+  Address endpoint = 3;
+}
+
+message ConnectRequest {
+  uint64 userid = 1; // https://discord.com/developers/docs/reference#snowflakes
+}
+
+message ConnectResponse {
+  Address source = 1; // the address as received from the server (used for nat punching)
+  bytes address = 2; // the ip address and mask to use for the wireguard interface
+  Peer server_peer = 3;
+}
+
+message HeartbeatRequest {}
+message HeartbeatResponse {}
+
+service UnityPublicService { // endpoints exposed to public internet
+  rpc Connect(ConnectRequest) returns (ConnectResponse) {}
+}
+
+service UnityPrivateService { // endpoints exposed only to VPN peers
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse) {}
+}

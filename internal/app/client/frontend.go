@@ -12,7 +12,7 @@ type Frontend struct {
 }
 
 func (srv *ClientService) setupApp() {
-	app := wails.CreateApp(&wails.AppConfig{
+	srv.frontend.app = wails.CreateApp(&wails.AppConfig{
 		Width:  1024,
 		Height: 768,
 		Title:  "Unity LAN",
@@ -21,12 +21,7 @@ func (srv *ClientService) setupApp() {
 		Colour: "#131313",
 	})
 
-	srv.frontend = Frontend{
-		srv: srv,
-		app: app,
-	}
-
-	app.Bind(&srv.frontend)
+	srv.frontend.app.Bind(&srv.frontend)
 }
 
 func (f *Frontend) WailsInit(runtime *wails.Runtime) error {
@@ -34,16 +29,18 @@ func (f *Frontend) WailsInit(runtime *wails.Runtime) error {
 
 	runtime.Events.On("wails:loaded", f.onLoad)
 
-	f.srv.startInterfacePoll()
+	f.srv.wg.startInterfacePoll()
+	f.srv.startGuildsStore()
+	f.srv.startFriendsStore()
 
 	return nil
 }
 
 func (f *Frontend) onLoad(_ ...interface{}) {
-	clients := f.srv.ctx.Clients
+	clients := f.srv.Clients
 
 	if clients.Discord == nil {
-		f.emit("doLogin", discordAuthConfig.AuthCodeURL(authState))
+
 	} else {
 		f.emit("loggedIn")
 	}

@@ -1,13 +1,14 @@
-import { Store } from "@wailsapp/runtime";
+import { Events, Store } from "@wailsapp/runtime";
 import { writable, Writable } from "svelte/store";
 
-export function wailsStore<T>(name: string, init?: T): Writable<T> {
+export function wailsStore<T>(name: string): Writable<T> {
   const s = Store.New(name)
-  const w = writable<T>(init)
+  const w = writable<T>()
 
+  let initialized = false
   let updating = false
   const wrapUpdate = (f) => {
-    if (!updating) {
+    if (!updating && initialized) {
       updating = true
       try {
         f()
@@ -19,13 +20,14 @@ export function wailsStore<T>(name: string, init?: T): Writable<T> {
   s.subscribe(v => {
     wrapUpdate(() => w.set(v))
   })
-  let initialized = false
   w.subscribe(v => {
-    if (v && initialized) {
+    if (v) {
       wrapUpdate(() => s.set(v))
     }
-    initialized = true
   })
+  initialized = true
+
+  Events.Emit(`wails:sync:store:requestvalue:${name}`)
 
   return w
 }

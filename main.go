@@ -49,7 +49,7 @@ func run(cmd *cobra.Command, args []string) error {
 		panic(err)
 	}
 
-	ctx := client.Context{
+	ctx := &client.Context{
 		SugaredLogger: log,
 		Clients: client.Clients{
 			Wireguard: wg,
@@ -73,18 +73,6 @@ func run(cmd *cobra.Command, args []string) error {
 	}()
 
 	srv := client.NewClientService(ctx)
-
-	if err := client.Discordtoken.Load(); err != nil {
-		ctx.Warnf("Error loading discord token from credential store: %v", err)
-	} else if client.Discordtoken.Token.AccessToken != "" {
-		err = srv.DiscordClientInit()
-		if err != nil {
-			ctx.Warnf("Got error setting up discord client with initial token: %v", err)
-		} else {
-			ctx.Info("Succesfully created discord client from cred store token")
-		}
-	}
-	ctx.Infof("Loaded token: %+v", client.Discordtoken.Secret)
 
 	srv.Start()
 

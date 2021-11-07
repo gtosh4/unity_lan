@@ -3,32 +3,45 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"time"
 
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
+	unitylanv1 "github.com/gtosh4/unity_lan/gen/proto/go/unitylan/v1"
 	"github.com/gtosh4/unity_lan/internal/pkg/admin"
-	"github.com/gtosh4/unity_lan/internal/pkg/wg"
-	"github.com/pkg/errors"
+	"github.com/metal-stack/go-ipam"
 	"go.uber.org/zap"
+	"google.golang.org/grpc"
 )
 
 type Server struct {
 	ctx Context
 
 	router *gin.Engine
+	ipam   ipam.Ipamer
+
+	prefix *ipam.Prefix
 }
 
-const port = 58105
+const httpPort = 58105
+const grpcPubPort = 58106
+const grpcPrivPort = 58107
 
-func NewServer(ctx Context) *Server {
+func NewServer(ctx Context) (*Server, error) {
 	srv := &Server{
-		ctx: ctx,
+		ctx:  ctx,
+		ipam: ipam.New(),
 	}
-	srv.setupRouter()
+	var err error
+	srv.prefix, err = srv.ipam.NewPrefix("10.0.0.0/8")
+	if err != nil {
+		return nil, err
+	}
+	srv.setupAPI()
 
-	return srv
+	return srv, nil
 }
 
 func (srv *Server) Context() context.Context {
@@ -39,7 +52,7 @@ func (srv *Server) Log() *zap.SugaredLogger {
 	return srv.ctx.SugaredLogger
 }
 
-func (srv *Server) setupRouter() {
+func (srv *Server) setupAPI() {
 	r := gin.New()
 	r.Use(
 		ginzap.RecoveryWithZap(srv.Log().Desugar(), true),
@@ -55,20 +68,50 @@ func (srv *Server) setupRouter() {
 }
 
 func (srv *Server) Start() error {
-	if _, err := wg.FindDevice(srv.ctx.Wireguard); err != nil {
-		return errors.Wrap(err, "could not find wg interface")
-	}
-
 	go func() {
 		s := &http.Server{
-			Addr:    fmt.Sprintf(":%d", port),
+			Addr:    fmt.Sprintf(":%d", httpPort),
 			Handler: srv.router,
 		}
 		srv.ctx.OnDoneClose(s.Close)
 
-		err := s.ListenAndServe()
-		if err != nil {
-			srv.Log().Errorf("Gin error: %v", err)
+		for srv.ctx.Err() == nil {
+			err := s.ListenAndServe()
+			if err != nil {
+				srv.Log().Errorf("Gin error: %v", err)
+			}
+		}
+	}()
+
+	go func() {
+		grpcServer := grpc.NewServer()
+		unitylanv1.RegisterUnityPublicServiceServer(grpcServer, srv)
+
+		for srv.ctx.Err() == nil {
+			addr := fmt.Sprintf(":%d", grpcPubPort)
+			lis, err := net.Listen("tcp", addr)
+			if err != nil {
+				srv.Log().Errorf("GRPC/pub: failed to listen on %s: %v", addr, err)
+				time.Sleep(time.Second)
+			} else {
+				grpcServer.Serve(lis)
+			}
+		}
+	}()
+
+	go func() {
+		grpcServer := grpc.NewServer()
+		unitylanv1.RegisterUnityPrivateServiceServer(grpcServer, srv)
+
+		for srv.ctx.Err() == nil {
+			addr := fmt.Sprintf(":%d", grpcPrivPort)
+			lis, err := net.Listen("tcp", addr)
+			if err != nil {
+				srv.Log().Errorf("GRPC/priv: failed to listen on %s: %v", addr, err)
+				time.Sleep(time.Second)
+			} else {
+				grpcServer.Serve(lis)
+			}
 		}
 	}()
 

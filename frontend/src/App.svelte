@@ -1,43 +1,18 @@
 <script lang="ts">
-  import { Browser, Events } from "@wailsapp/runtime";
-  import { writable } from "svelte/store";
+  import type { APIUser } from "discord-api-types";
+
   import DeviceCheck from "./components/DeviceCheck.svelte";
-  import GuildList from "./components/GuildList.svelte";
+  import FriendList from "./components/FriendList.svelte";
+  import { wailsStore } from "./wails_store";
 
-  enum loginState {
-    Unknown,
-    NeedsLogin,
-    LoggedIn,
-    LoginFailed,
-  }
-
-  let login = writable(loginState.Unknown);
-
-  Events.On("doLogin", (loginURL) => {
-    console.info("logging in");
-    $login = loginState.NeedsLogin;
-    Browser.OpenURL(loginURL);
-  });
-
-  Events.On("loggedIn", () => {
-    console.info("logged in");
-    $login = loginState.LoggedIn;
-  });
-
-  Events.On("loginFailed", () => {
-    console.info("login failed");
-    $login = loginState.LoginFailed;
-  });
+  const login = wailsStore<APIUser>("LoginState");
 </script>
 
 <main>
   <DeviceCheck />
-  {#if $login == loginState.NeedsLogin}
-    <p>Login with Discord (opened in browser)</p>
-  {:else if $login == loginState.LoggedIn}
-    <GuildList />
-  {:else if $login == loginState.LoginFailed}
-    <p>Login failed, check logs for details</p>
+  {#if $login}
+    <h1>Hello {$login.username} ({$login.id})</h1>
+    <FriendList />
   {:else}
     <p>Waiting for login status from backend</p>
   {/if}

@@ -12,8 +12,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gtosh4/unity_lan/frontend"
 	"github.com/gtosh4/unity_lan/internal/pkg/auth"
+	"github.com/gtosh4/unity_lan/internal/pkg/wails_store"
 	"github.com/gtosh4/unity_lan/pkg/credstore"
+	"github.com/gtosh4/unity_lan/pkg/openurl"
 	"github.com/gtosh4/unity_lan/secrets"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"golang.org/x/oauth2"
 )
@@ -25,7 +28,7 @@ var Discordtoken = auth.TokenSecret{
 }
 
 var discordAuthConfig = &oauth2.Config{
-	ClientID:     "902361055957770261",
+	ClientID:     "905550991955460126",
 	ClientSecret: strings.TrimSpace(secrets.DiscordClientSecret),
 	Endpoint: oauth2.Endpoint{
 		AuthURL:   "https://discord.com/api/oauth2/authorize",
@@ -36,71 +39,126 @@ var discordAuthConfig = &oauth2.Config{
 	Scopes: []string{
 		"identify",
 		"guilds",
-		// "rpc",
-		// "rpc.voice.read",
+		"rpc",
+		"rpc.voice.read",
+		// "relationships.read",
 	},
 }
 
-var authState string
+type DiscordAuth struct {
+	srv *ClientService
 
-func init() {
-	n, err := rand.Int(rand.Reader, big.NewInt(99999))
-	if err != nil {
-		n = big.NewInt(90813)
-	}
-	authState = n.String()
+	oath2State string
+	store      *wails_store.Store
 }
 
-func (srv *ClientService) oauthRedirect(c *gin.Context) {
-	log := srv.Log().With(zap.String("method", c.Request.Method), zap.String("remote", c.Request.RemoteAddr))
+func (auth *DiscordAuth) updateState(user *discordgo.User) {
+	if auth.store == nil {
+		if rt := auth.srv.frontend.runtime; rt != nil {
+			auth.store = wails_store.NewStore(rt, "LoginState", user)
+			auth.store.Set(user)
+			return
+		} else {
+			auth.srv.Warnf("Tried to update state (to %+v) before runtime ready", user)
+		}
+	} else {
+		auth.store.Set(user)
+	}
+}
+
+func (auth *DiscordAuth) oauthRedirect(c *gin.Context) {
+	srv := auth.srv
+	log := srv.SugaredLogger.With(zap.String("method", c.Request.Method), zap.String("remote", c.Request.RemoteAddr))
 
 	code := c.Query("code")
 	state := c.Query("state")
 
-	log.Infof("code: '%s' // state: '%s' (expected: '%s')", code, state, authState)
+	log.Infof("code: '%s' // state: '%s' (expected: '%s')", code, state, auth.oath2State)
+
+	retryRedirect := func() {
+		c.Redirect(http.StatusTemporaryRedirect, auth.AuthCodeURL())
+	}
+
+	errCode := c.Query("error")
+	errDesc := c.Query("error_description")
+
+	if errCode != "" {
+		log.Warnf("Got error from discord API: %s: %s", errCode, errDesc)
+		retryRedirect()
+		auth.updateState(nil)
+		return
+	}
 
 	if code == "" {
 		log.Warnf("No oauth2 code")
-		c.AbortWithStatus(http.StatusBadRequest)
-		srv.frontend.emit("loginFailed")
+		retryRedirect()
+		auth.updateState(nil)
 		return
 	}
 
-	if state != authState {
-		log.Warnf("State param (%s) doesn't match expected (%s)", state, authState)
-		c.AbortWithStatus(http.StatusBadRequest)
-		srv.frontend.emit("loginFailed")
+	if state != auth.oath2State {
+		log.Warnf("State param (%s) doesn't match expected (%s)", state, auth.oath2State)
+		retryRedirect()
+		auth.updateState(nil)
 		return
 	}
 
-	// tmp := &http.Client{
-	// 	Transport: &debug.LogRoundTrip{Base: http.DefaultTransport, Log: srv.Log()},
-	// }
-	// ctx := context.WithValue(srv.ctx, oauth2.HTTPClient, tmp)
-	token, err := discordAuthConfig.Exchange(srv.ctx, code)
+	token, err := discordAuthConfig.Exchange(srv.Context, code)
 	if err != nil {
 		log.Warnf("Could not exchange code for token: %v", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		srv.frontend.emit("loginFailed")
+		retryRedirect()
+		auth.updateState(nil)
 		return
 	}
 	Discordtoken.Token = *token
 
-	if err := srv.DiscordClientInit(); err != nil {
+	if err := auth.DiscordClientInit(); err != nil {
 		log.Warnf("Could not setup discord client: %v", err)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		srv.frontend.emit("loginFailed")
+		retryRedirect()
+		auth.updateState(nil)
 		return
 	}
-
-	srv.frontend.emit("loggedIn")
 
 	if _, err := c.Writer.Write(frontend.AuthSuccess); err != nil {
 		log.Warnf("Error returning auth success page: %v", err)
 	}
 }
 
-func (srv *ClientService) DiscordClientInit() error {
+func (auth *DiscordAuth) AuthCodeURL() string {
+	if auth.oath2State == "" {
+		n, err := rand.Int(rand.Reader, big.NewInt(99999))
+		if err != nil {
+			n = big.NewInt(90813)
+		}
+		auth.oath2State = n.String()
+	}
+	u := discordAuthConfig.AuthCodeURL(auth.oath2State)
+	auth.srv.Infof("opening %s", u)
+	return u
+}
+
+func (auth *DiscordAuth) OpenAuthPage() error {
+	return openurl.Open(auth.srv.Context, auth.AuthCodeURL())
+}
+
+func (auth *DiscordAuth) InitFromStore() error {
+	if err := Discordtoken.Load(); err != nil {
+		return errors.Wrap(err, "Error loading discord token from credential store")
+	}
+	if Discordtoken.Token.AccessToken == "" {
+		// No error, just not logged in
+		return nil
+	}
+
+	if err := auth.DiscordClientInit(); err != nil {
+		return errors.Wrap(err, "Got error setting up discord client with initial token")
+	} else {
+		auth.srv.Info("Succesfully created discord client from cred store token")
+	}
+	return nil
+}
+
+func (auth *DiscordAuth) DiscordClientInit() error {
 	if err := Discordtoken.Save(); err != nil {
 		return err
 	}
@@ -110,13 +168,18 @@ func (srv *ClientService) DiscordClientInit() error {
 		return err
 	}
 
+	user, err := client.User("@me")
+	if err != nil {
+		return err
+	}
+
+	auth.updateState(user)
+
 	// Swap in the oauth2 token auto-refreshing client
-	discordCtx := context.WithValue(srv.ctx, oauth2.HTTPClient, client.Client)
+	discordCtx := context.WithValue(auth.srv.Context, oauth2.HTTPClient, client.Client)
 	client.Client = discordAuthConfig.Client(discordCtx, &Discordtoken.Token)
 
-	srv.ctx.Clients.Discord = client
-
-	srv.startGuildsStore()
+	auth.srv.Clients.Discord = client
 
 	return nil
 }
