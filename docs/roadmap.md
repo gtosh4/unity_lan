@@ -108,8 +108,11 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    attestation carries `device_name` + `username` + `is_primary`; presence keyed by device
    pubkey (a user's multiple devices no longer collide); networks are pure ACL — seeds = anyone
    sharing ≥1 network. Verified: `mesh-test.sh` meshes with per-device IPs (0% loss).
-2. **Enrollment** — OAuth session (interactive) + one-time enrollment keys (headless); coordinator
-   binds device pubkey → user. Replaces `dev_auth`/`?dev_user=`.
+2. **Enrollment** — one-time enrollment keys (headless) ✅: `enrollment_keys` table (one-time,
+   optional expiry, bound to a pubkey on use); `resolve_user` = known device by pubkey, else
+   consume a key; minted via `/unitylan enroll` (any member, ephemeral) or config seed for tests.
+   Replaced `dev_auth`/`?dev_user=`. Verified: `mesh-test.sh` enrolls + meshes; store tests cover
+   one-time/expiry/rejection. OAuth session (interactive) still TODO — reuses the same binding.
 3. **Community slug** — admin config (default from guild name); carried in register/refresh.
 4. **Primary device** — coordinator-authoritative pointer per (community,user); owner-managed;
    `is_primary` propagated.

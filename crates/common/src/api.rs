@@ -15,6 +15,10 @@ pub struct RegisterReq {
     /// Owner-chosen label for this device (the `<device>` DNS label; sanitized by coordinator).
     #[serde(default)]
     pub device_name: String,
+    /// One-time enrollment key, sent until this device's pubkey is bound to its owner. Ignored
+    /// once enrolled (the coordinator resolves the owner from the pubkey binding).
+    #[serde(default)]
+    pub enrollment_key: Option<String>,
     /// The client's reachable `ip:port` for the WG listener (UPnP-mapped in production).
     #[serde(default)]
     pub endpoint: Option<SocketAddr>,

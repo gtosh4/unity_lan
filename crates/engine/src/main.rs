@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         wg_pubkey,
         cfg.device_name(),
         cfg.endpoint,
-        cfg.dev_user,
+        cfg.enrollment_key.clone(),
     )
     .await?;
 

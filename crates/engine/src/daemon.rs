@@ -15,9 +15,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
     // Register + verify our own device.
-    let (resp, device) =
-        coord::register(&cfg.coordinator, wg_pub, cfg.device_name(), cfg.endpoint, cfg.dev_user)
-            .await?;
+    let (resp, device) = coord::register(
+        &cfg.coordinator,
+        wg_pub,
+        cfg.device_name(),
+        cfg.endpoint,
+        cfg.enrollment_key.clone(),
+    )
+    .await?;
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
     let Some(device) = device else {
         anyhow::bail!("registered but hold no networks — nothing to mesh");
@@ -46,8 +51,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     ticker.tick().await; // first tick is immediate
     loop {
         ticker.tick().await;
-        match coord::refresh(&cfg.coordinator, wg_pub, cfg.device_name(), cfg.endpoint, cfg.dev_user)
-            .await
+        match coord::refresh(
+            &cfg.coordinator,
+            wg_pub,
+            cfg.device_name(),
+            cfg.endpoint,
+            cfg.enrollment_key.clone(),
+        )
+        .await
         {
             Ok((resp, _)) => match coord::verified_seeds(&resp) {
                 Ok(seeds) => apply_seeds(&backend, seeds, &mut peers)?,

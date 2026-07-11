@@ -1,7 +1,7 @@
 //! Ed25519 (coordinator attestation signing) and Curve25519 (WireGuard key) helpers.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// A raw 32-byte WireGuard (Curve25519) public key.
@@ -69,6 +69,18 @@ pub fn gen_wg_keypair() -> (WgPrivateKey, WgPublicKey) {
 pub fn wg_public_from_private(private: &WgPrivateKey) -> WgPublicKey {
     let secret = StaticSecret::from(*private);
     PublicKey::from(&secret).to_bytes()
+}
+
+/// Mint a one-time enrollment key: `unl_` + 32 hex chars (128 bits from the OS CSPRNG).
+pub fn gen_enrollment_key() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let mut s = String::with_capacity(4 + 32);
+    s.push_str("unl_");
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
 }
 
 #[cfg(test)]

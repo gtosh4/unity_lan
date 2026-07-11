@@ -11,8 +11,9 @@ pub struct Config {
     pub coordinator: String,
     /// State directory (WG private key, pinned anchor). Created if missing.
     pub state_dir: PathBuf,
-    /// Dev-only: caller identity sent as `?dev_user=` while the coordinator runs in fake mode.
-    pub dev_user: Option<u64>,
+    /// One-time enrollment key that binds this device to its owner on first register. Sent until
+    /// enrolled; the coordinator then knows this device by its WG pubkey.
+    pub enrollment_key: Option<String>,
     /// This machine's device name (the `<device>` DNS label). Defaults to the system hostname.
     #[serde(default)]
     pub device_name: Option<String>,

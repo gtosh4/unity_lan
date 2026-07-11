@@ -35,7 +35,6 @@ $NS1 ip addr add 10.0.0.2/24 dev veth1; $NS1 ip link set veth1 up; $NS1 ip link 
 cat >"$TMP/coord.toml" <<EOF
 bind = "10.0.0.1:8080"
 database = "$TMP/coord.db"
-dev_auth = true
 [[fake.guild]]
 id = 1
 name = "Test"
@@ -51,13 +50,19 @@ role_ids = [10]
 guild_id = 1
 role_id = 10
 name = "mesh"
+[[enroll]]
+key = "key-a"
+user_id = 1
+[[enroll]]
+key = "key-b"
+user_id = 2
 EOF
 # NOTE distinct iface names only because this test shares one /run across the namespaces
 # (boringtun's control socket is /run/wireguard/<iface>.sock). Real hosts each have their own.
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
 state_dir = "$TMP/a"
-dev_user = 1
+enrollment_key = "key-a"
 iface = "unla"
 listen_port = 51820
 endpoint = "10.0.0.1:51820"
@@ -66,7 +71,7 @@ EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
 state_dir = "$TMP/b"
-dev_user = 2
+enrollment_key = "key-b"
 iface = "unlb"
 listen_port = 51821
 endpoint = "10.0.0.2:51821"

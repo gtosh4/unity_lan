@@ -56,6 +56,12 @@ impl Store {
                 user_id     INTEGER NOT NULL,
                 device_name TEXT    NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS enrollment_keys (
+                key        TEXT    PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                expires_at INTEGER,          -- NULL = never expires
+                used_by    BLOB              -- device pubkey that consumed it; NULL = unused
+            );
             "#,
         )
         .execute(&self.pool)
@@ -181,5 +187,125 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(addr_from_index(idx))
+    }
+
+    /// The owner of an already-enrolled device, if its pubkey is bound.
+    pub async fn device_owner(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<u64>> {
+        let row = sqlx::query("SELECT user_id FROM devices WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<i64, _>("user_id") as u64))
+    }
+
+    // ---- enrollment keys (one-time; bind a new device's pubkey to its owner) ----
+
+    /// Insert (or refresh) a one-time enrollment key for a user. `expires_at` is optional.
+    pub async fn create_enrollment_key(
+        &self,
+        key: &str,
+        user_id: u64,
+        expires_at: Option<u64>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO enrollment_keys (key, user_id, expires_at, used_by) VALUES (?, ?, ?, NULL)
+             ON CONFLICT (key) DO UPDATE SET user_id = excluded.user_id, expires_at = excluded.expires_at",
+        )
+        .bind(key)
+        .bind(user_id as i64)
+        .bind(expires_at.map(|e| e as i64))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Consume a one-time enrollment key for `pubkey`, returning the bound user id. Idempotent if
+    /// re-presented by the same device. Errors if unknown, expired, or already used by another.
+    pub async fn consume_enrollment_key(
+        &self,
+        key: &str,
+        pubkey: &[u8; 32],
+        now: u64,
+    ) -> anyhow::Result<u64> {
+        let row = sqlx::query("SELECT user_id, expires_at, used_by FROM enrollment_keys WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("unknown enrollment key"))?;
+
+        let user_id = row.get::<i64, _>("user_id") as u64;
+        let used_by: Option<Vec<u8>> = row.try_get("used_by")?;
+        if let Some(used) = used_by {
+            return if used.as_slice() == pubkey.as_slice() {
+                Ok(user_id) // same device re-presenting — idempotent
+            } else {
+                Err(anyhow::anyhow!("enrollment key already used"))
+            };
+        }
+        if let Some(exp) = row.try_get::<Option<i64>, _>("expires_at")? {
+            if now >= exp as u64 {
+                return Err(anyhow::anyhow!("enrollment key expired"));
+            }
+        }
+
+        sqlx::query("UPDATE enrollment_keys SET used_by = ? WHERE key = ? AND used_by IS NULL")
+            .bind(pubkey.as_slice())
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn mem_store() -> Store {
+        // Each :memory: db is private to its single connection.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = Store { pool };
+        store.migrate().await.unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn enrollment_key_is_one_time_and_binds_device() {
+        let st = mem_store().await;
+        st.create_enrollment_key("k", 42, None).await.unwrap();
+        let dev_a = [1u8; 32];
+        let dev_b = [2u8; 32];
+
+        // First device consumes it and gets the owner.
+        assert_eq!(st.consume_enrollment_key("k", &dev_a, 0).await.unwrap(), 42);
+        // Same device re-presenting is idempotent.
+        assert_eq!(st.consume_enrollment_key("k", &dev_a, 0).await.unwrap(), 42);
+        // A different device is rejected.
+        assert!(st.consume_enrollment_key("k", &dev_b, 0).await.is_err());
+        // Unknown key is rejected.
+        assert!(st.consume_enrollment_key("nope", &dev_b, 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn expired_key_rejected() {
+        let st = mem_store().await;
+        st.create_enrollment_key("k", 7, Some(100)).await.unwrap();
+        assert!(st.consume_enrollment_key("k", &[3u8; 32], 100).await.is_err());
+        assert_eq!(st.consume_enrollment_key("k", &[3u8; 32], 99).await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn device_ip_is_stable_per_pubkey() {
+        let st = mem_store().await;
+        let a = st.allocate_device_ip(&[1u8; 32], 1, "laptop").await.unwrap();
+        let a2 = st.allocate_device_ip(&[1u8; 32], 1, "laptop").await.unwrap();
+        let b = st.allocate_device_ip(&[2u8; 32], 1, "phone").await.unwrap();
+        assert_eq!(a, a2, "same device pubkey → same IP");
+        assert_ne!(a, b, "same user's two devices → distinct IPs");
+        assert_eq!(st.device_owner(&[1u8; 32]).await.unwrap(), Some(1));
     }
 }

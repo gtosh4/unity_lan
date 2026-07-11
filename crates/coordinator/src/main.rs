@@ -46,6 +46,10 @@ async fn main() -> anyhow::Result<()> {
     for n in &cfg.network_seeds {
         store.upsert_network(n.guild_id, n.role_id, &n.name).await?;
     }
+    // Seed enrollment keys from config (test convenience; prod mints via `/unitylan enroll`).
+    for e in &cfg.enroll_seeds {
+        store.create_enrollment_key(&e.key, e.user_id, None).await?;
+    }
 
     let fake = cfg.fake;
     let discord = cfg.discord;
@@ -73,16 +77,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    if cfg.dev_auth {
-        tracing::warn!("dev_auth enabled: ?dev_user= bypasses OAuth — testing only");
-    }
-
     let state = AppState {
         signer,
         roles,
         store,
         presence: Arc::new(crate::presence::Presence::default()),
-        allow_dev: cfg.dev_auth,
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

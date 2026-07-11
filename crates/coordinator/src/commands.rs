@@ -71,8 +71,10 @@ fn commands() -> Vec<twilight_model::application::command::Command> {
             .option(RoleBuilder::new("role", "The role to unregister").required(true)),
         SubCommandBuilder::new("list", "List this guild's networks"),
     ]);
+    let enroll = SubCommandBuilder::new("enroll", "Mint a one-time key to enroll a headless device");
     vec![CommandBuilder::new("unitylan", "UnityLAN admin", CommandType::ChatInput)
         .option(group)
+        .option(enroll)
         .build()]
 }
 
@@ -123,22 +125,52 @@ async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -
     let Some(guild_id) = interaction.guild_id else {
         return "Use this in a server.".to_string();
     };
-    // Require Manage Guild.
-    let perms = interaction.member.as_ref().and_then(|m| m.permissions);
-    let is_admin = perms.is_some_and(|p| {
-        p.contains(Permissions::MANAGE_GUILD) || p.contains(Permissions::ADMINISTRATOR)
-    });
-    if !is_admin {
-        return "You need the Manage Server permission.".to_string();
+    let Some(opt) = data.options.first() else {
+        return "Unknown command.".to_string();
+    };
+    match (opt.name.as_str(), &opt.value) {
+        // /unitylan network <sub> ... — admin only.
+        ("network", CommandOptionValue::SubCommandGroup(subs)) => {
+            if !is_admin(interaction) {
+                return "You need the Manage Server permission.".to_string();
+            }
+            handle_network(store, guild_id.get(), subs).await
+        }
+        // /unitylan enroll — any member mints a one-time key for their own headless device.
+        ("enroll", CommandOptionValue::SubCommand(_)) => {
+            let Some(user) = interaction.author_id() else {
+                return "Could not determine your user.".to_string();
+            };
+            let key = common::crypto::gen_enrollment_key();
+            match store.create_enrollment_key(&key, user.get(), None).await {
+                Ok(()) => format!(
+                    "Your one-time enrollment key:\n`{key}`\n\nOn the headless device, set \
+                     `enrollment_key = \"{key}\"` in its config. It binds to the first device \
+                     that registers with it."
+                ),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+        _ => "Unknown command.".to_string(),
     }
+}
 
-    // /unitylan network <sub> ...
-    let Some(group) = data.options.first() else {
-        return "Unknown command.".to_string();
-    };
-    let CommandOptionValue::SubCommandGroup(subs) = &group.value else {
-        return "Unknown command.".to_string();
-    };
+/// Whether the interacting member has Manage Guild / Administrator.
+fn is_admin(interaction: &Interaction) -> bool {
+    interaction
+        .member
+        .as_ref()
+        .and_then(|m| m.permissions)
+        .is_some_and(|p| {
+            p.contains(Permissions::MANAGE_GUILD) || p.contains(Permissions::ADMINISTRATOR)
+        })
+}
+
+async fn handle_network(
+    store: &Store,
+    guild_id: u64,
+    subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
+) -> String {
     let Some(sub) = subs.first() else {
         return "Unknown subcommand.".to_string();
     };
@@ -160,7 +192,7 @@ async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -
                 return "Missing role.".to_string();
             };
             let name = name.unwrap_or_else(|| format!("role-{role}"));
-            match store.upsert_network(guild_id.get(), role.get(), &name).await {
+            match store.upsert_network(guild_id, role.get(), &name).await {
                 Ok(()) => format!("Registered <@&{role}> as network **{name}**."),
                 Err(e) => format!("Error: {e}"),
             }
@@ -173,12 +205,12 @@ async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -
             let Some(role) = role else {
                 return "Missing role.".to_string();
             };
-            match store.remove_network(guild_id.get(), role.get()).await {
+            match store.remove_network(guild_id, role.get()).await {
                 Ok(()) => format!("Unregistered <@&{role}>."),
                 Err(e) => format!("Error: {e}"),
             }
         }
-        "list" => match store.networks_in_guild(guild_id.get()).await {
+        "list" => match store.networks_in_guild(guild_id).await {
             Ok(nets) if nets.is_empty() => "No networks registered.".to_string(),
             Ok(nets) => {
                 let mut s = String::from("Networks:\n");

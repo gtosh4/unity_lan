@@ -4,14 +4,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{Grant, RegisterReq, RegisterResp, Seed};
 use common::netid::sanitize_label;
-use serde::Deserialize;
 
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
@@ -24,8 +23,6 @@ pub struct AppState {
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
-    /// Dev/testing: trust the `dev_user` query param as the caller's identity (no OAuth).
-    pub allow_dev: bool,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -37,18 +34,11 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-#[derive(Deserialize)]
-struct RegisterQuery {
-    /// Dev-only caller identity (fake mode). Ignored once real OAuth sessions exist.
-    dev_user: Option<u64>,
-}
-
 async fn register(
     State(st): State<AppState>,
-    Query(q): Query<RegisterQuery>,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
-    let user_id = resolve_user(&st, &q)?;
+    let user_id = resolve_user(&st, &req).await?;
     let networks = st.store.all_networks().await.map_err(internal)?;
     let device_name = sanitize_label(&req.device_name);
 
@@ -159,16 +149,22 @@ async fn register(
     }))
 }
 
-fn resolve_user(st: &AppState, q: &RegisterQuery) -> Result<u64, ApiError> {
-    if st.allow_dev {
-        q.dev_user
-            .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "dev_auth requires ?dev_user="))
-    } else {
-        Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "live OAuth session not implemented yet (set dev_auth=true to use ?dev_user=)",
-        ))
+/// Resolve the caller's user id: an already-enrolled device is known by its pubkey; a new device
+/// must present a valid one-time enrollment key (which binds its pubkey to the owner on use).
+async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError> {
+    if let Some(uid) = st.store.device_owner(&req.wg_pubkey).await.map_err(internal)? {
+        return Ok(uid);
     }
+    let Some(key) = req.enrollment_key.as_deref() else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "device not enrolled; provide an enrollment_key",
+        ));
+    };
+    st.store
+        .consume_enrollment_key(key, &req.wg_pubkey, common::now_unix())
+        .await
+        .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))
 }
 
 fn internal(e: anyhow::Error) -> ApiError {

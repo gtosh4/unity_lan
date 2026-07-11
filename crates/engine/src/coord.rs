@@ -29,9 +29,9 @@ pub async fn register(
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
-    dev_user: Option<u64>,
+    enrollment_key: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "register", wg_pubkey, device_name, endpoint, dev_user).await
+    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key).await
 }
 
 pub async fn refresh(
@@ -39,9 +39,9 @@ pub async fn refresh(
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
-    dev_user: Option<u64>,
+    enrollment_key: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "refresh", wg_pubkey, device_name, endpoint, dev_user).await
+    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key).await
 }
 
 async fn post(
@@ -50,19 +50,17 @@ async fn post(
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
-    dev_user: Option<u64>,
+    enrollment_key: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     let client = reqwest::Client::new();
-    let mut url = format!("{base_url}/{path}");
-    if let Some(u) = dev_user {
-        url.push_str(&format!("?dev_user={u}"));
-    }
+    let url = format!("{base_url}/{path}");
 
     let resp = client
         .post(&url)
         .json(&RegisterReq {
             wg_pubkey,
             device_name,
+            enrollment_key,
             endpoint,
         })
         .send()

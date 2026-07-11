@@ -18,12 +18,18 @@ pub struct Config {
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).
     pub discord: Option<DiscordConfig>,
-    /// Allow the `?dev_user=` shortcut instead of a real OAuth session. Dev/testing only.
-    #[serde(default)]
-    pub dev_auth: bool,
     /// Networks to seed into the registry on startup (test convenience).
     #[serde(default, rename = "network")]
     pub network_seeds: Vec<NetworkSeed>,
+    /// Enrollment keys to seed on startup (test convenience; prod mints via `/unitylan enroll`).
+    #[serde(default, rename = "enroll")]
+    pub enroll_seeds: Vec<EnrollSeed>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct EnrollSeed {
+    pub key: String,
+    pub user_id: u64,
 }
 
 #[derive(Debug, Deserialize)]
