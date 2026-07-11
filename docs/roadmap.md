@@ -85,15 +85,19 @@ rejects.
 - [x] `scripts/mesh-test.sh`: coordinator + two engine daemons in separate netns mesh and
       ping across — **PASS**, no host root, no manual link-up/routes.
 
-### M3b — P2P gossip (next)
-- [ ] `gossip.rs`: endpoint on `wg_ip` serving `{attestations, endpoints, tombstones}`.
-- [ ] Anti-entropy loop: pull from N random peers, merge (verify sig+TTL, newest endpoint seq).
-- [ ] Bootstrap purely via a seed peer (coordinator out of the steady-state path).
-- [ ] STUN reflection at the coordinator; endpoint-record `seq`.
+### M3b — P2P gossip (attempted, deferred)
+Prototyped a bidirectional gossip exchange over the mesh, then reverted. **Finding:** gossip
+runs *over* WG tunnels, and WireGuard needs **reciprocal** peer knowledge to open a tunnel
+(a peer drops handshakes from pubkeys it hasn't been told about). So a node can only gossip
+with peers that already know it — gossip cannot bootstrap discovery of a peer that doesn't
+know you. The coordinator's full-seed `/register` is therefore the real discovery mechanism
+(and it already yields a full reciprocal mesh). Gossip's remaining value here is only
+endpoint-freshness + less coordinator polling — marginal — and the prototype had a 3-node
+convergence bug. **Deferred** until there's a concrete need (e.g. very large meshes, or
+frequent roaming) and a reciprocity-aware bootstrap (ring/hub seed selection).
 
 **Verify (M3a):** ✅ two daemons mesh via coordinator seeds and ping across
-(`scripts/mesh-test.sh`). M3b verify: 4th node joins via one seed, reaches all; kill the
-starter → others stay meshed.
+(`scripts/mesh-test.sh`).
 
 ---
 
