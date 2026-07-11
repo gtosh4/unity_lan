@@ -88,30 +88,39 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     control::update(&status, &device, &seeds).await;
     apply_seeds(&backend, seeds, &mut peers)?;
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(cfg.refresh_secs.max(1)));
-    ticker.tick().await; // first tick is immediate
+    // Long-poll loop: each /refresh blocks at the coordinator until membership changes or the
+    // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
+    // a co-member joining wakes this call at once. `since` echoes the last version we applied.
+    let mut since = Some(resp.version);
     loop {
-        ticker.tick().await;
         match coord::refresh(
             &cfg.coordinator,
             wg_pub,
             cfg.device_name(),
             cfg.endpoint,
             cfg.enrollment_key.clone(),
+            since,
         )
         .await
         {
-            Ok((resp, dev)) => match coord::verified_seeds(&resp) {
-                Ok(seeds) => {
-                    if let Some(dev) = &dev {
-                        dns::update(&zone, dev, &seeds).await;
-                        control::update(&status, dev, &seeds).await;
+            Ok((resp, dev)) => {
+                since = Some(resp.version);
+                match coord::verified_seeds(&resp) {
+                    Ok(seeds) => {
+                        if let Some(dev) = &dev {
+                            dns::update(&zone, dev, &seeds).await;
+                            control::update(&status, dev, &seeds).await;
+                        }
+                        apply_seeds(&backend, seeds, &mut peers)?;
                     }
-                    apply_seeds(&backend, seeds, &mut peers)?;
+                    Err(e) => tracing::warn!("bad seeds: {e:#}"),
                 }
-                Err(e) => tracing::warn!("bad seeds: {e:#}"),
-            },
-            Err(e) => tracing::warn!("refresh failed: {e:#}"),
+            }
+            // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive.
+            Err(e) => {
+                tracing::warn!("refresh failed: {e:#}");
+                tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
+            }
         }
     }
 }

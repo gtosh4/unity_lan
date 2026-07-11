@@ -22,6 +22,11 @@ pub struct RegisterReq {
     /// The client's reachable `ip:port` for the WG listener (UPnP-mapped in production).
     #[serde(default)]
     pub endpoint: Option<SocketAddr>,
+    /// Long-poll ETag: the last `version` the client saw. When it equals the coordinator's
+    /// current version the request is **held** until membership changes or the hold elapses.
+    /// `None` (first register / a stale value) returns immediately.
+    #[serde(default)]
+    pub since: Option<u64>,
 }
 
 /// `POST /register` or `/refresh` response.
@@ -38,6 +43,9 @@ pub struct RegisterResp {
     /// Co-members (anyone sharing ≥1 network) to peer with — bootstrap for the mesh.
     #[serde(default)]
     pub seeds: Vec<Seed>,
+    /// Membership version (ETag). The client echoes it as `since` on the next long-poll.
+    #[serde(default)]
+    pub version: u64,
 }
 
 /// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.

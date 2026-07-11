@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         roles,
         store,
         presence: Arc::new(crate::presence::Presence::default()),
+        version: Arc::new(tokio::sync::watch::channel(0u64).0),
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

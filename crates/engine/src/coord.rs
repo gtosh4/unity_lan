@@ -38,17 +38,21 @@ pub async fn register(
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key).await
+    // First contact: `since = None` returns immediately (no long-poll hold).
+    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None).await
 }
 
+/// Long-poll `/refresh`: pass the last-seen `version` as `since`; the coordinator holds the
+/// request until membership changes or ~TTL/2 elapses (renewal). Returns the new version.
 pub async fn refresh(
     base_url: &str,
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
+    since: Option<u64>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key).await
+    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since).await
 }
 
 async fn post(
@@ -58,8 +62,13 @@ async fn post(
     device_name: String,
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
+    since: Option<u64>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    let client = reqwest::Client::new();
+    // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS + 60))
+        .build()
+        .context("building http client")?;
     let url = format!("{base_url}/{path}");
 
     let resp = client
@@ -69,6 +78,7 @@ async fn post(
             device_name,
             enrollment_key,
             endpoint,
+            since,
         })
         .send()
         .await

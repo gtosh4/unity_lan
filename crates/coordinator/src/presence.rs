@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct MemberPresence {
     pub pubkey: [u8; 32],
     pub ip: Ipv4Addr,
@@ -26,11 +26,15 @@ pub struct Presence {
 }
 
 impl Presence {
-    pub fn record(&self, guild_id: u64, role_id: u64, p: MemberPresence) {
-        self.map
-            .lock()
-            .unwrap()
-            .insert((guild_id, role_id, p.pubkey), p);
+    /// Record a device's presence in a network. Returns `true` if this changed the map (a new
+    /// device or altered fields) — the caller bumps the membership version so parked long-polls
+    /// wake. An identical re-record (steady-state refresh) returns `false` → no wake.
+    pub fn record(&self, guild_id: u64, role_id: u64, p: MemberPresence) -> bool {
+        let key = (guild_id, role_id, p.pubkey);
+        let mut map = self.map.lock().unwrap();
+        let changed = map.get(&key) != Some(&p);
+        map.insert(key, p);
+        changed
     }
 
     /// Other devices present in a network, excluding the caller's own device (`exclude_pubkey`).

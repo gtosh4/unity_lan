@@ -2,7 +2,7 @@
 
 A WireGuard mesh VPN whose membership is defined by Discord roles and enforced by a
 per-guild coordinator that issues **short-lived signed attestations**. Peers discover each
-other by **gossip** and form direct P2P tunnels. Hostnames:
+other **via the coordinator (long-poll)** and form direct P2P tunnels. Hostnames:
 `<nick>.<role>.<guild>.internal`.
 
 > Status: **draft**. Decisions marked ✅ are settled; ❓ are open. See
@@ -144,40 +144,62 @@ unexpired attestation for that peer in a shared network.
 - **Optional: tombstone.** For immediate kicks, the coordinator gossips a signed
   `{user_id, role_id, revoked_at}` tombstone; peers drop the pubkey at once.
 
-## 5. Discovery — Gossip & Bootstrap ✅
+## 5. Discovery — Coordinator-mediated long-poll ✅
+
+Discovery is **coordinator-mediated**, not gossip. The coordinator already holds every
+member's session and is the only party that can read Discord roles, so it is the natural
+propagation point — but it stays out of the *traffic* path: it only ships **signed
+attestations**, which peers verify **offline** against the pinned anchor.
 
 ```mermaid
 sequenceDiagram
     participant C as New client (Charlie)
     participant B as Coordinator (bot)
-    participant D as Discord
-    participant P as Any online member (Bob)
-    C->>B: OAuth login + report my reflexive endpoint
-    B->>D: read Charlie's roles + nick (bot token)
-    B-->>C: own attestations + bot pubkey + seed list [{attestation, endpoint_hint}]
-    Note over C: verify signatures, pin bot key
-    C->>P: WG handshake to a seed (pubkey+wg_ip from attestation, endpoint from hint)
-    Note over C,P: first mesh tunnel is up — gossip runs OVER it
-    C->>P: gossip pull: attestations + endpoint records
-    P-->>C: everyone's attestations + fresh endpoints (shared networks)
-    C-->>P: WG handshake to every other online member → mesh
-    loop before expiry
-        C->>B: refresh attestations + re-report endpoint
+    participant P as Online member (Bob)
+    C->>B: register (enrollment key / OAuth) + report endpoint
+    B-->>C: own attestation + anchor + seeds [{attestation, endpoint_hint}]
+    Note over C: verify signatures, pin anchor
+    C->>P: WG handshake to each seed (pubkey+wg_ip signed; endpoint from hint) → mesh
+    Note over P,B: Bob was long-polling; Charlie's join bumps the version
+    B-->>P: refresh returns at once with Charlie's attestation
+    P->>C: WG handshake back → tunnel reciprocal
+    loop steady state
+        C->>B: long-poll /refresh {since: version}
+        Note over C,B: held until membership changes OR ~TTL/2 (renewal)
     end
 ```
 
 - **Seed record** = `{attestation (signed), endpoint_hint}`. The `attestation` gives the
-  seed's `wg_pubkey`+`wg_ip` (verifiable, trusted); `endpoint_hint` comes from the
-  coordinator's soft cache (possibly stale). Enough to bring up the **first tunnel**.
-- **Transport**: gossip runs **over the WG mesh** — the bootstrap tunnel to a seed is just
-  Charlie's first real mesh peer, not a throwaway. Resolves the chicken-and-egg: only the
-  seed hint is needed pre-tunnel; everything after flows over authenticated WG.
-- **Bootstrap via anyone**: any one online seed suffices — **Alice offline is irrelevant.**
-  Client also caches last-known-good `{pubkey, endpoint}` from prior sessions as extra seeds.
-- **Gossip**: periodic anti-entropy — peers exchange a digest, pull newer attestations +
-  endpoint records, merge. Expired entries prune automatically (TTL).
+  seed's `wg_pubkey`+`wg_ip` (verifiable, trusted); `endpoint_hint` is the coordinator's soft
+  cache (possibly stale). Enough to bring up a tunnel.
+- **Long-poll + version (ETag)**: each client holds a `/refresh` carrying its last-seen
+  **version**. The coordinator returns **immediately** when relevant membership changed (a
+  monotonic version bumps on any presence change) or after a **hold ≈ TTL/2** otherwise. So a
+  join **wakes every parked peer at once** (near-instant propagation), while idle steady-state
+  moves **~zero bytes** (held connections, no periodic re-query). No lost wakeups
+  (`tokio::watch`); on reconnect a stale `since` returns immediately.
+- **Renewal piggybacks the hold**: the hold-timeout return re-issues fresh (re-signed)
+  attestations before they expire, so peers' cached seeds never age past TTL — no extra
+  renewal traffic beyond the once-per-hold return.
+- **Why not gossip / P2P**: the WireGuard **reciprocity wall** — a new device's first packet
+  to an established member is dropped (unknown pubkey), so an existing member must learn the
+  newcomer's pubkey **out-of-band** before any tunnel exists. The coordinator, already holding
+  everyone's long-poll, is that out-of-band channel. Attestations are signed + verified
+  offline, so **trust** never needs the coordinator — only **transport** does.
+- **Scale (target: ≤~100 devices/role, a user in a few roles → a few hundred peers/node)**:
+  **eager peering** (one WG `[Peer]` per co-device) is comfortable to ~1–2k peers/node in
+  boringtun; a few hundred is mid-range. Steady coordinator cost = **O(N) re-signs per TTL**
+  (a few signatures/sec even at thousands of devices) + N held connections; idle propagation
+  ≈ 0. The coordinator is a control plane, self-hostable on modest hardware.
+- **Escape hatch (unbuilt, only past ~1k devices in one network)**: (a) **delta** propagation
+  instead of full seed snapshots; (b) **lazy / on-demand peering** — know all pubkeys, bring
+  up tunnels only for pairs actually talking, to cap active tunnels below O(N²); (c) P2P
+  side-channel introductions or sponsor+gossip fan-out to drop existing-node polling entirely.
+  None needed at target scale — the full-mesh data plane (O(N²) tunnels, rekey/keepalive
+  storm), not the coordinator, is what bounds a single flat network, and it only bites in the
+  thousands-per-network.
 - **Coordinator resilience**: a brief outage doesn't break an established mesh (attestations
-  valid until TTL; peers keep gossiping over WG). Only an outage **> TTL** stops refresh; new
+  valid until TTL; peers keep their peer-set). Only an outage **> TTL** stops refresh; new
   joins always need the coordinator (it's the membership authority). **TTL = 30 min**
   (default): bounds both outage-tolerance and worst-case revocation latency; tombstones give
   immediate kicks.
@@ -357,5 +379,6 @@ flowchart TB
   onboarding friction; revisit for onboarding UX.
 
 _Decided:_ TTL = 30 min (§5); PSK deferred to post-v1 (§9); **one WG interface** spans all a
-client's networks/guilds (§6.2). Gossip transport = over the WG mesh (§5);
-bootstrap-without-coordinator = cached last-known seeds + several seeds per list (§5).
+client's networks/guilds (§6.2). Discovery = **coordinator-mediated long-poll + version/ETag**
+(§5), hold ≈ TTL/2, renewal piggybacks the hold; **eager peering** at target scale; gossip /
+lazy-peering / deltas are the >~1k-per-network escape hatch, unbuilt (§5).

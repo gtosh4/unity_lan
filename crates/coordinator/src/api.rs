@@ -25,6 +25,9 @@ pub struct AppState {
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
+    /// Monotonic membership version (the long-poll ETag). Bumped whenever presence changes;
+    /// parked `/refresh` handlers subscribe and wake on any bump. `watch` has no lost wakeups.
+    pub version: Arc<tokio::sync::watch::Sender<u64>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -37,11 +40,44 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// `POST /register` | `/refresh`: record presence + return the caller's grant and seeds.
+///
+/// Long-poll: build the snapshot once; if the client is already up to date (`since` == current
+/// version) hold the request until membership changes or the hold elapses, then rebuild (fresh,
+/// re-signed attestations — the renewal path). `since = None`/stale returns immediately.
 async fn register(
     State(st): State<AppState>,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
-    let user_id = resolve_user(&st, &req).await?;
+    let resp = build_snapshot(&st, &req).await?;
+    if req.since == Some(resp.version) {
+        wait_for_change(&st, resp.version).await;
+        return Ok(Json(build_snapshot(&st, &req).await?));
+    }
+    Ok(Json(resp))
+}
+
+/// Park until the membership version moves off `since`, or the hold elapses. `watch` tracks the
+/// latest version internally, so a bump between snapshot and subscribe is not lost.
+async fn wait_for_change(st: &AppState, since: u64) {
+    let mut rx = st.version.subscribe();
+    let deadline = tokio::time::sleep(std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS));
+    tokio::pin!(deadline);
+    loop {
+        if *rx.borrow_and_update() != since {
+            return;
+        }
+        tokio::select! {
+            r = rx.changed() => if r.is_err() { return; },
+            _ = &mut deadline => return,
+        }
+    }
+}
+
+/// Compute the caller's grant + seeds and record their presence, bumping the version if presence
+/// changed. Re-signs all attestations with the current time (so a rebuild renews them).
+async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp, ApiError> {
+    let user_id = resolve_user(st, req).await?;
     let networks = st.store.all_networks().await.map_err(internal)?;
     let device_name = sanitize_label(&req.device_name);
 
@@ -67,6 +103,7 @@ async fn register(
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
+    let mut changed = false; // did recording our presence alter the map? → bump version
     let mut network_names: Vec<String> = Vec::new();
     let mut community_name: Option<String> = None;
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
@@ -93,7 +130,7 @@ async fn register(
         network_names.push(net.name);
 
         // Record the device as present in this network (for others' seeds).
-        st.presence.record(
+        changed |= st.presence.record(
             net.guild_id,
             net.role_id,
             MemberPresence {
@@ -154,12 +191,18 @@ async fn register(
 
     let device_token = st.store.device_token(&req.wg_pubkey).await.map_err(internal)?;
 
-    Ok(Json(RegisterResp {
+    // Bump the version if our presence changed → wake peers parked in long-poll.
+    if changed {
+        st.version.send_modify(|v| *v += 1);
+    }
+
+    Ok(RegisterResp {
         coord_pubkey: st.signer.anchor_bytes(),
         grant,
         device_token,
         seeds,
-    }))
+        version: *st.version.borrow(),
+    })
 }
 
 /// `POST /devices/manage`: owner-scoped device ops authenticated by a device bearer token.
