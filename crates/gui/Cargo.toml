@@ -1,0 +1,19 @@
+[package]
+name = "unitylan-gui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "unitylan-gui"
+path = "src/main.rs"
+
+[dependencies]
+unitylan-common.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+
+# tokio executor so the async control-socket client runs inside iced's runtime.
+iced = { version = "0.13", features = ["tokio"] }

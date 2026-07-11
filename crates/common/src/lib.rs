@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod attestation;
+pub mod control;
 pub mod crypto;
 pub mod netid;
 pub mod wire;

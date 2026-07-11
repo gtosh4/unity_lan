@@ -6,31 +6,17 @@
 //! Windows named-pipe transport (via `interprocess`) is a later swap — the JSON protocol is
 //! transport-agnostic.
 
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
 use common::api::{ManageOp, ManageResp};
-use serde::{Deserialize, Serialize};
+use common::control::{ControlRequest, ControlResponse, DeviceStatus, PeerStatus, StatusReport};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
 use crate::coord::{self, SeedPeer, SelfDevice};
-
-#[derive(Serialize, Deserialize)]
-pub enum ControlRequest {
-    Status,
-    Manage(ManageOp),
-}
-
-#[derive(Serialize, Deserialize)]
-pub enum ControlResponse {
-    Status(StatusReport),
-    Manage(ManageResp),
-    Error(String),
-}
 
 /// What the control server needs to serve status + forward mutations to the coordinator.
 #[derive(Clone)]
@@ -39,27 +25,6 @@ pub struct Ctx {
     pub coordinator: String,
     /// The device token, set once the daemon has registered.
     pub token: Arc<RwLock<Option<String>>>,
-}
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct StatusReport {
-    pub device: Option<DeviceStatus>,
-    pub peers: Vec<PeerStatus>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct DeviceStatus {
-    pub wg_ip: Ipv4Addr,
-    pub hostname: String,
-    pub is_primary: bool,
-    pub networks: Vec<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct PeerStatus {
-    pub hostname: String,
-    pub wg_ip: Ipv4Addr,
-    pub endpoint: Option<SocketAddr>,
 }
 
 /// Shared, live status the daemon updates and the control socket reads.

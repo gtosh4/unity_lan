@@ -131,7 +131,7 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    hostnames are well-defined. Per-OS resolver hookup (resolved/NRPT/macOS) deferred to polish.
    Verified: `mesh-test.sh` digs node A's resolver → peer B's name + primary alias → B's IP; two
    engine unit tests (answer + socket).
-6. **Device management** — 🚧 in progress.
+6. **Device management** — ✅
    - [x] Control socket (engine daemon serves it) + `ctl status` CLI (read-only): live device +
      peers snapshot, updated each refresh. Verified: `mesh-test.sh` runs `ctl status` on node A →
      lists peer B's ip/hostname/endpoint.
@@ -141,17 +141,26 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
      executes owner-scoped ops; remove auto-promotes a new primary. `ctl rename|set-primary|remove`.
      (Token secrecy relies on TLS in prod + local perms; a signed-request upgrade can come later.)
    - [x] `devices` list (`ctl devices` → `ManageOp::List`).
-   - [ ] iced GUI frontend (M4) over the same socket — the remaining piece.
+   - [x] iced GUI frontend — see M4.
+7. **Discovery: long-poll + version/ETag** — ✅ (supersedes M3 gossip). `/refresh` carries the
+   client's last-seen `version`; the coordinator holds an up-to-date request until presence
+   changes (a `tokio::watch` version bump wakes parked peers at once) or ~TTL/2 elapses (renewal
+   re-signs attestations). Near-zero idle traffic; joins propagate near-instantly. Rationale +
+   scale envelope (eager peering at target scale; gossip/lazy-peering/deltas as the >~1k
+   escape hatch) in design.md §5. Verified: `mesh-test.sh` (2/2 — B's join wakes A's long-poll).
 
-## M4 — iced GUI + tray
-**Goal:** a real desktop app driving the engine.
-- [ ] `gui` crate: iced app (State/Message/update/view), `tray-icon`.
-- [ ] `engine.rs`: control-socket client + `Subscription` of engine events.
-- [ ] Screens: login (opens browser), networks list + toggle, status/peers.
-- [ ] Tray: up/down, open, quit; engine survives window close.
+## M4 — iced GUI
+**Goal:** a real desktop app driving the engine over the control socket.
+- [x] `gui` crate: iced app (State/Message/update/view) with a 2s `Subscription` timer refresh.
+- [x] Async control-socket client (shared `common::control` DTOs; GUI needs no engine dep).
+- [x] Screens: live status (this device + peers) and device management (rename / set-primary /
+      remove) — exactly what the control socket backs today. `unitylan-gui [control.sock]`.
+- [ ] Login (OAuth), network list + toggle, `expose`, tray — deferred: the engine doesn't yet
+      expose these over the socket. Land alongside the engine features (post-M5/M7).
 
-**Verify:** click Login → OAuth → networks appear → toggle a network → status shows peers,
-all via the socket; closing the window keeps the mesh up.
+**Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +
+wgpu/tiny-skia renderer + timer subscription + async socket task boot clean). The socket
+protocol itself is the same one `mesh-test.sh` exercises via the `ctl` CLI.
 
 ---
 
