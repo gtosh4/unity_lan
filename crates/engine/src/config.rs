@@ -32,6 +32,8 @@ pub struct Config {
     pub refresh_secs: u64,
     /// If set, run the `.internal` DNS resolver on this UDP address (e.g. "127.0.0.1:53").
     pub dns_bind: Option<SocketAddr>,
+    /// Control socket path for CLI/GUI frontends. Defaults to `<state_dir>/control.sock`.
+    pub control_socket: Option<PathBuf>,
 }
 
 fn default_iface() -> String {
@@ -49,6 +51,13 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         Ok(toml::from_str(&text)?)
+    }
+
+    /// Control-socket path: the configured value, else `<state_dir>/control.sock`.
+    pub fn control_socket_path(&self) -> PathBuf {
+        self.control_socket
+            .clone()
+            .unwrap_or_else(|| self.state_dir.join("control.sock"))
     }
 
     /// This device's name: the configured value, else the system hostname, else `"device"`.

@@ -2,6 +2,7 @@
 //! attestations, pin the trust anchor, and print the resulting IPs + hostnames.
 
 mod config;
+mod control;
 mod coord;
 mod daemon;
 mod dns;
@@ -42,6 +43,9 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("loading config {cfg_path}"))?;
         return daemon::run(cfg).await;
     }
+    if arg1 == "ctl" {
+        return ctl(std::env::args().nth(2), std::env::args().nth(3)).await;
+    }
 
     let config_path = if arg1.is_empty() {
         "engine.toml".to_string()
@@ -79,6 +83,36 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `ctl <subcommand> <config.toml>` — talk to a running daemon over its control socket.
+async fn ctl(sub: Option<String>, cfg_path: Option<String>) -> anyhow::Result<()> {
+    let sub = sub.unwrap_or_default();
+    let cfg_path = cfg_path.unwrap_or_else(|| "engine.toml".to_string());
+    let cfg = Config::load(std::path::Path::new(&cfg_path))
+        .with_context(|| format!("loading config {cfg_path}"))?;
+    let socket = cfg.control_socket_path();
+
+    match sub.as_str() {
+        "status" => {
+            let report = control::client_status(&socket).await?;
+            match &report.device {
+                None => println!("not joined to any network"),
+                Some(d) => {
+                    let primary = if d.is_primary { " [primary]" } else { "" };
+                    println!("device:  {} {}{}", d.wg_ip, d.hostname, primary);
+                    println!("networks: {}", d.networks.join(", "));
+                }
+            }
+            println!("peers ({}):", report.peers.len());
+            for p in &report.peers {
+                let ep = p.endpoint.map(|e| e.to_string()).unwrap_or_else(|| "-".into());
+                println!("  {:<16} {:<40} {}", p.wg_ip, p.hostname, ep);
+            }
+            Ok(())
+        }
+        other => anyhow::bail!("unknown ctl subcommand '{other}' (try: status)"),
+    }
 }
 
 /// Bring up a WireGuard interface, add a dummy peer, tear down. Requires CAP_NET_ADMIN.

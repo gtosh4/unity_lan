@@ -64,7 +64,9 @@ rejects.
 - [x] Bring up an interface with the client's `/32`; add a peer; **ping over the tunnel**
       (`scripts/wg-tunnel-test.sh` — two netns + veth, no host root; PASS).
 - [x] engine dev subcommands: `wg-smoke`, `wg-keygen`, `wg-node`.
-- [ ] `control.rs`: `interprocess` local-socket server; `common::control` request/event enums.
+- [x] `control.rs`: local-socket server (tokio `UnixListener`, newline-JSON) + `ctl status` CLI
+      — shows device (ip/hostname/primary/networks) + peers (ip/hostname/endpoint). Windows
+      named-pipe (`interprocess`) is a later transport swap. Done as part of M-device 6.
 - [ ] ⚠️ **Spike**: confirm `defguard_wireguard_rs` userspace path on **Windows + macOS**
       (Linux userspace confirmed working).
 
@@ -129,7 +131,15 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    hostnames are well-defined. Per-OS resolver hookup (resolved/NRPT/macOS) deferred to polish.
    Verified: `mesh-test.sh` digs node A's resolver → peer B's name + primary alias → B's IP; two
    engine unit tests (answer + socket).
-6. **Device management** — list/rename/set-primary/remove over the control socket (GUI + CLI).
+6. **Device management** — 🚧 in progress.
+   - [x] Control socket (engine daemon serves it) + `ctl status` CLI (read-only): live device +
+     peers snapshot, updated each refresh. Verified: `mesh-test.sh` runs `ctl status` on node A →
+     lists peer B's ip/hostname/endpoint.
+   - [ ] Mutations: rename / set-primary / remove over the socket → coordinator. Needs
+     authenticated device control requests (a device-signing key bound at enrollment); until then
+     set-primary is available via `/unitylan primary`.
+   - [ ] `devices` list (the owner's devices from the coordinator).
+   - [ ] iced GUI frontend (M4) over the same socket.
 
 ## M4 — iced GUI + tray
 **Goal:** a real desktop app driving the engine.

@@ -119,6 +119,13 @@ echo "host-b.nodeb.lan.internal -> ${DNS_IP:-<none>}   nodeb.lan.internal (prima
 { [ "$DNS_IP" = "$B_IP" ] && [ "$ALIAS_IP" = "$B_IP" ]; } || { echo "FAIL: resolver did not map peer name to its device IP"; exit 1; }
 echo "dns: peer hostname + primary alias resolve to B ✓"
 
+# Control socket: query node A's daemon for its status; it must list peer B.
+echo "=== control socket: ctl status on node A ==="
+CTL=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
+echo "$CTL"
+echo "$CTL" | grep -q "$B_IP" || { echo "FAIL: ctl status did not list peer B"; exit 1; }
+echo "ctl: status lists peer B ✓"
+
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then

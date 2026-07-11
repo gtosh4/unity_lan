@@ -7,6 +7,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::config::Config;
+use crate::control;
 use crate::coord::{self, SeedPeer};
 use crate::dns;
 use crate::keys;
@@ -56,10 +57,23 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
+    // Control socket: read-only status for CLI/GUI frontends.
+    let status = control::shared();
+    {
+        let path = cfg.control_socket_path();
+        let s = status.clone();
+        tokio::spawn(async move {
+            if let Err(e) = control::serve(&path, s).await {
+                tracing::error!("control socket ended: {e:#}");
+            }
+        });
+    }
+
     // Apply initial seeds, then refresh on an interval picking up new co-members.
     let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
     let seeds = coord::verified_seeds(&resp)?;
     dns::update(&zone, &device, &seeds).await;
+    control::update(&status, &device, &seeds).await;
     apply_seeds(&backend, seeds, &mut peers)?;
 
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.refresh_secs.max(1)));
@@ -79,6 +93,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 Ok(seeds) => {
                     if let Some(dev) = &dev {
                         dns::update(&zone, dev, &seeds).await;
+                        control::update(&status, dev, &seeds).await;
                     }
                     apply_seeds(&backend, seeds, &mut peers)?;
                 }
