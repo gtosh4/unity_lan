@@ -13,19 +13,20 @@ other by **gossip** and form direct P2P tunnels. Hostnames:
 | Term | Meaning |
 |---|---|
 | **Coordinator** | A self-hosted bot that serves **one or more** guilds (multi-tenant). |
-| **Guild** | A Discord server served by a coordinator. |
-| **Network** | A Discord **role** an admin has **registered** as a network. Each = one isolated subnet. Not every role is a network. |
-| **Member** | A user holding the role → entitled to that network. |
-| **Attestation** | A short-lived token, signed by the coordinator, proving `user + role + nick + ip + wg_pubkey`. The unit of membership. |
-| **Mesh** | Direct WireGuard tunnels between all online members of a network. |
+| **Guild / Community** | A Discord server served by a coordinator. Its DNS label is an admin-chosen **community slug**. |
+| **User** | A Discord identity (global `@handle`) = the **owner** of devices. |
+| **Device** | A WireGuard keypair = one machine. A user owns 1..N devices; one is **primary**. |
+| **Network** | A Discord **role** an admin **registered** as a network. An **ACL group** (who may peer), *not* a subnet. Not every role is a network. |
+| **Attestation** | A short-lived coordinator-signed token proving `user + role + device_name + ip + wg_pubkey (+ is_primary)`. The unit of membership. |
+| **Mesh** | Direct WireGuard tunnels between all online devices that share ≥1 network. |
 
-A guild hosts **multiple networks** (registered roles), which may **overlap** (a user with
-several roles is multi-homed). Networks are isolated from each other (separate subnets). A
-single coordinator can serve many guilds; subnets are namespaced by `(guild, role)` so they
-never collide.
+Networks may **overlap** (a device in several roles). Since the data plane is P2P, a device
+has **one IP** and forms **one tunnel** per co-device regardless of how many networks they
+share (§6). A single coordinator can serve many guilds.
 
 Admins register networks in Discord via slash commands
-(`/unitylan network add|remove|list`); the coordinator persists them in SQLite.
+(`/unitylan network add|remove|list`); the coordinator persists them in SQLite. Users manage
+their own devices (name, primary, remove) from the client app / CLI (§8).
 
 ## 2. Goals & Non-Goals
 
@@ -73,19 +74,30 @@ The client is **two processes**, the Tailscale/WireGuard-GUI split (kernel WG ne
 privilege; a GUI should not run as root):
 
 **Engine** — privileged background daemon (systemd · Windows Service · launchd). Owns all
-mesh state and the coordinator session:
-- Discord OAuth login; fetch attestations + trust anchor + seeds.
+mesh state and the coordinator session. One device = one engine:
+- **Enroll** the device under a user (§3.3), then fetch attestations + trust anchor + seeds.
 - Generate the WireGuard keypair (**private key never leaves the machine**).
-- **Gossip**: exchange signed attestations + live endpoints with peers; verify signatures.
-- Configure WireGuard: **one interface** holding all networks, one peer per online co-member.
+- Configure WireGuard: **one interface**, one peer per online co-device (§6).
 - **NAT**: open a reachable port (UPnP); relay hole-punch coordination for NAT'd peers.
 - Local DNS resolver for `*.internal`.
 - Exposes a local control socket (UDS / Windows named pipe).
 
-**GUI** — unprivileged **iced** desktop app + system tray. Pure front-end: every privileged
-action is an RPC to the engine. Toggle entitled networks, expose ports, view peers/status.
-The engine keeps the mesh running when the window is closed. (A thin CLI on the same socket
-is a possible later front-end.)
+**Front-ends** — both drive the engine over the control socket:
+- **GUI** — unprivileged **iced** desktop app + tray, for non-technical users. Login, device
+  name/primary, join networks, expose ports, status. Mesh keeps running when the window closes.
+- **CLI** — same operations, for **headless dedicated game-server hosts** (no desktop). E.g.
+  `unitylan enroll --name gameserver`, `unitylan expose 25565 --net minecraft`, `unitylan status`.
+
+### 3.3 Device enrollment ✅
+A device proves it belongs to a user in one of two ways (Tailscale-style):
+- **Interactive** (has a browser/Discord): OAuth `identify` → session → register the device's
+  pubkey.
+- **Headless** (game-server box): the user, on an already-authed device, mints a one-time
+  **enrollment key** (`unitylan enroll-key`); the box registers with it → coordinator binds
+  its pubkey to the user. **No Discord client needed on the box** — only HTTP to the coordinator.
+
+Device management (list / rename / set-primary / remove) is **owner-scoped**: any authed
+device of the user can manage the user's whole device set — the lost/old device isn't needed.
 
 ## 4. Trust & Attestation Model ✅
 
@@ -170,32 +182,59 @@ sequenceDiagram
   (default): bounds both outage-tolerance and worst-case revocation latency; tombstones give
   immediate kicks.
 
-## 6. Addressing & DNS ✅
+## 6. Device model, Addressing & DNS ✅ (Model B)
 
-### 6.1 IP space
-- Reserved range **`100.64.0.0/10`** (RFC 6598 / CGNAT — avoids home-LAN collisions with
-  `10.x`/`192.168.x`; same rationale as Tailscale).
-- **Subnet per network** = a `/24` derived from `hash(guild_id, role_id)` → distinct, no
-  cross-guild coordination, naturally isolated. (`/10` holds 16384 `/24`s.)
-- **Host IP**: the coordinator allocates each member a stable `/32` within the role's `/24`,
-  recorded in the attestation. Deterministic from `user_id`, collision-resolved by the
-  coordinator (it's the allocator).
+**Identity is device-centric** (the Tailscale model). A Discord **user** owns 1..N
+**devices**; a device = a WireGuard keypair. Discord identity is the *auth + grouping*; the
+device is the *network node*. **Networks (roles) are ACL groups, not subnets** — since the
+data plane is peer-to-peer, two devices form **one** tunnel if they share **≥1** network;
+which/how many networks they share only decides *whether* they peer (access) and *what names*
+point at them (context).
 
-### 6.2 Multi-homing (overlapping networks)
-A user in roles `@minecraft` + `@factorio` gets an IP in each `/24`. One WireGuard
-interface, `Address` = the list of per-network IPs, one `[Peer]` per co-member with
-`AllowedIPs = <peer>/32`. Isolation is automatic: a member only adds peers for networks it
-shares, each with a `/32` route — traffic can't cross networks.
+### 6.1 IP space — one IP per device
+- Reserved range **`100.64.0.0/10`** (RFC 6598 / CGNAT). **IPv4-only for now** (games/apps
+  need it); dual-stack IPv6 ULA (pubkey-derived) is an additive future option.
+- **One `/32` per device**, allocated in the flat `/10` (~4.19M addresses), keyed by the
+  device pubkey. Deterministic hint from `hash(pubkey)`, collision-resolved by the
+  coordinator. A device has the **same IP in every network** it's in.
+- **Peering = ACL:** you tunnel with a device iff you share ≥1 network. One WG interface, one
+  `[Peer]` per co-device with `AllowedIPs = <device>/32`. Non-shared devices → no peer → no
+  route → dropped. A device in two networks reaches members of both; those two groups can't
+  reach each other except through a shared member (exactly Tailscale ACL/tag semantics).
 
-### 6.3 DNS
-Zone: `<nick>.<role>.<guild>.internal` → member's `wg_ip`. Built locally from the member's
-verified attestations; only members of networks you're in resolve. Served by a local
-resolver (or `/etc/hosts` / split-DNS).
-- `<nick>` = sanitized guild nickname (readable again now that the coordinator can read
-  nicks); coordinator enforces uniqueness within a network.
-- **Why `.internal`, not `.local`:** `.local` is RFC 6762 mDNS (OS hijacks it to multicast).
-  `.internal` is ICANN-reserved (2024) for private use — never publicly delegated, no
-  multicast clash.
+### 6.2 Naming
+```
+alice.mycommunity.internal                 ← single device, or the user's PRIMARY device
+gameserver.alice.mycommunity.internal      ← a specific device
+laptop.alice.mycommunity.internal          ← another device
+```
+- **community** = an **admin-chosen slug** (config, default = sanitized guild name). Discord
+  guild *names* aren't unique and *ids* are ugly, so the community picks a slug (like a
+  Tailscale tailnet name / a domain). Needed to disambiguate across communities/coordinators.
+- **user** = the **global Discord username** (`@handle`, globally unique + readable). Not the
+  per-guild nick (nicks aren't unique). Nicks stay as display labels in the GUI only.
+- **device** = a per-user machine name (unique per user → collision-free; default = OS
+  hostname).
+- **`<user>.<community>.internal`** always resolves to the user's **primary** device, so the
+  common single-device case is trivially short. `<device>.<user>.<community>.internal`
+  addresses a specific device.
+- **Search domains** (`<community>.internal`, `<user>.<community>.internal`) let friends type
+  short names: `alice`, or `gameserver.alice`.
+
+### 6.3 Primary device
+The `<user>.<community>` alias is a *global* name, so **primary is authoritative at the
+coordinator** (`primary_device` per `(community, user)`) and propagated in register/refresh
+(an `is_primary` flag per device). Default = first enrolled. Owner-updatable from **any** of
+their devices (`unitylan primary <device>`) — no need for the old/dead one; on primary
+removal the coordinator auto-promotes. Moving networks = an endpoint refresh, not a device
+change.
+
+### 6.4 DNS resolution
+Local resolver serves `*.internal` from the client's verified attestations (own + co-device
+seeds); you only resolve devices you can reach (share a network with). Per-OS hookup:
+resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); hosts-file MVP.
+- **Why `.internal`, not `.local`:** `.local` is RFC 6762 mDNS (OS hijacks to multicast);
+  `.internal` is ICANN-reserved (2024) for private use — no public delegation, no clash.
 
 ## 7. Networking
 
@@ -223,14 +262,16 @@ trait WgBackend { set_peer, remove_peer, ensure_iface, gen_keypair, ... }
 Select native where present; else userspace. macOS = userspace only. All paths run inside the
 **privileged engine** (§3.2).
 
-## 8. Local Control (GUI + engine)
+## 8. Local Control (GUI + CLI over the control socket)
 
-The **iced GUI** drives these via the engine's control socket (no privilege in the GUI):
-- **Login** — Discord OAuth to the guild coordinator; pin its key.
-- **Networks** — list networks you're entitled to (roles you hold); toggle participation
-  locally (you must already hold the role; this does not grant Discord roles).
-- **Expose** — expose a local port to a network.
-- **Status** — networks, members, tunnels, resolved names, NAT state (live via event stream).
+Both the **iced GUI** (non-tech users) and the **CLI** (headless game-server hosts) drive the
+engine via its control socket (no privilege in the front-ends):
+- **Enroll / Login** — OAuth (interactive) or enrollment key (headless); pin the coordinator key.
+- **Devices** — this device's name, set/see **primary**, list/remove the user's devices.
+- **Networks** — list networks you're entitled to; toggle participation locally (you must
+  already hold the role; this does not grant Discord roles).
+- **Expose** — expose a local port to a network (e.g. `expose 25565 --net minecraft`).
+- **Status** — networks, co-devices, tunnels, resolved names, NAT state (live event stream).
 
 ## 9. Security & Trust
 
@@ -306,6 +347,14 @@ flowchart TB
   attestations mid-TTL — need a re-key signal.
 - **Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
   data path?
+- **Coordinator endpoint discovery**: instead of the client hardcoding/human-configuring the
+  coordinator URL, the coordinator could **advertise its endpoint via Discord** so the client
+  auto-discovers it from the guild. Candidate spots a bot can publish to at runtime: its
+  presence/activity ("Playing coord.example.com"), a maintained pinned message / channel
+  topic, or a `/unitylan info` reply. Discovery would run over Discord (via the user's own
+  session) *before* the client knows any coordinator — then TOFU-pin the anchor as usual. A
+  rogue-guild-admin advertising a bad URL only affects their own guild (expected). Removes
+  onboarding friction; revisit for onboarding UX.
 
 _Decided:_ TTL = 30 min (§5); PSK deferred to post-v1 (§9); **one WG interface** spans all a
 client's networks/guilds (§6.2). Gossip transport = over the WG mesh (§5);
