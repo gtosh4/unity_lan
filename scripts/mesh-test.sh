@@ -126,6 +126,12 @@ echo "$CTL"
 echo "$CTL" | grep -q "$B_IP" || { echo "FAIL: ctl status did not list peer B"; exit 1; }
 echo "ctl: status lists peer B ✓"
 
+# Control mutations: rename node A's device (authenticated by its bearer token) and confirm.
+echo "=== control mutations: ctl rename on node A ==="
+"$ENG" ctl rename "$TMP/a.toml" workstation
+"$ENG" ctl devices "$TMP/a.toml" | grep -q 'workstation.*this device' || { echo "FAIL: rename not reflected in devices"; exit 1; }
+echo "ctl: rename applied + listed ✓"
+
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then

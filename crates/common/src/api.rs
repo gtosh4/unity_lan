@@ -32,9 +32,47 @@ pub struct RegisterResp {
     /// The caller's own device grant; `None` if they hold no networks.
     #[serde(default)]
     pub grant: Option<Grant>,
+    /// This device's bearer token for control mutations; the client persists it.
+    #[serde(default)]
+    pub device_token: Option<String>,
     /// Co-members (anyone sharing ≥1 network) to peer with — bootstrap for the mesh.
     #[serde(default)]
     pub seeds: Vec<Seed>,
+}
+
+/// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManageReq {
+    /// The requesting device's bearer token (identifies the owner + authenticates).
+    pub token: String,
+    pub op: ManageOp,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ManageOp {
+    /// List the owner's devices.
+    List,
+    /// Rename the requesting device.
+    Rename { new_name: String },
+    /// Make one of the owner's devices (by name) primary.
+    SetPrimary { device_name: String },
+    /// Remove one of the owner's devices (by name).
+    Remove { device_name: String },
+}
+
+/// Response to a manage request: the owner's devices after the op, plus a human message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ManageResp {
+    pub message: String,
+    pub devices: Vec<DeviceInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_name: String,
+    pub is_primary: bool,
+    /// True for the device that made the request.
+    pub is_self: bool,
 }
 
 /// The caller's own device: its signed attestation + the names to build its hostname.

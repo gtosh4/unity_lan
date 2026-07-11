@@ -37,6 +37,16 @@ pub fn pin_anchor(state_dir: &Path, anchor: &[u8; 32]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Load the persisted device token, if any.
+pub fn load_token(state_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(state_dir.join("token")).ok().map(|s| s.trim().to_string())
+}
+
+/// Persist the device token (0600) when the coordinator issues one.
+pub fn save_token(state_dir: &Path, token: &str) -> anyhow::Result<()> {
+    write_secret(&state_dir.join("token"), token.as_bytes())
+}
+
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(path, bytes)?;
     #[cfg(unix)]

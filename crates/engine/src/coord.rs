@@ -104,6 +104,27 @@ async fn post(
     Ok((resp, device))
 }
 
+/// Send an owner-scoped device management op, authenticated by the device token.
+pub async fn manage(
+    base_url: &str,
+    token: String,
+    op: common::api::ManageOp,
+) -> anyhow::Result<common::api::ManageResp> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/devices/manage"))
+        .json(&common::api::ManageReq { token, op })
+        .send()
+        .await
+        .context("sending /devices/manage")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("coordinator rejected manage: {status}: {body}");
+    }
+    resp.json().await.context("decoding ManageResp")
+}
+
 /// Verify the seeds in a response against its anchor → the co-members to peer with.
 pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
     let anchor =

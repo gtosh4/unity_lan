@@ -54,7 +54,8 @@ impl Store {
                 pubkey      BLOB    PRIMARY KEY,
                 idx         INTEGER NOT NULL UNIQUE,
                 user_id     INTEGER NOT NULL,
-                device_name TEXT    NOT NULL
+                device_name TEXT    NOT NULL,
+                token       TEXT             -- per-device bearer token for control mutations
             );
             CREATE TABLE IF NOT EXISTS enrollment_keys (
                 key        TEXT    PRIMARY KEY,
@@ -74,6 +75,10 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
+        // Add the token column to devices tables created before it existed (ignore if present).
+        let _ = sqlx::query("ALTER TABLE devices ADD COLUMN token TEXT")
+            .execute(&self.pool)
+            .await;
         Ok(())
     }
 
@@ -209,14 +214,84 @@ impl Store {
         let idx = pick_free_index(&taken, device_hint(pubkey))
             .ok_or_else(|| anyhow::anyhow!("address space 100.64.0.0/10 exhausted"))?;
 
-        sqlx::query("INSERT INTO devices (pubkey, idx, user_id, device_name) VALUES (?, ?, ?, ?)")
+        sqlx::query(
+            "INSERT INTO devices (pubkey, idx, user_id, device_name, token) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(pubkey.as_slice())
+        .bind(idx as i64)
+        .bind(user_id as i64)
+        .bind(device_name)
+        .bind(common::crypto::gen_enrollment_key())
+        .execute(&self.pool)
+        .await?;
+        Ok(addr_from_index(idx))
+    }
+
+    /// The device's bearer token (minting one for a legacy row that predates the column).
+    pub async fn device_token(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query("SELECT token FROM devices WHERE pubkey = ?")
             .bind(pubkey.as_slice())
-            .bind(idx as i64)
-            .bind(user_id as i64)
-            .bind(device_name)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        if let Some(tok) = row.try_get::<Option<String>, _>("token")? {
+            return Ok(Some(tok));
+        }
+        let tok = common::crypto::gen_enrollment_key();
+        sqlx::query("UPDATE devices SET token = ? WHERE pubkey = ?")
+            .bind(&tok)
+            .bind(pubkey.as_slice())
             .execute(&self.pool)
             .await?;
-        Ok(addr_from_index(idx))
+        Ok(Some(tok))
+    }
+
+    /// Resolve a bearer token to (user_id, device pubkey).
+    pub async fn device_by_token(&self, token: &str) -> anyhow::Result<Option<(u64, [u8; 32])>> {
+        let row = sqlx::query("SELECT user_id, pubkey FROM devices WHERE token = ?")
+            .bind(token)
+            .fetch_optional(&self.pool)
+            .await?;
+        let Some(row) = row else { return Ok(None) };
+        let user_id = row.get::<i64, _>("user_id") as u64;
+        let pk: Vec<u8> = row.try_get("pubkey")?;
+        let pk: [u8; 32] = pk
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
+        Ok(Some((user_id, pk)))
+    }
+
+    /// Rename a device (by pubkey).
+    pub async fn rename_device(&self, pubkey: &[u8; 32], name: &str) -> anyhow::Result<()> {
+        sqlx::query("UPDATE devices SET device_name = ? WHERE pubkey = ?")
+            .bind(name)
+            .bind(pubkey.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a device. If it was the owner's primary, auto-promote another of their devices.
+    pub async fn remove_device(&self, user_id: u64, pubkey: &[u8; 32]) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM devices WHERE pubkey = ? AND user_id = ?")
+            .bind(pubkey.as_slice())
+            .bind(user_id as i64)
+            .execute(&self.pool)
+            .await?;
+        // If that was the primary pointer, promote another device (or clear it).
+        if self.primary_pubkey(user_id).await? == Some(*pubkey) {
+            match self.user_devices(user_id).await?.first() {
+                Some((pk, _)) => self.set_primary(user_id, pk).await?,
+                None => {
+                    sqlx::query("DELETE FROM primary_device WHERE user_id = ?")
+                        .bind(user_id as i64)
+                        .execute(&self.pool)
+                        .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The owner of an already-enrolled device, if its pubkey is bound.
@@ -413,6 +488,36 @@ mod tests {
 
         let names: Vec<String> = st.user_devices(9).await.unwrap().into_iter().map(|(_, n)| n).collect();
         assert_eq!(names.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn token_auth_rename_and_remove_autopromote() {
+        let st = mem_store().await;
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        st.allocate_device_ip(&a, 5, "laptop").await.unwrap();
+        st.allocate_device_ip(&b, 5, "phone").await.unwrap();
+        st.ensure_primary(5, &a).await.unwrap();
+
+        // Token resolves back to (user, device); unknown token → None.
+        let tok_a = st.device_token(&a).await.unwrap().unwrap();
+        assert_eq!(st.device_by_token(&tok_a).await.unwrap(), Some((5, a)));
+        assert_eq!(st.device_by_token("bogus").await.unwrap(), None);
+
+        // Rename the requesting device.
+        st.rename_device(&a, "workstation").await.unwrap();
+        let names: Vec<String> =
+            st.user_devices(5).await.unwrap().into_iter().map(|(_, n)| n).collect();
+        assert!(names.contains(&"workstation".to_string()));
+
+        // Removing the primary auto-promotes the remaining device.
+        st.remove_device(5, &a).await.unwrap();
+        assert_eq!(st.primary_pubkey(5).await.unwrap(), Some(b));
+        assert_eq!(st.user_devices(5).await.unwrap().len(), 1);
+
+        // Removing the last device clears the primary pointer.
+        st.remove_device(5, &b).await.unwrap();
+        assert_eq!(st.primary_pubkey(5).await.unwrap(), None);
     }
 
     #[tokio::test]

@@ -9,7 +9,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use common::api::{Grant, RegisterReq, RegisterResp, Seed};
+use common::api::{
+    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, RegisterReq, RegisterResp, Seed,
+};
 use common::netid::sanitize_label;
 
 use crate::presence::{MemberPresence, Presence};
@@ -31,6 +33,7 @@ pub fn router(state: AppState) -> Router {
         // register and refresh share the same logic: issue grants, record presence, return seeds.
         .route("/register", post(register))
         .route("/refresh", post(register))
+        .route("/devices/manage", post(manage))
         .with_state(state)
 }
 
@@ -149,11 +152,93 @@ async fn register(
         }
     }
 
+    let device_token = st.store.device_token(&req.wg_pubkey).await.map_err(internal)?;
+
     Ok(Json(RegisterResp {
         coord_pubkey: st.signer.anchor_bytes(),
         grant,
+        device_token,
         seeds,
     }))
+}
+
+/// `POST /devices/manage`: owner-scoped device ops authenticated by a device bearer token.
+async fn manage(
+    State(st): State<AppState>,
+    Json(req): Json<ManageReq>,
+) -> Result<Json<ManageResp>, ApiError> {
+    let (user_id, self_pubkey) = st
+        .store
+        .device_by_token(&req.token)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "invalid device token"))?;
+
+    let message = match req.op {
+        ManageOp::List => "ok".to_string(),
+        ManageOp::Rename { new_name } => {
+            let name = sanitize_label(&new_name);
+            st.store
+                .rename_device(&self_pubkey, &name)
+                .await
+                .map_err(internal)?;
+            format!("renamed this device to {name}")
+        }
+        ManageOp::SetPrimary { device_name } => {
+            let pk = find_device(&st, user_id, &device_name).await?;
+            st.store.set_primary(user_id, &pk).await.map_err(internal)?;
+            format!("primary set to {}", sanitize_label(&device_name))
+        }
+        ManageOp::Remove { device_name } => {
+            let pk = find_device(&st, user_id, &device_name).await?;
+            st.store
+                .remove_device(user_id, &pk)
+                .await
+                .map_err(internal)?;
+            format!("removed {}", sanitize_label(&device_name))
+        }
+    };
+
+    // Report the owner's devices after the op.
+    let primary = st.store.primary_pubkey(user_id).await.map_err(internal)?;
+    let devices = st
+        .store
+        .user_devices(user_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .map(|(pk, name)| DeviceInfo {
+            device_name: name,
+            is_primary: primary == Some(pk),
+            is_self: pk == self_pubkey,
+        })
+        .collect();
+    Ok(Json(ManageResp { message, devices }))
+}
+
+/// Resolve one of a user's devices by (sanitized) name to its pubkey; error if 0 or >1 match.
+async fn find_device(st: &AppState, user_id: u64, name: &str) -> Result<[u8; 32], ApiError> {
+    let want = sanitize_label(name);
+    let matches: Vec<[u8; 32]> = st
+        .store
+        .user_devices(user_id)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .filter(|(_, n)| *n == want)
+        .map(|(pk, _)| pk)
+        .collect();
+    match matches.as_slice() {
+        [pk] => Ok(*pk),
+        [] => Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            format!("no device named '{want}'"),
+        )),
+        _ => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("multiple devices named '{want}'; rename one first"),
+        )),
+    }
 }
 
 /// The community label for a guild: the admin-set slug, else the guild name.

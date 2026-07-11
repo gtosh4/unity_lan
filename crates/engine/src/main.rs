@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
         return daemon::run(cfg).await;
     }
     if arg1 == "ctl" {
-        return ctl(std::env::args().nth(2), std::env::args().nth(3)).await;
+        return ctl().await;
     }
 
     let config_path = if arg1.is_empty() {
@@ -85,13 +85,22 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `ctl <subcommand> <config.toml>` — talk to a running daemon over its control socket.
-async fn ctl(sub: Option<String>, cfg_path: Option<String>) -> anyhow::Result<()> {
-    let sub = sub.unwrap_or_default();
-    let cfg_path = cfg_path.unwrap_or_else(|| "engine.toml".to_string());
+/// `ctl <sub> <config.toml> [arg]` — talk to a running daemon over its control socket.
+/// subs: `status`, `devices`, `rename <name>`, `set-primary <device>`, `remove <device>`.
+async fn ctl() -> anyhow::Result<()> {
+    use common::api::ManageOp;
+
+    let sub = std::env::args().nth(2).unwrap_or_default();
+    let cfg_path = std::env::args().nth(3).unwrap_or_else(|| "engine.toml".to_string());
+    let arg = std::env::args().nth(4);
     let cfg = Config::load(std::path::Path::new(&cfg_path))
         .with_context(|| format!("loading config {cfg_path}"))?;
     let socket = cfg.control_socket_path();
+
+    let need_arg = || {
+        arg.clone()
+            .ok_or_else(|| anyhow::anyhow!("'{sub}' needs a device/name argument"))
+    };
 
     match sub.as_str() {
         "status" => {
@@ -111,8 +120,31 @@ async fn ctl(sub: Option<String>, cfg_path: Option<String>) -> anyhow::Result<()
             }
             Ok(())
         }
-        other => anyhow::bail!("unknown ctl subcommand '{other}' (try: status)"),
+        "devices" => print_devices(control::client_manage(&socket, ManageOp::List).await?),
+        "rename" => print_devices(
+            control::client_manage(&socket, ManageOp::Rename { new_name: need_arg()? }).await?,
+        ),
+        "set-primary" => print_devices(
+            control::client_manage(&socket, ManageOp::SetPrimary { device_name: need_arg()? })
+                .await?,
+        ),
+        "remove" => print_devices(
+            control::client_manage(&socket, ManageOp::Remove { device_name: need_arg()? }).await?,
+        ),
+        other => anyhow::bail!(
+            "unknown ctl subcommand '{other}' (try: status, devices, rename, set-primary, remove)"
+        ),
     }
+}
+
+fn print_devices(resp: common::api::ManageResp) -> anyhow::Result<()> {
+    println!("{}", resp.message);
+    for d in &resp.devices {
+        let primary = if d.is_primary { " [primary]" } else { "" };
+        let this = if d.is_self { " (this device)" } else { "" };
+        println!("  {}{}{}", d.device_name, primary, this);
+    }
+    Ok(())
 }
 
 /// Bring up a WireGuard interface, add a dummy peer, tear down. Requires CAP_NET_ADMIN.

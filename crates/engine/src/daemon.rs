@@ -26,6 +26,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     )
     .await?;
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
+
+    // Persist the device token (for control mutations) and keep it live for the control socket.
+    let token = std::sync::Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
+    if let Some(tok) = &resp.device_token {
+        keys::save_token(&cfg.state_dir, tok)?;
+        *token.write().await = Some(tok.clone());
+    }
+
     let Some(device) = device else {
         anyhow::bail!("registered but hold no networks — nothing to mesh");
     };
@@ -57,13 +65,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Control socket: read-only status for CLI/GUI frontends.
+    // Control socket: status + device-management for CLI/GUI frontends.
     let status = control::shared();
     {
         let path = cfg.control_socket_path();
-        let s = status.clone();
+        let ctx = control::Ctx {
+            status: status.clone(),
+            coordinator: cfg.coordinator.clone(),
+            token: token.clone(),
+        };
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&path, s).await {
+            if let Err(e) = control::serve(&path, ctx).await {
                 tracing::error!("control socket ended: {e:#}");
             }
         });

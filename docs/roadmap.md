@@ -135,11 +135,13 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    - [x] Control socket (engine daemon serves it) + `ctl status` CLI (read-only): live device +
      peers snapshot, updated each refresh. Verified: `mesh-test.sh` runs `ctl status` on node A →
      lists peer B's ip/hostname/endpoint.
-   - [ ] Mutations: rename / set-primary / remove over the socket → coordinator. Needs
-     authenticated device control requests (a device-signing key bound at enrollment); until then
-     set-primary is available via `/unitylan primary`.
-   - [ ] `devices` list (the owner's devices from the coordinator).
-   - [ ] iced GUI frontend (M4) over the same socket.
+   - [x] Mutations: rename / set-primary / remove over the socket → coordinator, authenticated
+     by a **per-device bearer token** minted at enrollment (`devices.token`, returned in
+     `RegisterResp`, persisted 0600 in `state_dir/token`). Coordinator maps token→device→user and
+     executes owner-scoped ops; remove auto-promotes a new primary. `ctl rename|set-primary|remove`.
+     (Token secrecy relies on TLS in prod + local perms; a signed-request upgrade can come later.)
+   - [x] `devices` list (`ctl devices` → `ManageOp::List`).
+   - [ ] iced GUI frontend (M4) over the same socket — the remaining piece.
 
 ## M4 — iced GUI + tray
 **Goal:** a real desktop app driving the engine.
