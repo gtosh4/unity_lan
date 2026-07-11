@@ -113,7 +113,9 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    consume a key; minted via `/unitylan enroll` (any member, ephemeral) or config seed for tests.
    Replaced `dev_auth`/`?dev_user=`. Verified: `mesh-test.sh` enrolls + meshes; store tests cover
    one-time/expiry/rejection. OAuth session (interactive) still TODO — reuses the same binding.
-3. **Community slug** — admin config (default from guild name); carried in register/refresh.
+3. **Community slug** ✅ — `communities` table (guild → slug); admin config via `[[community]]`
+   seed, default = guild name; threaded into `Grant.community_name`. Runtime setter command
+   deferred to the management chunk. Verified: `mesh-test.sh` shows `<device>.<user>.lan.internal`.
 4. **Primary device** — coordinator-authoritative pointer per (community,user); owner-managed;
    `is_primary` propagated.
 5. **DNS** — resolver serving `<device>.<user>.<community>.internal` + `<user>.<community>` alias

@@ -24,12 +24,21 @@ pub struct Config {
     /// Enrollment keys to seed on startup (test convenience; prod mints via `/unitylan enroll`).
     #[serde(default, rename = "enroll")]
     pub enroll_seeds: Vec<EnrollSeed>,
+    /// Community slugs to seed on startup (admin config; default is the guild name).
+    #[serde(default, rename = "community")]
+    pub community_seeds: Vec<CommunitySeed>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct EnrollSeed {
     pub key: String,
     pub user_id: u64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CommunitySeed {
+    pub guild_id: u64,
+    pub slug: String,
 }
 
 #[derive(Debug, Deserialize)]

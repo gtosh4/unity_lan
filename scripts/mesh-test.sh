@@ -56,6 +56,9 @@ user_id = 1
 [[enroll]]
 key = "key-b"
 user_id = 2
+[[community]]
+guild_id = 1
+slug = "lan"
 EOF
 # NOTE distinct iface names only because this test shares one /run across the namespaces
 # (boringtun's control socket is /run/wireguard/<iface>.sock). Real hosts each have their own.
@@ -93,6 +96,13 @@ A_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a.log" | head -1 | awk '{
 B_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b.log" | head -1 | awk '{print $1}')
 [ -n "$A_IP" ] && [ -n "$B_IP" ] || { echo "FAIL: nodes did not mesh"; cat "$TMP/a.log" "$TMP/b.log"; exit 1; }
 echo "A=$A_IP  B=$B_IP  (meshed via coordinator seeds)"
+
+# Naming: the community slug must appear in the device hostname (<device>.<user>.lan.internal).
+if grep -q '\.lan\.internal' "$TMP/a.log"; then
+  echo "hostname: $(grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.lan\.internal' "$TMP/a.log" | head -1) (community slug applied)"
+else
+  echo "FAIL: community slug not in hostname"; grep -E '100\.[0-9]' "$TMP/a.log"; exit 1
+fi
 
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="

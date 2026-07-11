@@ -62,6 +62,10 @@ impl Store {
                 expires_at INTEGER,          -- NULL = never expires
                 used_by    BLOB              -- device pubkey that consumed it; NULL = unused
             );
+            CREATE TABLE IF NOT EXISTS communities (
+                guild_id INTEGER PRIMARY KEY,
+                slug     TEXT    NOT NULL     -- the <community> DNS label for this guild
+            );
             "#,
         )
         .execute(&self.pool)
@@ -144,6 +148,28 @@ impl Store {
                 name: r.get::<String, _>("name"),
             })
             .collect())
+    }
+
+    // ---- community slug (the <community> DNS label; admin-set, defaults to guild name) ----
+
+    pub async fn set_community_slug(&self, guild_id: u64, slug: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO communities (guild_id, slug) VALUES (?, ?)
+             ON CONFLICT (guild_id) DO UPDATE SET slug = excluded.slug",
+        )
+        .bind(guild_id as i64)
+        .bind(slug)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn community_slug(&self, guild_id: u64) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query("SELECT slug FROM communities WHERE guild_id = ?")
+            .bind(guild_id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>("slug")))
     }
 
     // ---- device IP allocation (one /32 per device, keyed by WG pubkey) ----

@@ -50,6 +50,10 @@ async fn main() -> anyhow::Result<()> {
     for e in &cfg.enroll_seeds {
         store.create_enrollment_key(&e.key, e.user_id, None).await?;
     }
+    // Seed community slugs from config (admin config; default is the guild name).
+    for c in &cfg.community_seeds {
+        store.set_community_slug(c.guild_id, &c.slug).await?;
+    }
 
     let fake = cfg.fake;
     let discord = cfg.discord;

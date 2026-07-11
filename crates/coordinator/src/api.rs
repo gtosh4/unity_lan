@@ -73,7 +73,12 @@ async fn register(
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
         if community_name.is_none() {
-            community_name = Some(st.roles.guild_name(net.guild_id).await.unwrap_or_default());
+            // Admin-set slug wins; otherwise fall back to the guild name.
+            let slug = st.store.community_slug(net.guild_id).await.map_err(internal)?;
+            community_name = Some(match slug {
+                Some(s) => s,
+                None => st.roles.guild_name(net.guild_id).await.unwrap_or_default(),
+            });
         }
         network_names.push(net.name);
 
