@@ -1,0 +1,194 @@
+//! Discord slash commands for admins: `/unitylan network add|remove|list`.
+//!
+//! Runs a gateway shard, registers guild commands on GUILD_CREATE, and handles interactions
+//! by mutating the network registry (design.md §3.1). Manage-Guild gated.
+
+use std::sync::Arc;
+
+use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
+use twilight_model::application::command::CommandType;
+use twilight_model::application::interaction::application_command::{
+    CommandData, CommandOptionValue,
+};
+use twilight_model::application::interaction::{Interaction, InteractionData};
+use twilight_model::channel::message::MessageFlags;
+use twilight_model::guild::Permissions;
+use twilight_model::http::interaction::{InteractionResponse, InteractionResponseType};
+use twilight_model::id::marker::{ApplicationMarker, GuildMarker};
+use twilight_model::id::Id;
+use twilight_util::builder::command::{
+    CommandBuilder, RoleBuilder, StringBuilder, SubCommandBuilder, SubCommandGroupBuilder,
+};
+use twilight_util::builder::InteractionResponseDataBuilder;
+
+use crate::store::Store;
+
+/// Connect the gateway and handle `/unitylan` interactions until the process exits.
+pub async fn run_gateway(token: String, store: Arc<Store>) -> anyhow::Result<()> {
+    let http = twilight_http::Client::new(token.clone());
+    let app_id = http
+        .current_user_application()
+        .await?
+        .model()
+        .await?
+        .id;
+    tracing::info!(%app_id, "gateway: application resolved, slash commands enabled");
+
+    let mut shard = Shard::new(ShardId::ONE, token, Intents::GUILDS);
+    let flags = EventTypeFlags::GUILD_CREATE | EventTypeFlags::INTERACTION_CREATE;
+
+    while let Some(item) = shard.next_event(flags).await {
+        let event = match item {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!("gateway receive error: {e}");
+                continue;
+            }
+        };
+        match event {
+            // Register guild commands the moment we see a guild (instant availability).
+            Event::GuildCreate(gc) => {
+                match register_guild_commands(&http, app_id, gc.id()).await {
+                    Ok(()) => tracing::info!(guild = %gc.id(), "registered /unitylan commands"),
+                    Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
+                }
+            }
+            Event::InteractionCreate(interaction) => {
+                handle_interaction(&http, app_id, &store, interaction.0).await;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn commands() -> Vec<twilight_model::application::command::Command> {
+    let group = SubCommandGroupBuilder::new("network", "Manage UnityLAN networks").subcommands([
+        SubCommandBuilder::new("add", "Register a role as a network")
+            .option(RoleBuilder::new("role", "The role that grants access").required(true))
+            .option(StringBuilder::new("name", "DNS label (defaults to the role name)")),
+        SubCommandBuilder::new("remove", "Unregister a network")
+            .option(RoleBuilder::new("role", "The role to unregister").required(true)),
+        SubCommandBuilder::new("list", "List this guild's networks"),
+    ]);
+    vec![CommandBuilder::new("unitylan", "UnityLAN admin", CommandType::ChatInput)
+        .option(group)
+        .build()]
+}
+
+async fn register_guild_commands(
+    http: &twilight_http::Client,
+    app_id: Id<ApplicationMarker>,
+    guild_id: Id<GuildMarker>,
+) -> anyhow::Result<()> {
+    http.interaction(app_id)
+        .set_guild_commands(guild_id, &commands())
+        .await?;
+    Ok(())
+}
+
+async fn handle_interaction(
+    http: &twilight_http::Client,
+    app_id: Id<ApplicationMarker>,
+    store: &Store,
+    interaction: Interaction,
+) {
+    let Some(InteractionData::ApplicationCommand(data)) = interaction.data.clone() else {
+        return;
+    };
+    if data.name != "unitylan" {
+        return;
+    }
+    let content = process(store, &interaction, &data).await;
+
+    let response = InteractionResponse {
+        kind: InteractionResponseType::ChannelMessageWithSource,
+        data: Some(
+            InteractionResponseDataBuilder::new()
+                .content(content)
+                .flags(MessageFlags::EPHEMERAL)
+                .build(),
+        ),
+    };
+    if let Err(e) = http
+        .interaction(app_id)
+        .create_response(interaction.id, &interaction.token, &response)
+        .await
+    {
+        tracing::warn!("responding to interaction: {e:#}");
+    }
+}
+
+async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -> String {
+    let Some(guild_id) = interaction.guild_id else {
+        return "Use this in a server.".to_string();
+    };
+    // Require Manage Guild.
+    let perms = interaction.member.as_ref().and_then(|m| m.permissions);
+    let is_admin = perms.is_some_and(|p| {
+        p.contains(Permissions::MANAGE_GUILD) || p.contains(Permissions::ADMINISTRATOR)
+    });
+    if !is_admin {
+        return "You need the Manage Server permission.".to_string();
+    }
+
+    // /unitylan network <sub> ...
+    let Some(group) = data.options.first() else {
+        return "Unknown command.".to_string();
+    };
+    let CommandOptionValue::SubCommandGroup(subs) = &group.value else {
+        return "Unknown command.".to_string();
+    };
+    let Some(sub) = subs.first() else {
+        return "Unknown subcommand.".to_string();
+    };
+    let CommandOptionValue::SubCommand(opts) = &sub.value else {
+        return "Unknown subcommand.".to_string();
+    };
+
+    match sub.name.as_str() {
+        "add" => {
+            let role = opts.iter().find_map(|o| match o.value {
+                CommandOptionValue::Role(id) => Some(id),
+                _ => None,
+            });
+            let name = opts.iter().find_map(|o| match &o.value {
+                CommandOptionValue::String(s) => Some(s.clone()),
+                _ => None,
+            });
+            let Some(role) = role else {
+                return "Missing role.".to_string();
+            };
+            let name = name.unwrap_or_else(|| format!("role-{role}"));
+            match store.upsert_network(guild_id.get(), role.get(), &name).await {
+                Ok(()) => format!("Registered <@&{role}> as network **{name}**."),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+        "remove" => {
+            let role = opts.iter().find_map(|o| match o.value {
+                CommandOptionValue::Role(id) => Some(id),
+                _ => None,
+            });
+            let Some(role) = role else {
+                return "Missing role.".to_string();
+            };
+            match store.remove_network(guild_id.get(), role.get()).await {
+                Ok(()) => format!("Unregistered <@&{role}>."),
+                Err(e) => format!("Error: {e}"),
+            }
+        }
+        "list" => match store.networks_in_guild(guild_id.get()).await {
+            Ok(nets) if nets.is_empty() => "No networks registered.".to_string(),
+            Ok(nets) => {
+                let mut s = String::from("Networks:\n");
+                for n in nets {
+                    s.push_str(&format!("• <@&{}> — {}\n", n.role_id, n.name));
+                }
+                s
+            }
+            Err(e) => format!("Error: {e}"),
+        },
+        _ => "Unknown subcommand.".to_string(),
+    }
+}

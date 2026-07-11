@@ -3,6 +3,7 @@
 //! commands; the offline test config seeds them directly.
 
 mod api;
+mod commands;
 mod config;
 mod discord;
 mod presence;
@@ -46,18 +47,31 @@ async fn main() -> anyhow::Result<()> {
         store.upsert_network(n.guild_id, n.role_id, &n.name).await?;
     }
 
-    let roles: Arc<dyn RoleSource> = match (cfg.fake, cfg.discord) {
+    let fake = cfg.fake;
+    let discord = cfg.discord;
+    let roles: Arc<dyn RoleSource> = match (fake, &discord) {
         (Some(_), Some(_)) => anyhow::bail!("config has both [fake] and [discord]; pick one"),
-        (Some(fake), None) => {
+        (Some(fk), None) => {
             tracing::warn!("running with FAKE role source (offline dev mode)");
-            Arc::new(FakeRoleSource::new(fake))
+            Arc::new(FakeRoleSource::new(fk))
         }
         (None, Some(d)) => {
             tracing::info!("running with live Discord role source");
-            Arc::new(crate::discord::TwilightRoleSource::new(d.bot_token))
+            Arc::new(crate::discord::TwilightRoleSource::new(d.bot_token.clone()))
         }
         (None, None) => anyhow::bail!("no role source configured; add a [fake] or [discord] block"),
     };
+
+    // Live Discord: run the gateway for `/unitylan network` slash commands.
+    if let Some(d) = &discord {
+        let token = d.bot_token.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::commands::run_gateway(token, store).await {
+                tracing::error!("gateway task ended: {e:#}");
+            }
+        });
+    }
 
     if cfg.dev_auth {
         tracing::warn!("dev_auth enabled: ?dev_user= bypasses OAuth — testing only");
