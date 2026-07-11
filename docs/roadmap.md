@@ -116,8 +116,12 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
 3. **Community slug** ✅ — `communities` table (guild → slug); admin config via `[[community]]`
    seed, default = guild name; threaded into `Grant.community_name`. Runtime setter command
    deferred to the management chunk. Verified: `mesh-test.sh` shows `<device>.<user>.lan.internal`.
-4. **Primary device** — coordinator-authoritative pointer per (community,user); owner-managed;
-   `is_primary` propagated.
+4. **Primary device** ✅ — `primary_device` table (one per user; simpler than per-community —
+   the alias resolves the same everywhere). First enrollment auto-assigns; owner reassigns via
+   `/unitylan primary set <device>` (`list` shows them). `is_primary` computed at register and
+   propagated through the attestation → `SelfDevice`. CLI/GUI setter lands with the control
+   socket (chunk 6). Verified: store test (auto-assign/reassign) + `mesh-test.sh` shows
+   `[primary]`. The `<user>.<community>` alias itself is served in chunk 5 (DNS).
 5. **DNS** — resolver serving `<device>.<user>.<community>.internal` + `<user>.<community>` alias
    for primary + search domains. Verify: query resolver in netns for a peer name → device IP.
 6. **Device management** — list/rename/set-primary/remove over the control socket (GUI + CLI).

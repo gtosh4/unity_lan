@@ -49,6 +49,18 @@ async fn register(
         .await
         .map_err(internal)?;
 
+    // Primary device: first-enrolled auto-becomes primary; reassigned via `/unitylan primary`.
+    st.store
+        .ensure_primary(user_id, &req.wg_pubkey)
+        .await
+        .map_err(internal)?;
+    let is_primary = st
+        .store
+        .primary_pubkey(user_id)
+        .await
+        .map_err(internal)?
+        .is_some_and(|p| p == req.wg_pubkey);
+
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
@@ -92,7 +104,7 @@ async fn register(
                 user_id,
                 username: username.clone(),
                 device_name: device_name.clone(),
-                is_primary: false, // chunk 4: coordinator-authoritative primary pointer
+                is_primary,
                 endpoint: req.endpoint,
             },
         );
@@ -105,14 +117,7 @@ async fn register(
     } else {
         let signed = st
             .signer
-            .sign_attestation(
-                user_id,
-                username,
-                device_name,
-                false,
-                ip,
-                req.wg_pubkey,
-            )
+            .sign_attestation(user_id, username, device_name, is_primary, ip, req.wg_pubkey)
             .map_err(internal)?;
         Some(Grant {
             attestation: signed.to_base64(),

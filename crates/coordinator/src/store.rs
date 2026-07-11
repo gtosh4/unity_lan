@@ -66,6 +66,10 @@ impl Store {
                 guild_id INTEGER PRIMARY KEY,
                 slug     TEXT    NOT NULL     -- the <community> DNS label for this guild
             );
+            CREATE TABLE IF NOT EXISTS primary_device (
+                user_id INTEGER PRIMARY KEY,  -- one primary per user (the <user>.<community> alias)
+                pubkey  BLOB    NOT NULL
+            );
             "#,
         )
         .execute(&self.pool)
@@ -224,6 +228,72 @@ impl Store {
         Ok(row.map(|r| r.get::<i64, _>("user_id") as u64))
     }
 
+    /// A user's devices, as (pubkey, device_name).
+    pub async fn user_devices(&self, user_id: u64) -> anyhow::Result<Vec<([u8; 32], String)>> {
+        let rows = sqlx::query("SELECT pubkey, device_name FROM devices WHERE user_id = ?")
+            .bind(user_id as i64)
+            .fetch_all(&self.pool)
+            .await?;
+        let mut out = Vec::new();
+        for r in rows {
+            let pk: Vec<u8> = r.try_get("pubkey")?;
+            let pk: [u8; 32] = pk
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
+            out.push((pk, r.get::<String, _>("device_name")));
+        }
+        Ok(out)
+    }
+
+    // ---- primary device (one per user; backs the <user>.<community> alias) ----
+
+    /// Make `pubkey` this user's primary device only if they don't have one yet (auto-assign on
+    /// first enrollment).
+    pub async fn ensure_primary(&self, user_id: u64, pubkey: &[u8; 32]) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO primary_device (user_id, pubkey) VALUES (?, ?)
+             ON CONFLICT (user_id) DO NOTHING",
+        )
+        .bind(user_id as i64)
+        .bind(pubkey.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Set (reassign) this user's primary device.
+    pub async fn set_primary(&self, user_id: u64, pubkey: &[u8; 32]) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO primary_device (user_id, pubkey) VALUES (?, ?)
+             ON CONFLICT (user_id) DO UPDATE SET pubkey = excluded.pubkey",
+        )
+        .bind(user_id as i64)
+        .bind(pubkey.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// This user's primary device pubkey, if set.
+    pub async fn primary_pubkey(&self, user_id: u64) -> anyhow::Result<Option<[u8; 32]>> {
+        let row = sqlx::query("SELECT pubkey FROM primary_device WHERE user_id = ?")
+            .bind(user_id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let pk: Vec<u8> = r.try_get("pubkey")?;
+                let pk: [u8; 32] = pk
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
+                Ok(Some(pk))
+            }
+        }
+    }
+
     // ---- enrollment keys (one-time; bind a new device's pubkey to its owner) ----
 
     /// Insert (or refresh) a one-time enrollment key for a user. `expires_at` is optional.
@@ -322,6 +392,27 @@ mod tests {
         st.create_enrollment_key("k", 7, Some(100)).await.unwrap();
         assert!(st.consume_enrollment_key("k", &[3u8; 32], 100).await.is_err());
         assert_eq!(st.consume_enrollment_key("k", &[3u8; 32], 99).await.unwrap(), 7);
+    }
+
+    #[tokio::test]
+    async fn primary_auto_assigns_then_reassigns() {
+        let st = mem_store().await;
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        st.allocate_device_ip(&a, 9, "laptop").await.unwrap();
+        st.allocate_device_ip(&b, 9, "phone").await.unwrap();
+
+        // First device auto-becomes primary; enrolling a second doesn't steal it.
+        st.ensure_primary(9, &a).await.unwrap();
+        st.ensure_primary(9, &b).await.unwrap();
+        assert_eq!(st.primary_pubkey(9).await.unwrap(), Some(a));
+
+        // Owner reassigns to the second device.
+        st.set_primary(9, &b).await.unwrap();
+        assert_eq!(st.primary_pubkey(9).await.unwrap(), Some(b));
+
+        let names: Vec<String> = st.user_devices(9).await.unwrap().into_iter().map(|(_, n)| n).collect();
+        assert_eq!(names.len(), 2);
     }
 
     #[tokio::test]

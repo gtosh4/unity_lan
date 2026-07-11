@@ -28,9 +28,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         anyhow::bail!("registered but hold no networks — nothing to mesh");
     };
     tracing::info!(
-        "{} -> {}  (networks: {})",
+        "{} -> {}{}  (networks: {})",
         device.wg_ip,
         device.hostname,
+        if device.is_primary { " [primary]" } else { "" },
         device.networks.join(", ")
     );
 

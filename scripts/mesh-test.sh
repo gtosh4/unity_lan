@@ -104,6 +104,10 @@ else
   echo "FAIL: community slug not in hostname"; grep -E '100\.[0-9]' "$TMP/a.log"; exit 1
 fi
 
+# Primary: each node is its user's only device, so it auto-becomes primary.
+grep -q '\[primary\]' "$TMP/a.log" || { echo "FAIL: node A not marked primary"; exit 1; }
+echo "primary: node A auto-assigned primary ✓"
+
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then

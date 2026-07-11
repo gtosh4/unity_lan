@@ -72,9 +72,15 @@ fn commands() -> Vec<twilight_model::application::command::Command> {
         SubCommandBuilder::new("list", "List this guild's networks"),
     ]);
     let enroll = SubCommandBuilder::new("enroll", "Mint a one-time key to enroll a headless device");
+    let primary = SubCommandGroupBuilder::new("primary", "Choose your primary device").subcommands([
+        SubCommandBuilder::new("list", "List your devices and which is primary"),
+        SubCommandBuilder::new("set", "Set your primary device")
+            .option(StringBuilder::new("device", "Device name").required(true)),
+    ]);
     vec![CommandBuilder::new("unitylan", "UnityLAN admin", CommandType::ChatInput)
         .option(group)
         .option(enroll)
+        .option(primary)
         .build()]
 }
 
@@ -151,7 +157,70 @@ async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -
                 Err(e) => format!("Error: {e}"),
             }
         }
+        // /unitylan primary list|set — any member manages their own devices.
+        ("primary", CommandOptionValue::SubCommandGroup(subs)) => {
+            let Some(user) = interaction.author_id() else {
+                return "Could not determine your user.".to_string();
+            };
+            handle_primary(store, user.get(), subs).await
+        }
         _ => "Unknown command.".to_string(),
+    }
+}
+
+async fn handle_primary(
+    store: &Store,
+    user_id: u64,
+    subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
+) -> String {
+    let Some(sub) = subs.first() else {
+        return "Unknown subcommand.".to_string();
+    };
+    let CommandOptionValue::SubCommand(opts) = &sub.value else {
+        return "Unknown subcommand.".to_string();
+    };
+
+    let devices = match store.user_devices(user_id).await {
+        Ok(d) => d,
+        Err(e) => return format!("Error: {e}"),
+    };
+    if devices.is_empty() {
+        return "You have no enrolled devices yet.".to_string();
+    }
+    let primary = store.primary_pubkey(user_id).await.ok().flatten();
+
+    match sub.name.as_str() {
+        "list" => {
+            let mut s = String::from("Your devices:\n");
+            for (pk, name) in &devices {
+                let star = if primary.as_ref() == Some(pk) { " ⭐ (primary)" } else { "" };
+                s.push_str(&format!("• {name}{star}\n"));
+            }
+            s
+        }
+        "set" => {
+            let want = opts.iter().find_map(|o| match &o.value {
+                CommandOptionValue::String(s) => Some(common::netid::sanitize_label(s)),
+                _ => None,
+            });
+            let Some(want) = want else {
+                return "Missing device name.".to_string();
+            };
+            let matches: Vec<&[u8; 32]> = devices
+                .iter()
+                .filter(|(_, name)| *name == want)
+                .map(|(pk, _)| pk)
+                .collect();
+            match matches.as_slice() {
+                [] => format!("No device named **{want}**. Use `/unitylan primary list`."),
+                [pk] => match store.set_primary(user_id, pk).await {
+                    Ok(()) => format!("Primary device set to **{want}**."),
+                    Err(e) => format!("Error: {e}"),
+                },
+                _ => format!("Multiple devices named **{want}**; rename one first."),
+            }
+        }
+        _ => "Unknown subcommand.".to_string(),
     }
 }
 

@@ -15,6 +15,7 @@ pub struct SelfDevice {
     pub networks: Vec<String>,
     pub wg_ip: Ipv4Addr,
     pub hostname: String,
+    pub is_primary: bool,
 }
 
 /// A verified co-member to peer with.
@@ -87,6 +88,7 @@ async fn post(
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,
                 hostname,
+                is_primary: att.is_primary,
             })
         }
         None => None,
