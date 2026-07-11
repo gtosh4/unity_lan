@@ -30,6 +30,8 @@ pub struct Config {
     /// How often to refresh attestations + seeds from the coordinator.
     #[serde(default = "default_refresh")]
     pub refresh_secs: u64,
+    /// If set, run the `.internal` DNS resolver on this UDP address (e.g. "127.0.0.1:53").
+    pub dns_bind: Option<SocketAddr>,
 }
 
 fn default_iface() -> String {

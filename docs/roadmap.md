@@ -122,8 +122,13 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    propagated through the attestation → `SelfDevice`. CLI/GUI setter lands with the control
    socket (chunk 6). Verified: store test (auto-assign/reassign) + `mesh-test.sh` shows
    `[primary]`. The `<user>.<community>` alias itself is served in chunk 5 (DNS).
-5. **DNS** — resolver serving `<device>.<user>.<community>.internal` + `<user>.<community>` alias
-   for primary + search domains. Verify: query resolver in netns for a peer name → device IP.
+5. **DNS** ✅ — engine `dns.rs`: a tiny authoritative UDP resolver (hickory-proto) serving the
+   `.internal` zone from verified attestations (self + seeds). Answers `<device>.<user>.<community>`
+   and the `<user>.<community>` primary alias; NXDOMAIN for unknown `.internal`; EDNS-compatible.
+   Zone rebuilt each refresh; enabled via `dns_bind`. Seeds now carry `community_name` so peer
+   hostnames are well-defined. Per-OS resolver hookup (resolved/NRPT/macOS) deferred to polish.
+   Verified: `mesh-test.sh` digs node A's resolver → peer B's name + primary alias → B's IP; two
+   engine unit tests (answer + socket).
 6. **Device management** — list/rename/set-primary/remove over the control socket (GUI + CLI).
 
 ## M4 — iced GUI + tray

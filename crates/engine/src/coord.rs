@@ -16,6 +16,8 @@ pub struct SelfDevice {
     pub wg_ip: Ipv4Addr,
     pub hostname: String,
     pub is_primary: bool,
+    /// `<user>.<community>.internal` if we're the owner's primary device.
+    pub primary_alias: Option<String>,
 }
 
 /// A verified co-member to peer with.
@@ -23,6 +25,10 @@ pub struct SeedPeer {
     pub pubkey: [u8; 32],
     pub ip: Ipv4Addr,
     pub endpoint: Option<SocketAddr>,
+    /// `<device>.<user>.<community>.internal`.
+    pub hostname: String,
+    /// `<user>.<community>.internal` if this is the owner's primary device, else `None`.
+    pub primary_alias: Option<String>,
 }
 
 pub async fn register(
@@ -83,12 +89,14 @@ async fn post(
             let signed = Signed::from_base64(&grant.attestation).context("decoding grant")?;
             let att = verify_attestation(&signed, &anchor, now).context("verifying grant")?;
             let hostname = att.hostname(&grant.community_name);
+            let primary_alias = att.primary_alias(&grant.community_name);
             Some(SelfDevice {
                 community_name: grant.community_name.clone(),
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,
                 hostname,
                 is_primary: att.is_primary,
+                primary_alias,
             })
         }
         None => None,
@@ -109,6 +117,8 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
             pubkey: att.wg_pubkey,
             ip: att.wg_ip,
             endpoint: seed.endpoint,
+            hostname: att.hostname(&seed.community_name),
+            primary_alias: att.primary_alias(&seed.community_name),
         });
     }
     Ok(peers)

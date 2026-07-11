@@ -50,6 +50,18 @@ impl Attestation {
             DNS_SUFFIX,
         )
     }
+
+    /// `<user>.<community>.internal` — the alias for the owner's primary device; `None` otherwise.
+    pub fn primary_alias(&self, community_name: &str) -> Option<String> {
+        self.is_primary.then(|| {
+            format!(
+                "{}.{}.{}",
+                self.username,
+                sanitize_label(community_name),
+                DNS_SUFFIX,
+            )
+        })
+    }
 }
 
 /// Verify a signed attestation against the pinned anchor and reject if expired.

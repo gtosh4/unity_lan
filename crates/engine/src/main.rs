@@ -4,6 +4,7 @@
 mod config;
 mod coord;
 mod daemon;
+mod dns;
 mod keys;
 mod wg;
 

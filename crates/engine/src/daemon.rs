@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::coord::{self, SeedPeer};
+use crate::dns;
 use crate::keys;
 use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
 
@@ -44,9 +45,22 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     })?;
     tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
 
+    // Optional `.internal` resolver: serves our device + peers by name from verified attestations.
+    let zone = dns::empty_zone();
+    if let Some(bind) = cfg.dns_bind {
+        let z = zone.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dns::serve(bind, z).await {
+                tracing::error!("dns resolver ended: {e:#}");
+            }
+        });
+    }
+
     // Apply initial seeds, then refresh on an interval picking up new co-members.
     let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
-    apply_seeds(&backend, coord::verified_seeds(&resp)?, &mut peers)?;
+    let seeds = coord::verified_seeds(&resp)?;
+    dns::update(&zone, &device, &seeds).await;
+    apply_seeds(&backend, seeds, &mut peers)?;
 
     let mut ticker = tokio::time::interval(Duration::from_secs(cfg.refresh_secs.max(1)));
     ticker.tick().await; // first tick is immediate
@@ -61,8 +75,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         )
         .await
         {
-            Ok((resp, _)) => match coord::verified_seeds(&resp) {
-                Ok(seeds) => apply_seeds(&backend, seeds, &mut peers)?,
+            Ok((resp, dev)) => match coord::verified_seeds(&resp) {
+                Ok(seeds) => {
+                    if let Some(dev) = &dev {
+                        dns::update(&zone, dev, &seeds).await;
+                    }
+                    apply_seeds(&backend, seeds, &mut peers)?;
+                }
                 Err(e) => tracing::warn!("bad seeds: {e:#}"),
             },
             Err(e) => tracing::warn!("refresh failed: {e:#}"),

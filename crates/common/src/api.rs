@@ -53,6 +53,9 @@ pub struct Grant {
 pub struct Seed {
     /// base64(`Signed<Attestation>`) for a co-member sharing ≥1 network.
     pub attestation: String,
+    /// Community display name of a shared network's guild (the `<community>` DNS label).
+    #[serde(default)]
+    pub community_name: String,
     /// The co-member's last-reported endpoint (may be stale/absent).
     pub endpoint: Option<SocketAddr>,
 }

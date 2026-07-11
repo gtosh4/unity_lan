@@ -66,15 +66,18 @@ cat >"$TMP/a.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
 state_dir = "$TMP/a"
 enrollment_key = "key-a"
+device_name = "host-a"
 iface = "unla"
 listen_port = 51820
 endpoint = "10.0.0.1:51820"
 refresh_secs = 2
+dns_bind = "127.0.0.1:15353"
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
 state_dir = "$TMP/b"
 enrollment_key = "key-b"
+device_name = "host-b"
 iface = "unlb"
 listen_port = 51821
 endpoint = "10.0.0.2:51821"
@@ -107,6 +110,14 @@ fi
 # Primary: each node is its user's only device, so it auto-becomes primary.
 grep -q '\[primary\]' "$TMP/a.log" || { echo "FAIL: node A not marked primary"; exit 1; }
 echo "primary: node A auto-assigned primary ✓"
+
+# DNS: query node A's resolver for peer B by name (A learned B as a seed).
+echo "=== dns: resolve peer B via node A's .internal resolver ==="
+DNS_IP=$(dig @127.0.0.1 -p 15353 +short host-b.nodeb.lan.internal A | head -1)
+ALIAS_IP=$(dig @127.0.0.1 -p 15353 +short nodeb.lan.internal A | head -1)
+echo "host-b.nodeb.lan.internal -> ${DNS_IP:-<none>}   nodeb.lan.internal (primary alias) -> ${ALIAS_IP:-<none>}   (B=$B_IP)"
+{ [ "$DNS_IP" = "$B_IP" ] && [ "$ALIAS_IP" = "$B_IP" ]; } || { echo "FAIL: resolver did not map peer name to its device IP"; exit 1; }
+echo "dns: peer hostname + primary alias resolve to B ✓"
 
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="

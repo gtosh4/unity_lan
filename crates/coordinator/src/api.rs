@@ -85,12 +85,7 @@ async fn register(
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
         if community_name.is_none() {
-            // Admin-set slug wins; otherwise fall back to the guild name.
-            let slug = st.store.community_slug(net.guild_id).await.map_err(internal)?;
-            community_name = Some(match slug {
-                Some(s) => s,
-                None => st.roles.guild_name(net.guild_id).await.unwrap_or_default(),
-            });
+            community_name = Some(community_of(&st, net.guild_id).await.map_err(internal)?);
         }
         network_names.push(net.name);
 
@@ -130,6 +125,7 @@ async fn register(
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut seeds = Vec::new();
     for (guild_id, role_id) in &held {
+        let seed_community = community_of(&st, *guild_id).await.map_err(internal)?;
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
             if !seen.insert(mp.pubkey) {
                 continue;
@@ -147,6 +143,7 @@ async fn register(
                 .map_err(internal)?;
             seeds.push(Seed {
                 attestation: signed.to_base64(),
+                community_name: seed_community.clone(),
                 endpoint: mp.endpoint,
             });
         }
@@ -157,6 +154,14 @@ async fn register(
         grant,
         seeds,
     }))
+}
+
+/// The community label for a guild: the admin-set slug, else the guild name.
+async fn community_of(st: &AppState, guild_id: u64) -> anyhow::Result<String> {
+    match st.store.community_slug(guild_id).await? {
+        Some(s) => Ok(s),
+        None => Ok(st.roles.guild_name(guild_id).await.unwrap_or_default()),
+    }
 }
 
 /// Resolve the caller's user id: an already-enrolled device is known by its pubkey; a new device
