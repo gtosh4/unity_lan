@@ -146,6 +146,14 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         held.push((net.guild_id, net.role_id));
     }
 
+    // Self-eviction: drop our presence from any network we were recorded in but no longer hold
+    // (role revoked). Peers pick this up on their next (long-poll-woken) refresh and prune us.
+    for (g, r) in st.presence.networks_of(&req.wg_pubkey) {
+        if !held.contains(&(g, r)) {
+            changed |= st.presence.evict(g, r, &req.wg_pubkey);
+        }
+    }
+
     // Self-grant: one device attestation (None if the caller holds no networks).
     let grant = if held.is_empty() {
         None

@@ -187,13 +187,30 @@ gets two names/IPs; the networks can't route to each other.
 
 ## M7 — Revocation, expose, status polish
 **Goal:** losing a role cuts you off; expose local ports; solid status.
-- [ ] Coordinator gateway (`GUILD_MEMBER_UPDATE/REMOVE`) → tombstone + stop re-signing.
-- [ ] Client TTL refresh at half-life; apply tombstones (drop peer immediately).
+
+### M7a — Revocation core ✅
+- [x] **Client prune**: `apply_seeds` removes peers absent from the current seed set (was
+      add-only). A revoked/departed co-member drops out of the coordinator's presence → its
+      next-absent refresh removes the peer + reinstalls routing. Grant→None mid-loop (own role
+      lost) prunes every peer, isolating us.
+- [x] **Coordinator stop-signing + self-eviction**: `build_snapshot` skips networks the caller
+      no longer holds (no grant/seed) *and* evicts the caller's stale presence from any network
+      it dropped, bumping the version so parked long-polls wake and prune. `Presence::evict` /
+      `evict_user` / `networks_of` (unit-tested).
+- [x] Client TTL refresh at half-life — already via the long-poll hold (~TTL/2); revocation
+      propagates on the next woken refresh.
+- **Verify:** ✅ `mesh-test.sh` — after the mesh pings, node B's role is stripped and the
+  coordinator restarts; node A prunes peer B (log + `ctl status` no longer lists it).
+
+### M7b — Live gateway revocation (immediate, prod trigger)
+- [ ] Gateway `GUILD_MEMBER_UPDATE/REMOVE` → `presence.evict_user` for lost roles + version bump
+      (instant drop even when the revoked node is offline). Needs the GUILD_MEMBERS intent and
+      presence/version handles wired into the gateway task. No headless test (needs Discord).
+- [ ] Optional persisted tombstones (survive coordinator restart before the live role re-check).
+
+### M7c — expose / status polish
 - [ ] `expose <port> --net <role>` end to end.
 - [ ] Status/event polish in GUI.
-
-**Verify:** remove a member's role in Discord → within the TTL (or immediately via tombstone)
-they lose the tunnel. Expose a port → a peer reaches it.
 
 ---
 

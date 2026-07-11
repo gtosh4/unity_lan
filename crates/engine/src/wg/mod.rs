@@ -31,8 +31,7 @@ pub trait WgBackend {
     fn set_peer(&self, peer: &PeerConfig) -> anyhow::Result<()>;
     /// Install routes for the peers' allowed IPs (so tunnel traffic is routed to the iface).
     fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()>;
-    /// Remove a peer by public key. (Used by gossip reconciliation.)
-    #[allow(dead_code)]
+    /// Remove a peer by public key. (Used to prune revoked / departed co-members.)
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()>;
     /// Tear the interface down.
     fn down(&self) -> anyhow::Result<()>;

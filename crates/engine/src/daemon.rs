@@ -107,9 +107,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 since = Some(resp.version);
                 match coord::verified_seeds(&resp) {
                     Ok(seeds) => {
-                        if let Some(dev) = &dev {
-                            dns::update(&zone, dev, &seeds).await;
-                            control::update(&status, dev, &seeds).await;
+                        match &dev {
+                            Some(dev) => {
+                                dns::update(&zone, dev, &seeds).await;
+                                control::update(&status, dev, &seeds).await;
+                            }
+                            // No grant: we hold no networks anymore (role revoked). Seeds are empty
+                            // → apply_seeds prunes every peer, isolating us until access returns.
+                            None => tracing::warn!("no grant — access revoked; dropping all peers"),
                         }
                         apply_seeds(&backend, seeds, &mut peers)?;
                     }
@@ -143,6 +148,21 @@ fn apply_seeds(
     }
 
     let mut changed = false;
+
+    // Prune peers no longer in the seed set: a co-member who lost the role (revoked / left) drops
+    // out of the coordinator's presence, so its next-absent refresh here means "remove this peer".
+    let stale: Vec<[u8; 32]> = peers
+        .keys()
+        .filter(|pk| !desired.contains_key(*pk))
+        .copied()
+        .collect();
+    for pubkey in stale {
+        backend.remove_peer(&pubkey)?;
+        peers.remove(&pubkey);
+        tracing::info!(peer = %hex8(&pubkey), "peer removed (revoked or left)");
+        changed = true;
+    }
+
     for (pubkey, (mut allowed, endpoint)) in desired {
         allowed.sort();
         allowed.dedup();

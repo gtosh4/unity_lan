@@ -84,7 +84,7 @@ endpoint = "10.0.0.2:51821"
 refresh_secs = 2
 EOF
 
-"$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
+"$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 & COORD_PID=$!
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
 "$ENG" run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
@@ -135,8 +135,27 @@ echo "ctl: rename applied + listed ✓"
 # No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then
-  echo "RESULT: PASS ✓  membership -> coordinator seeds -> WG mesh -> traffic"
-  exit 0
+  echo "mesh ping ✓  membership -> coordinator seeds -> WG mesh -> traffic"
 else
   echo "RESULT: FAIL ✗"; tail -15 "$TMP/a.log" "$TMP/b.log"; exit 1
 fi
+
+# Revocation: strip node B's role and restart the coordinator (persistent DB, empty presence).
+# On reconnect A holds the role, B does not, so A's seed list no longer contains B → A prunes it.
+echo "=== revocation: remove node B's role, restart coordinator ==="
+awk '/^role_ids = \[10\]/ && ++c==2 {sub(/\[10\]/,"[]")} 1' "$TMP/coord.toml" >"$TMP/coord2.toml"
+kill "$COORD_PID" 2>/dev/null; wait "$COORD_PID" 2>/dev/null
+"$COORD" "$TMP/coord2.toml" >>"$TMP/coord.log" 2>&1 & COORD_PID=$!
+for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
+
+for _ in $(seq 1 40); do grep -q "peer removed" "$TMP/a.log" 2>/dev/null && break; sleep 0.5; done
+grep -q "peer removed" "$TMP/a.log" || { echo "FAIL: node A did not prune revoked peer B"; tail -15 "$TMP/a.log"; exit 1; }
+echo "prune: node A dropped peer B after revocation ✓"
+
+# Node A's status must no longer list B.
+CTL=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
+if echo "$CTL" | grep -q "$B_IP"; then echo "FAIL: ctl status still lists revoked peer B"; echo "$CTL"; exit 1; fi
+echo "ctl: status no longer lists B ✓"
+
+echo "RESULT: PASS ✓  mesh forms, carries traffic, and prunes a revoked member"
+exit 0
