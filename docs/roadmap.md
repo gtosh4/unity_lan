@@ -103,9 +103,11 @@ frequent roaming) and a reciprocity-aware bootstrap (ring/hub seed selection).
 
 ## M-device — Device model, addressing & naming (supersedes old per-network addressing)
 Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
-1. **One IP per device** — allocation keyed by device pubkey in a flat `100.64/10`; attestation
-   carries `device_name` + `username` + `is_primary`; networks become pure ACL (drop per-network
-   subnets). Verify: `mesh-test.sh` still meshes with per-device IPs.
+1. **One IP per device** ✅ — allocation keyed by device pubkey in a flat `100.64/10`
+   (`netid`: `device_hint`/`pick_free_index`/`addr_from_index`; `devices` table by pubkey);
+   attestation carries `device_name` + `username` + `is_primary`; presence keyed by device
+   pubkey (a user's multiple devices no longer collide); networks are pure ACL — seeds = anyone
+   sharing ≥1 network. Verified: `mesh-test.sh` meshes with per-device IPs (0% loss).
 2. **Enrollment** — OAuth session (interactive) + one-time enrollment keys (headless); coordinator
    binds device pubkey → user. Replaces `dev_auth`/`?dev_user=`.
 3. **Community slug** — admin config (default from guild name); carried in register/refresh.

@@ -1,4 +1,4 @@
-//! Coordinator client: register/refresh, verify grants + seeds against the pinned anchor.
+//! Coordinator client: register/refresh, verify our grant + seeds against the pinned anchor.
 
 use std::net::{Ipv4Addr, SocketAddr};
 
@@ -9,11 +9,10 @@ use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
 use common::wire::Signed;
 
-/// A verified membership of our own (one of our `/32`s + its hostname).
-pub struct Membership {
-    pub guild_name: String,
-    pub network_name: String,
-    pub role_id: u64,
+/// Our own verified device: its `/32`, hostname, and the networks it belongs to.
+pub struct SelfDevice {
+    pub community_name: String,
+    pub networks: Vec<String>,
     pub wg_ip: Ipv4Addr,
     pub hostname: String,
 }
@@ -28,28 +27,31 @@ pub struct SeedPeer {
 pub async fn register(
     base_url: &str,
     wg_pubkey: WgPublicKey,
+    device_name: String,
     endpoint: Option<SocketAddr>,
     dev_user: Option<u64>,
-) -> anyhow::Result<(RegisterResp, Vec<Membership>)> {
-    post(base_url, "register", wg_pubkey, endpoint, dev_user).await
+) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
+    post(base_url, "register", wg_pubkey, device_name, endpoint, dev_user).await
 }
 
 pub async fn refresh(
     base_url: &str,
     wg_pubkey: WgPublicKey,
+    device_name: String,
     endpoint: Option<SocketAddr>,
     dev_user: Option<u64>,
-) -> anyhow::Result<(RegisterResp, Vec<Membership>)> {
-    post(base_url, "refresh", wg_pubkey, endpoint, dev_user).await
+) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
+    post(base_url, "refresh", wg_pubkey, device_name, endpoint, dev_user).await
 }
 
 async fn post(
     base_url: &str,
     path: &str,
     wg_pubkey: WgPublicKey,
+    device_name: String,
     endpoint: Option<SocketAddr>,
     dev_user: Option<u64>,
-) -> anyhow::Result<(RegisterResp, Vec<Membership>)> {
+) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     let client = reqwest::Client::new();
     let mut url = format!("{base_url}/{path}");
     if let Some(u) = dev_user {
@@ -58,7 +60,11 @@ async fn post(
 
     let resp = client
         .post(&url)
-        .json(&RegisterReq { wg_pubkey, endpoint })
+        .json(&RegisterReq {
+            wg_pubkey,
+            device_name,
+            endpoint,
+        })
         .send()
         .await
         .with_context(|| format!("sending /{path}"))?;
@@ -73,20 +79,21 @@ async fn post(
         anchor_from_bytes(&resp.coord_pubkey).map_err(|e| anyhow::anyhow!("bad anchor: {e}"))?;
     let now = now_unix();
 
-    let mut memberships = Vec::new();
-    for grant in &resp.grants {
-        let signed = Signed::from_base64(&grant.attestation).context("decoding grant")?;
-        let att = verify_attestation(&signed, &anchor, now).context("verifying grant")?;
-        let hostname = att.hostname(&grant.network_name, &grant.guild_name);
-        memberships.push(Membership {
-            guild_name: grant.guild_name.clone(),
-            network_name: grant.network_name.clone(),
-            role_id: att.role_id,
-            wg_ip: att.wg_ip,
-            hostname,
-        });
-    }
-    Ok((resp, memberships))
+    let device = match &resp.grant {
+        Some(grant) => {
+            let signed = Signed::from_base64(&grant.attestation).context("decoding grant")?;
+            let att = verify_attestation(&signed, &anchor, now).context("verifying grant")?;
+            let hostname = att.hostname(&grant.community_name);
+            Some(SelfDevice {
+                community_name: grant.community_name.clone(),
+                networks: grant.networks.clone(),
+                wg_ip: att.wg_ip,
+                hostname,
+            })
+        }
+        None => None,
+    };
+    Ok((resp, device))
 }
 
 /// Verify the seeds in a response against its anchor → the co-members to peer with.

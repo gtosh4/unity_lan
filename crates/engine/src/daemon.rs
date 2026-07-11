@@ -14,23 +14,26 @@ use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
-    // Register + verify our own memberships.
-    let (resp, memberships) =
-        coord::register(&cfg.coordinator, wg_pub, cfg.endpoint, cfg.dev_user).await?;
+    // Register + verify our own device.
+    let (resp, device) =
+        coord::register(&cfg.coordinator, wg_pub, cfg.device_name(), cfg.endpoint, cfg.dev_user)
+            .await?;
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
-    if memberships.is_empty() {
+    let Some(device) = device else {
         anyhow::bail!("registered but hold no networks — nothing to mesh");
-    }
-    tracing::info!("joined {} network(s):", memberships.len());
-    for m in &memberships {
-        tracing::info!("  {} -> {}", m.wg_ip, m.hostname);
-    }
+    };
+    tracing::info!(
+        "{} -> {}  (networks: {})",
+        device.wg_ip,
+        device.hostname,
+        device.networks.join(", ")
+    );
 
-    // Bring up the single interface with all our /32s.
+    // Bring up the single interface with our device /32.
     let mut backend = UserspaceBackend::new(&cfg.iface)?;
     backend.up(&IfaceConfig {
         private_key: wg_priv,
-        addresses: memberships.iter().map(|m| (m.wg_ip, 32)).collect(),
+        addresses: vec![(device.wg_ip, 32)],
         listen_port: cfg.listen_port,
     })?;
     tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
@@ -43,7 +46,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     ticker.tick().await; // first tick is immediate
     loop {
         ticker.tick().await;
-        match coord::refresh(&cfg.coordinator, wg_pub, cfg.endpoint, cfg.dev_user).await {
+        match coord::refresh(&cfg.coordinator, wg_pub, cfg.device_name(), cfg.endpoint, cfg.dev_user)
+            .await
+        {
             Ok((resp, _)) => match coord::verified_seeds(&resp) {
                 Ok(seeds) => apply_seeds(&backend, seeds, &mut peers)?,
                 Err(e) => tracing::warn!("bad seeds: {e:#}"),

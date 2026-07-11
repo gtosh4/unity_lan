@@ -1,17 +1,20 @@
 //! Coordinator HTTP API DTOs (design/technical §4.1).
 //!
-//! A coordinator can serve multiple guilds, so `/register` returns a flat list of grants
-//! spanning every guild the caller shares with the bot, plus `seeds` — the co-members to
-//! bootstrap a mesh from. `/refresh` uses the same request/response shapes.
+//! Model B: a device has one IP regardless of how many networks it holds, so `/register`
+//! returns a single self-`grant` (the device's own attestation + naming) plus `seeds` — the
+//! co-members to peer with (anyone sharing ≥1 network). `/refresh` uses the same shapes.
 
 use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
-/// `POST /register` or `/refresh` request: the client's WG public key + self-reported endpoint.
+/// `POST /register` or `/refresh` request: the client's WG public key, device name, endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterReq {
     pub wg_pubkey: [u8; 32],
+    /// Owner-chosen label for this device (the `<device>` DNS label; sanitized by coordinator).
+    #[serde(default)]
+    pub device_name: String,
     /// The client's reachable `ip:port` for the WG listener (UPnP-mapped in production).
     #[serde(default)]
     pub endpoint: Option<SocketAddr>,
@@ -22,28 +25,29 @@ pub struct RegisterReq {
 pub struct RegisterResp {
     /// Ed25519 anchor bytes; the client pins this on first register.
     pub coord_pubkey: [u8; 32],
-    /// One grant per registered network the caller holds.
-    pub grants: Vec<Grant>,
-    /// Co-members (across the caller's networks) to peer with — bootstrap for the mesh.
+    /// The caller's own device grant; `None` if they hold no networks.
+    #[serde(default)]
+    pub grant: Option<Grant>,
+    /// Co-members (anyone sharing ≥1 network) to peer with — bootstrap for the mesh.
     #[serde(default)]
     pub seeds: Vec<Seed>,
 }
 
-/// One of the caller's own memberships: a signed attestation + the names to build its hostname.
+/// The caller's own device: its signed attestation + the names to build its hostname.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Grant {
-    /// base64(`Signed<Attestation>`).
+    /// base64(`Signed<Attestation>`) for this device.
     pub attestation: String,
-    /// Guild display name (the `<guild>` DNS label source).
-    pub guild_name: String,
-    /// Network display name (the `<network>` DNS label; admin-chosen, defaults to role name).
-    pub network_name: String,
+    /// Community display name (the `<community>` DNS label; admin-chosen, defaults to guild name).
+    pub community_name: String,
+    /// Network display names this device belongs to (ACL groups; for status display).
+    pub networks: Vec<String>,
 }
 
 /// A co-member to peer with: their signed attestation (pubkey + wg_ip) + last-known endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Seed {
-    /// base64(`Signed<Attestation>`) for the co-member in a shared network.
+    /// base64(`Signed<Attestation>`) for a co-member sharing ≥1 network.
     pub attestation: String,
     /// The co-member's last-reported endpoint (may be stale/absent).
     pub endpoint: Option<SocketAddr>,

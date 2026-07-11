@@ -52,21 +52,30 @@ async fn main() -> anyhow::Result<()> {
 
     let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
-    let (resp, memberships) =
-        coord::register(&cfg.coordinator, wg_pubkey, cfg.endpoint, cfg.dev_user).await?;
+    let (resp, device) = coord::register(
+        &cfg.coordinator,
+        wg_pubkey,
+        cfg.device_name(),
+        cfg.endpoint,
+        cfg.dev_user,
+    )
+    .await?;
 
     // Trust-on-first-use: pin the anchor, reject if it ever changes.
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
 
-    if memberships.is_empty() {
-        tracing::warn!("registered, but hold no networks (no roles)");
-    }
-    println!("verified {} membership(s):", memberships.len());
-    for m in &memberships {
-        println!(
-            "  {:<16} {:<44} [{} / {} · role {}]",
-            m.wg_ip, m.hostname, m.guild_name, m.network_name, m.role_id
-        );
+    match device {
+        None => tracing::warn!("registered, but hold no networks (no roles)"),
+        Some(d) => {
+            println!("verified device:");
+            println!(
+                "  {:<16} {:<44} [{} · networks: {}]",
+                d.wg_ip,
+                d.hostname,
+                d.community_name,
+                d.networks.join(", ")
+            );
+        }
     }
     Ok(())
 }

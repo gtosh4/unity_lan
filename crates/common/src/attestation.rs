@@ -1,4 +1,7 @@
 //! The attestation: the coordinator-signed unit of membership (design.md §4.1).
+//!
+//! Model B: the signed unit is a **device** — one WG key, one IP — not a per-network slot.
+//! Which networks (ACL groups) a device belongs to gate *peering*, not addressing.
 
 use std::net::Ipv4Addr;
 
@@ -9,21 +12,23 @@ use crate::netid::sanitize_label;
 use crate::wire::{Signed, WireError};
 use crate::DNS_SUFFIX;
 
-/// Binds an identity to a WireGuard key + allocated IP within a network (role), for a TTL.
+/// Binds a device (WG key + allocated IP) to its owner + name, for a TTL.
 ///
-/// The signed fields are all **stable** — the coordinator need not know a member's live
-/// endpoint (that is gossiped separately, see design.md §4.2).
+/// All signed fields are **stable** — the coordinator need not know a device's live endpoint
+/// (that is reported separately, see design.md §4.2). `username`/`device_name` are already
+/// sanitized to DNS labels by the coordinator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
-    pub guild_id: u64,
-    /// The Discord role = the network.
-    pub role_id: u64,
     pub user_id: u64,
-    /// Guild nickname, already sanitized to a DNS label; unique within the network.
-    pub nick: String,
-    /// Coordinator-allocated /32 within the role's subnet.
+    /// Owner's global handle, sanitized to a DNS label (the `<user>` in a hostname).
+    pub username: String,
+    /// Per-user device label, sanitized to a DNS label (the `<device>` in a hostname).
+    pub device_name: String,
+    /// Whether this is the owner's primary device (gets the `<user>.<community>` alias).
+    pub is_primary: bool,
+    /// Coordinator-allocated `/32` for this device within 100.64.0.0/10.
     pub wg_ip: Ipv4Addr,
-    /// Curve25519 WireGuard public key.
+    /// Curve25519 WireGuard public key — the device identity.
     pub wg_pubkey: [u8; 32],
     pub issued_at: u64,
     pub expires_at: u64,
@@ -34,14 +39,14 @@ impl Attestation {
         now >= self.expires_at
     }
 
-    /// `<nick>.<role>.<guild>.internal`. Role/guild are passed in (their *names* live at the
-    /// coordinator; only ids are in the attestation).
-    pub fn hostname(&self, role_name: &str, guild_name: &str) -> String {
+    /// `<device>.<user>.<community>.internal`. The community name lives at the coordinator and
+    /// is passed in (only ids/labels are in the attestation).
+    pub fn hostname(&self, community_name: &str) -> String {
         format!(
             "{}.{}.{}.{}",
-            self.nick,
-            sanitize_label(role_name),
-            sanitize_label(guild_name),
+            self.device_name,
+            self.username,
+            sanitize_label(community_name),
             DNS_SUFFIX,
         )
     }
@@ -75,10 +80,10 @@ mod tests {
 
     fn sample(now: u64) -> Attestation {
         Attestation {
-            guild_id: 111,
-            role_id: 222,
             user_id: 333,
-            nick: "alice".into(),
+            username: "alice".into(),
+            device_name: "laptop".into(),
+            is_primary: true,
             wg_ip: Ipv4Addr::new(100, 64, 42, 7),
             wg_pubkey: [1u8; 32],
             issued_at: now,
@@ -92,7 +97,7 @@ mod tests {
         let now = 1_000;
         let signed = Signed::sign(&key, &sample(now)).unwrap();
         let att = verify_attestation(&signed, &key.anchor(), now).unwrap();
-        assert_eq!(att.nick, "alice");
+        assert_eq!(att.username, "alice");
     }
 
     #[test]
@@ -111,8 +116,8 @@ mod tests {
     fn hostname_is_sanitized() {
         let att = sample(0);
         assert_eq!(
-            att.hostname("Minecraft SMP", "My Community!"),
-            "alice.minecraft-smp.my-community.internal"
+            att.hostname("My Community!"),
+            "laptop.alice.my-community.internal"
         );
     }
 }

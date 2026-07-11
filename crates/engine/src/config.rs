@@ -13,6 +13,9 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// Dev-only: caller identity sent as `?dev_user=` while the coordinator runs in fake mode.
     pub dev_user: Option<u64>,
+    /// This machine's device name (the `<device>` DNS label). Defaults to the system hostname.
+    #[serde(default)]
+    pub device_name: Option<String>,
 
     // ---- mesh (daemon `run` mode) ----
     /// WireGuard interface name.
@@ -43,5 +46,13 @@ impl Config {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         Ok(toml::from_str(&text)?)
+    }
+
+    /// This device's name: the configured value, else the system hostname, else `"device"`.
+    pub fn device_name(&self) -> String {
+        self.device_name
+            .clone()
+            .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
+            .unwrap_or_else(|| "device".to_string())
     }
 }

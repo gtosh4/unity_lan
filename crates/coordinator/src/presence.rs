@@ -1,6 +1,8 @@
-//! In-memory presence: who is currently registered in each network, with their pubkey/ip and
-//! last-reported endpoint. Rebuilt as members register/refresh; lost on restart (by design —
-//! seeds repopulate). Used to hand new joiners their co-members (design.md §5).
+//! In-memory presence: which **devices** are currently registered in each network, with their
+//! pubkey/ip/owner and last-reported endpoint. Rebuilt as members register/refresh; lost on
+//! restart (by design — seeds repopulate). Used to hand new joiners their co-members (§5).
+//!
+//! Keyed by (guild, role, device pubkey) so a user's multiple devices don't collide.
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -10,37 +12,40 @@ use std::sync::Mutex;
 pub struct MemberPresence {
     pub pubkey: [u8; 32],
     pub ip: Ipv4Addr,
-    pub nick: String,
+    pub user_id: u64,
+    pub username: String,
+    pub device_name: String,
+    pub is_primary: bool,
     pub endpoint: Option<SocketAddr>,
 }
 
 #[derive(Default)]
 pub struct Presence {
-    // (guild_id, role_id, user_id) -> presence
-    map: Mutex<HashMap<(u64, u64, u64), MemberPresence>>,
+    // (guild_id, role_id, device_pubkey) -> presence
+    map: Mutex<HashMap<(u64, u64, [u8; 32]), MemberPresence>>,
 }
 
 impl Presence {
-    pub fn record(&self, guild_id: u64, role_id: u64, user_id: u64, p: MemberPresence) {
+    pub fn record(&self, guild_id: u64, role_id: u64, p: MemberPresence) {
         self.map
             .lock()
             .unwrap()
-            .insert((guild_id, role_id, user_id), p);
+            .insert((guild_id, role_id, p.pubkey), p);
     }
 
-    /// Other members present in a network, excluding `exclude_user`.
+    /// Other devices present in a network, excluding the caller's own device (`exclude_pubkey`).
     pub fn others_in(
         &self,
         guild_id: u64,
         role_id: u64,
-        exclude_user: u64,
-    ) -> Vec<(u64, MemberPresence)> {
+        exclude_pubkey: &[u8; 32],
+    ) -> Vec<MemberPresence> {
         self.map
             .lock()
             .unwrap()
             .iter()
-            .filter(|((g, r, u), _)| *g == guild_id && *r == role_id && *u != exclude_user)
-            .map(|((_, _, u), p)| (*u, p.clone()))
+            .filter(|((g, r, pk), _)| *g == guild_id && *r == role_id && pk != exclude_pubkey)
+            .map(|(_, p)| p.clone())
             .collect()
     }
 }

@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{Grant, RegisterReq, RegisterResp, Seed};
-use common::netid::{host_addr, sanitize_label, subnet_of};
+use common::netid::sanitize_label;
 use serde::Deserialize;
 
 use crate::presence::{MemberPresence, Presence};
@@ -50,11 +50,21 @@ async fn register(
 ) -> Result<Json<RegisterResp>, ApiError> {
     let user_id = resolve_user(&st, &q)?;
     let networks = st.store.all_networks().await.map_err(internal)?;
+    let device_name = sanitize_label(&req.device_name);
+
+    // One IP per device (keyed by pubkey), reused across every network it holds.
+    let ip = st
+        .store
+        .allocate_device_ip(&req.wg_pubkey, user_id, &device_name)
+        .await
+        .map_err(internal)?;
 
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
-    let mut grants = Vec::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
+    let mut network_names: Vec<String> = Vec::new();
+    let mut community_name: Option<String> = None;
+    let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
 
     for net in networks {
         let member = match member_cache.get(&net.guild_id) {
@@ -70,48 +80,70 @@ async fn register(
             continue;
         }
 
-        let host = st
-            .store
-            .allocate_host(net.guild_id, net.role_id, user_id)
-            .await
-            .map_err(internal)?;
-        let ip = host_addr(subnet_of(net.guild_id, net.role_id), host);
-        let guild_name = st.roles.guild_name(net.guild_id).await.unwrap_or_default();
-        let nick = sanitize_label(&member.nick);
+        // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
+        username = sanitize_label(&member.nick);
+        if community_name.is_none() {
+            community_name = Some(st.roles.guild_name(net.guild_id).await.unwrap_or_default());
+        }
+        network_names.push(net.name);
 
-        // Record the caller as present in this network (for others' seeds).
+        // Record the device as present in this network (for others' seeds).
         st.presence.record(
             net.guild_id,
             net.role_id,
-            user_id,
             MemberPresence {
                 pubkey: req.wg_pubkey,
                 ip,
-                nick: nick.clone(),
+                user_id,
+                username: username.clone(),
+                device_name: device_name.clone(),
+                is_primary: false, // chunk 4: coordinator-authoritative primary pointer
                 endpoint: req.endpoint,
             },
         );
-
-        let signed = st
-            .signer
-            .sign_attestation(net.guild_id, net.role_id, user_id, nick, ip, req.wg_pubkey)
-            .map_err(internal)?;
-
-        grants.push(Grant {
-            attestation: signed.to_base64(),
-            guild_name,
-            network_name: net.name,
-        });
         held.push((net.guild_id, net.role_id));
     }
 
-    // Seeds: every other member present in a network the caller holds.
+    // Self-grant: one device attestation (None if the caller holds no networks).
+    let grant = if held.is_empty() {
+        None
+    } else {
+        let signed = st
+            .signer
+            .sign_attestation(
+                user_id,
+                username,
+                device_name,
+                false,
+                ip,
+                req.wg_pubkey,
+            )
+            .map_err(internal)?;
+        Some(Grant {
+            attestation: signed.to_base64(),
+            community_name: community_name.unwrap_or_default(),
+            networks: network_names,
+        })
+    };
+
+    // Seeds: every other device sharing ≥1 network with the caller, deduplicated by pubkey.
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     let mut seeds = Vec::new();
     for (guild_id, role_id) in &held {
-        for (other_user, mp) in st.presence.others_in(*guild_id, *role_id, user_id) {
+        for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
+            if !seen.insert(mp.pubkey) {
+                continue;
+            }
             let signed = st
                 .signer
-                .sign_attestation(*guild_id, *role_id, other_user, mp.nick, mp.ip, mp.pubkey)
+                .sign_attestation(
+                    mp.user_id,
+                    mp.username,
+                    mp.device_name,
+                    mp.is_primary,
+                    mp.ip,
+                    mp.pubkey,
+                )
                 .map_err(internal)?;
             seeds.push(Seed {
                 attestation: signed.to_base64(),
@@ -122,7 +154,7 @@ async fn register(
 
     Ok(Json(RegisterResp {
         coord_pubkey: st.signer.anchor_bytes(),
-        grants,
+        grant,
         seeds,
     }))
 }

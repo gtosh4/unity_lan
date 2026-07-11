@@ -1,12 +1,13 @@
-//! SQLite persistence: signing-key seed, network registry, IP allocations.
+//! SQLite persistence: signing-key seed, network registry, per-device IP allocations.
 //!
 //! u64 Discord snowflakes are stored as i64 (bit-preserving cast) since SQLite lacks u64.
 
 use std::collections::BTreeSet;
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use anyhow::Context;
-use common::netid::pick_free_host;
+use common::netid::{addr_from_index, device_hint, pick_free_index};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -49,12 +50,11 @@ impl Store {
                 name     TEXT    NOT NULL,
                 PRIMARY KEY (guild_id, role_id)
             );
-            CREATE TABLE IF NOT EXISTS allocations (
-                guild_id INTEGER NOT NULL,
-                role_id  INTEGER NOT NULL,
-                user_id  INTEGER NOT NULL,
-                host     INTEGER NOT NULL,
-                PRIMARY KEY (guild_id, role_id, user_id)
+            CREATE TABLE IF NOT EXISTS devices (
+                pubkey      BLOB    PRIMARY KEY,
+                idx         INTEGER NOT NULL UNIQUE,
+                user_id     INTEGER NOT NULL,
+                device_name TEXT    NOT NULL
             );
             "#,
         )
@@ -140,47 +140,46 @@ impl Store {
             .collect())
     }
 
-    // ---- allocations ----
+    // ---- device IP allocation (one /32 per device, keyed by WG pubkey) ----
 
-    /// Return the member's stable host octet in a network, allocating on first request.
-    pub async fn allocate_host(
+    /// Return the device's stable `/32`, allocating on first sight. The device_name is upserted
+    /// so a rename is reflected on the next register.
+    pub async fn allocate_device_ip(
         &self,
-        guild_id: u64,
-        role_id: u64,
+        pubkey: &[u8; 32],
         user_id: u64,
-    ) -> anyhow::Result<u8> {
-        if let Some(row) =
-            sqlx::query("SELECT host FROM allocations WHERE guild_id=? AND role_id=? AND user_id=?")
-                .bind(guild_id as i64)
-                .bind(role_id as i64)
-                .bind(user_id as i64)
-                .fetch_optional(&self.pool)
-                .await?
+        device_name: &str,
+    ) -> anyhow::Result<Ipv4Addr> {
+        if let Some(row) = sqlx::query("SELECT idx FROM devices WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .fetch_optional(&self.pool)
+            .await?
         {
-            return Ok(row.get::<i64, _>("host") as u8);
+            sqlx::query("UPDATE devices SET device_name = ? WHERE pubkey = ?")
+                .bind(device_name)
+                .bind(pubkey.as_slice())
+                .execute(&self.pool)
+                .await?;
+            return Ok(addr_from_index(row.get::<i64, _>("idx") as u32));
         }
 
-        let taken: BTreeSet<u8> =
-            sqlx::query("SELECT host FROM allocations WHERE guild_id=? AND role_id=?")
-                .bind(guild_id as i64)
-                .bind(role_id as i64)
-                .fetch_all(&self.pool)
-                .await?
-                .into_iter()
-                .map(|r| r.get::<i64, _>("host") as u8)
-                .collect();
+        let taken: BTreeSet<u32> = sqlx::query("SELECT idx FROM devices")
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|r| r.get::<i64, _>("idx") as u32)
+            .collect();
 
-        let hint = common::netid::host_hint(user_id);
-        let host = pick_free_host(&taken, hint)
-            .ok_or_else(|| anyhow::anyhow!("network {guild_id}/{role_id} is full"))?;
+        let idx = pick_free_index(&taken, device_hint(pubkey))
+            .ok_or_else(|| anyhow::anyhow!("address space 100.64.0.0/10 exhausted"))?;
 
-        sqlx::query("INSERT INTO allocations (guild_id, role_id, user_id, host) VALUES (?, ?, ?, ?)")
-            .bind(guild_id as i64)
-            .bind(role_id as i64)
+        sqlx::query("INSERT INTO devices (pubkey, idx, user_id, device_name) VALUES (?, ?, ?, ?)")
+            .bind(pubkey.as_slice())
+            .bind(idx as i64)
             .bind(user_id as i64)
-            .bind(host as i64)
+            .bind(device_name)
             .execute(&self.pool)
             .await?;
-        Ok(host)
+        Ok(addr_from_index(idx))
     }
 }

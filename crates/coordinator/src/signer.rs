@@ -20,23 +20,23 @@ impl Signer {
         self.key.anchor_bytes()
     }
 
-    /// Build and sign an attestation with the default TTL.
+    /// Build and sign a device attestation with the default TTL.
     #[allow(clippy::too_many_arguments)]
     pub fn sign_attestation(
         &self,
-        guild_id: u64,
-        role_id: u64,
         user_id: u64,
-        nick: String,
+        username: String,
+        device_name: String,
+        is_primary: bool,
         wg_ip: std::net::Ipv4Addr,
         wg_pubkey: WgPublicKey,
     ) -> anyhow::Result<Signed> {
         let now = now_unix();
         let att = Attestation {
-            guild_id,
-            role_id,
             user_id,
-            nick,
+            username,
+            device_name,
+            is_primary,
             wg_ip,
             wg_pubkey,
             issued_at: now,
