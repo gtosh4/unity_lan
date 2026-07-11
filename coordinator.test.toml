@@ -1,0 +1,35 @@
+# Offline test config (fake Discord). Run: unitylan-coordinator coordinator.test.toml
+# Two guilds served by one coordinator → demonstrates multi-tenant + per-guild nicks.
+
+bind = "127.0.0.1:8080"
+database = "coordinator.test.db"
+
+[[fake.guild]]
+id = 111
+name = "My Community"
+[[fake.guild.member]]
+user_id = 333
+nick = "Alice"
+role_ids = [222, 223]
+
+[[fake.guild]]
+id = 555
+name = "Gamers Inc"
+[[fake.guild.member]]
+user_id = 333
+nick = "AliceG"
+role_ids = [666]
+
+# Networks (normally added via /unitylan network add; seeded here for testing)
+[[network]]
+guild_id = 111
+role_id = 222
+name = "Minecraft SMP"
+[[network]]
+guild_id = 111
+role_id = 223
+name = "factorio"
+[[network]]
+guild_id = 555
+role_id = 666
+name = "Valheim"

@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/common", "crates/coordinator", "crates/engine"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.96"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+unitylan-common = { path = "crates/common" }

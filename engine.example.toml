@@ -1,0 +1,6 @@
+# Engine config. Copy to engine.toml and edit.
+# dev_user is only used while the coordinator runs in fake mode.
+
+coordinator = "http://127.0.0.1:8080"
+state_dir = "engine-state"
+dev_user = 333

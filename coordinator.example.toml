@@ -1,0 +1,20 @@
+# Coordinator config. Copy to coordinator.toml (real creds) or coordinator.test.toml (fake).
+# A coordinator can serve multiple guilds. Networks are normally managed via the
+# `/unitylan network` slash commands; the [[network]] seeds below are a test convenience.
+
+bind = "127.0.0.1:8080"
+database = "coordinator.db"
+
+# --- Offline dev source (M1). Replace with live [discord]/[oauth] blocks later. ---
+[[fake.guild]]
+id = 111
+name = "My Community"
+[[fake.guild.member]]
+user_id = 333
+nick = "Alice"
+role_ids = [222, 223]
+
+[[network]]
+guild_id = 111
+role_id = 222
+name = "Minecraft SMP"
