@@ -3,6 +3,7 @@
 
 mod config;
 mod coord;
+mod daemon;
 mod keys;
 mod wg;
 
@@ -32,6 +33,14 @@ async fn main() -> anyhow::Result<()> {
     if arg1 == "wg-node" {
         return wg_node();
     }
+    if arg1 == "run" {
+        let cfg_path = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "engine.toml".to_string());
+        let cfg = Config::load(std::path::Path::new(&cfg_path))
+            .with_context(|| format!("loading config {cfg_path}"))?;
+        return daemon::run(cfg).await;
+    }
 
     let config_path = if arg1.is_empty() {
         "engine.toml".to_string()
@@ -41,9 +50,10 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(std::path::Path::new(&config_path))
         .with_context(|| format!("loading config {config_path}"))?;
 
-    let wg_pubkey = keys::load_or_generate_wg(&cfg.state_dir)?;
+    let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
-    let (resp, memberships) = coord::register(&cfg.coordinator, wg_pubkey, cfg.dev_user).await?;
+    let (resp, memberships) =
+        coord::register(&cfg.coordinator, wg_pubkey, cfg.endpoint, cfg.dev_user).await?;
 
     // Trust-on-first-use: pin the anchor, reject if it ever changes.
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;

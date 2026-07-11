@@ -29,7 +29,9 @@ pub trait WgBackend {
     fn up(&mut self, cfg: &IfaceConfig) -> anyhow::Result<()>;
     /// Add or update a peer.
     fn set_peer(&self, peer: &PeerConfig) -> anyhow::Result<()>;
-    /// Remove a peer by public key. (Used by gossip reconciliation in M3.)
+    /// Install routes for the peers' allowed IPs (so tunnel traffic is routed to the iface).
+    fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()>;
+    /// Remove a peer by public key. (Used by gossip reconciliation.)
     #[allow(dead_code)]
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()>;
     /// Tear the interface down.

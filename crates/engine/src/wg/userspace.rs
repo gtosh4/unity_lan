@@ -58,6 +58,12 @@ impl WgBackend for UserspaceBackend {
         Ok(())
     }
 
+    fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()> {
+        let peers: Vec<Peer> = peers.iter().map(to_peer).collect();
+        self.api.configure_peer_routing(&peers)?;
+        Ok(())
+    }
+
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()> {
         self.api.remove_peer(&Key::new(*public_key))?;
         Ok(())

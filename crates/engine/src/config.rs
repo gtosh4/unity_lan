@@ -1,5 +1,6 @@
-//! Engine configuration (TOML). M1: coordinator URL + dev user + state dir.
+//! Engine configuration (TOML).
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -12,6 +13,29 @@ pub struct Config {
     pub state_dir: PathBuf,
     /// Dev-only: caller identity sent as `?dev_user=` while the coordinator runs in fake mode.
     pub dev_user: Option<u64>,
+
+    // ---- mesh (daemon `run` mode) ----
+    /// WireGuard interface name.
+    #[serde(default = "default_iface")]
+    pub iface: String,
+    /// WireGuard UDP listen port.
+    #[serde(default = "default_port")]
+    pub listen_port: u16,
+    /// Reachable endpoint reported to the coordinator (UPnP-mapped in production).
+    pub endpoint: Option<SocketAddr>,
+    /// How often to refresh attestations + seeds from the coordinator.
+    #[serde(default = "default_refresh")]
+    pub refresh_secs: u64,
+}
+
+fn default_iface() -> String {
+    "unl0".to_string()
+}
+fn default_port() -> u16 {
+    51820
+}
+fn default_refresh() -> u64 {
+    15
 }
 
 impl Config {

@@ -5,6 +5,7 @@
 mod api;
 mod config;
 mod discord;
+mod presence;
 mod roles;
 mod signer;
 mod store;
@@ -66,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         signer,
         roles,
         store,
+        presence: Arc::new(crate::presence::Presence::default()),
         allow_dev: cfg.dev_auth,
     };
 

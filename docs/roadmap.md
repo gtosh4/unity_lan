@@ -58,29 +58,43 @@ rejects.
 ---
 
 ## M2 — WireGuard backend + control socket
-**Goal:** engine can bring up an interface and add/remove peers from attestations; GUI-less
-control channel exists.
-- [ ] `wg/mod.rs`: `WgBackend` trait (`ensure_iface`, `set_peer`, `remove_peer`, `gen_keypair`).
-- [ ] `wg/userspace.rs`: defguard userspace backend (portable primary).
-- [ ] Bring up `unl0` with the client's `/32`(s); add a peer; ping over the tunnel (2 hosts).
+**Goal:** engine can bring up an interface and add/remove peers; GUI-less control channel.
+- [x] `wg/mod.rs`: `WgBackend` trait (`up`, `set_peer`, `remove_peer`, `down`).
+- [x] `wg/userspace.rs`: defguard/boringtun userspace backend (portable primary).
+- [x] Bring up an interface with the client's `/32`; add a peer; **ping over the tunnel**
+      (`scripts/wg-tunnel-test.sh` — two netns + veth, no host root; PASS).
+- [x] engine dev subcommands: `wg-smoke`, `wg-keygen`, `wg-node`.
 - [ ] `control.rs`: `interprocess` local-socket server; `common::control` request/event enums.
-- [ ] ⚠️ **Spike**: confirm `defguard_wireguard_rs` userspace path on Linux + Windows + macOS.
+- [ ] ⚠️ **Spike**: confirm `defguard_wireguard_rs` userspace path on **Windows + macOS**
+      (Linux userspace confirmed working).
 
-**Verify:** two engines on two hosts, manually fed each other's attestation+endpoint, form a
-tunnel and ping. `unitylan-ctl status` (temp CLI) shows the peer.
+**Verify:** ✅ real encrypted tunnel carries ICMP across two namespaces, 0% loss
+(`scripts/wg-tunnel-test.sh`). Control socket + `status` still pending.
 
 ---
 
-## M3 — Gossip mesh
+## M3 — Mesh formation
 **Goal:** members auto-discover and mesh; new joiner bootstraps via any online member.
-- [ ] `gossip.rs`: axum endpoint on `wg_ip` serving `{attestations, endpoints, tombstones}`.
-- [ ] Anti-entropy loop: pull from N random peers, merge (verify sig+TTL, newest endpoint seq).
-- [ ] Reconcile merged set → desired peer-set → diff → `set_peer`/`remove_peer`.
-- [ ] Coordinator `seeds` + `/refresh` (endpoint report + STUN reflection); client endpoint report.
-- [ ] Bootstrap from a single seed; then N-node convergence.
 
-**Verify:** start 3 engines; a 4th joins via one seed and reaches all 3. Kill the "starter"
-node → others stay meshed.
+### M3a — Seed-based meshing (done)
+- [x] Coordinator presence + `seeds` in `/register`; `/refresh` endpoint + client endpoint report.
+- [x] Engine daemon (`run`): register → bring up iface with its `/32`s → peer seeds →
+      refresh loop picking up new co-members.
+- [x] `scripts/mesh-test.sh`: coordinator + two engine daemons in separate netns mesh and
+      ping across — **PASS**, no host root.
+- **Gap:** the daemon does not yet bring the interface admin-up or install routes itself
+  (the test script does it); defguard `configure_peer_routing` needs the link up. Fix as
+  part of daemon OS-plumbing (link-up after `up()`), then routes apply automatically.
+
+### M3b — P2P gossip (next)
+- [ ] `gossip.rs`: endpoint on `wg_ip` serving `{attestations, endpoints, tombstones}`.
+- [ ] Anti-entropy loop: pull from N random peers, merge (verify sig+TTL, newest endpoint seq).
+- [ ] Bootstrap purely via a seed peer (coordinator out of the steady-state path).
+- [ ] STUN reflection at the coordinator; endpoint-record `seq`.
+
+**Verify (M3a):** ✅ two daemons mesh via coordinator seeds and ping across
+(`scripts/mesh-test.sh`). M3b verify: 4th node joins via one seed, reaches all; kill the
+starter → others stay meshed.
 
 ---
 

@@ -3,10 +3,10 @@
 use std::path::Path;
 
 use anyhow::{bail, Context};
-use common::crypto::{gen_wg_keypair, wg_public_from_private, WgPublicKey};
+use common::crypto::{gen_wg_keypair, wg_public_from_private, WgPrivateKey, WgPublicKey};
 
-/// Load the persisted WG private key, or generate + persist one (0600). Returns the pubkey.
-pub fn load_or_generate_wg(state_dir: &Path) -> anyhow::Result<WgPublicKey> {
+/// Load the persisted WG keypair, or generate + persist one (0600).
+pub fn load_or_generate_keypair(state_dir: &Path) -> anyhow::Result<(WgPrivateKey, WgPublicKey)> {
     std::fs::create_dir_all(state_dir)?;
     let priv_path = state_dir.join("wg.key");
     let priv_bytes: [u8; 32] = if priv_path.exists() {
@@ -19,7 +19,7 @@ pub fn load_or_generate_wg(state_dir: &Path) -> anyhow::Result<WgPublicKey> {
         write_secret(&priv_path, &priv_k)?;
         priv_k
     };
-    Ok(wg_public_from_private(&priv_bytes))
+    Ok((priv_bytes, wg_public_from_private(&priv_bytes)))
 }
 
 /// Pin the coordinator's anchor on first sight; reject if it later changes.
