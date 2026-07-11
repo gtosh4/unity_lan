@@ -80,11 +80,10 @@ rejects.
 - [x] Coordinator presence + `seeds` in `/register`; `/refresh` endpoint + client endpoint report.
 - [x] Engine daemon (`run`): register → bring up iface with its `/32`s → peer seeds →
       refresh loop picking up new co-members.
+- [x] Daemon brings its own link admin-up (Linux `ip link set up`; netlink/ioctl later) so
+      defguard installs routes automatically — meshes with **no external plumbing**.
 - [x] `scripts/mesh-test.sh`: coordinator + two engine daemons in separate netns mesh and
-      ping across — **PASS**, no host root.
-- **Gap:** the daemon does not yet bring the interface admin-up or install routes itself
-  (the test script does it); defguard `configure_peer_routing` needs the link up. Fix as
-  part of daemon OS-plumbing (link-up after `up()`), then routes apply automatically.
+      ping across — **PASS**, no host root, no manual link-up/routes.
 
 ### M3b — P2P gossip (next)
 - [ ] `gossip.rs`: endpoint on `wg_ip` serving `{attestations, endpoints, tombstones}`.

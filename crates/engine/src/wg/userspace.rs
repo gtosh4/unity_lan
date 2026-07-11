@@ -29,6 +29,26 @@ fn mask(ip: std::net::Ipv4Addr, cidr: u8) -> IpAddrMask {
     IpAddrMask::new(IpAddr::V4(ip), cidr)
 }
 
+/// defguard's userspace backend creates the TUN but leaves the link admin-down, so route
+/// installation fails ("Network is down"). Bring it up. Linux uses `ip`; the Windows/macOS
+/// native paths manage link state themselves. TODO: replace with a netlink/ioctl call.
+#[cfg(target_os = "linux")]
+fn bring_link_up(name: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("ip")
+        .args(["link", "set", name, "up"])
+        .status()
+        .map_err(|e| anyhow::anyhow!("running `ip link set {name} up`: {e}"))?;
+    if !status.success() {
+        anyhow::bail!("`ip link set {name} up` exited with {status}");
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bring_link_up(_name: &str) -> anyhow::Result<()> {
+    Ok(())
+}
+
 fn to_peer(p: &PeerConfig) -> Peer {
     let mut peer = Peer::new(Key::new(p.public_key));
     peer.allowed_ips = p.allowed_ips.iter().map(|(a, c)| mask(*a, *c)).collect();
@@ -50,6 +70,7 @@ impl WgBackend for UserspaceBackend {
             fwmark: None,
         };
         self.api.configure_interface(&config)?;
+        bring_link_up(&self.name)?;
         Ok(())
     }
 

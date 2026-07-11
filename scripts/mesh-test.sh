@@ -89,10 +89,7 @@ B_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b.log" | head -1 | awk '{
 [ -n "$A_IP" ] && [ -n "$B_IP" ] || { echo "FAIL: nodes did not mesh"; cat "$TMP/a.log" "$TMP/b.log"; exit 1; }
 echo "A=$A_IP  B=$B_IP  (meshed via coordinator seeds)"
 
-# admin-up + routes — plumbing the daemon does not yet do portably (tracked as a gap).
-ip link set unla up; ip route replace "$B_IP/32" dev unla
-$NS1 ip link set unlb up; $NS1 ip route replace "$A_IP/32" dev unlb
-
+# No manual plumbing: the daemon brings its own link up and installs routes.
 echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then
   echo "RESULT: PASS ✓  membership -> coordinator seeds -> WG mesh -> traffic"
