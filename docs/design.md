@@ -270,8 +270,13 @@ No traffic transits the coordinator.
 - **NAT'd members**: the mesh **is the signaling fabric** — a mutually-connected peer relays
   live endpoints + a synchronized punch signal so two NAT'd members can UDP hole-punch. This
   is the back-channel the earlier botless design lacked.
-- **Symmetric-NAT on both ends**: hole punch may fail. v1 = best-effort + clear diagnostics;
-  data-plane relay through a common peer is a possible future item, not v1.
+- **Symmetric-NAT on both ends**: hole punch may fail (each end's NAT picks a per-destination
+  port, so the peer-observed reflexive is structurally wrong — retrying can't help). **v1 policy
+  (settled): best-effort punch + clear `[unreachable: symmetric NAT?]` diagnostic, no relay.**
+  The system already degrades cleanly (classifies `Unreachable` after the 30s grace, surfaces it
+  in status). Rare for the target audience (home peers — usually ≥1 end is cone/port-forwardable,
+  which works); mainly bites strict corporate/CGNAT. Data-plane relay through a common peer is a
+  **post-GA** item (see roadmap Post-GA).
 
 ### 7.3 WireGuard backend ✅
 Trait-based, **userspace-portable primary** with native optimization where available (via
@@ -367,8 +372,9 @@ flowchart TB
   every client.
 - **Pubkey re-key / device change**: a member regenerating keys invalidates cached
   attestations mid-TTL — need a re-key signal.
-- **Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
-  data path?
+- ~~**Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
+  data path?~~ **Resolved:** v1 = best-effort + diagnostics, no relay (§7.2). Relay deferred
+  post-GA.
 - **Coordinator endpoint discovery**: instead of the client hardcoding/human-configuring the
   coordinator URL, the coordinator could **advertise its endpoint via Discord** so the client
   auto-discovers it from the guild. Candidate spots a bot can publish to at runtime: its

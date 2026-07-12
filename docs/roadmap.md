@@ -368,5 +368,13 @@ cross-OS deferrals).
       (DoS + a "point a member's handshakes at arbitrary ip:port" reflector; no confidentiality break
       — WG auths by pubkey). Now bounded to the network trust boundary (a victim's own co-members).
       Verified: `reflexive_reports_accepted_only_for_comembers` unit test; `nat-test.sh` still green.
-- [ ] Open design items to close before GA: coordinator key rotation, pubkey re-key signal,
-      symmetric-NAT policy (design.md Open Questions).
+- [ ] Open design items to close before GA: coordinator key rotation, pubkey re-key signal
+      (design.md Open Questions).
+- [x] Symmetric-NAT policy ✅ — v1 settled as best-effort + `[unreachable: symmetric NAT?]`
+      diagnostic, no relay (design.md §7.2). System already degrades cleanly; no code change.
+
+## Post-GA
+- [ ] Symmetric-NAT-both relay: data-plane forward through a common mesh peer for pairs where both
+      ends are symmetric-NAT'd (punch structurally can't work). Relay sees WG ciphertext only
+      (e2e intact); design must cover relay-peer selection/authorization + consent/DoS surface.
+      Deferred: rare for home peers, mostly corporate/CGNAT.
