@@ -85,11 +85,34 @@ impl Config {
         Ok(toml::from_str(&text)?)
     }
 
-    /// Control-socket path: the configured value, else `<state_dir>/control.sock`.
+    /// Control-socket path: the configured value, else `<state_dir>/control.sock`. Used as the
+    /// unix-domain socket path (on Windows the transport is a named pipe — see `control_name`).
+    #[cfg(not(windows))]
     pub fn control_socket_path(&self) -> PathBuf {
         self.control_socket
             .clone()
             .unwrap_or_else(|| self.state_dir.join("control.sock"))
+    }
+
+    /// Platform local-socket endpoint name for the control channel: the filesystem socket path on
+    /// unix, a named-pipe name (`unitylan-<stem>`, mapped by interprocess to `\\.\pipe\...`) on
+    /// Windows. The GUI derives the same pipe name from its socket argument's file stem, so a
+    /// default `control.sock` on both sides agrees on `unitylan-control`.
+    pub fn control_name(&self) -> String {
+        #[cfg(windows)]
+        {
+            let stem = self
+                .control_socket
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .unwrap_or("control");
+            format!("unitylan-{stem}")
+        }
+        #[cfg(not(windows))]
+        {
+            self.control_socket_path().to_string_lossy().into_owned()
+        }
     }
 
     /// This device's name: the configured value, else the system hostname, else `"device"`.

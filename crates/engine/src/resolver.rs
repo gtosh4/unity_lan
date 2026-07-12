@@ -24,6 +24,23 @@ pub trait ResolverHook: Send + Sync {
     fn revert(&self, iface: &str) -> anyhow::Result<()>;
 }
 
+/// The OS resolver backend for this platform, or `None` where we don't hook the resolver yet.
+///
+/// Linux drives systemd-resolved ([`ResolvectlHook`]). Windows would use NRPT
+/// (`Add-DnsClientNrptRule -Namespace .internal -NameServers <ip>` / `Remove-DnsClientNrptRule`)
+/// and macOS `/etc/resolver/internal`; both are deferred, so `.internal` names still resolve when
+/// queried directly at `dns_bind` but aren't wired into the OS resolver automatically there.
+pub fn platform_hook() -> Option<Box<dyn ResolverHook>> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(Box::new(ResolvectlHook))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// systemd-resolved backend driving `resolvectl`.
 pub struct ResolvectlHook;
 

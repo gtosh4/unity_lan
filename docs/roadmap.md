@@ -65,11 +65,15 @@ rejects.
 - [x] Bring up an interface with the client's `/32`; add a peer; **ping over the tunnel**
       (`scripts/wg-tunnel-test.sh` — two netns + veth, no host root; PASS).
 - [x] engine dev subcommands: `wg-smoke`, `wg-keygen`, `wg-node`.
-- [x] `control.rs`: local-socket server (tokio `UnixListener`, newline-JSON) + `ctl status` CLI
-      — shows device (ip/hostname/primary/networks) + peers (ip/hostname/endpoint). Windows
-      named-pipe (`interprocess`) is a later transport swap. Done as part of M-device 6.
-- [ ] ⚠️ **Spike**: confirm `defguard_wireguard_rs` userspace path on **Windows + macOS**
-      (Linux userspace confirmed working).
+- [x] `control.rs`: local-socket server (newline-JSON) + `ctl status` CLI — shows device
+      (ip/hostname/primary/networks) + peers (ip/hostname/endpoint). Done as part of M-device 6.
+      **Windows named-pipe transport** landed (M-win): the transport is now `interprocess`'s
+      cross-platform local socket (unix-domain socket on unix, named pipe on Windows); the endpoint
+      is named by `Config::control_name` (path on unix, `unitylan-<stem>` pipe on Windows). The GUI
+      client (`gui/src/ctl.rs`) uses the same transport + name convention.
+- [x] ⚠️ **Spike** resolved (M-win): defguard's **userspace** path is unix-only; on **Windows** the
+      supported path is `WGApi<Kernel>` (wireguard-nt), wired up as `wg/windows.rs` (see M8). macOS
+      userspace still unconfirmed.
 
 **Verify:** ✅ real encrypted tunnel carries ICMP across two namespaces, 0% loss
 (`scripts/wg-tunnel-test.sh`). Control socket + `status` still pending.
@@ -323,7 +327,12 @@ cross-OS deferrals).
       `scripts/expose-net-test.sh` — 3 nodes / 2 nets (A∈{mesh,mesh2}, B∈mesh, C∈mesh2): B reaches
       A's mesh-scoped 9001 but not mesh2-scoped 9002; C the reverse; expose to a non-held network
       is rejected. Plus 2 nft scoped-ruleset unit tests.
-- [ ] Windows WFP + macOS pf backends.
+- [x] **Windows firewall backend** (M-win): `WindowsFwBackend` drives Windows Defender Firewall via
+      PowerShell `New-NetFirewallRule`/`Remove-NetFirewallRule` (group `UnityLAN`), each rule an
+      inbound-allow scoped to the wg iface (`-InterfaceAlias`), `--net` exposes carrying
+      `-RemoteAddress` peer sets. Relies on the OS's stateful default-deny-inbound for the base
+      policy. `fw::default_backend()` selects nft (unix) vs this (Windows). 3 arg-construction unit
+      tests. macOS pf still a future backend.
 
 ### M7d — status polish ✅
 - [x] GUI surfaces the firewall: an **exposed ports** section (proto/port + `→ net:` scope) with
@@ -337,8 +346,12 @@ cross-OS deferrals).
 
 ## M8 — Native kernel backends (optimization)
 **Goal:** faster path where the OS offers it.
-- [ ] `wg/native.rs`: Linux netlink; Windows WireGuardNT (via defguard).
-- [ ] Select native when present, else userspace; parity tests.
+- [x] **Windows WireGuardNT** (M-win): `wg/windows.rs` `KernelBackend` drives defguard's
+      `WGApi<Kernel>` (wireguard-nt). Since defguard's Windows `configure_peer`/`remove_peer` are
+      no-ops, it holds the desired iface + peer state and re-applies the full `configure_interface`
+      on every change (endpoint-less peers skipped — wireguard-nt requires an endpoint).
+      `wg::new_backend()` selects userspace (unix) vs this (Windows). Needs elevation + `wireguard.dll`.
+- [ ] `wg/native.rs`: Linux netlink; select native when present, else userspace; parity tests.
 
 **Verify:** same behavior as userspace on Linux + Windows, measurably lower overhead.
 

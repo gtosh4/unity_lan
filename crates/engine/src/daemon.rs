@@ -13,11 +13,11 @@ use crate::config::Config;
 use crate::control;
 use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::dns;
-use crate::fw::{Exposed, Firewall, NftBackend};
+use crate::fw::{self, Exposed, Firewall};
 use crate::keys;
 use crate::netcfg::LocalNet;
-use crate::resolver::{self, ResolverHook};
-use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
+use crate::resolver::ResolverHook;
+use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
@@ -57,7 +57,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             })
             .collect();
         let f = Arc::new(Firewall::new(
-            Box::new(NftBackend),
+            fw::default_backend(),
             cfg.iface.clone(),
             seeds,
         ));
@@ -73,7 +73,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
     let status = control::shared();
     {
-        let path = cfg.control_socket_path();
+        let name = cfg.control_name();
         let ctx = control::Ctx {
             status: status.clone(),
             coordinator: cfg.coordinator.clone(),
@@ -83,7 +83,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             pubkey: wg_pub,
         };
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&path, ctx).await {
+            if let Err(e) = control::serve(&name, ctx).await {
                 tracing::error!("control socket ended: {e:#}");
             }
         });
@@ -126,7 +126,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     );
 
     // Bring up the single interface with our device /32.
-    let mut backend = UserspaceBackend::new(&cfg.iface)?;
+    let mut backend = wg::new_backend(&cfg.iface)?;
     backend.up(&IfaceConfig {
         private_key: wg_priv,
         addresses: vec![(device.wg_ip, 32)],
@@ -137,13 +137,15 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // Point the OS resolver at our `.internal` server on this link (best-effort). Reverted on
     // clean shutdown; also clears with the link if we exit uncleanly.
     let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
-        (true, Some(bind)) => {
-            let hook = resolver::ResolvectlHook;
-            if let Err(e) = hook.install(&cfg.iface, bind) {
-                tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
+        (true, Some(bind)) => match crate::resolver::platform_hook() {
+            Some(hook) => {
+                if let Err(e) = hook.install(&cfg.iface, bind) {
+                    tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
+                }
+                Some(hook)
             }
-            Some(Box::new(hook))
-        }
+            None => None, // no OS resolver backend on this platform yet (e.g. Windows NRPT deferred)
+        },
         _ => None,
     };
 
@@ -153,7 +155,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut last_seeds = coord::verified_seeds(&resp)?;
     let mut last_device = Some(device);
     apply_state(
-        &backend,
+        backend.as_ref(),
         &fw,
         &zone,
         &status,
@@ -255,7 +257,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             // loop round to re-refresh so the coordinator picks up the new opt-out set.
             _ = localnet.wake.notified() => {
                 apply_state(
-                    &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
+                    backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
                 ).await?;
                 continue;
             }
@@ -290,7 +292,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                             tracing::warn!("no grant — access revoked; dropping all peers");
                         }
                         apply_state(
-                            &backend,
+                            backend.as_ref(),
                             &fw,
                             &zone,
                             &status,

@@ -1,13 +1,11 @@
 //! Local control socket (design.md §3.2, §8): an unprivileged frontend (CLI now, GUI later)
-//! talks to the privileged engine daemon over a Unix socket. Newline-delimited JSON.
+//! talks to the privileged engine daemon over a local socket. Newline-delimited JSON.
 //!
-//! Read-only `status` for now. Mutations (rename / set-primary / remove) land once device
-//! control requests are authenticated (set-primary is already available via `/unitylan primary`).
-//! Windows named-pipe transport (via `interprocess`) is a later swap — the JSON protocol is
-//! transport-agnostic.
+//! Transport is `interprocess`'s cross-platform local socket — a Unix-domain socket on unix, a
+//! named pipe on Windows — so the same newline-JSON protocol works on both. The endpoint is named
+//! by [`crate::config::Config::control_name`] (a filesystem path on unix, a pipe name on Windows).
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -16,13 +14,32 @@ use common::control::{
     ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp, NetworkResp,
     PeerStatus, StatusReport,
 };
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::Stream as LocalStream;
+#[cfg(not(windows))]
+use interprocess::local_socket::GenericFilePath;
+#[cfg(windows)]
+use interprocess::local_socket::GenericNamespaced;
+use interprocess::local_socket::{ListenerOptions, Name};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
 use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::fw::Firewall;
 use crate::netcfg::LocalNet;
+
+/// Build the platform local-socket name from a config endpoint string: a filesystem path on unix,
+/// a `\\.\pipe\<name>` named pipe on Windows.
+fn to_name(endpoint: &str) -> std::io::Result<Name<'_>> {
+    #[cfg(windows)]
+    {
+        endpoint.to_ns_name::<GenericNamespaced>()
+    }
+    #[cfg(not(windows))]
+    {
+        endpoint.to_fs_name::<GenericFilePath>()
+    }
+}
 
 /// What the control server needs to serve status + forward mutations to the coordinator.
 #[derive(Clone)]
@@ -112,14 +129,19 @@ fn effective_networks(
         .collect()
 }
 
-/// Serve the control socket until the task is dropped. Recreates the socket file on start.
-pub async fn serve(path: &Path, ctx: Ctx) -> anyhow::Result<()> {
-    let _ = std::fs::remove_file(path); // clear a stale socket from a previous run
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("binding control socket {}", path.display()))?;
-    tracing::info!(socket = %path.display(), "control socket listening");
+/// Serve the control socket until the task is dropped. `endpoint` is the platform local-socket
+/// name (see [`crate::config::Config::control_name`]).
+pub async fn serve(endpoint: &str, ctx: Ctx) -> anyhow::Result<()> {
+    // Clear a stale unix socket file from a previous run (named pipes have no filesystem residue).
+    #[cfg(not(windows))]
+    let _ = std::fs::remove_file(endpoint);
+    let listener = ListenerOptions::new()
+        .name(to_name(endpoint)?)
+        .create_tokio()
+        .with_context(|| format!("binding control socket {endpoint}"))?;
+    tracing::info!(socket = %endpoint, "control socket listening");
     loop {
-        let (stream, _) = listener.accept().await?;
+        let stream = listener.accept().await?;
         let ctx = ctx.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_conn(stream, ctx).await {
@@ -129,7 +151,7 @@ pub async fn serve(path: &Path, ctx: Ctx) -> anyhow::Result<()> {
     }
 }
 
-async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
+async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).await? == 0 {
@@ -209,29 +231,31 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
-    reader.into_inner().write_all(&out).await?;
+    let mut stream = reader.into_inner();
+    stream.write_all(&out).await?;
+    stream.flush().await?; // flush before drop so the named-pipe peer sees the reply
     Ok(())
 }
 
-async fn request(path: &Path, req: &ControlRequest) -> anyhow::Result<ControlResponse> {
-    let stream = UnixStream::connect(path).await.with_context(|| {
-        format!(
-            "connecting to control socket {} (is the daemon running?)",
-            path.display()
-        )
-    })?;
+async fn request(endpoint: &str, req: &ControlRequest) -> anyhow::Result<ControlResponse> {
+    let stream = LocalStream::connect(to_name(endpoint)?)
+        .await
+        .with_context(|| {
+            format!("connecting to control socket {endpoint} (is the daemon running?)")
+        })?;
     let mut reader = BufReader::new(stream);
     let mut bytes = serde_json::to_vec(req)?;
     bytes.push(b'\n');
     reader.get_mut().write_all(&bytes).await?;
+    reader.get_mut().flush().await?;
     let mut line = String::new();
     reader.read_line(&mut line).await?;
     Ok(serde_json::from_str(line.trim())?)
 }
 
 /// Client: fetch the daemon's status snapshot.
-pub async fn client_status(path: &Path) -> anyhow::Result<StatusReport> {
-    match request(path, &ControlRequest::Status).await? {
+pub async fn client_status(endpoint: &str) -> anyhow::Result<StatusReport> {
+    match request(endpoint, &ControlRequest::Status).await? {
         ControlResponse::Status(s) => Ok(s),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
@@ -239,8 +263,8 @@ pub async fn client_status(path: &Path) -> anyhow::Result<StatusReport> {
 }
 
 /// Client: run a device-management op via the daemon (which forwards it to the coordinator).
-pub async fn client_manage(path: &Path, op: ManageOp) -> anyhow::Result<ManageResp> {
-    match request(path, &ControlRequest::Manage(op)).await? {
+pub async fn client_manage(endpoint: &str, op: ManageOp) -> anyhow::Result<ManageResp> {
+    match request(endpoint, &ControlRequest::Manage(op)).await? {
         ControlResponse::Manage(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
@@ -279,8 +303,8 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
 }
 
 /// Client: expose/unexpose/list ports via the daemon's local firewall.
-pub async fn client_expose(path: &Path, op: ExposeOp) -> anyhow::Result<ExposeResp> {
-    match request(path, &ControlRequest::Expose(op)).await? {
+pub async fn client_expose(endpoint: &str, op: ExposeOp) -> anyhow::Result<ExposeResp> {
+    match request(endpoint, &ControlRequest::Expose(op)).await? {
         ControlResponse::Expose(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
@@ -288,8 +312,8 @@ pub async fn client_expose(path: &Path, op: ExposeOp) -> anyhow::Result<ExposeRe
 }
 
 /// Client: start interactive login via the daemon; returns the authorize URL to open.
-pub async fn client_login(path: &Path) -> anyhow::Result<LoginResp> {
-    match request(path, &ControlRequest::Login).await? {
+pub async fn client_login(endpoint: &str) -> anyhow::Result<LoginResp> {
+    match request(endpoint, &ControlRequest::Login).await? {
         ControlResponse::Login(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
@@ -298,13 +322,13 @@ pub async fn client_login(path: &Path) -> anyhow::Result<LoginResp> {
 
 /// Client: toggle this device's peering on a network (role@guild).
 pub async fn client_set_network(
-    path: &Path,
+    endpoint: &str,
     guild_id: u64,
     role_id: u64,
     enabled: bool,
 ) -> anyhow::Result<NetworkResp> {
     match request(
-        path,
+        endpoint,
         &ControlRequest::SetNetwork {
             guild_id,
             role_id,

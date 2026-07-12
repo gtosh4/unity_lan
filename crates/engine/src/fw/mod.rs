@@ -9,14 +9,32 @@
 //! both kernel and userspace WireGuard, so the same rules apply. Linux nftables now; Windows WFP
 //! and macOS pf drop in behind [`FirewallBackend`] later.
 
+#[cfg(not(windows))]
 mod nftables;
+#[cfg(not(windows))]
 pub use nftables::NftBackend;
+
+#[cfg(windows)]
+mod windows;
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::Mutex;
 
 use common::control::{ExposedPort, Proto};
+
+/// The host-firewall backend for this platform: Linux/other-unix nftables, Windows Defender
+/// Firewall (via PowerShell). Both enforce the same port-ACL policy behind [`FirewallBackend`].
+pub fn default_backend() -> Box<dyn FirewallBackend> {
+    #[cfg(not(windows))]
+    {
+        Box::new(NftBackend)
+    }
+    #[cfg(windows)]
+    {
+        Box::new(windows::WindowsFwBackend)
+    }
+}
 
 /// A port opened to peers. `net = Some(name)` scopes it to that network's peers (source-IP
 /// filtered); `None` opens it to every peer (safe: only peers can deliver to the wg interface).

@@ -171,7 +171,7 @@ async fn ctl() -> anyhow::Result<()> {
     let arg = std::env::args().nth(4);
     let cfg = Config::load(std::path::Path::new(&cfg_path))
         .with_context(|| format!("loading config {cfg_path}"))?;
-    let socket = cfg.control_socket_path();
+    let socket = cfg.control_name();
 
     let need_arg = || {
         arg.clone()
@@ -348,12 +348,12 @@ fn print_devices(resp: common::api::ManageResp) -> anyhow::Result<()> {
 /// Bring up a WireGuard interface, add a dummy peer, tear down. Requires CAP_NET_ADMIN.
 fn wg_smoke(ifname: &str) -> anyhow::Result<()> {
     use std::net::Ipv4Addr;
-    use wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
+    use wg::{IfaceConfig, PeerConfig};
 
     let (priv_k, pub_k) = common::crypto::gen_wg_keypair();
     println!("wg-smoke: iface={ifname} pubkey={}", base64_std(&pub_k));
 
-    let mut backend = UserspaceBackend::new(ifname)?;
+    let mut backend = wg::new_backend(ifname)?;
     let cfg = IfaceConfig {
         private_key: priv_k,
         addresses: vec![(Ipv4Addr::new(100, 64, 42, 7), 32)],
@@ -401,7 +401,7 @@ fn wg_node() -> anyhow::Result<()> {
     use std::io::Write;
     use std::net::SocketAddr;
     use std::time::Duration;
-    use wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
+    use wg::{IfaceConfig, PeerConfig};
 
     let a: Vec<String> = std::env::args().collect();
     if a.len() < 10 {
@@ -418,7 +418,7 @@ fn wg_node() -> anyhow::Result<()> {
     let peer_allowed = parse_cidr(&a[8])?;
     let hold: u64 = a[9].parse()?;
 
-    let mut backend = UserspaceBackend::new(iface)?;
+    let mut backend = wg::new_backend(iface)?;
     backend.up(&IfaceConfig {
         private_key: priv_k,
         addresses: vec![addr],

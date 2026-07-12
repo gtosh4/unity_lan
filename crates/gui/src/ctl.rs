@@ -7,14 +7,39 @@ use common::api::{ManageOp, ManageResp};
 use common::control::{
     ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, NetworkResp, StatusReport,
 };
+use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::tokio::Stream as LocalStream;
+#[cfg(not(windows))]
+use interprocess::local_socket::GenericFilePath;
+#[cfg(windows)]
+use interprocess::local_socket::GenericNamespaced;
+use interprocess::local_socket::Name;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+
+/// Resolve the socket argument to a platform local-socket name. On unix it's the socket path; on
+/// Windows it's a named pipe whose name mirrors the engine's `Config::control_name` (`unitylan-`
+/// plus the path's file stem), so a default `control.sock` on both sides agrees on the same pipe.
+fn to_name(path: PathBuf) -> std::io::Result<Name<'static>> {
+    #[cfg(windows)]
+    {
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("control");
+        format!("unitylan-{stem}").to_ns_name::<GenericNamespaced>()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_fs_name::<GenericFilePath>()
+    }
+}
 
 /// One request/response round-trip. Errors are stringified for display in the UI.
 async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, String> {
-    let stream = UnixStream::connect(&path)
+    let name = to_name(path).map_err(|e| e.to_string())?;
+    let stream = LocalStream::connect(name)
         .await
-        .map_err(|e| format!("connect {} (is the daemon running?): {e}", path.display()))?;
+        .map_err(|e| format!("connect (is the daemon running?): {e}"))?;
     let mut reader = BufReader::new(stream);
     let mut bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
@@ -23,6 +48,7 @@ async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, 
         .write_all(&bytes)
         .await
         .map_err(|e| e.to_string())?;
+    reader.get_mut().flush().await.map_err(|e| e.to_string())?;
     let mut line = String::new();
     reader
         .read_line(&mut line)
