@@ -22,6 +22,8 @@ pub struct MemberPresence {
 #[derive(Default)]
 pub struct Presence {
     // (guild_id, role_id, device_pubkey) -> presence
+    // The composite key is the domain model; a type alias would hide it.
+    #[allow(clippy::type_complexity)]
     map: Mutex<HashMap<(u64, u64, [u8; 32]), MemberPresence>>,
 }
 

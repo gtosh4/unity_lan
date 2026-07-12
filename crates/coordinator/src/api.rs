@@ -174,7 +174,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
         if community_name.is_none() {
-            community_name = Some(community_of(&st, net.guild_id).await.map_err(internal)?);
+            community_name = Some(community_of(st, net.guild_id).await.map_err(internal)?);
         }
         network_names.push(net.name);
 
@@ -229,7 +229,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // accumulating the shared network *names* (so the client can scope `expose --net` per network).
     let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<String>, String)> = HashMap::new();
     for ((guild_id, role_id), net_name) in held.iter().zip(network_names.iter()) {
-        let seed_community = community_of(&st, *guild_id).await.map_err(internal)?;
+        let seed_community = community_of(st, *guild_id).await.map_err(internal)?;
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
             let entry = by_pubkey
                 .entry(mp.pubkey)
@@ -484,6 +484,26 @@ fn punch_target(
     }
 }
 
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, self.message).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::punch_target;
@@ -510,25 +530,5 @@ mod tests {
 
         // Neither dialable but no reflexive on file yet → nothing to punch to.
         assert_eq!(punch_target(false, None, None), None);
-    }
-}
-
-pub struct ApiError {
-    status: StatusCode,
-    message: String,
-}
-
-impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (self.status, self.message).into_response()
     }
 }

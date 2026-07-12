@@ -317,6 +317,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 /// firewall, and the WG backend. A peer is kept if it shares at least one *enabled* network with
 /// us; peers whose every shared network is locally disabled are dropped (both here and — once the
 /// opt-out reaches the coordinator — from its seed list too).
+// Cohesive per-refresh state application; splitting the args adds no clarity.
+#[allow(clippy::too_many_arguments)]
 async fn apply_state(
     backend: &dyn WgBackend,
     fw: &Option<Arc<Firewall>>,
@@ -444,6 +446,8 @@ fn apply_seeds(
     peers: &mut HashMap<[u8; 32], PeerConfig>,
 ) -> anyhow::Result<()> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
+    // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
+    #[allow(clippy::type_complexity)]
     let mut desired: HashMap<[u8; 32], (Vec<(Ipv4Addr, u8)>, Option<SocketAddr>)> = HashMap::new();
     for s in seeds {
         // A directly dialable endpoint wins; otherwise fall back to the punch target (reflexive) so
