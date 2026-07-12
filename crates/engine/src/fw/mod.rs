@@ -2,7 +2,8 @@
 //!
 //! Peering already decides *who* can reach us (WG crypto-routing drops non-peers); the firewall
 //! decides *which ports* those peers reach. Default-deny new inbound on the wg interface, allow
-//! established/related + ICMP echo, and open only the ports the owner `expose`s.
+//! established/related + ICMP echo, and open only the ports the owner `expose`s. A port may be
+//! scoped to one network (`--net`), reachable only from that network's peers (source-IP filtered).
 //!
 //! Backend-agnostic on purpose: decrypted packets traverse the OS stack from the wg adapter for
 //! both kernel and userspace WireGuard, so the same rules apply. Linux nftables now; Windows WFP
@@ -11,34 +12,43 @@
 mod nftables;
 pub use nftables::NftBackend;
 
+use std::collections::HashMap;
+use std::net::Ipv4Addr;
 use std::sync::Mutex;
 
 use common::control::{ExposedPort, Proto};
 
-/// A port opened to peers. `net` (source-network scoping) is reserved for the `--net` slice; the
-/// current backend opens to all peers (safe: only peers can deliver to the wg interface).
+/// A port opened to peers. `net = Some(name)` scopes it to that network's peers (source-IP
+/// filtered); `None` opens it to every peer (safe: only peers can deliver to the wg interface).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exposed {
     pub proto: Proto,
     pub port: u16,
+    pub net: Option<String>,
 }
+
+/// Current peer IPs grouped by shared-network name — the source sets for `--net`-scoped exposes.
+pub type PeersByNet = HashMap<String, Vec<Ipv4Addr>>;
 
 /// OS firewall control surface. `apply` installs the full ruleset (idempotent replace); `reset`
 /// removes it.
 pub trait FirewallBackend: Send + Sync {
     /// Replace the ruleset: default-deny new inbound on `iface`, allow established/related + ICMP
-    /// echo, accept the given exposed ports (from any peer).
-    fn apply(&self, iface: &str, exposed: &[Exposed]) -> anyhow::Result<()>;
+    /// echo, accept the exposed ports (scoped exposes matched against `peers_by_net`).
+    fn apply(&self, iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet)
+        -> anyhow::Result<()>;
     /// Remove all UnityLAN firewall rules.
     fn reset(&self) -> anyhow::Result<()>;
 }
 
-/// Live firewall state shared by the daemon (init) and the control socket (expose/unexpose).
-/// Every change reconciles the full ruleset, so the backend stays a pure function of `exposed`.
+/// Live firewall state shared by the daemon (init + membership updates) and the control socket
+/// (expose/unexpose). Every change reconciles the full ruleset, so the backend stays a pure
+/// function of (exposed set, peer-IP sets).
 pub struct Firewall {
     backend: Box<dyn FirewallBackend>,
     iface: String,
     exposed: Mutex<Vec<Exposed>>,
+    peers_by_net: Mutex<PeersByNet>,
 }
 
 impl Firewall {
@@ -47,6 +57,7 @@ impl Firewall {
             backend,
             iface,
             exposed: Mutex::new(seeds),
+            peers_by_net: Mutex::new(HashMap::new()),
         }
     }
 
@@ -55,19 +66,31 @@ impl Firewall {
         self.reconcile()
     }
 
+    /// Refresh the per-network peer sets (called on every membership change). Rescopes any
+    /// `--net` exposes to the current peers of their network.
+    pub fn update_peers(&self, peers_by_net: PeersByNet) -> anyhow::Result<()> {
+        *self.peers_by_net.lock().unwrap() = peers_by_net;
+        self.reconcile()
+    }
+
     /// Open a port (idempotent). Returns the resulting exposed set.
-    pub fn expose(&self, proto: Proto, port: u16) -> anyhow::Result<Vec<ExposedPort>> {
+    pub fn expose(
+        &self,
+        proto: Proto,
+        port: u16,
+        net: Option<String>,
+    ) -> anyhow::Result<Vec<ExposedPort>> {
         {
             let mut set = self.exposed.lock().unwrap();
-            if !set.iter().any(|e| e.proto == proto && e.port == port) {
-                set.push(Exposed { proto, port });
+            if !set.iter().any(|e| e.proto == proto && e.port == port && e.net == net) {
+                set.push(Exposed { proto, port, net });
             }
         }
         self.reconcile()?;
         Ok(self.list())
     }
 
-    /// Close a port (idempotent). Returns the resulting exposed set.
+    /// Close a port on all protocols/scopes matching (proto, port). Returns the exposed set.
     pub fn unexpose(&self, proto: Proto, port: u16) -> anyhow::Result<Vec<ExposedPort>> {
         self.exposed
             .lock()
@@ -85,7 +108,7 @@ impl Firewall {
             .map(|e| ExposedPort {
                 proto: e.proto,
                 port: e.port,
-                net: None,
+                net: e.net.clone(),
             })
             .collect()
     }
@@ -96,7 +119,8 @@ impl Firewall {
     }
 
     fn reconcile(&self) -> anyhow::Result<()> {
-        let set = self.exposed.lock().unwrap().clone();
-        self.backend.apply(&self.iface, &set)
+        let exposed = self.exposed.lock().unwrap().clone();
+        let peers = self.peers_by_net.lock().unwrap().clone();
+        self.backend.apply(&self.iface, &exposed, &peers)
     }
 }

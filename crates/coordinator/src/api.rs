@@ -165,36 +165,43 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         Some(Grant {
             attestation: signed.to_base64(),
             community_name: community_name.unwrap_or_default(),
-            networks: network_names,
+            networks: network_names.clone(),
         })
     };
 
-    // Seeds: every other device sharing ≥1 network with the caller, deduplicated by pubkey.
-    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let mut seeds = Vec::new();
-    for (guild_id, role_id) in &held {
+    // Seeds: every other device sharing ≥1 network with the caller, deduplicated by pubkey but
+    // accumulating the shared network *names* (so the client can scope `expose --net` per network).
+    let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<String>, String)> = HashMap::new();
+    for ((guild_id, role_id), net_name) in held.iter().zip(network_names.iter()) {
         let seed_community = community_of(&st, *guild_id).await.map_err(internal)?;
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
-            if !seen.insert(mp.pubkey) {
-                continue;
+            let entry = by_pubkey
+                .entry(mp.pubkey)
+                .or_insert_with(|| (mp.clone(), Vec::new(), seed_community.clone()));
+            if !entry.1.contains(net_name) {
+                entry.1.push(net_name.clone());
             }
-            let signed = st
-                .signer
-                .sign_attestation(
-                    mp.user_id,
-                    mp.username,
-                    mp.device_name,
-                    mp.is_primary,
-                    mp.ip,
-                    mp.pubkey,
-                )
-                .map_err(internal)?;
-            seeds.push(Seed {
-                attestation: signed.to_base64(),
-                community_name: seed_community.clone(),
-                endpoint: mp.endpoint,
-            });
         }
+    }
+    let mut seeds = Vec::new();
+    for (_pubkey, (mp, networks, community)) in by_pubkey {
+        let signed = st
+            .signer
+            .sign_attestation(
+                mp.user_id,
+                mp.username,
+                mp.device_name,
+                mp.is_primary,
+                mp.ip,
+                mp.pubkey,
+            )
+            .map_err(internal)?;
+        seeds.push(Seed {
+            attestation: signed.to_base64(),
+            community_name: community,
+            endpoint: mp.endpoint,
+            networks,
+        });
     }
 
     let device_token = st.store.device_token(&req.wg_pubkey).await.map_err(internal)?;

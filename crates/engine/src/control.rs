@@ -95,10 +95,20 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
         },
         ControlRequest::Expose(op) => match &ctx.fw {
             None => ControlResponse::Error("firewall disabled (set firewall = true)".into()),
-            Some(fw) => match apply_expose(fw, op) {
-                Ok(r) => ControlResponse::Expose(r),
-                Err(e) => ControlResponse::Error(format!("{e:#}")),
-            },
+            Some(fw) => {
+                let held = ctx
+                    .status
+                    .read()
+                    .await
+                    .device
+                    .as_ref()
+                    .map(|d| d.networks.clone())
+                    .unwrap_or_default();
+                match apply_expose(fw, op, &held) {
+                    Ok(r) => ControlResponse::Expose(r),
+                    Err(e) => ControlResponse::Error(format!("{e:#}")),
+                }
+            }
         },
     };
     let mut out = serde_json::to_vec(&resp)?;
@@ -138,15 +148,25 @@ pub async fn client_manage(path: &Path, op: ManageOp) -> anyhow::Result<ManageRe
     }
 }
 
-/// Apply an expose op to the local firewall and report the resulting exposed set.
-fn apply_expose(fw: &Firewall, op: ExposeOp) -> anyhow::Result<ExposeResp> {
+/// Apply an expose op to the local firewall and report the resulting exposed set. A `--net` scope
+/// must name a network this device actually holds.
+fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
-        ExposeOp::Add { net: Some(_), .. } => {
-            anyhow::bail!("per-network (--net) scoping not yet supported; omit it to expose to all peers")
-        }
-        ExposeOp::Add { proto, port, net: None } => {
-            (format!("exposed {}/{port}", proto.as_str()), fw.expose(proto, port)?)
+        ExposeOp::Add { proto, port, net } => {
+            if let Some(n) = &net {
+                if !held_nets.iter().any(|h| h == n) {
+                    anyhow::bail!(
+                        "not a member of network '{n}' (your networks: {})",
+                        held_nets.join(", ")
+                    );
+                }
+            }
+            let scope = net.as_deref().map(|n| format!(" (net: {n})")).unwrap_or_default();
+            (
+                format!("exposed {}/{port}{scope}", proto.as_str()),
+                fw.expose(proto, port, net)?,
+            )
         }
         ExposeOp::Remove { proto, port } => {
             (format!("closed {}/{port}", proto.as_str()), fw.unexpose(proto, port)?)

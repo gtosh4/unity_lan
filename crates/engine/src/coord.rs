@@ -29,6 +29,8 @@ pub struct SeedPeer {
     pub hostname: String,
     /// `<user>.<community>.internal` if this is the owner's primary device, else `None`.
     pub primary_alias: Option<String>,
+    /// Networks (display names) shared with us — used to scope `expose --net`.
+    pub networks: Vec<String>,
 }
 
 pub async fn register(
@@ -150,6 +152,7 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
             endpoint: seed.endpoint,
             hostname: att.hostname(&seed.community_name),
             primary_alias: att.primary_alias(&seed.community_name),
+            networks: seed.networks.clone(),
         });
     }
     Ok(peers)

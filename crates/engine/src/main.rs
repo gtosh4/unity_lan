@@ -134,12 +134,10 @@ async fn ctl() -> anyhow::Result<()> {
         ),
         "expose" => {
             let (proto, port) = parse_port(&need_arg()?)?;
+            let net = std::env::args().nth(5);
             print_exposed(
-                control::client_expose(
-                    &socket,
-                    common::control::ExposeOp::Add { proto, port, net: None },
-                )
-                .await?,
+                control::client_expose(&socket, common::control::ExposeOp::Add { proto, port, net })
+                    .await?,
             )
         }
         "unexpose" => {

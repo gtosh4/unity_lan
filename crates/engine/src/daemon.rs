@@ -81,6 +81,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                     _ => common::control::Proto::Tcp,
                 },
                 port: e.port,
+                net: None,
             })
             .collect();
         let f = Arc::new(Firewall::new(Box::new(NftBackend), cfg.iface.clone(), seeds));
@@ -114,6 +115,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let seeds = coord::verified_seeds(&resp)?;
     dns::update(&zone, &device, &seeds).await;
     control::update(&status, &device, &seeds).await;
+    if let Some(fw) = &fw {
+        fw.update_peers(peers_by_net(&seeds))?;
+    }
     apply_seeds(&backend, seeds, &mut peers)?;
 
     // Long-poll loop: each /refresh blocks at the coordinator until membership changes or the
@@ -155,6 +159,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                             // → apply_seeds prunes every peer, isolating us until access returns.
                             None => tracing::warn!("no grant — access revoked; dropping all peers"),
                         }
+                        if let Some(fw) = &fw {
+                            fw.update_peers(peers_by_net(&seeds))?;
+                        }
                         apply_seeds(&backend, seeds, &mut peers)?;
                     }
                     Err(e) => tracing::warn!("bad seeds: {e:#}"),
@@ -167,6 +174,17 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Group seed peer IPs by shared-network name → the source sets for `--net`-scoped exposes.
+fn peers_by_net(seeds: &[SeedPeer]) -> crate::fw::PeersByNet {
+    let mut map: crate::fw::PeersByNet = HashMap::new();
+    for s in seeds {
+        for n in &s.networks {
+            map.entry(n.clone()).or_default().push(s.ip);
+        }
+    }
+    map
 }
 
 /// Fold seeds (one per co-member per shared network) into peers keyed by pubkey, then push

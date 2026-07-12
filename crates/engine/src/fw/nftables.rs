@@ -1,20 +1,27 @@
 //! Linux nftables firewall backend. Renders the whole `inet unitylan` table and pipes it to
-//! `nft -f -` in one atomic load, so the ruleset is always a pure function of the exposed set.
+//! `nft -f -` in one atomic load, so the ruleset is always a pure function of (exposed set,
+//! per-network peer IPs).
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use common::control::Proto;
 
-use super::{Exposed, FirewallBackend};
+use super::{Exposed, FirewallBackend, PeersByNet};
 
 pub struct NftBackend;
 
 const TABLE: &str = "inet unitylan";
 
 impl FirewallBackend for NftBackend {
-    fn apply(&self, iface: &str, exposed: &[Exposed]) -> anyhow::Result<()> {
-        run_nft(&ruleset(iface, exposed))
+    fn apply(
+        &self,
+        iface: &str,
+        exposed: &[Exposed],
+        peers_by_net: &PeersByNet,
+    ) -> anyhow::Result<()> {
+        run_nft(&ruleset(iface, exposed, peers_by_net))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -23,14 +30,37 @@ impl FirewallBackend for NftBackend {
     }
 }
 
+/// nft set name for a network's peer IPs. Sanitized to a valid identifier.
+fn set_name(net: &str) -> String {
+    let s: String = net
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("net_{s}")
+}
+
 /// Build the nft script. Only `iif <iface>` traffic is policed; everything else is accepted so
 /// the host's other interfaces are untouched.
-fn ruleset(iface: &str, exposed: &[Exposed]) -> String {
+fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String {
     let mut s = String::new();
     // Atomic replace: ensure the table exists, drop it, recreate empty.
     s.push_str(&format!("add table {TABLE}\n"));
     s.push_str(&format!("delete table {TABLE}\n"));
     s.push_str(&format!("add table {TABLE}\n"));
+
+    // A named set of source IPs per network referenced by a scoped expose.
+    let scoped_nets: BTreeSet<&str> =
+        exposed.iter().filter_map(|e| e.net.as_deref()).collect();
+    for net in &scoped_nets {
+        let name = set_name(net);
+        s.push_str(&format!("add set {TABLE} {name} {{ type ipv4_addr ; }}\n"));
+        let ips = peers_by_net.get(*net).map(Vec::as_slice).unwrap_or(&[]);
+        if !ips.is_empty() {
+            let elems = ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ");
+            s.push_str(&format!("add element {TABLE} {name} {{ {elems} }}\n"));
+        }
+    }
+
     s.push_str(&format!(
         "add chain {TABLE} input {{ type filter hook input priority 0 ; policy accept ; }}\n"
     ));
@@ -40,24 +70,35 @@ fn ruleset(iface: &str, exposed: &[Exposed]) -> String {
     s.push_str(&format!("add rule {TABLE} input ct state established,related accept\n"));
     // Ping: liveness/diagnostics only, so allowed by default.
     s.push_str(&format!("add rule {TABLE} input icmp type echo-request accept\n"));
-    // Exposed ports (from any peer — only peers can reach the wg iface at all).
-    let tcp = ports(exposed, Proto::Tcp);
-    let udp = ports(exposed, Proto::Udp);
+
+    // Unscoped exposes (any peer — only peers reach the wg iface at all), grouped per proto.
+    let tcp = unscoped_ports(exposed, Proto::Tcp);
+    let udp = unscoped_ports(exposed, Proto::Udp);
     if !tcp.is_empty() {
         s.push_str(&format!("add rule {TABLE} input tcp dport {{ {tcp} }} accept\n"));
     }
     if !udp.is_empty() {
         s.push_str(&format!("add rule {TABLE} input udp dport {{ {udp} }} accept\n"));
     }
+    // Scoped exposes: only peers in the named network's source set reach the port.
+    for e in exposed.iter().filter(|e| e.net.is_some()) {
+        let name = set_name(e.net.as_deref().unwrap());
+        s.push_str(&format!(
+            "add rule {TABLE} input ip saddr @{name} {} dport {} accept\n",
+            e.proto.as_str(),
+            e.port
+        ));
+    }
+
     // Everything else arriving on the wg iface is denied.
     s.push_str(&format!("add rule {TABLE} input drop\n"));
     s
 }
 
-fn ports(exposed: &[Exposed], proto: Proto) -> String {
+fn unscoped_ports(exposed: &[Exposed], proto: Proto) -> String {
     exposed
         .iter()
-        .filter(|e| e.proto == proto)
+        .filter(|e| e.net.is_none() && e.proto == proto)
         .map(|e| e.port.to_string())
         .collect::<Vec<_>>()
         .join(", ")
@@ -91,31 +132,49 @@ fn run_nft(script: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
+
+    fn exp(proto: Proto, port: u16, net: Option<&str>) -> Exposed {
+        Exposed { proto, port, net: net.map(String::from) }
+    }
 
     #[test]
-    fn ruleset_has_default_deny_and_exposed_ports() {
+    fn ruleset_has_default_deny_and_unscoped_ports() {
         let rs = ruleset(
             "unl0",
-            &[
-                Exposed { proto: Proto::Tcp, port: 25565 },
-                Exposed { proto: Proto::Udp, port: 34197 },
-            ],
+            &[exp(Proto::Tcp, 25565, None), exp(Proto::Udp, 34197, None)],
+            &PeersByNet::new(),
         );
-        // Base policy.
         assert!(rs.contains("iifname != \"unl0\" accept"));
         assert!(rs.contains("ct state established,related accept"));
         assert!(rs.contains("icmp type echo-request accept"));
-        // Exposed ports, per proto.
         assert!(rs.contains("tcp dport { 25565 } accept"));
         assert!(rs.contains("udp dport { 34197 } accept"));
-        // Default-deny is the last rule.
         assert!(rs.trim_end().ends_with("input drop"));
     }
 
     #[test]
-    fn no_exposed_ports_still_default_denies() {
-        let rs = ruleset("unl0", &[]);
-        assert!(!rs.contains("dport"));
-        assert!(rs.contains("input drop"));
+    fn scoped_expose_builds_source_set_and_rule() {
+        let mut peers = PeersByNet::new();
+        peers.insert(
+            "mesh".into(),
+            vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
+        );
+        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, Some("mesh"))], &peers);
+        // Named set populated with the network's peer IPs.
+        assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
+        assert!(rs.contains("add element inet unitylan net_mesh { 100.64.0.2, 100.64.0.3 }"));
+        // Port scoped to that set.
+        assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
+        // Not a global port accept.
+        assert!(!rs.contains("tcp dport { 9001 } accept"));
+    }
+
+    #[test]
+    fn scoped_expose_with_no_peers_still_defines_empty_set() {
+        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, Some("mesh"))], &PeersByNet::new());
+        assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
+        assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
+        assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
     }
 }

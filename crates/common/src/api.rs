@@ -104,4 +104,8 @@ pub struct Seed {
     pub community_name: String,
     /// The co-member's last-reported endpoint (may be stale/absent).
     pub endpoint: Option<SocketAddr>,
+    /// The networks (by display name) this peer shares with the caller — lets the client scope
+    /// `expose --net <role>` to just this network's peers.
+    #[serde(default)]
+    pub networks: Vec<String>,
 }

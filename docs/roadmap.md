@@ -223,9 +223,14 @@ gets two names/IPs; the networks can't route to each other.
 - **Verify:** ✅ `mesh-test.sh` firewall phase — 9001 blocked by default-deny, reachable after
       `ctl expose 9001`, never-exposed 9002 stays blocked, blocked again after `unexpose`; ping
       (ICMP) survives throughout. Plus 2 nft ruleset unit tests.
-- [ ] **`--net <role>` source scoping** (M7c-2): scope a port to one network's peers (source-IP
-      sets), needs per-seed network membership in the API. Currently `--net` is rejected; exposes
-      open to all peers (safe — only peers reach the wg iface).
+- [x] **`--net <role>` source scoping** ✅ (M7c-2): `expose <port> --net <role>` opens the port
+      only to that network's peers. `Seed.networks` (per-peer shared-network names) added to the
+      API; the client groups peer IPs per network (`peers_by_net`, refreshed each membership
+      change) and nft emits a named `ipv4_addr` source set + `ip saddr @set … dport … accept`.
+      `--net` is validated against the device's held networks. **Verify:** ✅
+      `scripts/expose-net-test.sh` — 3 nodes / 2 nets (A∈{mesh,mesh2}, B∈mesh, C∈mesh2): B reaches
+      A's mesh-scoped 9001 but not mesh2-scoped 9002; C the reverse; expose to a non-held network
+      is rejected. Plus 2 nft scoped-ruleset unit tests.
 - [ ] Windows WFP + macOS pf backends.
 
 ### M7d — status polish
