@@ -15,13 +15,62 @@ use crate::api::{ManageOp, ManageResp};
 pub enum ControlRequest {
     Status,
     Manage(ManageOp),
+    /// Firewall port exposure — handled locally by the daemon (not forwarded to the coordinator).
+    Expose(ExposeOp),
 }
 
 #[derive(Serialize, Deserialize)]
 pub enum ControlResponse {
     Status(StatusReport),
     Manage(ManageResp),
+    Expose(ExposeResp),
     Error(String),
+}
+
+/// Transport protocol of an exposed port.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Proto {
+    Tcp,
+    Udp,
+}
+
+impl Proto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Proto::Tcp => "tcp",
+            Proto::Udp => "udp",
+        }
+    }
+}
+
+/// A firewall exposure op over the control socket. `net` scopes the exposure to one network's
+/// peers (source-IP filtered); `None` opens the port to every peer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ExposeOp {
+    List,
+    Add {
+        proto: Proto,
+        port: u16,
+        net: Option<String>,
+    },
+    Remove {
+        proto: Proto,
+        port: u16,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ExposeResp {
+    pub message: String,
+    pub exposed: Vec<ExposedPort>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExposedPort {
+    pub proto: Proto,
+    pub port: u16,
+    /// The network this port is scoped to, or `None` for all peers.
+    pub net: Option<String>,
 }
 
 /// A snapshot of the daemon's live mesh state: this device plus the peers it has meshed with.

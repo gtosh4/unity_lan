@@ -34,6 +34,28 @@ pub struct Config {
     pub dns_bind: Option<SocketAddr>,
     /// Control socket path for CLI/GUI frontends. Defaults to `<state_dir>/control.sock`.
     pub control_socket: Option<PathBuf>,
+    /// Enforce the host firewall (default-deny inbound on the wg iface + explicit `expose`).
+    /// On by default — secure posture. Set `false` on platforms without a firewall backend.
+    #[serde(default = "default_true")]
+    pub firewall: bool,
+    /// Ports to expose at startup (before any runtime `ctl expose`).
+    #[serde(default)]
+    pub expose: Vec<ExposeSeed>,
+}
+
+/// A config-seeded port exposure. `proto` defaults to `tcp`.
+#[derive(Debug, Deserialize)]
+pub struct ExposeSeed {
+    pub port: u16,
+    #[serde(default = "default_proto")]
+    pub proto: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_proto() -> String {
+    "tcp".to_string()
 }
 
 fn default_iface() -> String {

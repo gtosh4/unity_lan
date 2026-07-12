@@ -6,6 +6,7 @@ mod control;
 mod coord;
 mod daemon;
 mod dns;
+mod fw;
 mod keys;
 mod wg;
 
@@ -131,10 +132,57 @@ async fn ctl() -> anyhow::Result<()> {
         "remove" => print_devices(
             control::client_manage(&socket, ManageOp::Remove { device_name: need_arg()? }).await?,
         ),
+        "expose" => {
+            let (proto, port) = parse_port(&need_arg()?)?;
+            print_exposed(
+                control::client_expose(
+                    &socket,
+                    common::control::ExposeOp::Add { proto, port, net: None },
+                )
+                .await?,
+            )
+        }
+        "unexpose" => {
+            let (proto, port) = parse_port(&need_arg()?)?;
+            print_exposed(
+                control::client_expose(&socket, common::control::ExposeOp::Remove { proto, port })
+                    .await?,
+            )
+        }
+        "exposes" => {
+            print_exposed(control::client_expose(&socket, common::control::ExposeOp::List).await?)
+        }
         other => anyhow::bail!(
-            "unknown ctl subcommand '{other}' (try: status, devices, rename, set-primary, remove)"
+            "unknown ctl subcommand '{other}' (try: status, devices, rename, set-primary, \
+             remove, expose, unexpose, exposes)"
         ),
     }
+}
+
+/// Parse a `ctl expose` port argument: `25565` (tcp default) or `udp/34197` / `tcp/25565`.
+fn parse_port(arg: &str) -> anyhow::Result<(common::control::Proto, u16)> {
+    use common::control::Proto;
+    let (proto, port) = match arg.split_once('/') {
+        Some((p, n)) => {
+            let proto = match p.to_ascii_lowercase().as_str() {
+                "tcp" => Proto::Tcp,
+                "udp" => Proto::Udp,
+                other => anyhow::bail!("bad protocol '{other}' (use tcp or udp)"),
+            };
+            (proto, n)
+        }
+        None => (Proto::Tcp, arg),
+    };
+    Ok((proto, port.parse().map_err(|_| anyhow::anyhow!("bad port '{port}'"))?))
+}
+
+fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
+    println!("{}", resp.message);
+    for e in &resp.exposed {
+        let scope = e.net.as_deref().map(|n| format!(" (net: {n})")).unwrap_or_default();
+        println!("  {}/{}{}", e.proto.as_str(), e.port, scope);
+    }
+    Ok(())
 }
 
 fn print_devices(resp: common::api::ManageResp) -> anyhow::Result<()> {

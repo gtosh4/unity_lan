@@ -211,9 +211,25 @@ gets two names/IPs; the networks can't route to each other.
 - [ ] Optional persisted tombstones (survive coordinator restart before the live role re-check) —
       deferred: the live role re-check on re-register already blocks a revoked member.
 
-### M7c — expose / status polish
-- [ ] `expose <port> --net <role>` end to end.
-- [ ] Status/event polish in GUI.
+### M7c — expose (enforcing firewall)
+- [x] **Firewall core** ✅ — `FirewallBackend` trait + Linux nftables backend (`inet unitylan`,
+      atomic `nft -f -` load). Default-deny new inbound on the wg iface; allow established/related
+      + ICMP echo; accept only exposed ports. On by default (`firewall = true`); fail-closed at
+      startup if nft errors. Backend-agnostic so Windows WFP / macOS pf drop in later (both kernel
+      and userspace WG deliver decrypted packets through the OS stack, so the rules are identical).
+- [x] `ctl expose <port> [tcp|udp]` / `unexpose` / `exposes` over the control socket → `Firewall`
+      reconciles the whole ruleset; config `[[expose]]` seeds initial ports. Clean shutdown
+      (ctrl_c) tears the table down.
+- **Verify:** ✅ `mesh-test.sh` firewall phase — 9001 blocked by default-deny, reachable after
+      `ctl expose 9001`, never-exposed 9002 stays blocked, blocked again after `unexpose`; ping
+      (ICMP) survives throughout. Plus 2 nft ruleset unit tests.
+- [ ] **`--net <role>` source scoping** (M7c-2): scope a port to one network's peers (source-IP
+      sets), needs per-seed network membership in the API. Currently `--net` is rejected; exposes
+      open to all peers (safe — only peers reach the wg iface).
+- [ ] Windows WFP + macOS pf backends.
+
+### M7d — status polish
+- [ ] Status/event polish in GUI (surface exposed ports + revocation events).
 
 ---
 

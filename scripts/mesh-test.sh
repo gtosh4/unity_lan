@@ -140,6 +140,27 @@ else
   echo "RESULT: FAIL ✗"; tail -15 "$TMP/a.log" "$TMP/b.log"; exit 1
 fi
 
+# Firewall: default-deny inbound on the wg iface; only ports the owner exposes are reachable.
+echo "=== firewall: default-deny + expose enforcement (node B) ==="
+grep -q "firewall: default-deny" "$TMP/b.log" || { echo "FAIL: node B did not install firewall"; tail -15 "$TMP/b.log"; exit 1; }
+# Two TCP listeners on B: 9001 will be exposed, 9002 stays closed.
+$NS1 socat TCP-LISTEN:9001,fork,reuseaddr /dev/null >/dev/null 2>&1 &
+$NS1 socat TCP-LISTEN:9002,fork,reuseaddr /dev/null >/dev/null 2>&1 &
+sleep 0.5
+# A new TCP connect from A to B: exit 0 if open; a dropped (default-deny) port hangs → timeout.
+probe() { timeout 3 bash -c "exec 3<>/dev/tcp/$B_IP/$1" >/dev/null 2>&1; }
+
+probe 9001 && { echo "FAIL: 9001 reachable before expose (default-deny not enforced)"; exit 1; }
+echo "pre-expose: 9001 blocked by default-deny ✓"
+"$ENG" ctl expose "$TMP/b.toml" 9001
+probe 9001 || { echo "FAIL: 9001 unreachable after expose"; exit 1; }
+echo "post-expose: 9001 reachable ✓"
+probe 9002 && { echo "FAIL: never-exposed 9002 reachable"; exit 1; }
+echo "unexposed 9002 still blocked ✓"
+"$ENG" ctl unexpose "$TMP/b.toml" 9001
+probe 9001 && { echo "FAIL: 9001 still reachable after unexpose"; exit 1; }
+echo "post-unexpose: 9001 blocked again ✓"
+
 # Revocation: strip node B's role and restart the coordinator (persistent DB, empty presence).
 # On reconnect A holds the role, B does not, so A's seed list no longer contains B → A prunes it.
 echo "=== revocation: remove node B's role, restart coordinator ==="
@@ -157,5 +178,5 @@ CTL=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
 if echo "$CTL" | grep -q "$B_IP"; then echo "FAIL: ctl status still lists revoked peer B"; echo "$CTL"; exit 1; fi
 echo "ctl: status no longer lists B ✓"
 
-echo "RESULT: PASS ✓  mesh forms, carries traffic, and prunes a revoked member"
+echo "RESULT: PASS ✓  mesh forms, carries traffic, firewalls to exposed ports, prunes a revoked member"
 exit 0

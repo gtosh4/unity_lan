@@ -4,12 +4,16 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::Duration;
+
+use anyhow::Context;
 
 use crate::config::Config;
 use crate::control;
 use crate::coord::{self, SeedPeer};
 use crate::dns;
+use crate::fw::{Exposed, Firewall, NftBackend};
 use crate::keys;
 use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
 
@@ -65,7 +69,30 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Control socket: status + device-management for CLI/GUI frontends.
+    // Host firewall: default-deny inbound on the wg iface, plus any config-seeded exposes
+    // (design.md §M7). On by default; a grant to peer still needs an explicit `expose` per port.
+    let fw = if cfg.firewall {
+        let seeds: Vec<Exposed> = cfg
+            .expose
+            .iter()
+            .map(|e| Exposed {
+                proto: match e.proto.to_ascii_lowercase().as_str() {
+                    "udp" => common::control::Proto::Udp,
+                    _ => common::control::Proto::Tcp,
+                },
+                port: e.port,
+            })
+            .collect();
+        let f = Arc::new(Firewall::new(Box::new(NftBackend), cfg.iface.clone(), seeds));
+        f.init()
+            .context("installing firewall (default-deny); set `firewall = false` to disable")?;
+        tracing::info!(iface = %cfg.iface, "firewall: default-deny inbound + established/icmp/exposed");
+        Some(f)
+    } else {
+        None
+    };
+
+    // Control socket: status + device-management + expose for CLI/GUI frontends.
     let status = control::shared();
     {
         let path = cfg.control_socket_path();
@@ -73,6 +100,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             status: status.clone(),
             coordinator: cfg.coordinator.clone(),
             token: token.clone(),
+            fw: fw.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&path, ctx).await {
@@ -93,16 +121,27 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // a co-member joining wakes this call at once. `since` echoes the last version we applied.
     let mut since = Some(resp.version);
     loop {
-        match coord::refresh(
-            &cfg.coordinator,
-            wg_pub,
-            cfg.device_name(),
-            cfg.endpoint,
-            cfg.enrollment_key.clone(),
-            since,
-        )
-        .await
-        {
+        let refreshed = tokio::select! {
+            // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
+            _ = tokio::signal::ctrl_c() => {
+                if let Some(fw) = &fw {
+                    if let Err(e) = fw.reset() {
+                        tracing::warn!("firewall reset on shutdown: {e:#}");
+                    }
+                }
+                tracing::info!("shutting down");
+                return Ok(());
+            }
+            r = coord::refresh(
+                &cfg.coordinator,
+                wg_pub,
+                cfg.device_name(),
+                cfg.endpoint,
+                cfg.enrollment_key.clone(),
+                since,
+            ) => r,
+        };
+        match refreshed {
             Ok((resp, dev)) => {
                 since = Some(resp.version);
                 match coord::verified_seeds(&resp) {

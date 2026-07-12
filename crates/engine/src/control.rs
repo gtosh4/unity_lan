@@ -11,12 +11,15 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use common::api::{ManageOp, ManageResp};
-use common::control::{ControlRequest, ControlResponse, DeviceStatus, PeerStatus, StatusReport};
+use common::control::{
+    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, PeerStatus, StatusReport,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
 use crate::coord::{self, SeedPeer, SelfDevice};
+use crate::fw::Firewall;
 
 /// What the control server needs to serve status + forward mutations to the coordinator.
 #[derive(Clone)]
@@ -25,6 +28,8 @@ pub struct Ctx {
     pub coordinator: String,
     /// The device token, set once the daemon has registered.
     pub token: Arc<RwLock<Option<String>>>,
+    /// The host firewall, if enabled — handles `expose`/`unexpose` locally.
+    pub fw: Option<Arc<Firewall>>,
 }
 
 /// Shared, live status the daemon updates and the control socket reads.
@@ -88,6 +93,13 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             },
         },
+        ControlRequest::Expose(op) => match &ctx.fw {
+            None => ControlResponse::Error("firewall disabled (set firewall = true)".into()),
+            Some(fw) => match apply_expose(fw, op) {
+                Ok(r) => ControlResponse::Expose(r),
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            },
+        },
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
@@ -121,6 +133,32 @@ pub async fn client_status(path: &Path) -> anyhow::Result<StatusReport> {
 pub async fn client_manage(path: &Path, op: ManageOp) -> anyhow::Result<ManageResp> {
     match request(path, &ControlRequest::Manage(op)).await? {
         ControlResponse::Manage(r) => Ok(r),
+        ControlResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Apply an expose op to the local firewall and report the resulting exposed set.
+fn apply_expose(fw: &Firewall, op: ExposeOp) -> anyhow::Result<ExposeResp> {
+    let (message, exposed) = match op {
+        ExposeOp::List => ("exposed ports".to_string(), fw.list()),
+        ExposeOp::Add { net: Some(_), .. } => {
+            anyhow::bail!("per-network (--net) scoping not yet supported; omit it to expose to all peers")
+        }
+        ExposeOp::Add { proto, port, net: None } => {
+            (format!("exposed {}/{port}", proto.as_str()), fw.expose(proto, port)?)
+        }
+        ExposeOp::Remove { proto, port } => {
+            (format!("closed {}/{port}", proto.as_str()), fw.unexpose(proto, port)?)
+        }
+    };
+    Ok(ExposeResp { message, exposed })
+}
+
+/// Client: expose/unexpose/list ports via the daemon's local firewall.
+pub async fn client_expose(path: &Path, op: ExposeOp) -> anyhow::Result<ExposeResp> {
+    match request(path, &ControlRequest::Expose(op)).await? {
+        ControlResponse::Expose(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
     }
