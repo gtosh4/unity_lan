@@ -109,8 +109,14 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let mut community_name: Option<String> = None;
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
 
-    // Networks this device has opted out of peering on (the GUI toggle).
-    let optouts = st.store.network_optouts(&req.wg_pubkey).await.map_err(internal)?;
+    // Networks this device has opted out of peering on. The client is the source of truth and
+    // sends its current set on every register/refresh, so this works even across coordinator
+    // restarts and while the coordinator was unreachable.
+    let optouts: std::collections::HashSet<(u64, u64)> = req
+        .disabled_networks
+        .iter()
+        .map(|n| (n.guild_id, n.role_id))
+        .collect();
     let mut networks_status: Vec<NetworkStatus> = Vec::new();
 
     for net in networks {
@@ -273,22 +279,6 @@ async fn manage(
                 .await
                 .map_err(internal)?;
             format!("removed {}", sanitize_label(&device_name))
-        }
-        ManageOp::SetNetwork { guild_id, role_id, enabled } => {
-            st.store
-                .set_network_optout(&self_pubkey, guild_id, role_id, enabled)
-                .await
-                .map_err(internal)?;
-            // Disabling: drop this device from that network's presence now so peers prune it on
-            // their next (version-woken) refresh. Enabling: the bump re-meshes it.
-            if !enabled {
-                st.presence.evict(guild_id, role_id, &self_pubkey);
-            }
-            st.version.send_modify(|v| *v += 1);
-            format!(
-                "network {guild_id}/{role_id} peering {}",
-                if enabled { "enabled" } else { "disabled" }
-            )
         }
     };
 

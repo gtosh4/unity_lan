@@ -27,6 +27,18 @@ pub struct RegisterReq {
     /// `None` (first register / a stale value) returns immediately.
     #[serde(default)]
     pub since: Option<u64>,
+    /// Networks (role@guild) this device has locally opted out of peering on. The client is the
+    /// source of truth (so opt-out works even when the coordinator is unreachable); the
+    /// coordinator mirrors it here — excluding these from the device's presence/grant/seeds.
+    #[serde(default)]
+    pub disabled_networks: Vec<NetworkRef>,
+}
+
+/// A reference to a network by its (guild, role) identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkRef {
+    pub guild_id: u64,
+    pub role_id: u64,
 }
 
 /// `POST /register` or `/refresh` response.
@@ -80,13 +92,6 @@ pub enum ManageOp {
     SetPrimary { device_name: String },
     /// Remove one of the owner's devices (by name).
     Remove { device_name: String },
-    /// Enable/disable this device's peering on one network (role@guild). Disabling drops the
-    /// device from that network's presence both ways; other shared networks still peer.
-    SetNetwork {
-        guild_id: u64,
-        role_id: u64,
-        enabled: bool,
-    },
 }
 
 /// Response to a manage request: the owner's devices after the op, plus a human message.

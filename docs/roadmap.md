@@ -159,11 +159,15 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       the control socket).
 - [x] **Networks list + per-network peering toggle** — a device can enable/disable peering on
       each of its networks (role@guild) from the GUI (or `ctl net enable|disable <network>`).
-      Coordinator-side, symmetric opt-out (`network_optout` table keyed by device pubkey; excluded
-      from presence/grant/seeds both ways; version-bumped so peers prune at once). `RegisterResp`
-      + `StatusReport` carry `NetworkStatus` (guild/role/name/enabled). Verified:
-      `scripts/net-toggle-test.sh` (3 nodes/2 nets — A disables mesh2 → drops C both ways, keeps B;
-      re-enable → C returns) + store/GUI unit tests.
+      **Client is the source of truth**: the opt-out set is persisted locally
+      (`<state_dir>/network_optout.json`) and enforced by filtering seeds, so it works even when
+      the coordinator is **unreachable** — a toggle wakes the daemon (`tokio::Notify`) to re-mesh
+      from the last snapshot at once. The set rides along in every `RegisterReq.disabled_networks`;
+      the coordinator mirrors it (excludes those from presence/grant/seeds both ways) → symmetric
+      when reachable, auto-syncs on reconnect. `RegisterResp`/`StatusReport` carry `NetworkStatus`
+      (guild/role/name/enabled). Verified: `scripts/net-toggle-test.sh` (3 nodes/2 nets — online:
+      A disables mesh2 → drops C both ways, keeps B, re-enable → C returns; **offline**:
+      coordinator killed → `ctl net disable` still succeeds and A drops C locally) + GUI unit tests.
 - [ ] Login (OAuth), tray — deferred: the engine doesn't yet back these over the socket
       (post-M5).
 

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
-use common::control::{ExposeOp, ExposeResp, ExposedPort, Proto, StatusReport};
+use common::control::{ExposeOp, ExposeResp, ExposedPort, NetworkResp, Proto, StatusReport};
 use iced::widget::{button, column, row, scrollable, text, text_input, Column};
 use iced::{Element, Length, Subscription, Task};
 
@@ -62,7 +62,7 @@ enum Message {
     Unexpose { proto: Proto, port: u16 },
     /// Toggle this device's peering on a network (role@guild).
     ToggleNetwork { guild_id: u64, role_id: u64, enabled: bool },
-    NetworkToggled(Result<ManageResp, String>),
+    NetworkToggled(Result<NetworkResp, String>),
 }
 
 impl App {
@@ -139,10 +139,7 @@ impl App {
             }
             Message::ToggleNetwork { guild_id, role_id, enabled } => {
                 return Task::perform(
-                    ctl::manage(
-                        self.socket.clone(),
-                        ManageOp::SetNetwork { guild_id, role_id, enabled },
-                    ),
+                    ctl::set_network(self.socket.clone(), guild_id, role_id, enabled),
                     Message::NetworkToggled,
                 )
             }

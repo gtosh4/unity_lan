@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 
 use common::api::{ManageOp, ManageResp};
-use common::control::{ControlRequest, ControlResponse, ExposeOp, ExposeResp, StatusReport};
+use common::control::{
+    ControlRequest, ControlResponse, ExposeOp, ExposeResp, NetworkResp, StatusReport,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -41,6 +43,19 @@ pub async fn manage(path: PathBuf, op: ManageOp) -> Result<ManageResp, String> {
 pub async fn expose(path: PathBuf, op: ExposeOp) -> Result<ExposeResp, String> {
     match request(path, ControlRequest::Expose(op)).await? {
         ControlResponse::Expose(r) => Ok(r),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+pub async fn set_network(
+    path: PathBuf,
+    guild_id: u64,
+    role_id: u64,
+    enabled: bool,
+) -> Result<NetworkResp, String> {
+    match request(path, ControlRequest::SetNetwork { guild_id, role_id, enabled }).await? {
+        ControlResponse::Network(r) => Ok(r),
         ControlResponse::Error(e) => Err(e),
         _ => Err("unexpected response".into()),
     }

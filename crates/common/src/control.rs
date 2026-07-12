@@ -17,6 +17,14 @@ pub enum ControlRequest {
     Manage(ManageOp),
     /// Firewall port exposure — handled locally by the daemon (not forwarded to the coordinator).
     Expose(ExposeOp),
+    /// Enable/disable this device's peering on a network (role@guild). Handled locally (the client
+    /// is the source of truth) so it works even when the coordinator is unreachable; the change
+    /// rides along to the coordinator on the next register/refresh.
+    SetNetwork {
+        guild_id: u64,
+        role_id: u64,
+        enabled: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -24,7 +32,15 @@ pub enum ControlResponse {
     Status(StatusReport),
     Manage(ManageResp),
     Expose(ExposeResp),
+    Network(NetworkResp),
     Error(String),
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NetworkResp {
+    pub message: String,
+    /// The device's networks after the toggle, with effective (local) enabled state.
+    pub networks: Vec<NetworkStatus>,
 }
 
 /// Transport protocol of an exposed port.

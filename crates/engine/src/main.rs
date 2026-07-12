@@ -8,6 +8,7 @@ mod daemon;
 mod dns;
 mod fw;
 mod keys;
+mod netcfg;
 mod wg;
 
 use anyhow::Context;
@@ -64,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.device_name(),
         cfg.endpoint,
         cfg.enrollment_key.clone(),
+        Vec::new(),
     )
     .await?;
 
@@ -165,12 +167,13 @@ async fn ctl() -> anyhow::Result<()> {
                 let names: Vec<&str> = status.networks.iter().map(|n| n.name.as_str()).collect();
                 anyhow::anyhow!("no network named '{name}' (yours: {})", names.join(", "))
             })?;
-            let resp = control::client_manage(
-                &socket,
-                ManageOp::SetNetwork { guild_id: net.guild_id, role_id: net.role_id, enabled },
-            )
-            .await?;
+            let resp =
+                control::client_set_network(&socket, net.guild_id, net.role_id, enabled).await?;
             println!("{}", resp.message);
+            for n in &resp.networks {
+                let state = if n.enabled { "on" } else { "off" };
+                println!("  {} [{}]", n.name, state);
+            }
             Ok(())
         }
         other => anyhow::bail!(

@@ -100,7 +100,7 @@ node_toml a unla 51820 10.0.0.1 key-a
 node_toml b unlb 51821 10.0.0.2 key-b
 node_toml c unlc 51822 10.0.0.3 key-c
 
-"$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
+"$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 & COORD_PID=$!
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 "$ENG"     run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
 $NSB "$ENG" run "$TMP/b.toml" >"$TMP/b.log" 2>&1 &
@@ -139,5 +139,19 @@ echo "=== re-enable mesh2 on A ==="
 "$ENG" ctl net "$TMP/a.toml" enable mesh2
 wait_for a_has_peer "$C_IP" && echo "  ok: C re-peered after enabling mesh2" || { echo "  FAIL: C did not return"; fail=1; }
 
-[ "$fail" = 0 ] && { echo "RESULT: PASS ✓  per-network peering toggle enforced (both ways)"; exit 0; }
+# The point: opt-out must work even when the coordinator is unreachable. Kill it, then disable
+# mesh2 — the command must succeed and A must drop C locally (its own enforcement), without the
+# coordinator in the loop.
+echo "=== coordinator DOWN: local opt-out still works ==="
+kill "$COORD_PID" 2>/dev/null; wait "$COORD_PID" 2>/dev/null
+if "$ENG" ctl net "$TMP/a.toml" disable mesh2; then
+  echo "  ok: 'ctl net disable' succeeded with coordinator down"
+else
+  echo "  FAIL: toggle command failed when coordinator down"; fail=1
+fi
+wait_for bash -c '! '"$ENG"' ctl status "'"$TMP"'/a.toml" 2>/dev/null | grep -q "'"$C_IP"'"' \
+  && echo "  ok: A dropped C locally while coordinator down" || { echo "  FAIL: C still peered offline"; fail=1; }
+a_has_peer "$B_IP" && echo "  ok: B (mesh) still peered offline" || { echo "  FAIL: B dropped offline"; fail=1; }
+
+[ "$fail" = 0 ] && { echo "RESULT: PASS ✓  peering toggle enforced (both ways online + locally offline)"; exit 0; }
 echo "RESULT: FAIL ✗"; tail -n 20 "$TMP"/*.log; exit 1

@@ -2,7 +2,7 @@
 //! refresh periodically, adding newly-seen co-members. Seed-based meshing (design.md §5);
 //! P2P gossip layers on top later.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,14 +11,20 @@ use anyhow::Context;
 
 use crate::config::Config;
 use crate::control;
-use crate::coord::{self, SeedPeer};
+use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::dns;
 use crate::fw::{Exposed, Firewall, NftBackend};
 use crate::keys;
+use crate::netcfg::LocalNet;
 use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
+
+    // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
+    // the coordinator on every register/refresh; also enforced locally so it works while the
+    // coordinator is unreachable.
+    let localnet = Arc::new(LocalNet::load(&cfg.state_dir));
 
     // Register + verify our own device.
     let (resp, device) = coord::register(
@@ -27,6 +33,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         cfg.device_name(),
         cfg.endpoint,
         cfg.enrollment_key.clone(),
+        localnet.as_refs(),
     )
     .await?;
     keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
@@ -93,7 +100,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         None
     };
 
-    // Control socket: status + device-management + expose for CLI/GUI frontends.
+    // Control socket: status + device-management + expose + network toggle for CLI/GUI frontends.
     let status = control::shared();
     {
         let path = cfg.control_socket_path();
@@ -102,6 +109,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             coordinator: cfg.coordinator.clone(),
             token: token.clone(),
             fw: fw.clone(),
+            localnet: localnet.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&path, ctx).await {
@@ -110,15 +118,15 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Apply initial seeds, then refresh on an interval picking up new co-members.
+    // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
+    // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
     let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
-    let seeds = coord::verified_seeds(&resp)?;
-    dns::update(&zone, &device, &seeds).await;
-    control::update(&status, &device, &seeds).await;
-    if let Some(fw) = &fw {
-        fw.update_peers(peers_by_net(&seeds))?;
-    }
-    apply_seeds(&backend, seeds, &mut peers)?;
+    let mut last_seeds = coord::verified_seeds(&resp)?;
+    let mut last_device = Some(device);
+    apply_state(
+        &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
+    )
+    .await?;
 
     // Long-poll loop: each /refresh blocks at the coordinator until membership changes or the
     // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
@@ -136,6 +144,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 tracing::info!("shutting down");
                 return Ok(());
             }
+            // Local network toggle: re-mesh from the last snapshot at once (works offline), then
+            // loop round to re-refresh so the coordinator picks up the new opt-out set.
+            _ = localnet.wake.notified() => {
+                apply_state(
+                    &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
+                ).await?;
+                continue;
+            }
             r = coord::refresh(
                 &cfg.coordinator,
                 wg_pub,
@@ -143,6 +159,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 cfg.endpoint,
                 cfg.enrollment_key.clone(),
                 since,
+                localnet.as_refs(),
             ) => r,
         };
         match refreshed {
@@ -150,19 +167,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 since = Some(resp.version);
                 match coord::verified_seeds(&resp) {
                     Ok(seeds) => {
-                        match &dev {
-                            Some(dev) => {
-                                dns::update(&zone, dev, &seeds).await;
-                                control::update(&status, dev, &seeds).await;
-                            }
-                            // No grant: we hold no networks anymore (role revoked). Seeds are empty
-                            // → apply_seeds prunes every peer, isolating us until access returns.
-                            None => tracing::warn!("no grant — access revoked; dropping all peers"),
+                        last_seeds = seeds;
+                        // A grant of `None` means we hold no networks (role revoked): keep the last
+                        // device for name context, but the empty seed set prunes every peer.
+                        if dev.is_some() {
+                            last_device = dev;
+                        } else {
+                            tracing::warn!("no grant — access revoked; dropping all peers");
                         }
-                        if let Some(fw) = &fw {
-                            fw.update_peers(peers_by_net(&seeds))?;
-                        }
-                        apply_seeds(&backend, seeds, &mut peers)?;
+                        apply_state(
+                            &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds,
+                            &mut peers,
+                        )
+                        .await?;
                     }
                     Err(e) => tracing::warn!("bad seeds: {e:#}"),
                 }
@@ -174,6 +191,61 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Filter the snapshot through the local opt-out set, then push it to DNS, the control socket, the
+/// firewall, and the WG backend. A peer is kept if it shares at least one *enabled* network with
+/// us; peers whose every shared network is locally disabled are dropped (both here and — once the
+/// opt-out reaches the coordinator — from its seed list too).
+async fn apply_state(
+    backend: &dyn WgBackend,
+    fw: &Option<Arc<Firewall>>,
+    zone: &dns::Zone,
+    status: &control::Shared,
+    localnet: &LocalNet,
+    device: &Option<SelfDevice>,
+    seeds: &[SeedPeer],
+    peers: &mut HashMap<[u8; 32], PeerConfig>,
+) -> anyhow::Result<()> {
+    let disabled = localnet.snapshot();
+    let active: Vec<SeedPeer> = match device {
+        Some(dev) => filter_active(seeds, &disabled, &dev.networks_status),
+        None => Vec::new(),
+    };
+    if let Some(dev) = device {
+        dns::update(zone, dev, &active).await;
+        control::update(status, dev, &active, &disabled).await;
+    }
+    if let Some(fw) = fw {
+        fw.update_peers(peers_by_net(&active))?;
+    }
+    apply_seeds(backend, active, peers)?;
+    Ok(())
+}
+
+/// Keep peers that share at least one network we haven't locally disabled. Shared networks arrive
+/// as names; we resolve them to (guild, role) via our own `networks_status` to compare against the
+/// opt-out set. A peer with no known shared network (older coordinator) is kept.
+fn filter_active(
+    seeds: &[SeedPeer],
+    disabled: &HashSet<(u64, u64)>,
+    networks_status: &[common::api::NetworkStatus],
+) -> Vec<SeedPeer> {
+    let name_to_id: HashMap<&str, (u64, u64)> = networks_status
+        .iter()
+        .map(|n| (n.name.as_str(), (n.guild_id, n.role_id)))
+        .collect();
+    seeds
+        .iter()
+        .filter(|s| {
+            s.networks.is_empty()
+                || s.networks.iter().any(|name| match name_to_id.get(name.as_str()) {
+                    Some(id) => !disabled.contains(id),
+                    None => true,
+                })
+        })
+        .cloned()
+        .collect()
 }
 
 /// Group seed peer IPs by shared-network name → the source sets for `--net`-scoped exposes.

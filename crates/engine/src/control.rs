@@ -6,13 +6,15 @@
 //! Windows named-pipe transport (via `interprocess`) is a later swap — the JSON protocol is
 //! transport-agnostic.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context;
-use common::api::{ManageOp, ManageResp};
+use common::api::{ManageOp, ManageResp, NetworkStatus};
 use common::control::{
-    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, PeerStatus, StatusReport,
+    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, NetworkResp, PeerStatus,
+    StatusReport,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -20,6 +22,7 @@ use tokio::sync::RwLock;
 
 use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::fw::Firewall;
+use crate::netcfg::LocalNet;
 
 /// What the control server needs to serve status + forward mutations to the coordinator.
 #[derive(Clone)]
@@ -30,6 +33,8 @@ pub struct Ctx {
     pub token: Arc<RwLock<Option<String>>>,
     /// The host firewall, if enabled — handles `expose`/`unexpose` locally.
     pub fw: Option<Arc<Firewall>>,
+    /// Local per-network peering opt-out — handles the network toggle locally.
+    pub localnet: Arc<LocalNet>,
 }
 
 /// Shared, live status the daemon updates and the control socket reads.
@@ -39,8 +44,15 @@ pub fn shared() -> Shared {
     Arc::new(RwLock::new(StatusReport::default()))
 }
 
-/// Rebuild the status snapshot from the current device + seed peers.
-pub async fn update(shared: &Shared, device: &SelfDevice, seeds: &[SeedPeer]) {
+/// Rebuild the status snapshot from the current device + seed peers. `disabled` is the local
+/// opt-out set, so the reported per-network `enabled` reflects the local toggle immediately (even
+/// before the coordinator has mirrored it).
+pub async fn update(
+    shared: &Shared,
+    device: &SelfDevice,
+    seeds: &[SeedPeer],
+    disabled: &HashSet<(u64, u64)>,
+) {
     let report = StatusReport {
         device: Some(DeviceStatus {
             wg_ip: device.wg_ip,
@@ -56,9 +68,24 @@ pub async fn update(shared: &Shared, device: &SelfDevice, seeds: &[SeedPeer]) {
                 endpoint: s.endpoint,
             })
             .collect(),
-        networks: device.networks_status.clone(),
+        networks: effective_networks(&device.networks_status, disabled),
     };
     *shared.write().await = report;
+}
+
+/// Apply the local opt-out to a network list: a locally-disabled network reports `enabled = false`
+/// regardless of what the coordinator said.
+fn effective_networks(
+    networks: &[NetworkStatus],
+    disabled: &HashSet<(u64, u64)>,
+) -> Vec<NetworkStatus> {
+    networks
+        .iter()
+        .map(|n| NetworkStatus {
+            enabled: n.enabled && !disabled.contains(&(n.guild_id, n.role_id)),
+            ..n.clone()
+        })
+        .collect()
 }
 
 /// Serve the control socket until the task is dropped. Recreates the socket file on start.
@@ -111,6 +138,38 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
                 }
             }
         },
+        // Local network peering toggle: update the opt-out set (persist + wake the daemon to
+        // re-mesh immediately). The daemon carries it to the coordinator on the next refresh.
+        ControlRequest::SetNetwork { guild_id, role_id, enabled } => {
+            match ctx.localnet.set(guild_id, role_id, enabled) {
+                Ok(_) => {
+                    // `status.networks` already carries effective (locally-overridden) state, so
+                    // only override the row we just toggled; the rest stay as reported.
+                    let networks = ctx
+                        .status
+                        .read()
+                        .await
+                        .networks
+                        .iter()
+                        .map(|n| NetworkStatus {
+                            enabled: if (n.guild_id, n.role_id) == (guild_id, role_id) {
+                                enabled
+                            } else {
+                                n.enabled
+                            },
+                            ..n.clone()
+                        })
+                        .collect();
+                    let message = format!(
+                        "network {guild_id}/{role_id} peering {} (locally; syncs to coordinator on \
+                         next refresh)",
+                        if enabled { "enabled" } else { "disabled" }
+                    );
+                    ControlResponse::Network(NetworkResp { message, networks })
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
@@ -180,6 +239,20 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
 pub async fn client_expose(path: &Path, op: ExposeOp) -> anyhow::Result<ExposeResp> {
     match request(path, &ControlRequest::Expose(op)).await? {
         ControlResponse::Expose(r) => Ok(r),
+        ControlResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Client: toggle this device's peering on a network (role@guild).
+pub async fn client_set_network(
+    path: &Path,
+    guild_id: u64,
+    role_id: u64,
+    enabled: bool,
+) -> anyhow::Result<NetworkResp> {
+    match request(path, &ControlRequest::SetNetwork { guild_id, role_id, enabled }).await? {
+        ControlResponse::Network(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
     }

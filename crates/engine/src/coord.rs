@@ -3,7 +3,7 @@
 use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::{bail, Context};
-use common::api::{RegisterReq, RegisterResp};
+use common::api::{NetworkRef, RegisterReq, RegisterResp};
 use common::attestation::verify_attestation;
 use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
@@ -23,6 +23,7 @@ pub struct SelfDevice {
 }
 
 /// A verified co-member to peer with.
+#[derive(Clone)]
 pub struct SeedPeer {
     pub pubkey: [u8; 32],
     pub ip: Ipv4Addr,
@@ -41,9 +42,10 @@ pub async fn register(
     device_name: String,
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
+    disabled_networks: Vec<NetworkRef>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold).
-    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None).await
+    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None, disabled_networks).await
 }
 
 /// Long-poll `/refresh`: pass the last-seen `version` as `since`; the coordinator holds the
@@ -55,10 +57,12 @@ pub async fn refresh(
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
     since: Option<u64>,
+    disabled_networks: Vec<NetworkRef>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since).await
+    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since, disabled_networks).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn post(
     base_url: &str,
     path: &str,
@@ -67,6 +71,7 @@ async fn post(
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
     since: Option<u64>,
+    disabled_networks: Vec<NetworkRef>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -83,6 +88,7 @@ async fn post(
             enrollment_key,
             endpoint,
             since,
+            disabled_networks,
         })
         .send()
         .await
