@@ -112,7 +112,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     else {
         return Ok(()); // interrupted before login
     };
-    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
+    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
     if let Some(tok) = &resp.device_token {
         keys::save_token(&cfg.state_dir, tok)?;
         *token.write().await = Some(tok.clone());

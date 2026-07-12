@@ -66,6 +66,11 @@ pub struct NetworkRef {
 pub struct RegisterResp {
     /// Ed25519 anchor bytes; the client pins this on first register.
     pub coord_pubkey: [u8; 32],
+    /// Trust-anchor rotation certs (base64 `Signed<RotationCert>`), oldest→newest. A client whose
+    /// pinned anchor differs from `coord_pubkey` walks these to re-pin without manual intervention
+    /// (design.md §9). Empty until the coordinator's key has been rotated at least once.
+    #[serde(default)]
+    pub rotation_chain: Vec<String>,
     /// The caller's own device grant; `None` if they hold no networks.
     #[serde(default)]
     pub grant: Option<Grant>,

@@ -7,6 +7,7 @@ pub mod attestation;
 pub mod control;
 pub mod crypto;
 pub mod netid;
+pub mod rotation;
 pub mod wire;
 
 use std::time::{SystemTime, UNIX_EPOCH};

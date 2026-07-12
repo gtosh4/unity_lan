@@ -368,7 +368,17 @@ cross-OS deferrals).
       (DoS + a "point a member's handshakes at arbitrary ip:port" reflector; no confidentiality break
       — WG auths by pubkey). Now bounded to the network trust boundary (a victim's own co-members).
       Verified: `reflexive_reports_accepted_only_for_comembers` unit test; `nat-test.sh` still green.
-- [ ] Open design items to close before GA: coordinator key rotation (design.md Open Questions).
+- [x] Coordinator key rotation ✅ — signed `prev → new` rotation certs (`RotationCert`, signed by
+      the outgoing key) served as an ordered chain in every `RegisterResp`; a client whose pin is
+      superseded walks the chain (verifying each hop under the key it already trusts) and re-pins to
+      the current anchor without manual steps. Multi-hop, so a client offline across several
+      rotations still catches up; a gap the chain can't bridge is refused (MITM preserved → manual
+      re-pin). Trigger: offline `coordinator rotate-key <config>` admin subcommand + restart.
+      Verified: 5 `walk_chain` unit tests (multi-hop, forged-cert, rollback, no-path);
+      `scripts/rotation-test.sh` end-to-end (TOFU pin → A→B→C re-pin → unrelated-key refusal);
+      `mesh-test.sh` still green.
+- All GA-blocker design items (design.md Open Questions) are now closed: symmetric-NAT policy,
+  pubkey re-key signal, coordinator key rotation. Remaining pre-GA work is packaging/perf, below.
 - [x] Pubkey re-key signal ✅ — a re-keyed device passes its old device token as `supersede`; the
       coordinator authenticates ownership and retires the old pubkey at once (drops the device row,
       evicts presence). A presence reaper (`PRESENCE_TTL_SECS`) backstops it and any unclean drop

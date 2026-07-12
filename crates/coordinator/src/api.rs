@@ -38,6 +38,10 @@ pub struct AppState {
     /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
     /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
     pub reflexive: Arc<Mutex<HashMap<[u8; 32], std::net::SocketAddr>>>,
+    /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
+    /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
+    /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
+    pub rotation_chain: Vec<String>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -316,6 +320,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
 
     Ok(RegisterResp {
         coord_pubkey: st.signer.anchor_bytes(),
+        rotation_chain: st.rotation_chain.clone(),
         grant,
         device_token,
         seeds,

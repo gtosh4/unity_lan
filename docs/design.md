@@ -306,7 +306,13 @@ engine via its control socket (no privilege in the front-ends):
   attestations).
 - The coordinator carries **no traffic and no private keys** — compromise leaks membership
   metadata + lets an attacker forge memberships for that guild, but not decrypt traffic.
-- Trust anchor = the coordinator's Ed25519 pubkey, **pinned on first login**. ❓ key rotation.
+- Trust anchor = the coordinator's Ed25519 pubkey, **pinned on first login**. **Rotation
+  (settled):** each rotation emits a `RotationCert` (`prev → new`) signed by the outgoing key; the
+  coordinator serves the ordered chain in every `RegisterResp`. A client whose pin is superseded
+  walks the chain, verifying each hop under the key it already trusts, and re-pins to the current
+  anchor — no manual step. A gap the chain can't bridge (key lost/compromised, nothing to sign) is
+  refused → manual re-pin (MITM protection preserved). Trigger: offline `coordinator rotate-key`
+  admin subcommand, then restart.
 - Access control = Discord roles, enforced via the peer-set (§4.3). Revocation via TTL /
   tombstone (§4.4).
 - Attestation replay bounded by TTL. **Re-key handling (settled):** a device that rotates its WG
@@ -372,8 +378,9 @@ flowchart TB
 
 - **Endpoint-record spoofing** (§4.2): rate-limit only, or add a coordinator-attested
   Ed25519 identity key per member to sign endpoint updates.
-- **Coordinator key rotation** (§9): rotate the Ed25519 anchor without hand re-pinning on
-  every client.
+- ~~**Coordinator key rotation** (§9): rotate the Ed25519 anchor without hand re-pinning on
+  every client.~~ **Resolved:** signed `prev → new` rotation-cert chain, walked client-side; the
+  `rotate-key` subcommand mints hops (§9).
 - ~~**Pubkey re-key / device change**: a member regenerating keys invalidates cached
   attestations mid-TTL — need a re-key signal.~~ **Resolved:** `supersede` token on re-key retires
   the old pubkey immediately; a presence reaper (`PRESENCE_TTL_SECS`) backstops any unclean drop

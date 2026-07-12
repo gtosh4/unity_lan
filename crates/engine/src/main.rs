@@ -105,7 +105,7 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     // Trust-on-first-use: pin the anchor, reject if it ever changes.
-    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
+    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
 
     match device {
         None => tracing::warn!("registered, but hold no networks (no roles)"),

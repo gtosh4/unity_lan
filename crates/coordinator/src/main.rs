@@ -9,6 +9,7 @@ mod discord;
 mod oauth;
 mod presence;
 mod roles;
+mod rotate;
 mod signer;
 mod store;
 
@@ -33,15 +34,31 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "coordinator.toml".to_string());
+    // `rotate-key [config]` is an offline admin subcommand: rotate the trust anchor and exit. The
+    // operator restarts the coordinator afterward to sign under the new key.
+    let mut args = std::env::args().skip(1);
+    let first = args.next();
+    let (rotate_only, config_path) = match first.as_deref() {
+        Some("rotate-key") => (true, args.next()),
+        other => (false, other.map(String::from)),
+    };
+    let config_path = config_path.unwrap_or_else(|| "coordinator.toml".to_string());
     let cfg = Config::load(std::path::Path::new(&config_path))
         .with_context(|| format!("loading config {config_path}"))?;
 
     let store = Arc::new(Store::open(&cfg.database).await?);
+
+    if rotate_only {
+        let anchor = crate::rotate::rotate_key(&store).await?;
+        let hex: String = anchor.iter().map(|b| format!("{b:02x}")).collect();
+        println!("trust anchor rotated. new anchor: {hex}");
+        println!("restart the coordinator to sign under the new key.");
+        return Ok(());
+    }
+
     let seed = store.load_or_create_seed().await?;
     let signer = Arc::new(Signer::from_seed(&seed));
+    let rotation_chain = store.rotation_chain().await?;
 
     // Seed the network registry from config (test convenience; prod uses slash commands).
     for n in &cfg.network_seeds {
@@ -133,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
         oauth,
         oauth_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        rotation_chain,
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

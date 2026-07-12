@@ -75,6 +75,10 @@ impl Store {
                 pubkey  BLOB    PRIMARY KEY,  -- device pubkey bound to a user via interactive login
                 user_id INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS rotation_certs (
+                idx  INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
+                cert TEXT    NOT NULL                    -- base64 Signed<RotationCert> (prev→new)
+            );
             "#,
         )
         .execute(&self.pool)
@@ -105,6 +109,36 @@ impl Store {
             .await?;
         tracing::info!("generated new signing key");
         Ok(seed)
+    }
+
+    /// Replace the signing seed (trust-anchor rotation). The caller must first append the
+    /// `prev → new` rotation cert via [`Store::append_rotation_cert`] so clients can follow.
+    pub async fn replace_seed(&self, seed: &[u8; 32]) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO signing_key (id, seed) VALUES (1, ?)")
+            .bind(seed.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Append a rotation cert (base64 `Signed<RotationCert>`) to the chain.
+    pub async fn append_rotation_cert(&self, cert_b64: &str) -> anyhow::Result<()> {
+        sqlx::query("INSERT INTO rotation_certs (cert) VALUES (?)")
+            .bind(cert_b64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The rotation-cert chain (base64), oldest→newest, for clients to re-pin across rotations.
+    pub async fn rotation_chain(&self) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query("SELECT cert FROM rotation_certs ORDER BY idx ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("cert"))
+            .collect())
     }
 
     // ---- network registry (managed by admin slash commands; seeded in tests) ----

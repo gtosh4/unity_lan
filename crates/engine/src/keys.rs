@@ -2,8 +2,10 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context};
+use anyhow::bail;
 use common::crypto::{gen_wg_keypair, wg_public_from_private, WgPrivateKey, WgPublicKey};
+use common::rotation::walk_chain;
+use common::wire::Signed;
 
 /// Load the persisted WG keypair, or generate + persist one (0600).
 pub fn load_or_generate_keypair(state_dir: &Path) -> anyhow::Result<(WgPrivateKey, WgPublicKey)> {
@@ -22,19 +24,39 @@ pub fn load_or_generate_keypair(state_dir: &Path) -> anyhow::Result<(WgPrivateKe
     Ok((priv_bytes, wg_public_from_private(&priv_bytes)))
 }
 
-/// Pin the coordinator's anchor on first sight; reject if it later changes.
-pub fn pin_anchor(state_dir: &Path, anchor: &[u8; 32]) -> anyhow::Result<()> {
+/// Pin the coordinator's anchor on first sight. On a later change, accept it only if the rotation
+/// chain proves a signed path from our pinned anchor to the new one (design.md §9); otherwise
+/// refuse (possible MITM, or a key lost past recovery → the operator must have the user re-pin).
+pub fn pin_anchor(
+    state_dir: &Path,
+    anchor: &[u8; 32],
+    rotation_chain: &[String],
+) -> anyhow::Result<()> {
     let path = state_dir.join("anchor.pub");
-    if path.exists() {
-        let existing = std::fs::read(&path).context("reading pinned anchor")?;
-        if existing.as_slice() != anchor.as_slice() {
-            bail!("coordinator trust anchor changed — refusing (possible MITM or key rotation)");
-        }
-    } else {
+    let Ok(existing) = std::fs::read(&path) else {
         std::fs::write(&path, anchor)?;
         tracing::info!("pinned coordinator trust anchor");
+        return Ok(());
+    };
+    let pinned: [u8; 32] = existing
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pinned anchor file is not 32 bytes"))?;
+    if pinned == *anchor {
+        return Ok(());
     }
-    Ok(())
+    // Anchor changed: follow the rotation chain. A malformed cert simply can't advance the walk.
+    let chain: Vec<Signed> = rotation_chain
+        .iter()
+        .filter_map(|c| Signed::from_base64(c).ok())
+        .collect();
+    if walk_chain(pinned, *anchor, &chain) {
+        std::fs::write(&path, anchor)?;
+        tracing::warn!("coordinator anchor rotated — re-pinned via rotation chain");
+        Ok(())
+    } else {
+        bail!("coordinator trust anchor changed with no valid rotation path — refusing (possible MITM)");
+    }
 }
 
 /// Load the persisted device token, if any.
