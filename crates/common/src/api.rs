@@ -38,6 +38,12 @@ pub struct RegisterReq {
     /// have no peers or the backend can't report endpoints.
     #[serde(default)]
     pub observed: Vec<ObservedEndpoint>,
+    /// Re-key supersede: when this device replaces one whose WG key it just rotated, the old
+    /// device's bearer token (still held by the client). The coordinator authenticates ownership
+    /// by it and retires the old pubkey immediately (frees its IP, evicts its presence) instead of
+    /// waiting for the reaper. `None` in the common case.
+    #[serde(default)]
+    pub supersede: Option<String>,
 }
 
 /// "I saw device `pubkey` sending from `endpoint`." A peer's reflexive address as observed across

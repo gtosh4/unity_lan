@@ -309,8 +309,12 @@ engine via its control socket (no privilege in the front-ends):
 - Trust anchor = the coordinator's Ed25519 pubkey, **pinned on first login**. ❓ key rotation.
 - Access control = Discord roles, enforced via the peer-set (§4.3). Revocation via TTL /
   tombstone (§4.4).
-- Attestation replay bounded by TTL; ❓ do we need per-session nonces / pubkey-change
-  handling on re-key.
+- Attestation replay bounded by TTL. **Re-key handling (settled):** a device that rotates its WG
+  key registers under the new pubkey and passes its old device token as `supersede`; the
+  coordinator authenticates ownership by the token and retires the old pubkey at once (removes its
+  device row, evicts its presence). A presence reaper (`PRESENCE_TTL_SECS`) is the backstop — it
+  also clears any device that vanished without a clean drop (crash / network loss). ❓ per-session
+  nonces (replay within TTL) still open.
 - Per-network WireGuard preshared key (PSK) as defense-in-depth: **deferred to post-v1**.
 
 ## 10. Components Summary
@@ -370,8 +374,10 @@ flowchart TB
   Ed25519 identity key per member to sign endpoint updates.
 - **Coordinator key rotation** (§9): rotate the Ed25519 anchor without hand re-pinning on
   every client.
-- **Pubkey re-key / device change**: a member regenerating keys invalidates cached
-  attestations mid-TTL — need a re-key signal.
+- ~~**Pubkey re-key / device change**: a member regenerating keys invalidates cached
+  attestations mid-TTL — need a re-key signal.~~ **Resolved:** `supersede` token on re-key retires
+  the old pubkey immediately; a presence reaper (`PRESENCE_TTL_SECS`) backstops any unclean drop
+  (§9).
 - ~~**Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
   data path?~~ **Resolved:** v1 = best-effort + diagnostics, no relay (§7.2). Relay deferred
   post-GA.

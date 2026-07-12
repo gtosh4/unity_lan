@@ -91,6 +91,7 @@ async fn wait_for_change(st: &AppState, since: u64) {
 /// changed. Re-signs all attestations with the current time (so a rebuild renews them).
 async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp, ApiError> {
     let user_id = resolve_user(st, req).await?;
+    let now = common::now_unix();
     let networks = st.store.all_networks().await.map_err(internal)?;
     let device_name = sanitize_label(&req.device_name);
 
@@ -117,6 +118,32 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
     let mut changed = false; // did recording our presence alter the map? → bump version
+
+    // Re-key supersede (design.md §9): a device regenerating its WG key registers under a *new*
+    // pubkey, orphaning the old one — its presence would linger (never self-evicted, since its
+    // owner now refreshes under the new key) until the reaper ages it out. If the client still
+    // holds the old device token it proves ownership and we retire the old device *now*: drop its
+    // store row (frees the IP + stale DNS name) and evict its presence everywhere. Possession of
+    // the old token is the authorization; we still require it resolve to the same owner so one
+    // member can't retire another's device even with a leaked token.
+    if let Some(old_token) = &req.supersede {
+        if let Some((owner, old_pubkey)) = st
+            .store
+            .device_by_token(old_token)
+            .await
+            .map_err(internal)?
+        {
+            if should_supersede(owner, old_pubkey, user_id, req.wg_pubkey) {
+                st.store
+                    .remove_device(user_id, &old_pubkey)
+                    .await
+                    .map_err(internal)?;
+                for (g, r) in st.presence.networks_of(&old_pubkey) {
+                    changed |= st.presence.evict(g, r, &old_pubkey);
+                }
+            }
+        }
+    }
     let mut network_names: Vec<String> = Vec::new();
     let mut community_name: Option<String> = None;
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
@@ -178,6 +205,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 is_primary,
                 endpoint: req.endpoint,
             },
+            now,
         );
         held.push((net.guild_id, net.role_id));
     }
@@ -489,6 +517,19 @@ fn punch_target(
     }
 }
 
+/// Whether a re-key supersede request should retire the old device. The old device token proved
+/// possession; we retire the pubkey it names iff it belongs to the *same* owner (a leaked token
+/// can't retire another member's device) and it's a *different* key than the one now registering
+/// (a steady-state register carrying its own current token is a no-op, not a self-retire).
+fn should_supersede(
+    token_owner: u64,
+    old_pubkey: [u8; 32],
+    caller_user: u64,
+    caller_pubkey: [u8; 32],
+) -> bool {
+    token_owner == caller_user && old_pubkey != caller_pubkey
+}
+
 /// Peer-observed reflexives the caller may legitimately report: only those for a device the caller
 /// actually meshes with (`comembers` = the caller's co-member seed pubkeys). You can only observe a
 /// peer's reflexive across a tunnel you share, so a report about anyone else is spoofed/irrelevant.
@@ -525,7 +566,7 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_reflexives, punch_target};
+    use super::{accepted_reflexives, punch_target, should_supersede};
     use common::api::ObservedEndpoint;
 
     fn addr(s: &str) -> std::net::SocketAddr {
@@ -556,6 +597,18 @@ mod tests {
         // With no co-members, every report is rejected.
         let none = std::collections::HashSet::new();
         assert_eq!(accepted_reflexives(&observed, &none).count(), 0);
+    }
+
+    #[test]
+    fn supersede_retires_only_same_owner_different_key() {
+        let old = [7u8; 32];
+        let new = [8u8; 32];
+        // Re-key: same owner, token names the old key → retire it.
+        assert!(should_supersede(42, old, 42, new));
+        // Steady state: token names the key now registering → no-op (don't self-retire).
+        assert!(!should_supersede(42, new, 42, new));
+        // Leaked/foreign token: names another owner's device → refuse (can't retire theirs).
+        assert!(!should_supersede(99, old, 42, new));
     }
 
     #[test]

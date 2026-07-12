@@ -384,6 +384,10 @@ async fn register_until_ready(
     status: &control::Shared,
     fw: &Option<Arc<Firewall>>,
 ) -> anyhow::Result<Option<(common::api::RegisterResp, SelfDevice)>> {
+    // Our persisted device token as of startup. If we re-keyed (new wg.key) since it was issued,
+    // it still names the old pubkey → the coordinator retires that stale identity on our first
+    // register. No-op when it names our current key (the steady case) or once the old row is gone.
+    let supersede = keys::load_token(&cfg.state_dir);
     loop {
         let attempt = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
@@ -400,6 +404,7 @@ async fn register_until_ready(
                 endpoint,
                 cfg.enrollment_key.clone(),
                 localnet.as_refs(),
+                supersede.clone(),
             ) => r,
         };
         match attempt {

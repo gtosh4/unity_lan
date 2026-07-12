@@ -368,8 +368,13 @@ cross-OS deferrals).
       (DoS + a "point a member's handshakes at arbitrary ip:port" reflector; no confidentiality break
       — WG auths by pubkey). Now bounded to the network trust boundary (a victim's own co-members).
       Verified: `reflexive_reports_accepted_only_for_comembers` unit test; `nat-test.sh` still green.
-- [ ] Open design items to close before GA: coordinator key rotation, pubkey re-key signal
-      (design.md Open Questions).
+- [ ] Open design items to close before GA: coordinator key rotation (design.md Open Questions).
+- [x] Pubkey re-key signal ✅ — a re-keyed device passes its old device token as `supersede`; the
+      coordinator authenticates ownership and retires the old pubkey at once (drops the device row,
+      evicts presence). A presence reaper (`PRESENCE_TTL_SECS`) backstops it and any unclean drop
+      (crashed/dropped client) that would otherwise linger until coordinator restart. Verified:
+      `should_supersede` + `reap_evicts_only_stale_entries` +
+      `record_refreshes_last_seen_without_reporting_change` unit tests; `mesh-test.sh` still green.
 - [x] Symmetric-NAT policy ✅ — v1 settled as best-effort + `[unreachable: symmetric NAT?]`
       diagnostic, no relay (design.md §7.2). System already degrades cleanly; no code change.
 

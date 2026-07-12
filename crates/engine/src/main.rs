@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.endpoint,
         cfg.enrollment_key.clone(),
         Vec::new(),
+        keys::load_token(&cfg.state_dir),
     )
     .await?;
 
@@ -142,6 +143,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
             cfg.endpoint,
             None,
             Vec::new(),
+            None, // login binds a fresh identity; nothing to supersede
         )
         .await
         {

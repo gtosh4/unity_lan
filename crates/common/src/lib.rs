@@ -18,6 +18,12 @@ pub const ATTESTATION_TTL_SECS: u64 = 30 * 60;
 /// before returning to renew attestations. ≈ TTL/2 so peers' cached seeds never age past TTL.
 pub const LONGPOLL_HOLD_SECS: u64 = ATTESTATION_TTL_SECS / 2;
 
+/// Presence staleness bound (design.md §9): the coordinator reaps a device's presence if it
+/// hasn't refreshed within this window. A live client re-registers at least every long-poll hold,
+/// so 2× that + slack never evicts a healthy peer; it catches crashed/dropped clients and the old
+/// pubkey a re-keyed device abandoned (the reaper backstop to the explicit supersede).
+pub const PRESENCE_TTL_SECS: u64 = LONGPOLL_HOLD_SECS * 2 + 60;
+
 /// Private DNS suffix (design.md §6.3): ICANN-reserved `.internal`, not `.local`.
 pub const DNS_SUFFIX: &str = "internal";
 

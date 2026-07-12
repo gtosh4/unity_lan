@@ -88,6 +88,22 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Presence reaper: evict devices that stopped refreshing (crashed/dropped client, or the old
+    // pubkey a re-keyed device abandoned). Bumps the version so co-members prune the dead peer.
+    {
+        let presence = presence.clone();
+        let version = version.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                if presence.reap(common::now_unix(), common::PRESENCE_TTL_SECS) {
+                    version.send_modify(|v| *v += 1);
+                }
+            }
+        });
+    }
+
     // Interactive-login provider: live Discord OAuth if configured, else a fake one in dev mode.
     let oauth: Option<Arc<dyn crate::oauth::OauthProvider>> = match (cfg.oauth, fake_mode) {
         (Some(o), _) => {

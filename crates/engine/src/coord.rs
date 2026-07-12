@@ -45,9 +45,11 @@ pub async fn register(
     endpoint: Option<SocketAddr>,
     enrollment_key: Option<String>,
     disabled_networks: Vec<NetworkRef>,
+    supersede: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
-    // observed endpoints to report.
+    // observed endpoints to report. `supersede` carries our stored device token so the coordinator
+    // retires a prior pubkey we just re-keyed away from (no-op unless the token names a different key).
     post(
         base_url,
         "register",
@@ -58,6 +60,7 @@ pub async fn register(
         None,
         disabled_networks,
         Vec::new(),
+        supersede,
     )
     .await
 }
@@ -85,6 +88,7 @@ pub async fn refresh(
         since,
         disabled_networks,
         observed,
+        None, // refresh never supersedes: a re-key retires the old key on the initial register
     )
     .await
 }
@@ -100,6 +104,7 @@ async fn post(
     since: Option<u64>,
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
+    supersede: Option<String>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -120,6 +125,7 @@ async fn post(
             since,
             disabled_networks,
             observed,
+            supersede,
         })
         .send()
         .await
