@@ -70,12 +70,17 @@ async fn main() -> anyhow::Result<()> {
         (None, None) => anyhow::bail!("no role source configured; add a [fake] or [discord] block"),
     };
 
-    // Live Discord: run the gateway for `/unitylan network` slash commands.
+    let presence = Arc::new(crate::presence::Presence::default());
+    let version = Arc::new(tokio::sync::watch::channel(0u64).0);
+
+    // Live Discord: run the gateway for `/unitylan` slash commands + role-revocation events.
     if let Some(d) = &discord {
         let token = d.bot_token.clone();
         let store = store.clone();
+        let presence = presence.clone();
+        let version = version.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::commands::run_gateway(token, store).await {
+            if let Err(e) = crate::commands::run_gateway(token, store, presence, version).await {
                 tracing::error!("gateway task ended: {e:#}");
             }
         });
@@ -85,8 +90,8 @@ async fn main() -> anyhow::Result<()> {
         signer,
         roles,
         store,
-        presence: Arc::new(crate::presence::Presence::default()),
-        version: Arc::new(tokio::sync::watch::channel(0u64).0),
+        presence,
+        version,
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

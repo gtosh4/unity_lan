@@ -202,11 +202,14 @@ gets two names/IPs; the networks can't route to each other.
 - **Verify:** ✅ `mesh-test.sh` — after the mesh pings, node B's role is stripped and the
   coordinator restarts; node A prunes peer B (log + `ctl status` no longer lists it).
 
-### M7b — Live gateway revocation (immediate, prod trigger)
-- [ ] Gateway `GUILD_MEMBER_UPDATE/REMOVE` → `presence.evict_user` for lost roles + version bump
-      (instant drop even when the revoked node is offline). Needs the GUILD_MEMBERS intent and
-      presence/version handles wired into the gateway task. No headless test (needs Discord).
-- [ ] Optional persisted tombstones (survive coordinator restart before the live role re-check).
+### M7b — Live gateway revocation (immediate, prod trigger) ✅
+- [x] Gateway `MEMBER_UPDATE`/`MEMBER_REMOVE` (GUILD_MEMBERS intent) → `presence.evict_user` for
+      every network whose role the member no longer holds + version bump → parked long-polls wake
+      and prune instantly, even when the revoked node is offline. `presence`/`version` wired into
+      the gateway task. Verified-by-construction (compiles against twilight's event model); no
+      headless test — needs a live Discord guild.
+- [ ] Optional persisted tombstones (survive coordinator restart before the live role re-check) —
+      deferred: the live role re-check on re-register already blocks a revoked member.
 
 ### M7c — expose / status polish
 - [ ] `expose <port> --net <role>` end to end.

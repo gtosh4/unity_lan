@@ -61,7 +61,6 @@ impl Presence {
 
     /// Drop every device a user has in one network (role revoked at the source). Returns `true` if
     /// anything was removed. Used by the live gateway when a member loses a role.
-    #[allow(dead_code)]
     pub fn evict_user(&self, guild_id: u64, role_id: u64, user_id: u64) -> bool {
         let mut map = self.map.lock().unwrap();
         let before = map.len();

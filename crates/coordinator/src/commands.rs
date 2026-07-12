@@ -3,8 +3,10 @@
 //! Runs a gateway shard, registers guild commands on GUILD_CREATE, and handles interactions
 //! by mutating the network registry (design.md §3.1). Manage-Guild gated.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use tokio::sync::watch;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_model::application::command::CommandType;
 use twilight_model::application::interaction::application_command::{
@@ -21,10 +23,18 @@ use twilight_util::builder::command::{
 };
 use twilight_util::builder::InteractionResponseDataBuilder;
 
+use crate::presence::Presence;
 use crate::store::Store;
 
-/// Connect the gateway and handle `/unitylan` interactions until the process exits.
-pub async fn run_gateway(token: String, store: Arc<Store>) -> anyhow::Result<()> {
+/// Connect the gateway and handle `/unitylan` interactions + role-revocation events until the
+/// process exits. `presence`/`version` let member-role changes evict presence immediately (and
+/// wake parked long-polls), so losing a role cuts a member off without waiting for the TTL.
+pub async fn run_gateway(
+    token: String,
+    store: Arc<Store>,
+    presence: Arc<Presence>,
+    version: Arc<watch::Sender<u64>>,
+) -> anyhow::Result<()> {
     let http = twilight_http::Client::new(token.clone());
     let app_id = http
         .current_user_application()
@@ -34,8 +44,12 @@ pub async fn run_gateway(token: String, store: Arc<Store>) -> anyhow::Result<()>
         .id;
     tracing::info!(%app_id, "gateway: application resolved, slash commands enabled");
 
-    let mut shard = Shard::new(ShardId::ONE, token, Intents::GUILDS);
-    let flags = EventTypeFlags::GUILD_CREATE | EventTypeFlags::INTERACTION_CREATE;
+    // GUILD_MEMBERS (privileged) is required to receive member add/update/remove events.
+    let mut shard = Shard::new(ShardId::ONE, token, Intents::GUILDS | Intents::GUILD_MEMBERS);
+    let flags = EventTypeFlags::GUILD_CREATE
+        | EventTypeFlags::INTERACTION_CREATE
+        | EventTypeFlags::MEMBER_UPDATE
+        | EventTypeFlags::MEMBER_REMOVE;
 
     while let Some(item) = shard.next_event(flags).await {
         let event = match item {
@@ -56,10 +70,49 @@ pub async fn run_gateway(token: String, store: Arc<Store>) -> anyhow::Result<()>
             Event::InteractionCreate(interaction) => {
                 handle_interaction(&http, app_id, &store, interaction.0).await;
             }
+            // A member's roles changed: evict them from any network whose role they no longer hold.
+            Event::MemberUpdate(m) => {
+                let held: HashSet<u64> = m.roles.iter().map(|r| r.get()).collect();
+                revoke(&store, &presence, &version, m.guild_id.get(), m.user.id.get(), &held).await;
+            }
+            // A member left the guild: evict them from every network in it.
+            Event::MemberRemove(m) => {
+                revoke(&store, &presence, &version, m.guild_id.get(), m.user.id.get(), &HashSet::new())
+                    .await;
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Evict a member from every registered network in `guild` whose role is not in `held`, bumping
+/// the membership version if anything changed so parked long-polls wake and prune the peer.
+async fn revoke(
+    store: &Store,
+    presence: &Presence,
+    version: &watch::Sender<u64>,
+    guild_id: u64,
+    user_id: u64,
+    held: &HashSet<u64>,
+) {
+    let nets = match store.networks_in_guild(guild_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("revoke: listing networks: {e:#}");
+            return;
+        }
+    };
+    let mut changed = false;
+    for net in nets {
+        if !held.contains(&net.role_id) {
+            changed |= presence.evict_user(guild_id, net.role_id, user_id);
+        }
+    }
+    if changed {
+        version.send_modify(|v| *v += 1);
+        tracing::info!(guild = guild_id, user = user_id, "revoked: evicted lost-role presence");
+    }
 }
 
 fn commands() -> Vec<twilight_model::application::command::Command> {
