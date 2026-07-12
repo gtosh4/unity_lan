@@ -191,12 +191,41 @@ protocol itself is the same one `mesh-test.sh` exercises via the `ctl` CLI.
 ---
 
 ## M5 — NAT traversal
-**Goal:** reach members behind NAT.
-- [ ] `nat.rs`: UPnP-IGD port mapping; publish mapped endpoint.
-- [ ] Mesh-relayed hole punch: relay peer passes endpoints + synchronized punch signal.
-- [ ] Diagnostics for symmetric-NAT-both (best-effort, clear error).
+**Goal:** reach members behind NAT. Split by reachability class: *reachable* (UPnP / forward →
+dialable), *cone-NAT'd* (hole punch), *symmetric-both* (diagnostics only, §7.2 non-goal).
+Punch architecture (settled): **coordinator-mediated + peer-observed reflexive** — reuses the
+long-poll/presence/endpoint cache already built; the simultaneous long-poll wake *is* the punch
+sync signal; reflexive endpoint is read from a reachable peer's view of us (no STUN server — the
+WG socket is owned by boringtun, so a side-socket STUN is impossible). Corrects design §3.1's
+"reflect the refresh source" note: refresh is HTTP/TCP, a different NAT mapping than the WG UDP
+port — useless for punch.
 
-**Verify:** two NAT'd hosts (no port-forward) mesh via a mutually-connected relay peer.
+### M5.1 — UPnP + endpoint autodiscovery ✅
+- [x] `nat.rs`: UPnP-IGD (`igd-next`) maps the WG UDP port, learns external `ip:port`, renews the
+      lease at half-life. Best-effort: no gateway / refusal → advertise no endpoint (be dialed).
+- [x] Endpoint precedence in the daemon: explicit `endpoint` (manual forward) > UPnP-mapped > none;
+      the result rides every register/refresh (existing plumbing). `upnp = true` default, skipped
+      when `endpoint` is set.
+- **Verify:** ✅ `mesh-test.sh` green (explicit-endpoint path unchanged; UPnP skipped when set).
+      Live UPnP path needs a real IGD router (or the `mock-igd` crate) — manual/opportunistic.
+
+### M5.2 — Coordinator-mediated hole punch (cone NAT)
+- [ ] ⚠️ **Spike (gate)**: confirm defguard `read_interface_data()` exposes each peer's last-seen
+      source endpoint. If not, peer-observed reflexive is blocked — stop and rethink.
+- [ ] `WgBackend::peer_endpoints()`: read observed endpoints; the daemon reports its reflexive
+      (a reachable peer's view of us) as `endpoint` when config/UPnP gave none.
+- [ ] API: `Seed.punch: Option<SocketAddr>` — coordinator emits it for a peer pair that both lack
+      a dialable endpoint but share a network and both have a reflexive on file.
+- [ ] Daemon: a seed carrying `punch` → set that peer's endpoint + send a WG handshake init; the
+      long-poll simultaneous wake synchronizes both sides.
+- **Verify:** 3-netns test — A reachable, B & C behind simulated cone NAT; B↔C form a direct
+      tunnel + ping (extend `mesh-test.sh` harness).
+
+### M5.3 — Symmetric-NAT diagnostics
+- [ ] Detect per-peer reflexive port drift → symmetric flag.
+- [ ] `StatusReport` NAT state field; `ctl status` + GUI surface "unreachable: symmetric NAT both
+      ends." No data-plane relay in v1 (§7.2).
+- **Verify:** drift-detector unit test + GUI reducer test for the status string.
 
 ---
 

@@ -84,9 +84,26 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
+    // Endpoint we advertise to peers: an explicit config value wins (manual forward / known
+    // public addr); otherwise try UPnP-IGD to map our port; otherwise none (rely on being dialed).
+    let endpoint = match cfg.endpoint {
+        Some(e) => Some(e),
+        None if cfg.upnp => match crate::nat::map_port(cfg.listen_port).await {
+            Ok(ep) => {
+                tracing::info!(endpoint = %ep, "UPnP: mapped external endpoint");
+                Some(ep)
+            }
+            Err(e) => {
+                tracing::info!("UPnP unavailable ({e:#}); advertising no endpoint");
+                None
+            }
+        },
+        None => None,
+    };
+
     // Register, waiting (serving control) until we're logged in and hold a network to mesh.
     let Some((resp, device)) =
-        register_until_ready(&cfg, wg_pub, &localnet, &status, &fw).await?
+        register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw).await?
     else {
         return Ok(()); // interrupted before login
     };
@@ -150,7 +167,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 &cfg.coordinator,
                 wg_pub,
                 cfg.device_name(),
-                cfg.endpoint,
+                endpoint,
                 cfg.enrollment_key.clone(),
                 since,
                 localnet.as_refs(),
@@ -246,6 +263,7 @@ fn filter_active(
 /// network to mesh. Sets `needs_login` so a frontend can start OAuth; returns `None` on ctrl_c.
 async fn register_until_ready(
     cfg: &Config,
+    endpoint: Option<SocketAddr>,
     wg_pub: [u8; 32],
     localnet: &LocalNet,
     status: &control::Shared,
@@ -264,7 +282,7 @@ async fn register_until_ready(
                 &cfg.coordinator,
                 wg_pub,
                 cfg.device_name(),
-                cfg.endpoint,
+                endpoint,
                 cfg.enrollment_key.clone(),
                 localnet.as_refs(),
             ) => r,

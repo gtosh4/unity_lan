@@ -8,6 +8,7 @@ mod daemon;
 mod dns;
 mod fw;
 mod keys;
+mod nat;
 mod netcfg;
 mod wg;
 

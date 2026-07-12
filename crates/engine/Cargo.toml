@@ -21,6 +21,7 @@ toml.workspace = true
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 defguard_wireguard_rs = "0.10.0"
+igd-next = { version = "0.17", features = ["aio_tokio"] }
 interprocess = "2.4.2"
 base64 = "0.22"
 hickory-proto = "0.26.1"

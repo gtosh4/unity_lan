@@ -25,8 +25,13 @@ pub struct Config {
     /// WireGuard UDP listen port.
     #[serde(default = "default_port")]
     pub listen_port: u16,
-    /// Reachable endpoint reported to the coordinator (UPnP-mapped in production).
+    /// Reachable endpoint reported to the coordinator. If set, it is advertised as-is (manual
+    /// port-forward / known public address) and UPnP is skipped.
     pub endpoint: Option<SocketAddr>,
+    /// Auto-map the WireGuard port via UPnP-IGD and advertise the mapped endpoint when `endpoint`
+    /// is not set. On by default; best-effort (no gateway → no endpoint, we rely on being dialed).
+    #[serde(default = "default_true")]
+    pub upnp: bool,
     /// How often to refresh attestations + seeds from the coordinator.
     #[serde(default = "default_refresh")]
     pub refresh_secs: u64,
