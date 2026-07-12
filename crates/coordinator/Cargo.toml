@@ -21,6 +21,7 @@ toml.workspace = true
 
 axum = "0.8"
 ipnet = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
 twilight-http = "0.17.1"
 twilight-model = "0.17.1"

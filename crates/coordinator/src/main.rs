@@ -6,6 +6,7 @@ mod api;
 mod commands;
 mod config;
 mod discord;
+mod oauth;
 mod presence;
 mod roles;
 mod signer;
@@ -57,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
     let fake = cfg.fake;
     let discord = cfg.discord;
+    let fake_mode = fake.is_some();
     let roles: Arc<dyn RoleSource> = match (fake, &discord) {
         (Some(_), Some(_)) => anyhow::bail!("config has both [fake] and [discord]; pick one"),
         (Some(fk), None) => {
@@ -86,12 +88,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Interactive-login provider: live Discord OAuth if configured, else a fake one in dev mode.
+    let oauth: Option<Arc<dyn crate::oauth::OauthProvider>> = match (cfg.oauth, fake_mode) {
+        (Some(o), _) => {
+            tracing::info!("interactive login: Discord OAuth");
+            Some(Arc::new(crate::oauth::DiscordOauth::new(
+                o.client_id,
+                o.client_secret,
+                o.redirect_uri,
+            )))
+        }
+        (None, true) => {
+            tracing::warn!("interactive login: FAKE oauth (offline dev mode)");
+            Some(Arc::new(crate::oauth::FakeOauth::new(format!(
+                "http://{}/oauth/callback",
+                cfg.bind
+            ))))
+        }
+        (None, false) => None,
+    };
+
     let state = AppState {
         signer,
         roles,
         store,
         presence,
         version,
+        oauth,
+        oauth_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

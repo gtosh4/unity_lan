@@ -74,6 +74,19 @@ pub struct NetworkStatus {
     pub enabled: bool,
 }
 
+/// `POST /oauth/start`: begin interactive Discord login for this device's pubkey.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OauthStartReq {
+    pub wg_pubkey: [u8; 32],
+}
+
+/// The authorize URL to open in a browser, plus the opaque `state` binding this login attempt.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OauthStartResp {
+    pub authorize_url: String,
+    pub state: String,
+}
+
 /// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ManageReq {

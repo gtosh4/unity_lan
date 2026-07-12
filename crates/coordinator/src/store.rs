@@ -71,6 +71,10 @@ impl Store {
                 user_id INTEGER PRIMARY KEY,  -- one primary per user (the <user>.<community> alias)
                 pubkey  BLOB    NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS oauth_authorized (
+                pubkey  BLOB    PRIMARY KEY,  -- device pubkey bound to a user via interactive login
+                user_id INTEGER NOT NULL
+            );
             "#,
         )
         .execute(&self.pool)
@@ -157,6 +161,27 @@ impl Store {
                 name: r.get::<String, _>("name"),
             })
             .collect())
+    }
+
+    // ---- interactive login (OAuth) device binding ----
+
+    /// Bind a device pubkey to a user id (set by the OAuth callback). Idempotent.
+    pub async fn bind_oauth(&self, pubkey: &[u8; 32], user_id: u64) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO oauth_authorized (pubkey, user_id) VALUES (?, ?)")
+            .bind(pubkey.as_slice())
+            .bind(user_id as i64)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// The user a device pubkey was bound to via interactive login, if any.
+    pub async fn oauth_user(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<u64>> {
+        let row = sqlx::query("SELECT user_id FROM oauth_authorized WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<i64, _>("user_id") as u64))
     }
 
     // ---- community slug (the <community> DNS label; admin-set, defaults to guild name) ----

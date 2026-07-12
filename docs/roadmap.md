@@ -36,9 +36,10 @@ verified `wg_ip` + hostname obtained from the coordinator.
 - [ ] `store.rs`: SQLite via sqlx — `allocations`, `signing_key`, `tombstones`; migrations.
 - [ ] `signer.rs`: load/generate Ed25519 key; `sign_attestation(user, role, …, ttl=30m)`.
 - [ ] `discord.rs`: twilight-http `GET member` → roles + nick.
-- [ ] `oauth.rs`: Discord OAuth2 auth-code + PKCE; exchange code → `user_id` (`identify`).
+- [x] `oauth.rs`: Discord OAuth2 auth-code; exchange code → `user_id` (`identify`). Confidential
+      server-mediated flow (PKCE deferred). `FakeOauth` for offline tests.
 - [ ] `alloc.rs`: allocate stable `wg_ip` per `(guild,role,user)`; persist; collision-resolve.
-- [ ] `api.rs` (axum): `GET /oauth/start`, `GET /oauth/callback`, `POST /register`.
+- [x] `api.rs` (axum): `POST /oauth/start`, `GET /oauth/callback`, `POST /register`.
 - [ ] `main.rs`: load config, open store, serve.
 
 ### M1.3 `engine` (headless)
@@ -168,8 +169,16 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       (guild/role/name/enabled). Verified: `scripts/net-toggle-test.sh` (3 nodes/2 nets — online:
       A disables mesh2 → drops C both ways, keeps B, re-enable → C returns; **offline**:
       coordinator killed → `ctl net disable` still succeeds and A drops C locally) + GUI unit tests.
-- [ ] Login (OAuth), tray — deferred: the engine doesn't yet back these over the socket
-      (post-M5).
+- [x] **Interactive login (OAuth)** — `unitylan login <config>` runs Discord OAuth2 (auth-code):
+      the coordinator is a confidential client (holds the secret, exchanges server-side), so the
+      client only opens the authorize URL and polls register. `/oauth/start` (mint state → pubkey)
+      + `/oauth/callback` (exchange code → bind pubkey→user in `oauth_authorized`); `resolve_user`
+      accepts an OAuth-bound device. A `FakeOauth` provider (parses `user:<id>`) backs offline
+      tests. PKCE deferred (unnecessary for a confidential server-mediated flow). Verified:
+      `scripts/oauth-test.sh` — no-key register refused → login → fake callback binds → register
+      succeeds. **GUI login button still deferred** (needs a control-socket op to start login +
+      surface the URL from the daemon).
+- [ ] Tray — deferred: the engine doesn't yet back it over the socket (post-M5).
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +
 wgpu/tiny-skia renderer + timer subscription + async socket task boot clean). The socket

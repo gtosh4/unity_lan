@@ -125,6 +125,28 @@ async fn post(
     Ok((resp, device))
 }
 
+/// Begin interactive login: ask the coordinator for the Discord authorize URL to open. The
+/// coordinator binds our pubkey to the user when the browser hits its callback; we then just
+/// register (no enrollment key needed).
+pub async fn oauth_start(
+    base_url: &str,
+    wg_pubkey: WgPublicKey,
+) -> anyhow::Result<common::api::OauthStartResp> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/oauth/start"))
+        .json(&common::api::OauthStartReq { wg_pubkey })
+        .send()
+        .await
+        .context("sending /oauth/start")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("coordinator rejected oauth/start: {status}: {body}");
+    }
+    resp.json().await.context("decoding OauthStartResp")
+}
+
 /// Send an owner-scoped device management op, authenticated by the device token.
 pub async fn manage(
     base_url: &str,

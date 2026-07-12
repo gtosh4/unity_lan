@@ -18,6 +18,8 @@ pub struct Config {
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).
     pub discord: Option<DiscordConfig>,
+    /// Discord OAuth2 app for interactive login. Absent → OAuth disabled (or fake, in `[fake]`).
+    pub oauth: Option<OauthConfig>,
     /// Networks to seed into the registry on startup (test convenience).
     #[serde(default, rename = "network")]
     pub network_seeds: Vec<NetworkSeed>,
@@ -44,6 +46,14 @@ pub struct CommunitySeed {
 #[derive(Debug, Deserialize)]
 pub struct DiscordConfig {
     pub bot_token: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct OauthConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    /// The `/oauth/callback` URL registered with the Discord app (this coordinator's public URL).
+    pub redirect_uri: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

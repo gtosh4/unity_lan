@@ -2,19 +2,20 @@
 //! caller shares with the bot, for every registered network whose role they hold.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
-    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, RegisterReq, RegisterResp,
-    Seed,
+    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthStartReq,
+    OauthStartResp, RegisterReq, RegisterResp, Seed,
 };
 use common::netid::sanitize_label;
 
+use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
 use crate::signer::Signer;
@@ -29,6 +30,10 @@ pub struct AppState {
     /// Monotonic membership version (the long-poll ETag). Bumped whenever presence changes;
     /// parked `/refresh` handlers subscribe and wake on any bump. `watch` has no lost wakeups.
     pub version: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Interactive-login provider (Discord OAuth, or a fake in tests); `None` disables login.
+    pub oauth: Option<Arc<dyn OauthProvider>>,
+    /// In-flight login attempts: `state` → the device pubkey to bind when the callback arrives.
+    pub oauth_sessions: Arc<Mutex<HashMap<String, [u8; 32]>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -38,6 +43,9 @@ pub fn router(state: AppState) -> Router {
         .route("/register", post(register))
         .route("/refresh", post(register))
         .route("/devices/manage", post(manage))
+        // interactive login: start returns the authorize URL; callback binds pubkey → user.
+        .route("/oauth/start", post(oauth_start))
+        .route("/oauth/callback", get(oauth_callback))
         .with_state(state)
 }
 
@@ -332,22 +340,72 @@ async fn community_of(st: &AppState, guild_id: u64) -> anyhow::Result<String> {
     }
 }
 
-/// Resolve the caller's user id: an already-enrolled device is known by its pubkey; a new device
-/// must present a valid one-time enrollment key (which binds its pubkey to the owner on use).
+/// Resolve the caller's user id: an already-enrolled device is known by its pubkey; a device bound
+/// via interactive login (OAuth) is known too; otherwise a new device must present a valid
+/// one-time enrollment key (which binds its pubkey to the owner on use).
 async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError> {
     if let Some(uid) = st.store.device_owner(&req.wg_pubkey).await.map_err(internal)? {
+        return Ok(uid);
+    }
+    if let Some(uid) = st.store.oauth_user(&req.wg_pubkey).await.map_err(internal)? {
         return Ok(uid);
     }
     let Some(key) = req.enrollment_key.as_deref() else {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
-            "device not enrolled; provide an enrollment_key",
+            "device not enrolled; log in (oauth) or provide an enrollment_key",
         ));
     };
     st.store
         .consume_enrollment_key(key, &req.wg_pubkey, common::now_unix())
         .await
         .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))
+}
+
+/// `POST /oauth/start`: mint a login `state` for this device pubkey and return the authorize URL.
+async fn oauth_start(
+    State(st): State<AppState>,
+    Json(req): Json<OauthStartReq>,
+) -> Result<Json<OauthStartResp>, ApiError> {
+    let oauth = st
+        .oauth
+        .as_ref()
+        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "interactive login not configured"))?;
+    let state = common::crypto::gen_enrollment_key();
+    st.oauth_sessions
+        .lock()
+        .unwrap()
+        .insert(state.clone(), req.wg_pubkey);
+    let authorize_url = oauth.authorize_url(&state);
+    Ok(Json(OauthStartResp { authorize_url, state }))
+}
+
+#[derive(serde::Deserialize)]
+struct CallbackQuery {
+    code: String,
+    state: String,
+}
+
+/// `GET /oauth/callback`: Discord redirects here with `code`+`state`. Exchange the code for the
+/// user id and bind it to the pubkey we stashed under `state`, so the client's next register works.
+async fn oauth_callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
+    let Some(oauth) = st.oauth.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "interactive login not configured").into_response();
+    };
+    let Some(pubkey) = st.oauth_sessions.lock().unwrap().remove(&q.state) else {
+        return (StatusCode::BAD_REQUEST, "unknown or expired login state").into_response();
+    };
+    match oauth.exchange(&q.code).await {
+        Ok(user_id) => match st.store.bind_oauth(&pubkey, user_id).await {
+            Ok(()) => Html(
+                "<h1>Logged in ✓</h1><p>Your device is authorized. Return to UnityLAN; you can \
+                 close this tab.</p>",
+            )
+            .into_response(),
+            Err(e) => internal(e).into_response(),
+        },
+        Err(e) => (StatusCode::UNAUTHORIZED, format!("login failed: {e:#}")).into_response(),
+    }
 }
 
 fn internal(e: anyhow::Error) -> ApiError {
