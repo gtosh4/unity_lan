@@ -37,6 +37,11 @@ pub struct Config {
     pub refresh_secs: u64,
     /// If set, run the `.internal` DNS resolver on this UDP address (e.g. "127.0.0.1:53").
     pub dns_bind: Option<SocketAddr>,
+    /// Point the OS resolver at our `.internal` server (systemd-resolved per-link routing domain).
+    /// On by default; acts only when `dns_bind` is set. Best-effort — needs privilege, and a
+    /// failure only means `.internal` names don't auto-resolve. Set `false` to manage DNS yourself.
+    #[serde(default = "default_true")]
+    pub resolver_hook: bool,
     /// Control socket path for CLI/GUI frontends. Defaults to `<state_dir>/control.sock`.
     pub control_socket: Option<PathBuf>,
     /// Enforce the host firewall (default-deny inbound on the wg iface + explicit `expose`).

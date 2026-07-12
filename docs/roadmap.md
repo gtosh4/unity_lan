@@ -252,13 +252,28 @@ port — useless for punch.
 ---
 
 ## M6 — DNS + multi-homing
-**Goal:** `*.internal` names resolve; overlapping networks work on one interface.
-- [ ] `dns.rs`: hickory-server `.internal` zone from verified attestations.
-- [ ] Per-OS hookup: resolved/resolv.conf · Windows NRPT/netsh · macOS resolver dir; hosts fallback.
-- [ ] One interface, per-role `/32`s; verify cross-network isolation.
+**Goal:** `*.internal` names resolve on the OS; overlapping networks work on one interface.
+- [x] `dns.rs`: `.internal` authoritative resolver from verified attestations — built in M-device ch5.
+- [x] **Per-OS resolver hookup (Linux)** ✅ — `resolver.rs`: `ResolverHook` trait + systemd-resolved
+      backend (`ResolvectlHook`). On iface-up the daemon points resolved at our resolver via a
+      **per-link `~internal` routing domain** (`resolvectl dns <iface> <server>` + `domain <iface>
+      ~internal`), so only `*.internal` lookups go to us — global DNS untouched. Reverted on clean
+      shutdown (`resolvectl revert`); also clears with the link. `resolver_hook = true` default,
+      best-effort (needs privilege — the daemon already runs privileged; a failure only means names
+      don't auto-resolve). The resolver binds loopback (`dns_bind`) and resolved routes to it because
+      the wg iface is operational (carries its `/32`) — resolved ignores per-link DNS on a
+      non-operational link. Windows NRPT + macOS `/etc/resolver` are future backends behind the trait.
+- [x] **Multi-homing / cross-network isolation** ✅ — obsolete under **Model B** (design §6): one
+      device IP in a flat `100.64/10`, networks are pure ACL. Isolation is already enforced by
+      seed-scoping (you only peer co-members sharing ≥1 network) + the firewall's `--net` source
+      scoping (M7c-2), not per-role `/32`s.
 
-**Verify:** `ping alice.minecraft.myguild.internal` resolves + reaches; a member in two roles
-gets two names/IPs; the networks can't route to each other.
+**Verify:** ✅ 2 `resolver.rs` unit tests (resolvectl arg construction); `scripts/resolver-hook-test.sh`
+(live, root) — on this host's real systemd-resolved, scoped to a throwaway link: the daemon's actual
+`ResolvectlHook` routes `.internal` and `resolvectl query host-a.alice.lan.internal → 100.64.0.9`,
+then reverts. `mesh-test.sh` still green (in-netns the hook warns best-effort — no resolved there).
+Per-OS hookup for Windows/macOS deferred (untestable here; consistent with the M2 spike / M7c
+cross-OS deferrals).
 
 ---
 

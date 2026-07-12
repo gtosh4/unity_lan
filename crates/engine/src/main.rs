@@ -10,6 +10,7 @@ mod fw;
 mod keys;
 mod nat;
 mod netcfg;
+mod resolver;
 mod wg;
 
 use anyhow::Context;
@@ -37,6 +38,27 @@ async fn main() -> anyhow::Result<()> {
     }
     if arg1 == "wg-node" {
         return wg_node();
+    }
+    if arg1 == "dns-serve" {
+        // Dev/test: serve a single `<name> <ip>` on `<bind>` from the `.internal` resolver.
+        let bind: std::net::SocketAddr = std::env::args().nth(2).unwrap().parse()?;
+        let name = std::env::args().nth(3).unwrap();
+        let ip: std::net::Ipv4Addr = std::env::args().nth(4).unwrap().parse()?;
+        let zone = dns::empty_zone();
+        zone.write().await.insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
+        return dns::serve(bind, zone).await;
+    }
+    if arg1 == "resolver-install" {
+        // Dev/test: drive the real ResolverHook. `resolver-install <iface> <server>`.
+        use resolver::ResolverHook;
+        let iface = std::env::args().nth(2).unwrap();
+        let server: std::net::SocketAddr = std::env::args().nth(3).unwrap().parse()?;
+        return resolver::ResolvectlHook.install(&iface, server);
+    }
+    if arg1 == "resolver-revert" {
+        use resolver::ResolverHook;
+        let iface = std::env::args().nth(2).unwrap();
+        return resolver::ResolvectlHook.revert(&iface);
     }
     if arg1 == "run" {
         let cfg_path = std::env::args()

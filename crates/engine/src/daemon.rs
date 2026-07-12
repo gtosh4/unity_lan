@@ -16,6 +16,7 @@ use crate::dns;
 use crate::fw::{Exposed, Firewall, NftBackend};
 use crate::keys;
 use crate::netcfg::LocalNet;
+use crate::resolver::{self, ResolverHook};
 use crate::wg::{IfaceConfig, PeerConfig, UserspaceBackend, WgBackend};
 
 pub async fn run(cfg: Config) -> anyhow::Result<()> {
@@ -129,6 +130,19 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     })?;
     tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
 
+    // Point the OS resolver at our `.internal` server on this link (best-effort). Reverted on
+    // clean shutdown; also clears with the link if we exit uncleanly.
+    let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
+        (true, Some(bind)) => {
+            let hook = resolver::ResolvectlHook;
+            if let Err(e) = hook.install(&cfg.iface, bind) {
+                tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
+            }
+            Some(Box::new(hook))
+        }
+        _ => None,
+    };
+
     // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
     // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
     let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
@@ -211,6 +225,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 if let Some(fw) = &fw {
                     if let Err(e) = fw.reset() {
                         tracing::warn!("firewall reset on shutdown: {e:#}");
+                    }
+                }
+                if let Some(r) = &resolver {
+                    if let Err(e) = r.revert(&cfg.iface) {
+                        tracing::warn!("resolver revert on shutdown: {e:#}");
                     }
                 }
                 tracing::info!("shutting down");
