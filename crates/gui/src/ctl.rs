@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use common::api::{ManageOp, ManageResp};
 use common::control::{
-    ControlRequest, ControlResponse, ExposeOp, ExposeResp, NetworkResp, StatusReport,
+    ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, NetworkResp, StatusReport,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -56,6 +56,14 @@ pub async fn set_network(
 ) -> Result<NetworkResp, String> {
     match request(path, ControlRequest::SetNetwork { guild_id, role_id, enabled }).await? {
         ControlResponse::Network(r) => Ok(r),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+pub async fn login(path: PathBuf) -> Result<LoginResp, String> {
+    match request(path, ControlRequest::Login).await? {
+        ControlResponse::Login(r) => Ok(r),
         ControlResponse::Error(e) => Err(e),
         _ => Err("unexpected response".into()),
     }

@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
-use common::control::{ExposeOp, ExposeResp, ExposedPort, NetworkResp, Proto, StatusReport};
+use common::control::{
+    ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
+};
 use iced::widget::{button, column, row, scrollable, text, text_input, Column};
 use iced::{Element, Length, Subscription, Task};
 
@@ -40,6 +42,8 @@ struct App {
     rename_input: String,
     expose_port_input: String,
     expose_net_input: String,
+    /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
+    login_url: Option<String>,
     error: Option<String>,
 }
 
@@ -63,6 +67,9 @@ enum Message {
     /// Toggle this device's peering on a network (role@guild).
     ToggleNetwork { guild_id: u64, role_id: u64, enabled: bool },
     NetworkToggled(Result<NetworkResp, String>),
+    /// Start interactive login; the daemon returns the Discord authorize URL to open.
+    Login,
+    LoginStarted(Result<LoginResp, String>),
 }
 
 impl App {
@@ -75,6 +82,7 @@ impl App {
             rename_input: String::new(),
             expose_port_input: String::new(),
             expose_net_input: String::new(),
+            login_url: None,
             error: None,
         }
     }
@@ -148,6 +156,14 @@ impl App {
                 return self.reload(); // pull the updated networks + peers immediately
             }
             Message::NetworkToggled(Err(e)) => self.error = Some(e),
+            Message::Login => {
+                return Task::perform(ctl::login(self.socket.clone()), Message::LoginStarted)
+            }
+            Message::LoginStarted(Ok(r)) => {
+                self.login_url = Some(r.authorize_url);
+                self.error = None;
+            }
+            Message::LoginStarted(Err(e)) => self.error = Some(e),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -180,14 +196,15 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let body = column![
-            self.device_section(),
-            self.networks_section(),
-            self.peers_section(),
-            self.devices_section(),
-            self.exposed_section(),
-        ]
-        .spacing(20)
+        let needs_login = self.status.as_ref().is_some_and(|s| s.needs_login);
+        let body = Column::new()
+            .spacing(20)
+            .push_maybe(needs_login.then(|| self.login_section()))
+            .push(self.device_section())
+            .push(self.networks_section())
+            .push(self.peers_section())
+            .push(self.devices_section())
+            .push(self.exposed_section())
             .push_maybe(
                 self.error
                     .as_ref()
@@ -261,6 +278,20 @@ impl App {
         column![text("devices").size(18), list, rename]
             .spacing(8)
             .into()
+    }
+
+    fn login_section(&self) -> Element<'_, Message> {
+        let mut col = column![
+            text("Not logged in").size(18),
+            button(text("Log in with Discord")).on_press(Message::Login),
+        ]
+        .spacing(8);
+        if let Some(url) = &self.login_url {
+            col = col
+                .push(text("Open this URL in your browser to finish:").size(14))
+                .push(text(url.clone()).size(13));
+        }
+        col.into()
     }
 
     fn networks_section(&self) -> Element<'_, Message> {
@@ -355,6 +386,7 @@ mod tests {
                 endpoint: None,
             }],
             networks: vec![],
+            needs_login: false,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -438,11 +470,22 @@ mod tests {
                 name: "mesh2".into(),
                 enabled: false,
             }],
+            needs_login: false,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
         assert_eq!(nets.len(), 1);
         assert!(!nets[0].enabled);
+    }
+
+    #[test]
+    fn login_started_shows_authorize_url() {
+        let mut a = app();
+        let _ = a.update(Message::LoginStarted(Ok(LoginResp {
+            authorize_url: "https://discord.com/oauth2/authorize?x".into(),
+        })));
+        assert_eq!(a.login_url.as_deref(), Some("https://discord.com/oauth2/authorize?x"));
+        assert!(a.error.is_none());
     }
 
     #[test]

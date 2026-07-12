@@ -174,10 +174,14 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       client only opens the authorize URL and polls register. `/oauth/start` (mint state → pubkey)
       + `/oauth/callback` (exchange code → bind pubkey→user in `oauth_authorized`); `resolve_user`
       accepts an OAuth-bound device. A `FakeOauth` provider (parses `user:<id>`) backs offline
-      tests. PKCE deferred (unnecessary for a confidential server-mediated flow). Verified:
-      `scripts/oauth-test.sh` — no-key register refused → login → fake callback binds → register
-      succeeds. **GUI login button still deferred** (needs a control-socket op to start login +
-      surface the URL from the daemon).
+      tests. PKCE deferred (unnecessary for a confidential server-mediated flow). Two frontends:
+      the headless/direct `unitylan login`, and the **GUI/daemon-mediated** path — the daemon now
+      serves the control socket *before* enrollment (reporting `needs_login` instead of bailing),
+      the GUI shows a **Log in with Discord** button (`ControlRequest::Login` → authorize URL), and
+      the daemon's register loop binds the device + brings up the mesh once the browser completes.
+      Verified: `scripts/oauth-test.sh` (direct: no-key refused → login → fake callback → register
+      succeeds) and `scripts/gui-login-test.sh` (daemon-mediated: needs_login → `ctl login` → fake
+      callback → daemon meshes).
 - [ ] Tray — deferred: the engine doesn't yet back it over the socket (post-M5).
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +

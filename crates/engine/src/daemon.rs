@@ -26,46 +26,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // coordinator is unreachable.
     let localnet = Arc::new(LocalNet::load(&cfg.state_dir));
 
-    // Register + verify our own device.
-    let (resp, device) = coord::register(
-        &cfg.coordinator,
-        wg_pub,
-        cfg.device_name(),
-        cfg.endpoint,
-        cfg.enrollment_key.clone(),
-        localnet.as_refs(),
-    )
-    .await?;
-    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
-
-    // Persist the device token (for control mutations) and keep it live for the control socket.
     let token = std::sync::Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
-    if let Some(tok) = &resp.device_token {
-        keys::save_token(&cfg.state_dir, tok)?;
-        *token.write().await = Some(tok.clone());
-    }
 
-    let Some(device) = device else {
-        anyhow::bail!("registered but hold no networks — nothing to mesh");
-    };
-    tracing::info!(
-        "{} -> {}{}  (networks: {})",
-        device.wg_ip,
-        device.hostname,
-        if device.is_primary { " [primary]" } else { "" },
-        device.networks.join(", ")
-    );
-
-    // Bring up the single interface with our device /32.
-    let mut backend = UserspaceBackend::new(&cfg.iface)?;
-    backend.up(&IfaceConfig {
-        private_key: wg_priv,
-        addresses: vec![(device.wg_ip, 32)],
-        listen_port: cfg.listen_port,
-    })?;
-    tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
-
-    // Optional `.internal` resolver: serves our device + peers by name from verified attestations.
+    // Optional `.internal` resolver: serves our device + peers by name (empty until we mesh).
     let zone = dns::empty_zone();
     if let Some(bind) = cfg.dns_bind {
         let z = zone.clone();
@@ -76,8 +39,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Host firewall: default-deny inbound on the wg iface, plus any config-seeded exposes
-    // (design.md §M7). On by default; a grant to peer still needs an explicit `expose` per port.
+    // Host firewall, built *before* we register so the control socket can serve `expose` from the
+    // start and the rules are in place the instant the interface appears (nft matches by iface
+    // name, which loads fine before the iface exists). §M7.
     let fw = if cfg.firewall {
         let seeds: Vec<Exposed> = cfg
             .expose
@@ -100,7 +64,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         None
     };
 
-    // Control socket: status + device-management + expose + network toggle for CLI/GUI frontends.
+    // Control socket up first — so a frontend (GUI) can drive interactive login before we're
+    // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
     let status = control::shared();
     {
         let path = cfg.control_socket_path();
@@ -110,6 +75,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             token: token.clone(),
             fw: fw.clone(),
             localnet: localnet.clone(),
+            pubkey: wg_pub,
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&path, ctx).await {
@@ -117,6 +83,34 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             }
         });
     }
+
+    // Register, waiting (serving control) until we're logged in and hold a network to mesh.
+    let Some((resp, device)) =
+        register_until_ready(&cfg, wg_pub, &localnet, &status, &fw).await?
+    else {
+        return Ok(()); // interrupted before login
+    };
+    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey)?;
+    if let Some(tok) = &resp.device_token {
+        keys::save_token(&cfg.state_dir, tok)?;
+        *token.write().await = Some(tok.clone());
+    }
+    tracing::info!(
+        "{} -> {}{}  (networks: {})",
+        device.wg_ip,
+        device.hostname,
+        if device.is_primary { " [primary]" } else { "" },
+        device.networks.join(", ")
+    );
+
+    // Bring up the single interface with our device /32.
+    let mut backend = UserspaceBackend::new(&cfg.iface)?;
+    backend.up(&IfaceConfig {
+        private_key: wg_priv,
+        addresses: vec![(device.wg_ip, 32)],
+        listen_port: cfg.listen_port,
+    })?;
+    tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
 
     // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
     // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
@@ -246,6 +240,60 @@ fn filter_active(
         })
         .cloned()
         .collect()
+}
+
+/// Register in a loop, keeping the control socket alive, until we're logged in *and* hold a
+/// network to mesh. Sets `needs_login` so a frontend can start OAuth; returns `None` on ctrl_c.
+async fn register_until_ready(
+    cfg: &Config,
+    wg_pub: [u8; 32],
+    localnet: &LocalNet,
+    status: &control::Shared,
+    fw: &Option<Arc<Firewall>>,
+) -> anyhow::Result<Option<(common::api::RegisterResp, SelfDevice)>> {
+    loop {
+        let attempt = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                if let Some(fw) = fw {
+                    if let Err(e) = fw.reset() { tracing::warn!("firewall reset on shutdown: {e:#}"); }
+                }
+                tracing::info!("shutting down");
+                return Ok(None);
+            }
+            r = coord::register(
+                &cfg.coordinator,
+                wg_pub,
+                cfg.device_name(),
+                cfg.endpoint,
+                cfg.enrollment_key.clone(),
+                localnet.as_refs(),
+            ) => r,
+        };
+        match attempt {
+            Ok((resp, Some(dev))) => {
+                control::set_needs_login(status, false).await;
+                return Ok(Some((resp, dev)));
+            }
+            // Enrolled but no networks yet — not a login problem; wait for a role.
+            Ok((_resp, None)) => {
+                control::set_needs_login(status, false).await;
+                tracing::info!("registered but hold no networks yet; waiting for a role");
+            }
+            Err(e) => {
+                // A 401 means we're not logged in; flag it so a frontend offers login. Other
+                // errors (coordinator down) are transient — just retry without the flag.
+                let msg = format!("{e:#}");
+                let needs_login = msg.contains("not enrolled") || msg.contains("log in");
+                control::set_needs_login(status, needs_login).await;
+                if needs_login {
+                    tracing::info!("not logged in — waiting for interactive login");
+                } else {
+                    tracing::warn!("register failed (retrying): {e:#}");
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(2))).await;
+    }
 }
 
 /// Group seed peer IPs by shared-network name → the source sets for `--net`-scoped exposes.

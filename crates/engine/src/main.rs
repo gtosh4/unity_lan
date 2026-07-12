@@ -153,6 +153,9 @@ async fn ctl() -> anyhow::Result<()> {
     match sub.as_str() {
         "status" => {
             let report = control::client_status(&socket).await?;
+            if report.needs_login {
+                println!("not logged in — run `unitylan ctl login {cfg_path}`");
+            }
             match &report.device {
                 None => println!("not joined to any network"),
                 Some(d) => {
@@ -196,6 +199,12 @@ async fn ctl() -> anyhow::Result<()> {
         }
         "exposes" => {
             print_exposed(control::client_expose(&socket, common::control::ExposeOp::List).await?)
+        }
+        "login" => {
+            let resp = control::client_login(&socket).await?;
+            println!("Open this URL to log in with Discord:\n\n  {}\n", resp.authorize_url);
+            println!("The daemon binds this device once you complete the browser step.");
+            Ok(())
         }
         "net" => {
             let action = need_arg()?; // enable | disable

@@ -25,6 +25,9 @@ pub enum ControlRequest {
         role_id: u64,
         enabled: bool,
     },
+    /// Begin interactive login: ask the coordinator (via the daemon) for the Discord authorize URL
+    /// to open. The daemon's register loop binds the device once the browser completes the flow.
+    Login,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,7 +36,14 @@ pub enum ControlResponse {
     Manage(ManageResp),
     Expose(ExposeResp),
     Network(NetworkResp),
+    Login(LoginResp),
     Error(String),
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LoginResp {
+    /// The Discord authorize URL the user opens to complete login.
+    pub authorize_url: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -98,6 +108,10 @@ pub struct StatusReport {
     /// source for the GUI's peering toggle. Empty when not joined.
     #[serde(default)]
     pub networks: Vec<NetworkStatus>,
+    /// True while the daemon is up but the device isn't logged in / enrolled — the GUI shows a
+    /// "Log in with Discord" button.
+    #[serde(default)]
+    pub needs_login: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

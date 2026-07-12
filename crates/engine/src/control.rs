@@ -13,8 +13,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use common::api::{ManageOp, ManageResp, NetworkStatus};
 use common::control::{
-    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, NetworkResp, PeerStatus,
-    StatusReport,
+    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp, NetworkResp,
+    PeerStatus, StatusReport,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
@@ -35,6 +35,13 @@ pub struct Ctx {
     pub fw: Option<Arc<Firewall>>,
     /// Local per-network peering opt-out — handles the network toggle locally.
     pub localnet: Arc<LocalNet>,
+    /// This device's WG public key — used to start interactive login (OAuth).
+    pub pubkey: [u8; 32],
+}
+
+/// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
+pub async fn set_needs_login(shared: &Shared, needs: bool) {
+    shared.write().await.needs_login = needs;
 }
 
 /// Shared, live status the daemon updates and the control socket reads.
@@ -69,6 +76,7 @@ pub async fn update(
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
+        needs_login: false, // a device present means we're enrolled
     };
     *shared.write().await = report;
 }
@@ -170,6 +178,12 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
         }
+        // Interactive login: fetch the authorize URL from the coordinator for this device pubkey.
+        // The daemon's register loop binds us once the browser completes the flow.
+        ControlRequest::Login => match coord::oauth_start(&ctx.coordinator, ctx.pubkey).await {
+            Ok(start) => ControlResponse::Login(LoginResp { authorize_url: start.authorize_url }),
+            Err(e) => ControlResponse::Error(format!("{e:#}")),
+        },
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
@@ -239,6 +253,15 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
 pub async fn client_expose(path: &Path, op: ExposeOp) -> anyhow::Result<ExposeResp> {
     match request(path, &ControlRequest::Expose(op)).await? {
         ControlResponse::Expose(r) => Ok(r),
+        ControlResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Client: start interactive login via the daemon; returns the authorize URL to open.
+pub async fn client_login(path: &Path) -> anyhow::Result<LoginResp> {
+    match request(path, &ControlRequest::Login).await? {
+        ControlResponse::Login(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
     }

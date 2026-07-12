@@ -47,13 +47,8 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8087/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-# Sanity: without login, register is refused (no key, not bound).
-if "$ENG" run "$TMP/a.toml" >"$TMP/pre.log" 2>&1; then :; fi
-grep -qiE "not enrolled|log in" "$TMP/pre.log" \
-  && echo "pre-login: register refused without a key ✓" \
-  || { echo "FAIL: register was not refused pre-login"; cat "$TMP/pre.log"; exit 1; }
-
-# Start interactive login; it prints the authorize URL (with state) and polls register.
+# Start interactive login (the headless/direct path); it prints the authorize URL (with state)
+# and polls register. The daemon-mediated GUI path is covered by gui-login-test.sh.
 "$ENG" login "$TMP/a.toml" >"$TMP/login.out" 2>&1 &
 for _ in $(seq 1 40); do grep -q 'oauth/callback' "$TMP/login.out" 2>/dev/null && break; sleep 0.25; done
 STATE=$(grep -oE 'state=[A-Za-z0-9_]+' "$TMP/login.out" | head -1 | cut -d= -f2)
