@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
     DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthStartReq,
-    OauthStartResp, RegisterReq, RegisterResp, Seed,
+    OauthStartResp, ObservedEndpoint, RegisterReq, RegisterResp, Seed,
 };
 use common::netid::sanitize_label;
 
@@ -131,19 +131,6 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         .collect();
     let mut networks_status: Vec<NetworkStatus> = Vec::new();
 
-    // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device
-    // X arriving from ip:port" — X's NAT mapping seen from the outside. A first sighting or a roam
-    // (address change) bumps the version so a parked co-member wakes and picks up the punch target.
-    {
-        let mut refl = st.reflexive.lock().unwrap();
-        for obs in &req.observed {
-            if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
-                refl.insert(obs.pubkey, obs.endpoint);
-                changed = true;
-            }
-        }
-    }
-
     for net in networks {
         let member = match member_cache.get(&net.guild_id) {
             Some(m) => m.clone(),
@@ -239,6 +226,24 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             }
         }
     }
+    // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device
+    // X arriving from ip:port" — X's NAT mapping seen from the outside. Accepted *only* for a pubkey
+    // the caller actually meshes with (a co-member seed): you can only report a reflexive for a peer
+    // you share a network with — and thus have a tunnel to observe. This bounds a spoofed endpoint to
+    // the victim's own co-members (the network trust boundary), instead of letting any authenticated
+    // member redirect any device's punch target to an attacker-chosen address. A first sighting or a
+    // roam (address change) bumps the version so a parked co-member wakes and picks up the target.
+    {
+        let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
+        let mut refl = st.reflexive.lock().unwrap();
+        for obs in accepted_reflexives(&req.observed, &comembers) {
+            if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
+                refl.insert(obs.pubkey, obs.endpoint);
+                changed = true;
+            }
+        }
+    }
+
     // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
     // forward). If so, a NAT'd peer just dials us and no punch is needed on either side.
     let caller_dialable = req.endpoint.is_some();
@@ -484,6 +489,20 @@ fn punch_target(
     }
 }
 
+/// Peer-observed reflexives the caller may legitimately report: only those for a device the caller
+/// actually meshes with (`comembers` = the caller's co-member seed pubkeys). You can only observe a
+/// peer's reflexive across a tunnel you share, so a report about anyone else is spoofed/irrelevant.
+/// This bounds a forged endpoint to the victim's own co-members (the network trust boundary) rather
+/// than letting any authenticated member redirect any device's punch target.
+fn accepted_reflexives<'a>(
+    observed: &'a [ObservedEndpoint],
+    comembers: &'a std::collections::HashSet<[u8; 32]>,
+) -> impl Iterator<Item = &'a ObservedEndpoint> {
+    observed
+        .iter()
+        .filter(move |o| comembers.contains(&o.pubkey))
+}
+
 pub struct ApiError {
     status: StatusCode,
     message: String,
@@ -506,10 +525,37 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::punch_target;
+    use super::{accepted_reflexives, punch_target};
+    use common::api::ObservedEndpoint;
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().unwrap()
+    }
+
+    #[test]
+    fn reflexive_reports_accepted_only_for_comembers() {
+        let comember = [1u8; 32];
+        let stranger = [2u8; 32];
+        let observed = vec![
+            ObservedEndpoint {
+                pubkey: comember,
+                endpoint: addr("203.0.113.5:51820"),
+            },
+            // A device the caller does NOT share a network with — a spoofed / unrelated report.
+            ObservedEndpoint {
+                pubkey: stranger,
+                endpoint: addr("203.0.113.9:51820"),
+            },
+        ];
+        let comembers = std::collections::HashSet::from([comember]);
+
+        let accepted: Vec<_> = accepted_reflexives(&observed, &comembers).collect();
+        assert_eq!(accepted.len(), 1, "only the co-member's report is accepted");
+        assert_eq!(accepted[0].pubkey, comember);
+
+        // With no co-members, every report is rejected.
+        let none = std::collections::HashSet::new();
+        assert_eq!(accepted_reflexives(&observed, &none).count(), 0);
     }
 
     #[test]

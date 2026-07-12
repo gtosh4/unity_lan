@@ -348,5 +348,12 @@ cross-OS deferrals).
 - [ ] `tracing` logging across binaries.
 - [ ] Per-OS service packaging (systemd unit · Windows Service · launchd plist).
 - [ ] CI: `cargo fmt`/`clippy`/`test`.
+- [x] Endpoint-record spoof hardening ✅ — the coordinator accepts a peer-observed reflexive
+      (`RegisterReq.observed`) only for a pubkey the caller actually meshes with (a co-member seed),
+      via `accepted_reflexives`. Was: any authenticated member could write an arbitrary endpoint for
+      any device → redirect that device's co-members' WG punch target to an attacker-chosen address
+      (DoS + a "point a member's handshakes at arbitrary ip:port" reflector; no confidentiality break
+      — WG auths by pubkey). Now bounded to the network trust boundary (a victim's own co-members).
+      Verified: `reflexive_reports_accepted_only_for_comembers` unit test; `nat-test.sh` still green.
 - [ ] Open design items to close before GA: coordinator key rotation, pubkey re-key signal,
-      endpoint-record spoof hardening, symmetric-NAT policy (design.md Open Questions).
+      symmetric-NAT policy (design.md Open Questions).
