@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use common::api::{ManageOp, ManageResp};
-use common::control::{ControlRequest, ControlResponse, StatusReport};
+use common::control::{ControlRequest, ControlResponse, ExposeOp, ExposeResp, StatusReport};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -33,6 +33,14 @@ pub async fn fetch_status(path: PathBuf) -> Result<StatusReport, String> {
 pub async fn manage(path: PathBuf, op: ManageOp) -> Result<ManageResp, String> {
     match request(path, ControlRequest::Manage(op)).await? {
         ControlResponse::Manage(r) => Ok(r),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+pub async fn expose(path: PathBuf, op: ExposeOp) -> Result<ExposeResp, String> {
+    match request(path, ControlRequest::Expose(op)).await? {
+        ControlResponse::Expose(r) => Ok(r),
         ControlResponse::Error(e) => Err(e),
         _ => Err("unexpected response".into()),
     }

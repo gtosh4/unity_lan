@@ -155,8 +155,10 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
 - [x] Async control-socket client (shared `common::control` DTOs; GUI needs no engine dep).
 - [x] Screens: live status (this device + peers) and device management (rename / set-primary /
       remove) — exactly what the control socket backs today. `unitylan-gui [control.sock]`.
-- [ ] Login (OAuth), network list + toggle, `expose`, tray — deferred: the engine doesn't yet
-      expose these over the socket. Land alongside the engine features (post-M5/M7).
+- [x] `expose` / `unexpose` / exposed-ports list — added in M7d (the engine now backs them over
+      the control socket).
+- [ ] Login (OAuth), network list + toggle, tray — deferred: the engine doesn't yet expose these
+      over the socket. Land alongside the engine features (post-M5).
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +
 wgpu/tiny-skia renderer + timer subscription + async socket task boot clean). The socket
@@ -233,8 +235,13 @@ gets two names/IPs; the networks can't route to each other.
       is rejected. Plus 2 nft scoped-ruleset unit tests.
 - [ ] Windows WFP + macOS pf backends.
 
-### M7d — status polish
-- [ ] Status/event polish in GUI (surface exposed ports + revocation events).
+### M7d — status polish ✅
+- [x] GUI surfaces the firewall: an **exposed ports** section (proto/port + `→ net:` scope) with
+      per-row **unexpose** buttons and an **expose** row (port `25565` or `udp/34197`, optional
+      net). Auto-refreshed on the 2s tick over the same control socket the CLI uses.
+- [x] Revocation events show implicitly — a pruned peer drops out of the auto-refreshed peers
+      list. **Verify:** 4 new GUI reducer tests (exposes list / valid submit clears inputs / bad
+      port surfaces error / `parse_port`); launch smoke clean. 36 unit tests total.
 
 ---
 

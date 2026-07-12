@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
-use common::control::StatusReport;
+use common::control::{ExposeOp, ExposeResp, ExposedPort, Proto, StatusReport};
 use iced::widget::{button, column, row, scrollable, text, text_input, Column};
 use iced::{Element, Length, Subscription, Task};
 
@@ -36,21 +36,30 @@ struct App {
     socket: PathBuf,
     status: Option<StatusReport>,
     devices: Vec<DeviceInfo>,
+    exposed: Vec<ExposedPort>,
     rename_input: String,
+    expose_port_input: String,
+    expose_net_input: String,
     error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    /// Timer tick → refetch status + device list.
+    /// Timer tick → refetch status + device list + exposed ports.
     Tick,
     StatusFetched(Result<StatusReport, String>),
     /// Result of a `List` (or any manage op) → the owner's devices.
     DevicesFetched(Result<ManageResp, String>),
+    /// Result of an expose/unexpose/list → the exposed ports.
+    ExposesFetched(Result<ExposeResp, String>),
     RenameInput(String),
     RenameSubmit,
     SetPrimary(String),
     Remove(String),
+    ExposePortInput(String),
+    ExposeNetInput(String),
+    ExposeSubmit,
+    Unexpose { proto: Proto, port: u16 },
 }
 
 impl App {
@@ -59,18 +68,25 @@ impl App {
             socket,
             status: None,
             devices: Vec::new(),
+            exposed: Vec::new(),
             rename_input: String::new(),
+            expose_port_input: String::new(),
+            expose_net_input: String::new(),
             error: None,
         }
     }
 
-    /// Fetch status + device list concurrently.
+    /// Fetch status + device list + exposed ports concurrently.
     fn reload(&self) -> Task<Message> {
         Task::batch([
             Task::perform(ctl::fetch_status(self.socket.clone()), Message::StatusFetched),
             Task::perform(
                 ctl::manage(self.socket.clone(), ManageOp::List),
                 Message::DevicesFetched,
+            ),
+            Task::perform(
+                ctl::expose(self.socket.clone(), ExposeOp::List),
+                Message::ExposesFetched,
             ),
         ])
     }
@@ -88,6 +104,36 @@ impl App {
                 self.error = None;
             }
             Message::DevicesFetched(Err(e)) => self.error = Some(e),
+            Message::ExposesFetched(Ok(r)) => {
+                self.exposed = r.exposed;
+                self.error = None;
+            }
+            Message::ExposesFetched(Err(e)) => self.error = Some(e),
+            Message::ExposePortInput(s) => self.expose_port_input = s,
+            Message::ExposeNetInput(s) => self.expose_net_input = s,
+            Message::ExposeSubmit => {
+                match parse_port(self.expose_port_input.trim()) {
+                    Ok((proto, port)) => {
+                        let net = match self.expose_net_input.trim() {
+                            "" => None,
+                            n => Some(n.to_string()),
+                        };
+                        self.expose_port_input.clear();
+                        self.expose_net_input.clear();
+                        return Task::perform(
+                            ctl::expose(self.socket.clone(), ExposeOp::Add { proto, port, net }),
+                            Message::ExposesFetched,
+                        );
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            Message::Unexpose { proto, port } => {
+                return Task::perform(
+                    ctl::expose(self.socket.clone(), ExposeOp::Remove { proto, port }),
+                    Message::ExposesFetched,
+                )
+            }
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -120,8 +166,13 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let body = column![self.device_section(), self.peers_section(), self.devices_section()]
-            .spacing(20)
+        let body = column![
+            self.device_section(),
+            self.peers_section(),
+            self.devices_section(),
+            self.exposed_section(),
+        ]
+        .spacing(20)
             .push_maybe(
                 self.error
                     .as_ref()
@@ -196,6 +247,50 @@ impl App {
             .spacing(8)
             .into()
     }
+
+    fn exposed_section(&self) -> Element<'_, Message> {
+        let mut list = Column::new().spacing(6);
+        for e in &self.exposed {
+            let scope = e.net.as_deref().map(|n| format!("  → net: {n}")).unwrap_or_default();
+            let r = row![
+                text(format!("{}/{}{}", e.proto.as_str(), e.port, scope)).width(Length::Fill),
+                button(text("unexpose").size(13))
+                    .on_press(Message::Unexpose { proto: e.proto, port: e.port }),
+            ]
+            .spacing(8);
+            list = list.push(r);
+        }
+
+        // Add row: port (e.g. `25565` or `udp/34197`) + optional network to scope it to.
+        let add = row![
+            text_input("port (e.g. 25565 or udp/34197)", &self.expose_port_input)
+                .on_input(Message::ExposePortInput)
+                .on_submit(Message::ExposeSubmit),
+            text_input("net (optional)", &self.expose_net_input)
+                .on_input(Message::ExposeNetInput)
+                .on_submit(Message::ExposeSubmit),
+            button(text("expose").size(13)).on_press(Message::ExposeSubmit),
+        ]
+        .spacing(8);
+
+        column![text("exposed ports").size(18), list, add].spacing(8).into()
+    }
+}
+
+/// Parse a port field: `25565` (tcp default) or `tcp/25565` / `udp/34197`.
+fn parse_port(s: &str) -> Result<(Proto, u16), String> {
+    let (proto, port) = match s.split_once('/') {
+        Some((p, n)) => {
+            let proto = match p.to_ascii_lowercase().as_str() {
+                "tcp" => Proto::Tcp,
+                "udp" => Proto::Udp,
+                other => return Err(format!("bad protocol '{other}' (use tcp or udp)")),
+            };
+            (proto, n)
+        }
+        None => (Proto::Tcp, s),
+    };
+    port.parse().map(|p| (proto, p)).map_err(|_| format!("bad port '{port}'"))
 }
 
 #[cfg(test)]
@@ -260,5 +355,45 @@ mod tests {
         let _ = a.update(Message::RenameSubmit);
         // whitespace-only rename: input stays, nothing dispatched
         assert_eq!(a.rename_input, "   ");
+    }
+
+    #[test]
+    fn exposes_fetched_replaces_list() {
+        let mut a = app();
+        let resp = ExposeResp {
+            message: "ok".into(),
+            exposed: vec![ExposedPort { proto: Proto::Tcp, port: 25565, net: Some("mesh".into()) }],
+        };
+        let _ = a.update(Message::ExposesFetched(Ok(resp)));
+        assert_eq!(a.exposed.len(), 1);
+        assert_eq!(a.exposed[0].port, 25565);
+    }
+
+    #[test]
+    fn expose_submit_valid_clears_inputs() {
+        let mut a = app();
+        a.expose_port_input = "udp/34197".into();
+        a.expose_net_input = "mesh".into();
+        let _ = a.update(Message::ExposeSubmit); // dispatches the expose task
+        assert!(a.expose_port_input.is_empty());
+        assert!(a.expose_net_input.is_empty());
+        assert!(a.error.is_none());
+    }
+
+    #[test]
+    fn expose_submit_bad_port_surfaces_error_and_keeps_input() {
+        let mut a = app();
+        a.expose_port_input = "notaport".into();
+        let _ = a.update(Message::ExposeSubmit);
+        assert!(a.error.is_some());
+        assert_eq!(a.expose_port_input, "notaport");
+    }
+
+    #[test]
+    fn parse_port_defaults_tcp_and_reads_proto() {
+        assert_eq!(parse_port("25565").unwrap(), (Proto::Tcp, 25565));
+        assert_eq!(parse_port("udp/34197").unwrap(), (Proto::Udp, 34197));
+        assert!(parse_port("sctp/1").is_err());
+        assert!(parse_port("70000").is_err());
     }
 }
