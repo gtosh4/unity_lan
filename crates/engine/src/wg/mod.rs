@@ -4,6 +4,7 @@
 mod userspace;
 pub use userspace::UserspaceBackend;
 
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 /// Interface-level configuration for the single UnityLAN interface (`unl0`).
@@ -33,6 +34,9 @@ pub trait WgBackend {
     fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()>;
     /// Remove a peer by public key. (Used to prune revoked / departed co-members.)
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()>;
+    /// The endpoint WireGuard last saw each peer send from (its reflexive NAT mapping). Populated
+    /// once a peer has completed a handshake; reported to the coordinator for hole punching (§7.2).
+    fn peer_endpoints(&self) -> anyhow::Result<HashMap<[u8; 32], SocketAddr>>;
     /// Tear the interface down.
     fn down(&self) -> anyhow::Result<()>;
 }

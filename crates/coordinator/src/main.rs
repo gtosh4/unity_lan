@@ -116,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
         version,
         oauth,
         oauth_sessions: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

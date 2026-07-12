@@ -28,6 +28,8 @@ pub struct SeedPeer {
     pub pubkey: [u8; 32],
     pub ip: Ipv4Addr,
     pub endpoint: Option<SocketAddr>,
+    /// Hole-punch target (peer's reflexive `ip:port`) when neither side is directly dialable.
+    pub punch: Option<SocketAddr>,
     /// `<device>.<user>.<community>.internal`.
     pub hostname: String,
     /// `<user>.<community>.internal` if this is the owner's primary device, else `None`.
@@ -44,12 +46,14 @@ pub async fn register(
     enrollment_key: Option<String>,
     disabled_networks: Vec<NetworkRef>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    // First contact: `since = None` returns immediately (no long-poll hold).
-    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None, disabled_networks).await
+    // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
+    // observed endpoints to report.
+    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None, disabled_networks, Vec::new()).await
 }
 
 /// Long-poll `/refresh`: pass the last-seen `version` as `since`; the coordinator holds the
 /// request until membership changes or ~TTL/2 elapses (renewal). Returns the new version.
+#[allow(clippy::too_many_arguments)]
 pub async fn refresh(
     base_url: &str,
     wg_pubkey: WgPublicKey,
@@ -58,8 +62,9 @@ pub async fn refresh(
     enrollment_key: Option<String>,
     since: Option<u64>,
     disabled_networks: Vec<NetworkRef>,
+    observed: Vec<common::api::ObservedEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since, disabled_networks).await
+    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since, disabled_networks, observed).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,6 +77,7 @@ async fn post(
     enrollment_key: Option<String>,
     since: Option<u64>,
     disabled_networks: Vec<NetworkRef>,
+    observed: Vec<common::api::ObservedEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -89,6 +95,7 @@ async fn post(
             endpoint,
             since,
             disabled_networks,
+            observed,
         })
         .send()
         .await
@@ -181,6 +188,7 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
             pubkey: att.wg_pubkey,
             ip: att.wg_ip,
             endpoint: seed.endpoint,
+            punch: seed.punch,
             hostname: att.hostname(&seed.community_name),
             primary_alias: att.primary_alias(&seed.community_name),
             networks: seed.networks.clone(),

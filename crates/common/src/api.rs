@@ -32,6 +32,20 @@ pub struct RegisterReq {
     /// coordinator mirrors it here — excluding these from the device's presence/grant/seeds.
     #[serde(default)]
     pub disabled_networks: Vec<NetworkRef>,
+    /// Peer-observed endpoints: for each current WG peer, the `ip:port` its packets arrive from
+    /// (that peer's reflexive NAT mapping as *we* see it). Reported so the coordinator can hand
+    /// two NAT'd co-members each other's reflexive address to hole-punch (§7.2). Empty when we
+    /// have no peers or the backend can't report endpoints.
+    #[serde(default)]
+    pub observed: Vec<ObservedEndpoint>,
+}
+
+/// "I saw device `pubkey` sending from `endpoint`." A peer's reflexive address as observed across
+/// an established tunnel — the punch target for co-members that can't dial it directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedEndpoint {
+    pub pubkey: [u8; 32],
+    pub endpoint: SocketAddr,
 }
 
 /// A reference to a network by its (guild, role) identity.
@@ -141,8 +155,13 @@ pub struct Seed {
     /// Community display name of a shared network's guild (the `<community>` DNS label).
     #[serde(default)]
     pub community_name: String,
-    /// The co-member's last-reported endpoint (may be stale/absent).
+    /// The co-member's last-reported (directly dialable) endpoint (may be stale/absent).
     pub endpoint: Option<SocketAddr>,
+    /// Hole-punch target: this peer's reflexive `ip:port`, set only when neither we nor the peer
+    /// is directly dialable. The client uses it as the peer endpoint; both sides handshake at once
+    /// (their long-polls wake on the same version bump) to punch through their NATs (§7.2).
+    #[serde(default)]
+    pub punch: Option<SocketAddr>,
     /// The networks (by display name) this peer shares with the caller — lets the client scope
     /// `expose --net <role>` to just this network's peers.
     #[serde(default)]

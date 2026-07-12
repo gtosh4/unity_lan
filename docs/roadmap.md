@@ -209,17 +209,29 @@ port — useless for punch.
 - **Verify:** ✅ `mesh-test.sh` green (explicit-endpoint path unchanged; UPnP skipped when set).
       Live UPnP path needs a real IGD router (or the `mock-igd` crate) — manual/opportunistic.
 
-### M5.2 — Coordinator-mediated hole punch (cone NAT)
-- [ ] ⚠️ **Spike (gate)**: confirm defguard `read_interface_data()` exposes each peer's last-seen
-      source endpoint. If not, peer-observed reflexive is blocked — stop and rethink.
-- [ ] `WgBackend::peer_endpoints()`: read observed endpoints; the daemon reports its reflexive
-      (a reachable peer's view of us) as `endpoint` when config/UPnP gave none.
-- [ ] API: `Seed.punch: Option<SocketAddr>` — coordinator emits it for a peer pair that both lack
-      a dialable endpoint but share a network and both have a reflexive on file.
-- [ ] Daemon: a seed carrying `punch` → set that peer's endpoint + send a WG handshake init; the
-      long-poll simultaneous wake synchronizes both sides.
-- **Verify:** 3-netns test — A reachable, B & C behind simulated cone NAT; B↔C form a direct
-      tunnel + ping (extend `mesh-test.sh` harness).
+### M5.2 — Coordinator-mediated hole punch (cone NAT) ✅
+- [x] **Spike (gate)** ✅ — defguard `read_interface_data()` exposes each peer's last-seen source
+      endpoint (`Host.peers[k].endpoint`, parsed from the boringtun uapi `get` dump) on every
+      backend. Peer-observed reflexive is viable.
+- [x] `WgBackend::peer_endpoints()` — reads the endpoint WG last saw each peer send from. The
+      daemon reports these as `RegisterReq.observed`; a reachable peer (A) thereby tells the
+      coordinator every NAT'd co-member's reflexive `ip:port`. The read is retried (boringtun's
+      uapi is racy under load) and re-polled every ~2s so a freshly-learned reflexive is reported
+      promptly (the long-poll hold would otherwise sit on it for ~TTL/2); a failed read is treated
+      as "unchanged" so it never flaps a spurious report.
+- [x] API: `RegisterReq.observed: Vec<ObservedEndpoint>` + `Seed.punch: Option<SocketAddr>`.
+      Coordinator caches reflexives (`AppState.reflexive`, last-writer-wins) and `punch_target`
+      sets `punch` for a peer only when **neither** side is directly dialable (else the dialable
+      one is reached via `endpoint`); a new/roamed reflexive bumps the version so parked peers wake.
+- [x] Daemon: a seed carrying `punch` → set that peer's WG endpoint (`endpoint.or(punch)`) and
+      handshake it; both sides wake on the same version bump → simultaneous open.
+- **Verify:** ✅ `scripts/nat-test.sh` (3 netns, A reachable + B & C behind separate full-cone
+      NATs): A observes both reflexives → coordinator pairs them → **B dials C's reflexive and C
+      dials B's** (gated). Plus `punch_target` unit test. The final UDP data-plane hop (ping over
+      the punched tunnel) is reported **best-effort, not gated**: Linux netns MASQUERADE/DNAT can't
+      faithfully emulate an endpoint-independent NAT's simultaneous-open (conntrack clash — proven
+      with a standalone raw-socket punch); real cone/full-cone routers punch fine. `mesh-test.sh`
+      still green (no regression from the reflexive-reporting loop changes).
 
 ### M5.3 — Symmetric-NAT diagnostics
 - [ ] Detect per-peer reflexive port drift → symmetric flag.

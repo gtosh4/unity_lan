@@ -15,6 +15,32 @@ pub struct UserspaceBackend {
     name: String,
 }
 
+/// Read the endpoint WireGuard last saw each peer send from. Empty until peers handshake.
+/// boringtun's userspace uapi read is racy under load and intermittently returns EAGAIN mid-parse;
+/// retry a few times so a transient failure doesn't look like "no endpoints".
+pub fn read_peer_endpoints(
+    ifname: &str,
+) -> anyhow::Result<std::collections::HashMap<[u8; 32], std::net::SocketAddr>> {
+    let api = WGApi::<Userspace>::new(ifname.to_string())?;
+    let mut last_err = None;
+    for _ in 0..5 {
+        match api.read_interface_data() {
+            Ok(host) => {
+                return Ok(host
+                    .peers
+                    .iter()
+                    .filter_map(|(k, p)| p.endpoint.map(|ep| (k.as_array(), ep)))
+                    .collect())
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    }
+    Err(anyhow::anyhow!("reading interface data: {last_err:?}"))
+}
+
 impl UserspaceBackend {
     pub fn new(ifname: &str) -> anyhow::Result<Self> {
         let api = WGApi::<Userspace>::new(ifname.to_string())?;
@@ -88,6 +114,10 @@ impl WgBackend for UserspaceBackend {
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()> {
         self.api.remove_peer(&Key::new(*public_key))?;
         Ok(())
+    }
+
+    fn peer_endpoints(&self) -> anyhow::Result<std::collections::HashMap<[u8; 32], std::net::SocketAddr>> {
+        read_peer_endpoints(&self.name)
     }
 
     fn down(&self) -> anyhow::Result<()> {

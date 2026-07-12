@@ -34,6 +34,10 @@ pub struct AppState {
     pub oauth: Option<Arc<dyn OauthProvider>>,
     /// In-flight login attempts: `state` → the device pubkey to bind when the callback arrives.
     pub oauth_sessions: Arc<Mutex<HashMap<String, [u8; 32]>>>,
+    /// Peer-observed reflexive endpoints: device pubkey → the `ip:port` a peer last saw it send
+    /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
+    /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
+    pub reflexive: Arc<Mutex<HashMap<[u8; 32], std::net::SocketAddr>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -127,6 +131,19 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         .collect();
     let mut networks_status: Vec<NetworkStatus> = Vec::new();
 
+    // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device
+    // X arriving from ip:port" — X's NAT mapping seen from the outside. A first sighting or a roam
+    // (address change) bumps the version so a parked co-member wakes and picks up the punch target.
+    {
+        let mut refl = st.reflexive.lock().unwrap();
+        for obs in &req.observed {
+            if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
+                refl.insert(obs.pubkey, obs.endpoint);
+                changed = true;
+            }
+        }
+    }
+
     for net in networks {
         let member = match member_cache.get(&net.guild_id) {
             Some(m) => m.clone(),
@@ -215,8 +232,13 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             }
         }
     }
+    // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
+    // forward). If so, a NAT'd peer just dials us and no punch is needed on either side.
+    let caller_dialable = req.endpoint.is_some();
+    let reflexive = st.reflexive.lock().unwrap().clone();
     let mut seeds = Vec::new();
     for (_pubkey, (mp, networks, community)) in by_pubkey {
+        let punch = punch_target(caller_dialable, mp.endpoint, reflexive.get(&mp.pubkey).copied());
         let signed = st
             .signer
             .sign_attestation(
@@ -232,6 +254,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             attestation: signed.to_base64(),
             community_name: community,
             endpoint: mp.endpoint,
+            punch,
             networks,
         });
     }
@@ -410,6 +433,47 @@ async fn oauth_callback(State(st): State<AppState>, Query(q): Query<CallbackQuer
 
 fn internal(e: anyhow::Error) -> ApiError {
     ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// The hole-punch target to hand a caller for one peer (§7.2): the peer's reflexive address, but
+/// only when *neither* side is directly dialable. If either the caller or the peer has a dialable
+/// endpoint, that side is reached directly (via the seed `endpoint`) and no punch is needed.
+fn punch_target(
+    caller_dialable: bool,
+    peer_endpoint: Option<std::net::SocketAddr>,
+    peer_reflexive: Option<std::net::SocketAddr>,
+) -> Option<std::net::SocketAddr> {
+    if !caller_dialable && peer_endpoint.is_none() {
+        peer_reflexive
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::punch_target;
+
+    fn addr(s: &str) -> std::net::SocketAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn punch_only_when_neither_side_dialable() {
+        let refl = Some(addr("203.0.113.5:51820"));
+
+        // Both behind NAT (no dialable endpoint), peer reflexive known → punch it.
+        assert_eq!(punch_target(false, None, refl), refl);
+
+        // Caller dialable → peer dials caller, no punch.
+        assert_eq!(punch_target(true, None, refl), None);
+
+        // Peer dialable → caller dials peer via `endpoint`, no punch.
+        assert_eq!(punch_target(false, Some(addr("198.51.100.9:51820")), refl), None);
+
+        // Neither dialable but no reflexive on file yet → nothing to punch to.
+        assert_eq!(punch_target(false, None, None), None);
+    }
 }
 
 pub struct ApiError {

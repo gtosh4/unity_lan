@@ -143,7 +143,36 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
     // a co-member joining wakes this call at once. `since` echoes the last version we applied.
     let mut since = Some(resp.version);
+    // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
+    let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
     loop {
+        // Report where WG currently sees each peer sending from (their reflexive NAT mapping), so
+        // the coordinator can hand two NAT'd co-members each other's address to hole-punch. The
+        // reflexive appears only after a peer handshakes — later than a long-poll hold would
+        // return — so we re-read every couple seconds and report on change (a cheap local uapi
+        // read; no network traffic unless the set actually changed). A failed read (boringtun's
+        // uapi is racy under load) is treated as "unchanged" so it never flaps into a spurious
+        // report.
+        let observed = match backend.peer_endpoints() {
+            Ok(map) => {
+                let mut v: Vec<common::api::ObservedEndpoint> = map
+                    .into_iter()
+                    .map(|(pubkey, endpoint)| common::api::ObservedEndpoint { pubkey, endpoint })
+                    .collect();
+                v.sort_by_key(|o| o.pubkey);
+                v
+            }
+            Err(_) => last_reported.clone(),
+        };
+        let changed = observed != last_reported;
+        if changed {
+            tracing::info!(
+                eps = ?observed.iter().map(|o| o.endpoint).collect::<Vec<_>>(),
+                "reflexive: reporting observed endpoints to coordinator"
+            );
+        }
+        // Report immediately (no hold) when our view changed; else hold for membership.
+        let poll_since = if changed { None } else { since };
         let refreshed = tokio::select! {
             // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
             _ = tokio::signal::ctrl_c() => {
@@ -163,19 +192,26 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 ).await?;
                 continue;
             }
+            // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
+            // reported on the next loop). Only while unchanged — a change goes straight to a report.
+            _ = tokio::time::sleep(Duration::from_secs(2)), if !changed => {
+                continue;
+            }
             r = coord::refresh(
                 &cfg.coordinator,
                 wg_pub,
                 cfg.device_name(),
                 endpoint,
                 cfg.enrollment_key.clone(),
-                since,
+                poll_since,
                 localnet.as_refs(),
+                observed.clone(),
             ) => r,
         };
         match refreshed {
             Ok((resp, dev)) => {
                 since = Some(resp.version);
+                last_reported = observed; // the coordinator now has this reflexive set
                 match coord::verified_seeds(&resp) {
                     Ok(seeds) => {
                         last_seeds = seeds;
@@ -335,10 +371,18 @@ fn apply_seeds(
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     let mut desired: HashMap<[u8; 32], (Vec<(Ipv4Addr, u8)>, Option<SocketAddr>)> = HashMap::new();
     for s in seeds {
-        let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), s.endpoint));
+        // A directly dialable endpoint wins; otherwise fall back to the punch target (reflexive) so
+        // WG handshakes toward it — the coordinator only sets `punch` when both sides will punch.
+        if s.endpoint.is_none() {
+            if let Some(p) = s.punch {
+                tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
+            }
+        }
+        let ep = s.endpoint.or(s.punch);
+        let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), ep));
         e.0.push((s.ip, 32));
         if e.1.is_none() {
-            e.1 = s.endpoint;
+            e.1 = ep;
         }
     }
 
