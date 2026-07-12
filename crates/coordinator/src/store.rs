@@ -71,6 +71,12 @@ impl Store {
                 user_id INTEGER PRIMARY KEY,  -- one primary per user (the <user>.<community> alias)
                 pubkey  BLOB    NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS network_optout (
+                pubkey   BLOB    NOT NULL,     -- a device that opted out of peering on a network
+                guild_id INTEGER NOT NULL,
+                role_id  INTEGER NOT NULL,
+                PRIMARY KEY (pubkey, guild_id, role_id)
+            );
             "#,
         )
         .execute(&self.pool)
@@ -156,6 +162,48 @@ impl Store {
                 role_id: r.get::<i64, _>("role_id") as u64,
                 name: r.get::<String, _>("name"),
             })
+            .collect())
+    }
+
+    // ---- per-device network peering opt-out (the GUI toggle) ----
+
+    /// Enable/disable a device's peering on one network. `enabled = false` records an opt-out.
+    pub async fn set_network_optout(
+        &self,
+        pubkey: &[u8; 32],
+        guild_id: u64,
+        role_id: u64,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        if enabled {
+            sqlx::query("DELETE FROM network_optout WHERE pubkey = ? AND guild_id = ? AND role_id = ?")
+                .bind(pubkey.as_slice())
+                .bind(guild_id as i64)
+                .bind(role_id as i64)
+                .execute(&self.pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "INSERT OR IGNORE INTO network_optout (pubkey, guild_id, role_id) VALUES (?, ?, ?)",
+            )
+            .bind(pubkey.as_slice())
+            .bind(guild_id as i64)
+            .bind(role_id as i64)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// The (guild, role) networks a device has opted out of.
+    pub async fn network_optouts(&self, pubkey: &[u8; 32]) -> anyhow::Result<Vec<(u64, u64)>> {
+        let rows = sqlx::query("SELECT guild_id, role_id FROM network_optout WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.get::<i64, _>("guild_id") as u64, r.get::<i64, _>("role_id") as u64))
             .collect())
     }
 
@@ -459,6 +507,25 @@ mod tests {
         assert!(st.consume_enrollment_key("k", &dev_b, 0).await.is_err());
         // Unknown key is rejected.
         assert!(st.consume_enrollment_key("nope", &dev_b, 0).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn network_optout_toggles() {
+        let st = mem_store().await;
+        let dev = [5u8; 32];
+        assert!(st.network_optouts(&dev).await.unwrap().is_empty());
+
+        // Disable → recorded; disabling again is idempotent.
+        st.set_network_optout(&dev, 1, 10, false).await.unwrap();
+        st.set_network_optout(&dev, 1, 10, false).await.unwrap();
+        st.set_network_optout(&dev, 1, 20, false).await.unwrap();
+        let outs = st.network_optouts(&dev).await.unwrap();
+        assert_eq!(outs.len(), 2);
+        assert!(outs.contains(&(1, 10)) && outs.contains(&(1, 20)));
+
+        // Re-enable one → only the other remains.
+        st.set_network_optout(&dev, 1, 10, true).await.unwrap();
+        assert_eq!(st.network_optouts(&dev).await.unwrap(), vec![(1, 20)]);
     }
 
     #[tokio::test]

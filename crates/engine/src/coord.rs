@@ -18,6 +18,8 @@ pub struct SelfDevice {
     pub is_primary: bool,
     /// `<user>.<community>.internal` if we're the owner's primary device.
     pub primary_alias: Option<String>,
+    /// Every network our roles grant (role@guild) with per-device enabled state — for the toggle.
+    pub networks_status: Vec<common::api::NetworkStatus>,
 }
 
 /// A verified co-member to peer with.
@@ -109,6 +111,7 @@ async fn post(
                 hostname,
                 is_primary: att.is_primary,
                 primary_alias,
+                networks_status: resp.networks.clone(),
             })
         }
         None => None,

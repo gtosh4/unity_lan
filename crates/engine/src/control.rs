@@ -56,6 +56,7 @@ pub async fn update(shared: &Shared, device: &SelfDevice, seeds: &[SeedPeer]) {
                 endpoint: s.endpoint,
             })
             .collect(),
+        networks: device.networks_status.clone(),
     };
     *shared.write().await = report;
 }

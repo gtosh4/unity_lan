@@ -10,7 +10,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
-    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, RegisterReq, RegisterResp, Seed,
+    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, RegisterReq, RegisterResp,
+    Seed,
 };
 use common::netid::sanitize_label;
 
@@ -108,6 +109,10 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let mut community_name: Option<String> = None;
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
 
+    // Networks this device has opted out of peering on (the GUI toggle).
+    let optouts = st.store.network_optouts(&req.wg_pubkey).await.map_err(internal)?;
+    let mut networks_status: Vec<NetworkStatus> = Vec::new();
+
     for net in networks {
         let member = match member_cache.get(&net.guild_id) {
             Some(m) => m.clone(),
@@ -119,6 +124,19 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         };
         let Some(member) = member else { continue };
         if !member.role_ids.contains(&net.role_id) {
+            continue;
+        }
+
+        // The user holds this role. Record it for the toggle UI; a disabled network is listed but
+        // contributes no presence / grant / seeds (so it doesn't peer, in either direction).
+        let enabled = !optouts.contains(&(net.guild_id, net.role_id));
+        networks_status.push(NetworkStatus {
+            guild_id: net.guild_id,
+            role_id: net.role_id,
+            name: net.name.clone(),
+            enabled,
+        });
+        if !enabled {
             continue;
         }
 
@@ -217,6 +235,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         device_token,
         seeds,
         version: *st.version.borrow(),
+        networks: networks_status,
     })
 }
 
@@ -254,6 +273,22 @@ async fn manage(
                 .await
                 .map_err(internal)?;
             format!("removed {}", sanitize_label(&device_name))
+        }
+        ManageOp::SetNetwork { guild_id, role_id, enabled } => {
+            st.store
+                .set_network_optout(&self_pubkey, guild_id, role_id, enabled)
+                .await
+                .map_err(internal)?;
+            // Disabling: drop this device from that network's presence now so peers prune it on
+            // their next (version-woken) refresh. Enabling: the bump re-meshes it.
+            if !enabled {
+                st.presence.evict(guild_id, role_id, &self_pubkey);
+            }
+            st.version.send_modify(|v| *v += 1);
+            format!(
+                "network {guild_id}/{role_id} peering {}",
+                if enabled { "enabled" } else { "disabled" }
+            )
         }
     };
 

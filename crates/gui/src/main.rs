@@ -60,6 +60,9 @@ enum Message {
     ExposeNetInput(String),
     ExposeSubmit,
     Unexpose { proto: Proto, port: u16 },
+    /// Toggle this device's peering on a network (role@guild).
+    ToggleNetwork { guild_id: u64, role_id: u64, enabled: bool },
+    NetworkToggled(Result<ManageResp, String>),
 }
 
 impl App {
@@ -134,6 +137,20 @@ impl App {
                     Message::ExposesFetched,
                 )
             }
+            Message::ToggleNetwork { guild_id, role_id, enabled } => {
+                return Task::perform(
+                    ctl::manage(
+                        self.socket.clone(),
+                        ManageOp::SetNetwork { guild_id, role_id, enabled },
+                    ),
+                    Message::NetworkToggled,
+                )
+            }
+            Message::NetworkToggled(Ok(_)) => {
+                self.error = None;
+                return self.reload(); // pull the updated networks + peers immediately
+            }
+            Message::NetworkToggled(Err(e)) => self.error = Some(e),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -168,6 +185,7 @@ impl App {
     fn view(&self) -> Element<'_, Message> {
         let body = column![
             self.device_section(),
+            self.networks_section(),
             self.peers_section(),
             self.devices_section(),
             self.exposed_section(),
@@ -248,6 +266,26 @@ impl App {
             .into()
     }
 
+    fn networks_section(&self) -> Element<'_, Message> {
+        let nets = self.status.as_ref().map(|s| s.networks.as_slice()).unwrap_or(&[]);
+        let mut col = Column::new().spacing(6);
+        for n in nets {
+            let state = if n.enabled { "on" } else { "off" };
+            let label = if n.enabled { "disable" } else { "enable" };
+            let r = row![
+                text(format!("{}  [{}]", n.name, state)).width(Length::Fill),
+                button(text(label).size(13)).on_press(Message::ToggleNetwork {
+                    guild_id: n.guild_id,
+                    role_id: n.role_id,
+                    enabled: !n.enabled,
+                }),
+            ]
+            .spacing(8);
+            col = col.push(r);
+        }
+        column![text("networks").size(18), col].spacing(6).into()
+    }
+
     fn exposed_section(&self) -> Element<'_, Message> {
         let mut list = Column::new().spacing(6);
         for e in &self.exposed {
@@ -319,6 +357,7 @@ mod tests {
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
             }],
+            networks: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -387,6 +426,33 @@ mod tests {
         let _ = a.update(Message::ExposeSubmit);
         assert!(a.error.is_some());
         assert_eq!(a.expose_port_input, "notaport");
+    }
+
+    #[test]
+    fn status_carries_networks_for_the_toggle() {
+        use common::api::NetworkStatus;
+        let mut a = app();
+        let report = StatusReport {
+            device: None,
+            peers: vec![],
+            networks: vec![NetworkStatus {
+                guild_id: 1,
+                role_id: 20,
+                name: "mesh2".into(),
+                enabled: false,
+            }],
+        };
+        let _ = a.update(Message::StatusFetched(Ok(report)));
+        let nets = &a.status.unwrap().networks;
+        assert_eq!(nets.len(), 1);
+        assert!(!nets[0].enabled);
+    }
+
+    #[test]
+    fn network_toggle_error_surfaces() {
+        let mut a = app();
+        let _ = a.update(Message::NetworkToggled(Err("nope".into())));
+        assert_eq!(a.error.as_deref(), Some("nope"));
     }
 
     #[test]

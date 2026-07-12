@@ -46,6 +46,20 @@ pub struct RegisterResp {
     /// Membership version (ETag). The client echoes it as `since` on the next long-poll.
     #[serde(default)]
     pub version: u64,
+    /// Every network the caller's roles grant (role@guild), with whether this device is
+    /// participating — the source for the GUI's per-network peering toggle. Includes disabled
+    /// ones (so they can be re-enabled); disabled networks are excluded from `grant`/`seeds`.
+    #[serde(default)]
+    pub networks: Vec<NetworkStatus>,
+}
+
+/// One of a device's networks (a role@guild) and whether this device peers on it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NetworkStatus {
+    pub guild_id: u64,
+    pub role_id: u64,
+    pub name: String,
+    pub enabled: bool,
 }
 
 /// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.
@@ -66,6 +80,13 @@ pub enum ManageOp {
     SetPrimary { device_name: String },
     /// Remove one of the owner's devices (by name).
     Remove { device_name: String },
+    /// Enable/disable this device's peering on one network (role@guild). Disabling drops the
+    /// device from that network's presence both ways; other shared networks still peer.
+    SetNetwork {
+        guild_id: u64,
+        role_id: u64,
+        enabled: bool,
+    },
 }
 
 /// Response to a manage request: the owner's devices after the op, plus a human message.

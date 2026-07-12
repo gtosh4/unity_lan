@@ -150,9 +150,32 @@ async fn ctl() -> anyhow::Result<()> {
         "exposes" => {
             print_exposed(control::client_expose(&socket, common::control::ExposeOp::List).await?)
         }
+        "net" => {
+            let action = need_arg()?; // enable | disable
+            let name = std::env::args()
+                .nth(5)
+                .ok_or_else(|| anyhow::anyhow!("net needs <enable|disable> <network>"))?;
+            let enabled = match action.as_str() {
+                "enable" => true,
+                "disable" => false,
+                _ => anyhow::bail!("use 'enable' or 'disable'"),
+            };
+            let status = control::client_status(&socket).await?;
+            let net = status.networks.iter().find(|n| n.name == name).ok_or_else(|| {
+                let names: Vec<&str> = status.networks.iter().map(|n| n.name.as_str()).collect();
+                anyhow::anyhow!("no network named '{name}' (yours: {})", names.join(", "))
+            })?;
+            let resp = control::client_manage(
+                &socket,
+                ManageOp::SetNetwork { guild_id: net.guild_id, role_id: net.role_id, enabled },
+            )
+            .await?;
+            println!("{}", resp.message);
+            Ok(())
+        }
         other => anyhow::bail!(
             "unknown ctl subcommand '{other}' (try: status, devices, rename, set-primary, \
-             remove, expose, unexpose, exposes)"
+             remove, expose, unexpose, exposes, net)"
         ),
     }
 }

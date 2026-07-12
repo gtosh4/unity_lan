@@ -157,8 +157,15 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       remove) — exactly what the control socket backs today. `unitylan-gui [control.sock]`.
 - [x] `expose` / `unexpose` / exposed-ports list — added in M7d (the engine now backs them over
       the control socket).
-- [ ] Login (OAuth), network list + toggle, tray — deferred: the engine doesn't yet expose these
-      over the socket. Land alongside the engine features (post-M5).
+- [x] **Networks list + per-network peering toggle** — a device can enable/disable peering on
+      each of its networks (role@guild) from the GUI (or `ctl net enable|disable <network>`).
+      Coordinator-side, symmetric opt-out (`network_optout` table keyed by device pubkey; excluded
+      from presence/grant/seeds both ways; version-bumped so peers prune at once). `RegisterResp`
+      + `StatusReport` carry `NetworkStatus` (guild/role/name/enabled). Verified:
+      `scripts/net-toggle-test.sh` (3 nodes/2 nets — A disables mesh2 → drops C both ways, keeps B;
+      re-enable → C returns) + store/GUI unit tests.
+- [ ] Login (OAuth), tray — deferred: the engine doesn't yet back these over the socket
+      (post-M5).
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +
 wgpu/tiny-skia renderer + timer subscription + async socket task boot clean). The socket

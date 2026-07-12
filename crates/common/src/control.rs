@@ -9,7 +9,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::{ManageOp, ManageResp};
+use crate::api::{ManageOp, ManageResp, NetworkStatus};
 
 #[derive(Serialize, Deserialize)]
 pub enum ControlRequest {
@@ -78,6 +78,10 @@ pub struct ExposedPort {
 pub struct StatusReport {
     pub device: Option<DeviceStatus>,
     pub peers: Vec<PeerStatus>,
+    /// Every network this device's roles grant (role@guild) + per-device enabled state — the
+    /// source for the GUI's peering toggle. Empty when not joined.
+    #[serde(default)]
+    pub networks: Vec<NetworkStatus>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
