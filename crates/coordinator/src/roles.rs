@@ -52,7 +52,13 @@ impl FakeRoleSource {
                         )
                     })
                     .collect();
-                (g.id, FakeGuildData { name: g.name, members })
+                (
+                    g.id,
+                    FakeGuildData {
+                        name: g.name,
+                        members,
+                    },
+                )
             })
             .collect();
         Self { guilds }

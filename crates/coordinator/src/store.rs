@@ -109,7 +109,12 @@ impl Store {
 
     // ---- network registry (managed by admin slash commands; seeded in tests) ----
 
-    pub async fn upsert_network(&self, guild_id: u64, role_id: u64, name: &str) -> anyhow::Result<()> {
+    pub async fn upsert_network(
+        &self,
+        guild_id: u64,
+        role_id: u64,
+        name: &str,
+    ) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO networks (guild_id, role_id, name) VALUES (?, ?, ?)
              ON CONFLICT (guild_id, role_id) DO UPDATE SET name = excluded.name",
@@ -423,11 +428,12 @@ impl Store {
         pubkey: &[u8; 32],
         now: u64,
     ) -> anyhow::Result<u64> {
-        let row = sqlx::query("SELECT user_id, expires_at, used_by FROM enrollment_keys WHERE key = ?")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("unknown enrollment key"))?;
+        let row =
+            sqlx::query("SELECT user_id, expires_at, used_by FROM enrollment_keys WHERE key = ?")
+                .bind(key)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("unknown enrollment key"))?;
 
         let user_id = row.get::<i64, _>("user_id") as u64;
         let used_by: Option<Vec<u8>> = row.try_get("used_by")?;
@@ -490,8 +496,16 @@ mod tests {
     async fn expired_key_rejected() {
         let st = mem_store().await;
         st.create_enrollment_key("k", 7, Some(100)).await.unwrap();
-        assert!(st.consume_enrollment_key("k", &[3u8; 32], 100).await.is_err());
-        assert_eq!(st.consume_enrollment_key("k", &[3u8; 32], 99).await.unwrap(), 7);
+        assert!(st
+            .consume_enrollment_key("k", &[3u8; 32], 100)
+            .await
+            .is_err());
+        assert_eq!(
+            st.consume_enrollment_key("k", &[3u8; 32], 99)
+                .await
+                .unwrap(),
+            7
+        );
     }
 
     #[tokio::test]
@@ -511,7 +525,13 @@ mod tests {
         st.set_primary(9, &b).await.unwrap();
         assert_eq!(st.primary_pubkey(9).await.unwrap(), Some(b));
 
-        let names: Vec<String> = st.user_devices(9).await.unwrap().into_iter().map(|(_, n)| n).collect();
+        let names: Vec<String> = st
+            .user_devices(9)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
         assert_eq!(names.len(), 2);
     }
 
@@ -531,8 +551,13 @@ mod tests {
 
         // Rename the requesting device.
         st.rename_device(&a, "workstation").await.unwrap();
-        let names: Vec<String> =
-            st.user_devices(5).await.unwrap().into_iter().map(|(_, n)| n).collect();
+        let names: Vec<String> = st
+            .user_devices(5)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect();
         assert!(names.contains(&"workstation".to_string()));
 
         // Removing the primary auto-promotes the remaining device.
@@ -548,8 +573,14 @@ mod tests {
     #[tokio::test]
     async fn device_ip_is_stable_per_pubkey() {
         let st = mem_store().await;
-        let a = st.allocate_device_ip(&[1u8; 32], 1, "laptop").await.unwrap();
-        let a2 = st.allocate_device_ip(&[1u8; 32], 1, "laptop").await.unwrap();
+        let a = st
+            .allocate_device_ip(&[1u8; 32], 1, "laptop")
+            .await
+            .unwrap();
+        let a2 = st
+            .allocate_device_ip(&[1u8; 32], 1, "laptop")
+            .await
+            .unwrap();
         let b = st.allocate_device_ip(&[2u8; 32], 1, "phone").await.unwrap();
         assert_eq!(a, a2, "same device pubkey → same IP");
         assert_ne!(a, b, "same user's two devices → distinct IPs");

@@ -35,8 +35,12 @@ pub type PeersByNet = HashMap<String, Vec<Ipv4Addr>>;
 pub trait FirewallBackend: Send + Sync {
     /// Replace the ruleset: default-deny new inbound on `iface`, allow established/related + ICMP
     /// echo, accept the exposed ports (scoped exposes matched against `peers_by_net`).
-    fn apply(&self, iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet)
-        -> anyhow::Result<()>;
+    fn apply(
+        &self,
+        iface: &str,
+        exposed: &[Exposed],
+        peers_by_net: &PeersByNet,
+    ) -> anyhow::Result<()>;
     /// Remove all UnityLAN firewall rules.
     fn reset(&self) -> anyhow::Result<()>;
 }
@@ -82,7 +86,10 @@ impl Firewall {
     ) -> anyhow::Result<Vec<ExposedPort>> {
         {
             let mut set = self.exposed.lock().unwrap();
-            if !set.iter().any(|e| e.proto == proto && e.port == port && e.net == net) {
+            if !set
+                .iter()
+                .any(|e| e.proto == proto && e.port == port && e.net == net)
+            {
                 set.push(Exposed { proto, port, net });
             }
         }

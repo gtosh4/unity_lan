@@ -63,9 +63,16 @@ enum Message {
     ExposePortInput(String),
     ExposeNetInput(String),
     ExposeSubmit,
-    Unexpose { proto: Proto, port: u16 },
+    Unexpose {
+        proto: Proto,
+        port: u16,
+    },
     /// Toggle this device's peering on a network (role@guild).
-    ToggleNetwork { guild_id: u64, role_id: u64, enabled: bool },
+    ToggleNetwork {
+        guild_id: u64,
+        role_id: u64,
+        enabled: bool,
+    },
     NetworkToggled(Result<NetworkResp, String>),
     /// Start interactive login; the daemon returns the Discord authorize URL to open.
     Login,
@@ -90,7 +97,10 @@ impl App {
     /// Fetch status + device list + exposed ports concurrently.
     fn reload(&self) -> Task<Message> {
         Task::batch([
-            Task::perform(ctl::fetch_status(self.socket.clone()), Message::StatusFetched),
+            Task::perform(
+                ctl::fetch_status(self.socket.clone()),
+                Message::StatusFetched,
+            ),
             Task::perform(
                 ctl::manage(self.socket.clone(), ManageOp::List),
                 Message::DevicesFetched,
@@ -122,30 +132,32 @@ impl App {
             Message::ExposesFetched(Err(e)) => self.error = Some(e),
             Message::ExposePortInput(s) => self.expose_port_input = s,
             Message::ExposeNetInput(s) => self.expose_net_input = s,
-            Message::ExposeSubmit => {
-                match parse_port(self.expose_port_input.trim()) {
-                    Ok((proto, port)) => {
-                        let net = match self.expose_net_input.trim() {
-                            "" => None,
-                            n => Some(n.to_string()),
-                        };
-                        self.expose_port_input.clear();
-                        self.expose_net_input.clear();
-                        return Task::perform(
-                            ctl::expose(self.socket.clone(), ExposeOp::Add { proto, port, net }),
-                            Message::ExposesFetched,
-                        );
-                    }
-                    Err(e) => self.error = Some(e),
+            Message::ExposeSubmit => match parse_port(self.expose_port_input.trim()) {
+                Ok((proto, port)) => {
+                    let net = match self.expose_net_input.trim() {
+                        "" => None,
+                        n => Some(n.to_string()),
+                    };
+                    self.expose_port_input.clear();
+                    self.expose_net_input.clear();
+                    return Task::perform(
+                        ctl::expose(self.socket.clone(), ExposeOp::Add { proto, port, net }),
+                        Message::ExposesFetched,
+                    );
                 }
-            }
+                Err(e) => self.error = Some(e),
+            },
             Message::Unexpose { proto, port } => {
                 return Task::perform(
                     ctl::expose(self.socket.clone(), ExposeOp::Remove { proto, port }),
                     Message::ExposesFetched,
                 )
             }
-            Message::ToggleNetwork { guild_id, role_id, enabled } => {
+            Message::ToggleNetwork {
+                guild_id,
+                role_id,
+                enabled,
+            } => {
                 return Task::perform(
                     ctl::set_network(self.socket.clone(), guild_id, role_id, enabled),
                     Message::NetworkToggled,
@@ -228,11 +240,17 @@ impl App {
             }
             None => text("not joined to any network").into(),
         };
-        column![text("this device").size(18), inner].spacing(6).into()
+        column![text("this device").size(18), inner]
+            .spacing(6)
+            .into()
     }
 
     fn peers_section(&self) -> Element<'_, Message> {
-        let peers = self.status.as_ref().map(|s| s.peers.as_slice()).unwrap_or(&[]);
+        let peers = self
+            .status
+            .as_ref()
+            .map(|s| s.peers.as_slice())
+            .unwrap_or(&[]);
         let mut col = Column::new().spacing(4);
         for p in peers {
             let ep = p
@@ -251,8 +269,9 @@ impl App {
         for d in &self.devices {
             let primary = if d.is_primary { "  [primary]" } else { "" };
             let this = if d.is_self { "  (this device)" } else { "" };
-            let mut r = row![text(format!("{}{}{}", d.device_name, primary, this)).width(Length::Fill)]
-                .spacing(8);
+            let mut r =
+                row![text(format!("{}{}{}", d.device_name, primary, this)).width(Length::Fill)]
+                    .spacing(8);
             if !d.is_primary {
                 r = r.push(
                     button(text("set primary").size(13))
@@ -261,7 +280,8 @@ impl App {
             }
             if !d.is_self {
                 r = r.push(
-                    button(text("remove").size(13)).on_press(Message::Remove(d.device_name.clone())),
+                    button(text("remove").size(13))
+                        .on_press(Message::Remove(d.device_name.clone())),
                 );
             }
             list = list.push(r);
@@ -295,7 +315,11 @@ impl App {
     }
 
     fn networks_section(&self) -> Element<'_, Message> {
-        let nets = self.status.as_ref().map(|s| s.networks.as_slice()).unwrap_or(&[]);
+        let nets = self
+            .status
+            .as_ref()
+            .map(|s| s.networks.as_slice())
+            .unwrap_or(&[]);
         let mut col = Column::new().spacing(6);
         for n in nets {
             let state = if n.enabled { "on" } else { "off" };
@@ -317,11 +341,17 @@ impl App {
     fn exposed_section(&self) -> Element<'_, Message> {
         let mut list = Column::new().spacing(6);
         for e in &self.exposed {
-            let scope = e.net.as_deref().map(|n| format!("  → net: {n}")).unwrap_or_default();
+            let scope = e
+                .net
+                .as_deref()
+                .map(|n| format!("  → net: {n}"))
+                .unwrap_or_default();
             let r = row![
                 text(format!("{}/{}{}", e.proto.as_str(), e.port, scope)).width(Length::Fill),
-                button(text("unexpose").size(13))
-                    .on_press(Message::Unexpose { proto: e.proto, port: e.port }),
+                button(text("unexpose").size(13)).on_press(Message::Unexpose {
+                    proto: e.proto,
+                    port: e.port
+                }),
             ]
             .spacing(8);
             list = list.push(r);
@@ -339,7 +369,9 @@ impl App {
         ]
         .spacing(8);
 
-        column![text("exposed ports").size(18), list, add].spacing(8).into()
+        column![text("exposed ports").size(18), list, add]
+            .spacing(8)
+            .into()
     }
 }
 
@@ -356,7 +388,9 @@ fn parse_port(s: &str) -> Result<(Proto, u16), String> {
         }
         None => (Proto::Tcp, s),
     };
-    port.parse().map(|p| (proto, p)).map_err(|_| format!("bad port '{port}'"))
+    port.parse()
+        .map(|p| (proto, p))
+        .map_err(|_| format!("bad port '{port}'"))
 }
 
 #[cfg(test)]
@@ -431,7 +465,11 @@ mod tests {
         let mut a = app();
         let resp = ExposeResp {
             message: "ok".into(),
-            exposed: vec![ExposedPort { proto: Proto::Tcp, port: 25565, net: Some("mesh".into()) }],
+            exposed: vec![ExposedPort {
+                proto: Proto::Tcp,
+                port: 25565,
+                net: Some("mesh".into()),
+            }],
         };
         let _ = a.update(Message::ExposesFetched(Ok(resp)));
         assert_eq!(a.exposed.len(), 1);
@@ -485,7 +523,10 @@ mod tests {
         let _ = a.update(Message::LoginStarted(Ok(LoginResp {
             authorize_url: "https://discord.com/oauth2/authorize?x".into(),
         })));
-        assert_eq!(a.login_url.as_deref(), Some("https://discord.com/oauth2/authorize?x"));
+        assert_eq!(
+            a.login_url.as_deref(),
+            Some("https://discord.com/oauth2/authorize?x")
+        );
         assert!(a.error.is_none());
     }
 

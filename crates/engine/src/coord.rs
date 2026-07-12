@@ -48,7 +48,18 @@ pub async fn register(
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
     // observed endpoints to report.
-    post(base_url, "register", wg_pubkey, device_name, endpoint, enrollment_key, None, disabled_networks, Vec::new()).await
+    post(
+        base_url,
+        "register",
+        wg_pubkey,
+        device_name,
+        endpoint,
+        enrollment_key,
+        None,
+        disabled_networks,
+        Vec::new(),
+    )
+    .await
 }
 
 /// Long-poll `/refresh`: pass the last-seen `version` as `since`; the coordinator holds the
@@ -64,7 +75,18 @@ pub async fn refresh(
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    post(base_url, "refresh", wg_pubkey, device_name, endpoint, enrollment_key, since, disabled_networks, observed).await
+    post(
+        base_url,
+        "refresh",
+        wg_pubkey,
+        device_name,
+        endpoint,
+        enrollment_key,
+        since,
+        disabled_networks,
+        observed,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -81,7 +103,9 @@ async fn post(
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS + 60))
+        .timeout(std::time::Duration::from_secs(
+            common::LONGPOLL_HOLD_SECS + 60,
+        ))
         .build()
         .context("building http client")?;
     let url = format!("{base_url}/{path}");

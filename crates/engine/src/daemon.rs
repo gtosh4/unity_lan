@@ -56,7 +56,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 net: None,
             })
             .collect();
-        let f = Arc::new(Firewall::new(Box::new(NftBackend), cfg.iface.clone(), seeds));
+        let f = Arc::new(Firewall::new(
+            Box::new(NftBackend),
+            cfg.iface.clone(),
+            seeds,
+        ));
         f.init()
             .context("installing firewall (default-deny); set `firewall = false` to disable")?;
         tracing::info!(iface = %cfg.iface, "firewall: default-deny inbound + established/icmp/exposed");
@@ -149,7 +153,14 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut last_seeds = coord::verified_seeds(&resp)?;
     let mut last_device = Some(device);
     apply_state(
-        &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
+        &backend,
+        &fw,
+        &zone,
+        &status,
+        &localnet,
+        &last_device,
+        &last_seeds,
+        &mut peers,
     )
     .await?;
 
@@ -174,7 +185,10 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 let mut v: Vec<common::api::ObservedEndpoint> = map
                     .iter()
                     .filter_map(|(pk, s)| {
-                        s.endpoint.map(|endpoint| common::api::ObservedEndpoint { pubkey: *pk, endpoint })
+                        s.endpoint.map(|endpoint| common::api::ObservedEndpoint {
+                            pubkey: *pk,
+                            endpoint,
+                        })
                     })
                     .collect();
                 v.sort_by_key(|o| o.pubkey);
@@ -202,7 +216,9 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 .and_then(|m| m.get(pk))
                 .and_then(|s| s.last_handshake)
                 .is_some_and(|t| t.elapsed().map_or(true, |d| d < Duration::from_secs(180)));
-            let age = punch_since.get(pk).map_or(0, |t| now.duration_since(*t).as_secs());
+            let age = punch_since
+                .get(pk)
+                .map_or(0, |t| now.duration_since(*t).as_secs());
             let r = common::control::classify_reach(punched, connected, age);
             if let Some((ip, _)) = cfg.allowed_ips.first() {
                 reach.insert(*ip, r);
@@ -274,7 +290,13 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                             tracing::warn!("no grant — access revoked; dropping all peers");
                         }
                         apply_state(
-                            &backend, &fw, &zone, &status, &localnet, &last_device, &last_seeds,
+                            &backend,
+                            &fw,
+                            &zone,
+                            &status,
+                            &localnet,
+                            &last_device,
+                            &last_seeds,
                             &mut peers,
                         )
                         .await?;
@@ -337,10 +359,12 @@ fn filter_active(
         .iter()
         .filter(|s| {
             s.networks.is_empty()
-                || s.networks.iter().any(|name| match name_to_id.get(name.as_str()) {
-                    Some(id) => !disabled.contains(id),
-                    None => true,
-                })
+                || s.networks
+                    .iter()
+                    .any(|name| match name_to_id.get(name.as_str()) {
+                        Some(id) => !disabled.contains(id),
+                        None => true,
+                    })
         })
         .cloned()
         .collect()

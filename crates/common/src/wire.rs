@@ -76,7 +76,10 @@ mod tests {
     #[test]
     fn sign_verify_roundtrip() {
         let key = CoordinatorKey::generate();
-        let v = Demo { a: 7, b: "x".into() };
+        let v = Demo {
+            a: 7,
+            b: "x".into(),
+        };
         let signed = Signed::sign(&key, &v).unwrap();
         let out: Demo = signed.verify(&key.anchor()).unwrap();
         assert_eq!(v, out);
@@ -85,7 +88,10 @@ mod tests {
     #[test]
     fn tamper_payload_fails() {
         let key = CoordinatorKey::generate();
-        let v = Demo { a: 1, b: "y".into() };
+        let v = Demo {
+            a: 1,
+            b: "y".into(),
+        };
         let mut signed = Signed::sign(&key, &v).unwrap();
         signed.payload[0] ^= 0xff;
         let out: Result<Demo, _> = signed.verify(&key.anchor());
@@ -95,7 +101,10 @@ mod tests {
     #[test]
     fn base64_roundtrip() {
         let key = CoordinatorKey::generate();
-        let v = Demo { a: 42, b: "hello".into() };
+        let v = Demo {
+            a: 42,
+            b: "hello".into(),
+        };
         let signed = Signed::sign(&key, &v).unwrap();
         let restored = Signed::from_base64(&signed.to_base64()).unwrap();
         let out: Demo = restored.verify(&key.anchor()).unwrap();

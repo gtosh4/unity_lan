@@ -164,7 +164,11 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
         },
         // Local network peering toggle: update the opt-out set (persist + wake the daemon to
         // re-mesh immediately). The daemon carries it to the coordinator on the next refresh.
-        ControlRequest::SetNetwork { guild_id, role_id, enabled } => {
+        ControlRequest::SetNetwork {
+            guild_id,
+            role_id,
+            enabled,
+        } => {
             match ctx.localnet.set(guild_id, role_id, enabled) {
                 Ok(_) => {
                     // `status.networks` already carries effective (locally-overridden) state, so
@@ -197,7 +201,9 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
         // Interactive login: fetch the authorize URL from the coordinator for this device pubkey.
         // The daemon's register loop binds us once the browser completes the flow.
         ControlRequest::Login => match coord::oauth_start(&ctx.coordinator, ctx.pubkey).await {
-            Ok(start) => ControlResponse::Login(LoginResp { authorize_url: start.authorize_url }),
+            Ok(start) => ControlResponse::Login(LoginResp {
+                authorize_url: start.authorize_url,
+            }),
             Err(e) => ControlResponse::Error(format!("{e:#}")),
         },
     };
@@ -209,7 +215,10 @@ async fn handle_conn(stream: UnixStream, ctx: Ctx) -> anyhow::Result<()> {
 
 async fn request(path: &Path, req: &ControlRequest) -> anyhow::Result<ControlResponse> {
     let stream = UnixStream::connect(path).await.with_context(|| {
-        format!("connecting to control socket {} (is the daemon running?)", path.display())
+        format!(
+            "connecting to control socket {} (is the daemon running?)",
+            path.display()
+        )
     })?;
     let mut reader = BufReader::new(stream);
     let mut bytes = serde_json::to_vec(req)?;
@@ -252,15 +261,19 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
                     );
                 }
             }
-            let scope = net.as_deref().map(|n| format!(" (net: {n})")).unwrap_or_default();
+            let scope = net
+                .as_deref()
+                .map(|n| format!(" (net: {n})"))
+                .unwrap_or_default();
             (
                 format!("exposed {}/{port}{scope}", proto.as_str()),
                 fw.expose(proto, port, net)?,
             )
         }
-        ExposeOp::Remove { proto, port } => {
-            (format!("closed {}/{port}", proto.as_str()), fw.unexpose(proto, port)?)
-        }
+        ExposeOp::Remove { proto, port } => (
+            format!("closed {}/{port}", proto.as_str()),
+            fw.unexpose(proto, port)?,
+        ),
     };
     Ok(ExposeResp { message, exposed })
 }
@@ -290,7 +303,16 @@ pub async fn client_set_network(
     role_id: u64,
     enabled: bool,
 ) -> anyhow::Result<NetworkResp> {
-    match request(path, &ControlRequest::SetNetwork { guild_id, role_id, enabled }).await? {
+    match request(
+        path,
+        &ControlRequest::SetNetwork {
+            guild_id,
+            role_id,
+            enabled,
+        },
+    )
+    .await?
+    {
         ControlResponse::Network(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),

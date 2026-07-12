@@ -21,14 +21,15 @@ use crate::config::Config;
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     let arg1 = std::env::args().nth(1).unwrap_or_default();
     if arg1 == "wg-smoke" {
-        let ifname = std::env::args().nth(2).unwrap_or_else(|| "unl-smoke".to_string());
+        let ifname = std::env::args()
+            .nth(2)
+            .unwrap_or_else(|| "unl-smoke".to_string());
         return wg_smoke(&ifname);
     }
     if arg1 == "wg-keygen" {
@@ -45,7 +46,9 @@ async fn main() -> anyhow::Result<()> {
         let name = std::env::args().nth(3).unwrap();
         let ip: std::net::Ipv4Addr = std::env::args().nth(4).unwrap().parse()?;
         let zone = dns::empty_zone();
-        zone.write().await.insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
+        zone.write()
+            .await
+            .insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
         return dns::serve(bind, zone).await;
     }
     if arg1 == "resolver-install" {
@@ -162,7 +165,9 @@ async fn ctl() -> anyhow::Result<()> {
     use common::api::ManageOp;
 
     let sub = std::env::args().nth(2).unwrap_or_default();
-    let cfg_path = std::env::args().nth(3).unwrap_or_else(|| "engine.toml".to_string());
+    let cfg_path = std::env::args()
+        .nth(3)
+        .unwrap_or_else(|| "engine.toml".to_string());
     let arg = std::env::args().nth(4);
     let cfg = Config::load(std::path::Path::new(&cfg_path))
         .with_context(|| format!("loading config {cfg_path}"))?;
@@ -189,7 +194,10 @@ async fn ctl() -> anyhow::Result<()> {
             }
             println!("peers ({}):", report.peers.len());
             for p in &report.peers {
-                let ep = p.endpoint.map(|e| e.to_string()).unwrap_or_else(|| "-".into());
+                let ep = p
+                    .endpoint
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "-".into());
                 let nat = match p.reach {
                     common::control::PeerReach::Direct => "",
                     common::control::PeerReach::Punching => "  [hole-punching…]",
@@ -201,21 +209,41 @@ async fn ctl() -> anyhow::Result<()> {
         }
         "devices" => print_devices(control::client_manage(&socket, ManageOp::List).await?),
         "rename" => print_devices(
-            control::client_manage(&socket, ManageOp::Rename { new_name: need_arg()? }).await?,
+            control::client_manage(
+                &socket,
+                ManageOp::Rename {
+                    new_name: need_arg()?,
+                },
+            )
+            .await?,
         ),
         "set-primary" => print_devices(
-            control::client_manage(&socket, ManageOp::SetPrimary { device_name: need_arg()? })
-                .await?,
+            control::client_manage(
+                &socket,
+                ManageOp::SetPrimary {
+                    device_name: need_arg()?,
+                },
+            )
+            .await?,
         ),
         "remove" => print_devices(
-            control::client_manage(&socket, ManageOp::Remove { device_name: need_arg()? }).await?,
+            control::client_manage(
+                &socket,
+                ManageOp::Remove {
+                    device_name: need_arg()?,
+                },
+            )
+            .await?,
         ),
         "expose" => {
             let (proto, port) = parse_port(&need_arg()?)?;
             let net = std::env::args().nth(5);
             print_exposed(
-                control::client_expose(&socket, common::control::ExposeOp::Add { proto, port, net })
-                    .await?,
+                control::client_expose(
+                    &socket,
+                    common::control::ExposeOp::Add { proto, port, net },
+                )
+                .await?,
             )
         }
         "unexpose" => {
@@ -230,7 +258,10 @@ async fn ctl() -> anyhow::Result<()> {
         }
         "login" => {
             let resp = control::client_login(&socket).await?;
-            println!("Open this URL to log in with Discord:\n\n  {}\n", resp.authorize_url);
+            println!(
+                "Open this URL to log in with Discord:\n\n  {}\n",
+                resp.authorize_url
+            );
             println!("The daemon binds this device once you complete the browser step.");
             Ok(())
         }
@@ -245,10 +276,15 @@ async fn ctl() -> anyhow::Result<()> {
                 _ => anyhow::bail!("use 'enable' or 'disable'"),
             };
             let status = control::client_status(&socket).await?;
-            let net = status.networks.iter().find(|n| n.name == name).ok_or_else(|| {
-                let names: Vec<&str> = status.networks.iter().map(|n| n.name.as_str()).collect();
-                anyhow::anyhow!("no network named '{name}' (yours: {})", names.join(", "))
-            })?;
+            let net = status
+                .networks
+                .iter()
+                .find(|n| n.name == name)
+                .ok_or_else(|| {
+                    let names: Vec<&str> =
+                        status.networks.iter().map(|n| n.name.as_str()).collect();
+                    anyhow::anyhow!("no network named '{name}' (yours: {})", names.join(", "))
+                })?;
             let resp =
                 control::client_set_network(&socket, net.guild_id, net.role_id, enabled).await?;
             println!("{}", resp.message);
@@ -279,13 +315,21 @@ fn parse_port(arg: &str) -> anyhow::Result<(common::control::Proto, u16)> {
         }
         None => (Proto::Tcp, arg),
     };
-    Ok((proto, port.parse().map_err(|_| anyhow::anyhow!("bad port '{port}'"))?))
+    Ok((
+        proto,
+        port.parse()
+            .map_err(|_| anyhow::anyhow!("bad port '{port}'"))?,
+    ))
 }
 
 fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
     println!("{}", resp.message);
     for e in &resp.exposed {
-        let scope = e.net.as_deref().map(|n| format!(" (net: {n})")).unwrap_or_default();
+        let scope = e
+            .net
+            .as_deref()
+            .map(|n| format!(" (net: {n})"))
+            .unwrap_or_default();
         println!("  {}/{}{}", e.proto.as_str(), e.port, scope);
     }
     Ok(())

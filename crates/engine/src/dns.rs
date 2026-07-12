@@ -109,7 +109,10 @@ mod tests {
         let zone = empty_zone();
         {
             let mut w = zone.write().await;
-            w.insert("host-b.nodeb.lan.internal".into(), Ipv4Addr::new(100, 69, 1, 2));
+            w.insert(
+                "host-b.nodeb.lan.internal".into(),
+                Ipv4Addr::new(100, 69, 1, 2),
+            );
         }
 
         // Known name → A record with the mapped IP.
@@ -135,9 +138,10 @@ mod tests {
     #[tokio::test]
     async fn serves_over_udp_socket() {
         let zone = empty_zone();
-        zone.write()
-            .await
-            .insert("host-b.nodeb.lan.internal".into(), Ipv4Addr::new(100, 69, 1, 2));
+        zone.write().await.insert(
+            "host-b.nodeb.lan.internal".into(),
+            Ipv4Addr::new(100, 69, 1, 2),
+        );
 
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = server.local_addr().unwrap();
@@ -149,7 +153,10 @@ mod tests {
         });
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        client.send_to(&query_bytes("host-b.nodeb.lan.internal."), addr).await.unwrap();
+        client
+            .send_to(&query_bytes("host-b.nodeb.lan.internal."), addr)
+            .await
+            .unwrap();
         let mut buf = [0u8; 512];
         let len = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv(&mut buf))
             .await

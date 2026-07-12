@@ -49,14 +49,17 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> Strin
     s.push_str(&format!("add table {TABLE}\n"));
 
     // A named set of source IPs per network referenced by a scoped expose.
-    let scoped_nets: BTreeSet<&str> =
-        exposed.iter().filter_map(|e| e.net.as_deref()).collect();
+    let scoped_nets: BTreeSet<&str> = exposed.iter().filter_map(|e| e.net.as_deref()).collect();
     for net in &scoped_nets {
         let name = set_name(net);
         s.push_str(&format!("add set {TABLE} {name} {{ type ipv4_addr ; }}\n"));
         let ips = peers_by_net.get(*net).map(Vec::as_slice).unwrap_or(&[]);
         if !ips.is_empty() {
-            let elems = ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ");
+            let elems = ips
+                .iter()
+                .map(|ip| ip.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
             s.push_str(&format!("add element {TABLE} {name} {{ {elems} }}\n"));
         }
     }
@@ -65,20 +68,30 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> Strin
         "add chain {TABLE} input {{ type filter hook input priority 0 ; policy accept ; }}\n"
     ));
     // Leave non-wg interfaces alone.
-    s.push_str(&format!("add rule {TABLE} input iifname != \"{iface}\" accept\n"));
+    s.push_str(&format!(
+        "add rule {TABLE} input iifname != \"{iface}\" accept\n"
+    ));
     // Return traffic for our own outbound connections.
-    s.push_str(&format!("add rule {TABLE} input ct state established,related accept\n"));
+    s.push_str(&format!(
+        "add rule {TABLE} input ct state established,related accept\n"
+    ));
     // Ping: liveness/diagnostics only, so allowed by default.
-    s.push_str(&format!("add rule {TABLE} input icmp type echo-request accept\n"));
+    s.push_str(&format!(
+        "add rule {TABLE} input icmp type echo-request accept\n"
+    ));
 
     // Unscoped exposes (any peer — only peers reach the wg iface at all), grouped per proto.
     let tcp = unscoped_ports(exposed, Proto::Tcp);
     let udp = unscoped_ports(exposed, Proto::Udp);
     if !tcp.is_empty() {
-        s.push_str(&format!("add rule {TABLE} input tcp dport {{ {tcp} }} accept\n"));
+        s.push_str(&format!(
+            "add rule {TABLE} input tcp dport {{ {tcp} }} accept\n"
+        ));
     }
     if !udp.is_empty() {
-        s.push_str(&format!("add rule {TABLE} input udp dport {{ {udp} }} accept\n"));
+        s.push_str(&format!(
+            "add rule {TABLE} input udp dport {{ {udp} }} accept\n"
+        ));
     }
     // Scoped exposes: only peers in the named network's source set reach the port.
     for e in exposed.iter().filter(|e| e.net.is_some()) {
@@ -135,7 +148,11 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn exp(proto: Proto, port: u16, net: Option<&str>) -> Exposed {
-        Exposed { proto, port, net: net.map(String::from) }
+        Exposed {
+            proto,
+            port,
+            net: net.map(String::from),
+        }
     }
 
     #[test]
@@ -172,7 +189,11 @@ mod tests {
 
     #[test]
     fn scoped_expose_with_no_peers_still_defines_empty_set() {
-        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, Some("mesh"))], &PeersByNet::new());
+        let rs = ruleset(
+            "unl0",
+            &[exp(Proto::Tcp, 9001, Some("mesh"))],
+            &PeersByNet::new(),
+        );
         assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
         assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
         assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));

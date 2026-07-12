@@ -209,7 +209,14 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     } else {
         let signed = st
             .signer
-            .sign_attestation(user_id, username, device_name, is_primary, ip, req.wg_pubkey)
+            .sign_attestation(
+                user_id,
+                username,
+                device_name,
+                is_primary,
+                ip,
+                req.wg_pubkey,
+            )
             .map_err(internal)?;
         Some(Grant {
             attestation: signed.to_base64(),
@@ -238,7 +245,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let reflexive = st.reflexive.lock().unwrap().clone();
     let mut seeds = Vec::new();
     for (_pubkey, (mp, networks, community)) in by_pubkey {
-        let punch = punch_target(caller_dialable, mp.endpoint, reflexive.get(&mp.pubkey).copied());
+        let punch = punch_target(
+            caller_dialable,
+            mp.endpoint,
+            reflexive.get(&mp.pubkey).copied(),
+        );
         let signed = st
             .signer
             .sign_attestation(
@@ -259,7 +270,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         });
     }
 
-    let device_token = st.store.device_token(&req.wg_pubkey).await.map_err(internal)?;
+    let device_token = st
+        .store
+        .device_token(&req.wg_pubkey)
+        .await
+        .map_err(internal)?;
 
     // Bump the version if our presence changed → wake peers parked in long-poll.
     if changed {
@@ -367,10 +382,20 @@ async fn community_of(st: &AppState, guild_id: u64) -> anyhow::Result<String> {
 /// via interactive login (OAuth) is known too; otherwise a new device must present a valid
 /// one-time enrollment key (which binds its pubkey to the owner on use).
 async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError> {
-    if let Some(uid) = st.store.device_owner(&req.wg_pubkey).await.map_err(internal)? {
+    if let Some(uid) = st
+        .store
+        .device_owner(&req.wg_pubkey)
+        .await
+        .map_err(internal)?
+    {
         return Ok(uid);
     }
-    if let Some(uid) = st.store.oauth_user(&req.wg_pubkey).await.map_err(internal)? {
+    if let Some(uid) = st
+        .store
+        .oauth_user(&req.wg_pubkey)
+        .await
+        .map_err(internal)?
+    {
         return Ok(uid);
     }
     let Some(key) = req.enrollment_key.as_deref() else {
@@ -390,17 +415,22 @@ async fn oauth_start(
     State(st): State<AppState>,
     Json(req): Json<OauthStartReq>,
 ) -> Result<Json<OauthStartResp>, ApiError> {
-    let oauth = st
-        .oauth
-        .as_ref()
-        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "interactive login not configured"))?;
+    let oauth = st.oauth.as_ref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "interactive login not configured",
+        )
+    })?;
     let state = common::crypto::gen_enrollment_key();
     st.oauth_sessions
         .lock()
         .unwrap()
         .insert(state.clone(), req.wg_pubkey);
     let authorize_url = oauth.authorize_url(&state);
-    Ok(Json(OauthStartResp { authorize_url, state }))
+    Ok(Json(OauthStartResp {
+        authorize_url,
+        state,
+    }))
 }
 
 #[derive(serde::Deserialize)]
@@ -413,7 +443,11 @@ struct CallbackQuery {
 /// user id and bind it to the pubkey we stashed under `state`, so the client's next register works.
 async fn oauth_callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
     let Some(oauth) = st.oauth.as_ref() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, "interactive login not configured").into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "interactive login not configured",
+        )
+            .into_response();
     };
     let Some(pubkey) = st.oauth_sessions.lock().unwrap().remove(&q.state) else {
         return (StatusCode::BAD_REQUEST, "unknown or expired login state").into_response();
@@ -469,7 +503,10 @@ mod tests {
         assert_eq!(punch_target(true, None, refl), None);
 
         // Peer dialable → caller dials peer via `endpoint`, no punch.
-        assert_eq!(punch_target(false, Some(addr("198.51.100.9:51820")), refl), None);
+        assert_eq!(
+            punch_target(false, Some(addr("198.51.100.9:51820")), refl),
+            None
+        );
 
         // Neither dialable but no reflexive on file yet → nothing to punch to.
         assert_eq!(punch_target(false, None, None), None);

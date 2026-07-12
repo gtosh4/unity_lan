@@ -36,16 +36,15 @@ pub async fn run_gateway(
     version: Arc<watch::Sender<u64>>,
 ) -> anyhow::Result<()> {
     let http = twilight_http::Client::new(token.clone());
-    let app_id = http
-        .current_user_application()
-        .await?
-        .model()
-        .await?
-        .id;
+    let app_id = http.current_user_application().await?.model().await?.id;
     tracing::info!(%app_id, "gateway: application resolved, slash commands enabled");
 
     // GUILD_MEMBERS (privileged) is required to receive member add/update/remove events.
-    let mut shard = Shard::new(ShardId::ONE, token, Intents::GUILDS | Intents::GUILD_MEMBERS);
+    let mut shard = Shard::new(
+        ShardId::ONE,
+        token,
+        Intents::GUILDS | Intents::GUILD_MEMBERS,
+    );
     let flags = EventTypeFlags::GUILD_CREATE
         | EventTypeFlags::INTERACTION_CREATE
         | EventTypeFlags::MEMBER_UPDATE
@@ -61,24 +60,37 @@ pub async fn run_gateway(
         };
         match event {
             // Register guild commands the moment we see a guild (instant availability).
-            Event::GuildCreate(gc) => {
-                match register_guild_commands(&http, app_id, gc.id()).await {
-                    Ok(()) => tracing::info!(guild = %gc.id(), "registered /unitylan commands"),
-                    Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
-                }
-            }
+            Event::GuildCreate(gc) => match register_guild_commands(&http, app_id, gc.id()).await {
+                Ok(()) => tracing::info!(guild = %gc.id(), "registered /unitylan commands"),
+                Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
+            },
             Event::InteractionCreate(interaction) => {
                 handle_interaction(&http, app_id, &store, interaction.0).await;
             }
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
                 let held: HashSet<u64> = m.roles.iter().map(|r| r.get()).collect();
-                revoke(&store, &presence, &version, m.guild_id.get(), m.user.id.get(), &held).await;
+                revoke(
+                    &store,
+                    &presence,
+                    &version,
+                    m.guild_id.get(),
+                    m.user.id.get(),
+                    &held,
+                )
+                .await;
             }
             // A member left the guild: evict them from every network in it.
             Event::MemberRemove(m) => {
-                revoke(&store, &presence, &version, m.guild_id.get(), m.user.id.get(), &HashSet::new())
-                    .await;
+                revoke(
+                    &store,
+                    &presence,
+                    &version,
+                    m.guild_id.get(),
+                    m.user.id.get(),
+                    &HashSet::new(),
+                )
+                .await;
             }
             _ => {}
         }
@@ -111,7 +123,11 @@ async fn revoke(
     }
     if changed {
         version.send_modify(|v| *v += 1);
-        tracing::info!(guild = guild_id, user = user_id, "revoked: evicted lost-role presence");
+        tracing::info!(
+            guild = guild_id,
+            user = user_id,
+            "revoked: evicted lost-role presence"
+        );
     }
 }
 
@@ -119,22 +135,29 @@ fn commands() -> Vec<twilight_model::application::command::Command> {
     let group = SubCommandGroupBuilder::new("network", "Manage UnityLAN networks").subcommands([
         SubCommandBuilder::new("add", "Register a role as a network")
             .option(RoleBuilder::new("role", "The role that grants access").required(true))
-            .option(StringBuilder::new("name", "DNS label (defaults to the role name)")),
+            .option(StringBuilder::new(
+                "name",
+                "DNS label (defaults to the role name)",
+            )),
         SubCommandBuilder::new("remove", "Unregister a network")
             .option(RoleBuilder::new("role", "The role to unregister").required(true)),
         SubCommandBuilder::new("list", "List this guild's networks"),
     ]);
-    let enroll = SubCommandBuilder::new("enroll", "Mint a one-time key to enroll a headless device");
-    let primary = SubCommandGroupBuilder::new("primary", "Choose your primary device").subcommands([
-        SubCommandBuilder::new("list", "List your devices and which is primary"),
-        SubCommandBuilder::new("set", "Set your primary device")
-            .option(StringBuilder::new("device", "Device name").required(true)),
-    ]);
-    vec![CommandBuilder::new("unitylan", "UnityLAN admin", CommandType::ChatInput)
-        .option(group)
-        .option(enroll)
-        .option(primary)
-        .build()]
+    let enroll =
+        SubCommandBuilder::new("enroll", "Mint a one-time key to enroll a headless device");
+    let primary =
+        SubCommandGroupBuilder::new("primary", "Choose your primary device").subcommands([
+            SubCommandBuilder::new("list", "List your devices and which is primary"),
+            SubCommandBuilder::new("set", "Set your primary device")
+                .option(StringBuilder::new("device", "Device name").required(true)),
+        ]);
+    vec![
+        CommandBuilder::new("unitylan", "UnityLAN admin", CommandType::ChatInput)
+            .option(group)
+            .option(enroll)
+            .option(primary)
+            .build(),
+    ]
 }
 
 async fn register_guild_commands(
@@ -246,7 +269,11 @@ async fn handle_primary(
         "list" => {
             let mut s = String::from("Your devices:\n");
             for (pk, name) in &devices {
-                let star = if primary.as_ref() == Some(pk) { " ⭐ (primary)" } else { "" };
+                let star = if primary.as_ref() == Some(pk) {
+                    " ⭐ (primary)"
+                } else {
+                    ""
+                };
                 s.push_str(&format!("• {name}{star}\n"));
             }
             s

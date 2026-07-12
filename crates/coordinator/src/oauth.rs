@@ -116,7 +116,10 @@ impl FakeOauth {
 impl OauthProvider for FakeOauth {
     fn authorize_url(&self, state: &str) -> String {
         // The tester curls the callback directly; encode state so it's easy to grep.
-        format!("{}?state={state}&code=user:REPLACE_WITH_ID", self.redirect_uri)
+        format!(
+            "{}?state={state}&code=user:REPLACE_WITH_ID",
+            self.redirect_uri
+        )
     }
 
     async fn exchange(&self, code: &str) -> anyhow::Result<u64> {

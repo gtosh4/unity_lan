@@ -38,7 +38,10 @@ pub async fn map_port(port: u16) -> Result<SocketAddr> {
         .await
         .context("router refused UPnP port mapping")?;
 
-    let external_ip = gateway.get_external_ip().await.context("reading external IP")?;
+    let external_ip = gateway
+        .get_external_ip()
+        .await
+        .context("reading external IP")?;
     let endpoint = SocketAddr::new(external_ip, port);
 
     // Renew at half-life so the mapping never lapses while the daemon is up.
@@ -66,7 +69,8 @@ fn default_route_ipv4() -> Result<Ipv4Addr> {
     let sock = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).context("bind probe socket")?;
     // 192.0.2.1 (TEST-NET-1, RFC 5737) is never routed anywhere real; we only need it to make the
     // OS pick our outbound interface's source address.
-    sock.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).context("select route")?;
+    sock.connect((Ipv4Addr::new(192, 0, 2, 1), 9))
+        .context("select route")?;
     match sock.local_addr().context("reading probe local_addr")?.ip() {
         IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => Ok(v4),
         other => anyhow::bail!("no usable LAN IPv4 (got {other})"),
