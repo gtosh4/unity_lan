@@ -127,4 +127,53 @@ pub struct PeerStatus {
     pub hostname: String,
     pub wg_ip: Ipv4Addr,
     pub endpoint: Option<SocketAddr>,
+    /// How this peer is (or isn't) reachable — surfaces a stuck hole punch. Defaults to `Direct`.
+    #[serde(default)]
+    pub reach: PeerReach,
+}
+
+/// A peer's data-plane reachability, for status display (§7.2 diagnostics).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PeerReach {
+    /// Connected — reached directly (dialable/forwarded) or a hole punch that completed.
+    #[default]
+    Direct,
+    /// Hole punch in progress: we're dialing the peer's reflexive, no handshake yet.
+    Punching,
+    /// Hole punch attempted but never completed (no handshake). Likely symmetric NAT on both
+    /// ends — not traversable without a relay (out of scope for v1, §7.2).
+    Unreachable,
+}
+
+/// Classify a peer's reachability from whether it needed a hole punch, whether a WG handshake has
+/// completed, and how long the punch has been outstanding. Pure, so it's unit-testable.
+pub fn classify_reach(punched: bool, connected: bool, punch_age_secs: u64) -> PeerReach {
+    if connected || !punched {
+        // Connected (directly or via a completed punch), or a normal peer still bootstrapping.
+        PeerReach::Direct
+    } else if punch_age_secs >= 30 {
+        PeerReach::Unreachable
+    } else {
+        PeerReach::Punching
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_reach, PeerReach};
+
+    #[test]
+    fn reach_classification() {
+        // A directly-reachable / non-punched peer is always Direct.
+        assert_eq!(classify_reach(false, false, 0), PeerReach::Direct);
+        assert_eq!(classify_reach(false, true, 999), PeerReach::Direct);
+        // A punch that completed (handshake seen) reads as Direct regardless of age.
+        assert_eq!(classify_reach(true, true, 5), PeerReach::Direct);
+        // Punching in progress, within the grace window.
+        assert_eq!(classify_reach(true, false, 5), PeerReach::Punching);
+        assert_eq!(classify_reach(true, false, 29), PeerReach::Punching);
+        // Punch outstanding past the window with no handshake → unreachable (likely symmetric).
+        assert_eq!(classify_reach(true, false, 30), PeerReach::Unreachable);
+        assert_eq!(classify_reach(true, false, 120), PeerReach::Unreachable);
+    }
 }

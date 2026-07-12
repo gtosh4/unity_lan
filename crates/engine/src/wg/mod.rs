@@ -6,6 +6,7 @@ pub use userspace::UserspaceBackend;
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::time::SystemTime;
 
 /// Interface-level configuration for the single UnityLAN interface (`unl0`).
 /// The interface name is set when the backend is constructed.
@@ -14,6 +15,12 @@ pub struct IfaceConfig {
     /// The client's own `/32`(s) across all its networks.
     pub addresses: Vec<(Ipv4Addr, u8)>,
     pub listen_port: u16,
+}
+
+/// Live per-peer stats read back from the WG backend.
+pub struct PeerStat {
+    pub endpoint: Option<SocketAddr>,
+    pub last_handshake: Option<SystemTime>,
 }
 
 /// A single peer in the mesh.
@@ -34,9 +41,10 @@ pub trait WgBackend {
     fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()>;
     /// Remove a peer by public key. (Used to prune revoked / departed co-members.)
     fn remove_peer(&self, public_key: &[u8; 32]) -> anyhow::Result<()>;
-    /// The endpoint WireGuard last saw each peer send from (its reflexive NAT mapping). Populated
-    /// once a peer has completed a handshake; reported to the coordinator for hole punching (§7.2).
-    fn peer_endpoints(&self) -> anyhow::Result<HashMap<[u8; 32], SocketAddr>>;
+    /// Per-peer live stats from the WG backend: the endpoint it was last seen sending from (its
+    /// reflexive NAT mapping, reported to the coordinator for hole punching §7.2) and the time of
+    /// its last completed handshake (for reachability/NAT diagnostics).
+    fn peer_stats(&self) -> anyhow::Result<HashMap<[u8; 32], PeerStat>>;
     /// Tear the interface down.
     fn down(&self) -> anyhow::Result<()>;
 }

@@ -145,25 +145,57 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let mut since = Some(resp.version);
     // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
     let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
+    // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
+    let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
     loop {
-        // Report where WG currently sees each peer sending from (their reflexive NAT mapping), so
-        // the coordinator can hand two NAT'd co-members each other's address to hole-punch. The
-        // reflexive appears only after a peer handshakes — later than a long-poll hold would
-        // return — so we re-read every couple seconds and report on change (a cheap local uapi
-        // read; no network traffic unless the set actually changed). A failed read (boringtun's
-        // uapi is racy under load) is treated as "unchanged" so it never flaps into a spurious
-        // report.
-        let observed = match backend.peer_endpoints() {
-            Ok(map) => {
+        // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
+        // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
+        // hole-punch. The reflexive appears only after a peer handshakes — later than a long-poll
+        // hold would return — so we re-read every couple seconds and report on change (a cheap
+        // local uapi read; no network traffic unless the set actually changed). A failed read
+        // (boringtun's uapi is racy under load) is treated as "unchanged" so it never flaps.
+        let stats = backend.peer_stats().ok();
+        let observed = match &stats {
+            Some(map) => {
                 let mut v: Vec<common::api::ObservedEndpoint> = map
-                    .into_iter()
-                    .map(|(pubkey, endpoint)| common::api::ObservedEndpoint { pubkey, endpoint })
+                    .iter()
+                    .filter_map(|(pk, s)| {
+                        s.endpoint.map(|endpoint| common::api::ObservedEndpoint { pubkey: *pk, endpoint })
+                    })
                     .collect();
                 v.sort_by_key(|o| o.pubkey);
                 v
             }
-            Err(_) => last_reported.clone(),
+            None => last_reported.clone(),
         };
+
+        // Reachability diagnostics (§7.2): classify each peer and overlay it onto the status so a
+        // stuck hole punch surfaces. A peer is "punched" if its only endpoint is a punch target
+        // (no dialable endpoint); "connected" if WG has a recent handshake for it.
+        let now = std::time::Instant::now();
+        let mut reach: HashMap<std::net::Ipv4Addr, common::control::PeerReach> = HashMap::new();
+        for (pk, cfg) in &peers {
+            let punched = last_seeds
+                .iter()
+                .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
+            if punched {
+                punch_since.entry(*pk).or_insert(now);
+            } else {
+                punch_since.remove(pk);
+            }
+            let connected = stats
+                .as_ref()
+                .and_then(|m| m.get(pk))
+                .and_then(|s| s.last_handshake)
+                .is_some_and(|t| t.elapsed().map_or(true, |d| d < Duration::from_secs(180)));
+            let age = punch_since.get(pk).map_or(0, |t| now.duration_since(*t).as_secs());
+            let r = common::control::classify_reach(punched, connected, age);
+            if let Some((ip, _)) = cfg.allowed_ips.first() {
+                reach.insert(*ip, r);
+            }
+        }
+        control::set_reach(&status, &reach).await;
+
         let changed = observed != last_reported;
         if changed {
             tracing::info!(

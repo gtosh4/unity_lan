@@ -384,6 +384,7 @@ mod tests {
                 hostname: "host-b.bob.lan.internal".into(),
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
+                reach: common::control::PeerReach::Direct,
             }],
             networks: vec![],
             needs_login: false,

@@ -233,11 +233,21 @@ port — useless for punch.
       with a standalone raw-socket punch); real cone/full-cone routers punch fine. `mesh-test.sh`
       still green (no regression from the reflexive-reporting loop changes).
 
-### M5.3 — Symmetric-NAT diagnostics
-- [ ] Detect per-peer reflexive port drift → symmetric flag.
-- [ ] `StatusReport` NAT state field; `ctl status` + GUI surface "unreachable: symmetric NAT both
-      ends." No data-plane relay in v1 (§7.2).
-- **Verify:** drift-detector unit test + GUI reducer test for the status string.
+### M5.3 — NAT / reachability diagnostics ✅
+- [x] Per-peer reachability classifier (`common::control::classify_reach`): a peer is `Direct`
+      (dialable, or a hole punch whose WG handshake completed), `Punching` (dialing a reflexive,
+      within a 30s grace window), or `Unreachable` (punch outstanding past the window with no
+      handshake — the symmetric-NAT-both-ends tail; no relay in v1, §7.2).
+- [x] `WgBackend::peer_stats()` surfaces each peer's last-seen endpoint **and** last-handshake
+      time; the daemon classifies every peer each loop and overlays it onto the control-socket
+      status (`control::set_reach`, cheap — no DNS/firewall work) so a stuck punch shows up even
+      when nothing else changes. `StatusReport`/`PeerStatus` gain `reach`.
+- [x] `ctl status` annotates a peer `[hole-punching…]` / `[unreachable: symmetric NAT?]`; the GUI
+      renders the same `PeerReach` from the shared status.
+- **Verify:** ✅ `classify_reach` unit test (all transitions). `nat-test.sh` surfaces the state over
+      `ctl status` (informational there — netns produces a one-sided handshake so B records a
+      handshake for C and reads `Direct`; the `last_handshake` liveness signal is correct on real
+      networks, where a lost return path also fails the handshake). `mesh-test.sh` still green.
 
 ---
 

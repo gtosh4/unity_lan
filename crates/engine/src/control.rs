@@ -73,12 +73,28 @@ pub async fn update(
                 hostname: s.hostname.clone(),
                 wg_ip: s.ip,
                 endpoint: s.endpoint,
+                reach: common::control::PeerReach::Direct, // overlaid by `set_reach`
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
         needs_login: false, // a device present means we're enrolled
     };
     *shared.write().await = report;
+}
+
+/// Overlay per-peer reachability onto the current status without rebuilding it (cheap — no DNS or
+/// firewall work), so a stuck hole punch surfaces promptly even when nothing else changed. Keyed
+/// by the peer's wg IP.
+pub async fn set_reach(
+    shared: &Shared,
+    reach: &std::collections::HashMap<std::net::Ipv4Addr, common::control::PeerReach>,
+) {
+    let mut report = shared.write().await;
+    for p in &mut report.peers {
+        if let Some(r) = reach.get(&p.wg_ip) {
+            p.reach = *r;
+        }
+    }
 }
 
 /// Apply the local opt-out to a network list: a locally-disabled network reports `enabled = false`

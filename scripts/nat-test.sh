@@ -228,5 +228,16 @@ if [ "$OK" = 1 ]; then
 else
   echo "data-plane: ping did not traverse (expected under netns NAT emulation; see note above)"
 fi
+
+# M5.3 diagnostics: the daemon classifies each peer's reachability (Direct / Punching /
+# Unreachable) from whether it needed a punch + whether WG has a handshake, and surfaces it over
+# the control socket. `ctl status` lists it. This is INFORMATIONAL here: netns produces a one-sided
+# handshake (C's init reaches B, B's response is lost), so B records a handshake for C and reports
+# Direct even though data can't flow — the `last_handshake` liveness signal is correct on real
+# networks, where a lost return path also fails the handshake. The classifier itself is unit-tested
+# (`cargo test -p unitylan-common reach_classification`).
+echo "=== NAT diagnostics (M5.3): B's view of C's reachability [informational] ==="
+"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -E "peers|$C_IP|$A_IP" || echo "  (ctl status unavailable)"
+
 echo "RESULT: PASS ✓  reflexive discovery + coordinator pairing + hole-punch dial verified end-to-end"
 exit 0

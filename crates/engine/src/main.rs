@@ -168,7 +168,12 @@ async fn ctl() -> anyhow::Result<()> {
             println!("peers ({}):", report.peers.len());
             for p in &report.peers {
                 let ep = p.endpoint.map(|e| e.to_string()).unwrap_or_else(|| "-".into());
-                println!("  {:<16} {:<40} {}", p.wg_ip, p.hostname, ep);
+                let nat = match p.reach {
+                    common::control::PeerReach::Direct => "",
+                    common::control::PeerReach::Punching => "  [hole-punching…]",
+                    common::control::PeerReach::Unreachable => "  [unreachable: symmetric NAT?]",
+                };
+                println!("  {:<16} {:<40} {}{}", p.wg_ip, p.hostname, ep, nat);
             }
             Ok(())
         }
