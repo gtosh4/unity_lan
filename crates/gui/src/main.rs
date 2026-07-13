@@ -197,13 +197,17 @@ impl App {
                 return Task::perform(ctl::login(self.socket.clone()), Message::LoginStarted)
             }
             Message::LoginStarted(Ok(r)) => {
-                let _ = open::that(&r.authorize_url); // best-effort auto-open; link stays for manual use
+                if !cfg!(test) {
+                    let _ = open::that(&r.authorize_url); // best-effort auto-open; link stays for manual use
+                }
                 self.login_url = Some(r.authorize_url);
                 self.error = None;
             }
             Message::LoginStarted(Err(e)) => self.error = Some(e),
             Message::OpenUrl(url) => {
-                let _ = open::that(&url);
+                if !cfg!(test) {
+                    let _ = open::that(&url);
+                }
             }
             Message::CopyUrl(url) => return iced::clipboard::write(url),
             Message::ServiceFetched(Ok(s)) => self.service = Some(s),
@@ -451,8 +455,13 @@ impl App {
         for n in nets {
             let state = if n.enabled { "on" } else { "off" };
             let label = if n.enabled { "disable" } else { "enable" };
+            let title = if n.guild_name.is_empty() {
+                n.name.clone()
+            } else {
+                format!("{} @ {}", n.name, n.guild_name)
+            };
             let r = row![
-                text(format!("{}  [{}]", n.name, state)).width(Length::Fill),
+                text(format!("{}  [{}]", title, state)).width(Length::Fill),
                 button(text(label).size(13)).on_press(Message::ToggleNetwork {
                     guild_id: n.guild_id,
                     role_id: n.role_id,
@@ -635,6 +644,7 @@ mod tests {
                 guild_id: 1,
                 role_id: 20,
                 name: "mesh2".into(),
+                guild_name: "guild1".into(),
                 enabled: false,
             }],
             needs_login: false,

@@ -150,6 +150,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     }
     let mut network_names: Vec<String> = Vec::new();
     let mut community_name: Option<String> = None;
+    let mut community_cache: HashMap<u64, String> = HashMap::new();
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
 
     // Networks this device has opted out of peering on. The client is the source of truth and
@@ -178,11 +179,20 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
 
         // The user holds this role. Record it for the toggle UI; a disabled network is listed but
         // contributes no presence / grant / seeds (so it doesn't peer, in either direction).
+        let guild_label = match community_cache.get(&net.guild_id) {
+            Some(l) => l.clone(),
+            None => {
+                let l = community_of(st, net.guild_id).await.map_err(internal)?;
+                community_cache.insert(net.guild_id, l.clone());
+                l
+            }
+        };
         let enabled = !optouts.contains(&(net.guild_id, net.role_id));
         networks_status.push(NetworkStatus {
             guild_id: net.guild_id,
             role_id: net.role_id,
             name: net.name.clone(),
+            guild_name: guild_label.clone(),
             enabled,
         });
         if !enabled {
@@ -192,7 +202,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
         if community_name.is_none() {
-            community_name = Some(community_of(st, net.guild_id).await.map_err(internal)?);
+            community_name = Some(guild_label);
         }
         network_names.push(net.name);
 
