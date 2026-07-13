@@ -134,11 +134,7 @@ async fn revoke(
 fn commands() -> Vec<twilight_model::application::command::Command> {
     let group = SubCommandGroupBuilder::new("network", "Manage UnityLAN networks").subcommands([
         SubCommandBuilder::new("add", "Register a role as a network")
-            .option(RoleBuilder::new("role", "The role that grants access").required(true))
-            .option(StringBuilder::new(
-                "name",
-                "DNS label (defaults to the role name)",
-            )),
+            .option(RoleBuilder::new("role", "The role that grants access").required(true)),
         SubCommandBuilder::new("remove", "Unregister a network")
             .option(RoleBuilder::new("role", "The role to unregister").required(true)),
         SubCommandBuilder::new("list", "List this guild's networks"),
@@ -342,21 +338,15 @@ async fn handle_network(
                 CommandOptionValue::Role(id) => Some(id),
                 _ => None,
             });
-            let name = opts.iter().find_map(|o| match &o.value {
-                CommandOptionValue::String(s) => Some(s.clone()),
-                _ => None,
-            });
             let Some(role) = role else {
                 return "Missing role.".to_string();
             };
-            // Default the network name to the role's own Discord name; fall back to `role-{id}`
-            // only if the API lookup fails (e.g. the role was just deleted).
-            let name = match name {
-                Some(n) => n,
-                None => role_name(http, guild_id, role.get())
-                    .await
-                    .unwrap_or_else(|| format!("role-{role}")),
-            };
+            // The network name is always the role's own Discord name (kept in sync by the
+            // RoleUpdate handler); fall back to `role-{id}` only if the API lookup fails
+            // (e.g. the role was just deleted).
+            let name = role_name(http, guild_id, role.get())
+                .await
+                .unwrap_or_else(|| format!("role-{role}"));
             match store.upsert_network(guild_id, role.get(), &name).await {
                 Ok(()) => {
                     // Wake parked long-polls so clients pick up the new network immediately.

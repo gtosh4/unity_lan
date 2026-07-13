@@ -186,11 +186,18 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 l
             }
         };
+        // Resolve the name live from the role source so it tracks Discord role renames; fall back
+        // to the snapshot captured at registration if the lookup fails.
+        let name = st
+            .roles
+            .role_name(net.guild_id, net.role_id)
+            .await
+            .unwrap_or_else(|| net.name.clone());
         let enabled = !optouts.contains(&(net.guild_id, net.role_id));
         networks_status.push(NetworkStatus {
             guild_id: net.guild_id,
             role_id: net.role_id,
-            name: net.name.clone(),
+            name: name.clone(),
             guild_name: guild_label.clone(),
             enabled,
         });
@@ -203,7 +210,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         if community_name.is_none() {
             community_name = Some(guild_label);
         }
-        network_names.push(net.name);
+        network_names.push(name);
 
         // Record the device as present in this network (for others' seeds) — unless it has locally
         // disconnected (`paused`), in which case we still build its grant + seeds (so it can

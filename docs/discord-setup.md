@@ -31,11 +31,12 @@ No permission bits needed — reading roles only requires guild membership + the
 A coordinator can serve **multiple guilds**. Networks are not automatic — a guild admin
 (Manage Guild) designates which roles are networks:
 ```
-/unitylan network add role:@minecraft name:"Minecraft SMP"
+/unitylan network add role:@minecraft
 /unitylan network remove role:@minecraft
 /unitylan network list
 ```
-`name` is optional (defaults to the role name); it becomes the `<network>` DNS label.
+The network's `<network>` DNS label is the role's own Discord name, and stays in sync when the
+role is renamed.
 
 ## E. Create test roles + collect IDs
 1. Enable **Developer Mode**: User Settings → **Advanced** → Developer Mode **ON**.

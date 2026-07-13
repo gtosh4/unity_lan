@@ -22,6 +22,9 @@ pub trait RoleSource: Send + Sync {
     async fn guild_name(&self, guild_id: u64) -> Option<String>;
     /// A member's roles + nick in a specific guild; `None` if not a member.
     async fn member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles>;
+    /// Current Discord display name of a role, so a network's name tracks role renames without any
+    /// stored copy to propagate. `None` if unknown (caller falls back to the registered snapshot).
+    async fn role_name(&self, guild_id: u64, role_id: u64) -> Option<String>;
 }
 
 pub struct FakeRoleSource {
@@ -73,5 +76,10 @@ impl RoleSource for FakeRoleSource {
 
     async fn member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles> {
         self.guilds.get(&guild_id)?.members.get(&user_id).cloned()
+    }
+
+    /// The fake source doesn't model role names; callers fall back to the seeded network name.
+    async fn role_name(&self, _guild_id: u64, _role_id: u64) -> Option<String> {
+        None
     }
 }
