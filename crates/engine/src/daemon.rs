@@ -159,6 +159,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
     let mut last_seeds = coord::verified_seeds(&resp)?;
     let mut last_device = Some(device);
+    // Whether the last coordinator refresh succeeded. We just registered, so start `true`; a failed
+    // refresh flips it (the mesh keeps running from cache), a successful one flips it back.
+    let mut coord_online = true;
     apply_state(
         backend.as_ref(),
         &fw,
@@ -168,6 +171,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         &last_device,
         &last_seeds,
         &mut peers,
+        coord_online,
     )
     .await?;
 
@@ -263,7 +267,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // new opt-out / paused state.
             _ = localnet.wake.notified() => {
                 apply_state(
-                    backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
+                    backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online,
                 ).await?;
                 continue;
             }
@@ -286,6 +290,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         };
         match refreshed {
             Ok((resp, dev)) => {
+                coord_online = true;
                 since = Some(resp.version);
                 last_reported = observed; // the coordinator now has this reflexive set
                 match coord::verified_seeds(&resp) {
@@ -307,15 +312,19 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                             &last_device,
                             &last_seeds,
                             &mut peers,
+                            coord_online,
                         )
                         .await?;
                     }
                     Err(e) => tracing::warn!("bad seeds: {e:#}"),
                 }
             }
-            // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive.
+            // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive but
+            // flag it so the GUI shows the coordinator as offline.
             Err(e) => {
                 tracing::warn!("refresh failed: {e:#}");
+                coord_online = false;
+                control::set_coord_online(&status, false).await;
                 tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
             }
         }
@@ -337,6 +346,7 @@ async fn apply_state(
     device: &Option<SelfDevice>,
     seeds: &[SeedPeer],
     peers: &mut HashMap<[u8; 32], PeerConfig>,
+    coord_online: bool,
 ) -> anyhow::Result<()> {
     // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
     // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
@@ -371,6 +381,7 @@ async fn apply_state(
             &disabled,
             !paused,
             localnet.disable_new(),
+            coord_online,
         )
         .await;
     }

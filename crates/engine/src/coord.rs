@@ -12,6 +12,8 @@ use common::wire::Signed;
 /// Our own verified device: its `/32`, hostname, and the networks it belongs to.
 pub struct SelfDevice {
     pub community_name: String,
+    /// The owner's Discord handle this device is enrolled as (the `<user>` label).
+    pub username: String,
     pub networks: Vec<String>,
     pub wg_ip: Ipv4Addr,
     pub hostname: String,
@@ -156,6 +158,7 @@ async fn post(
             let primary_alias = att.primary_alias(&grant.community_name);
             Some(SelfDevice {
                 community_name: grant.community_name.clone(),
+                username: att.username.clone(),
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,
                 hostname,

@@ -74,6 +74,12 @@ pub async fn set_disable_new(shared: &Shared, disable: bool) {
     shared.write().await.disable_new_networks = disable;
 }
 
+/// Overlay coordinator reachability without rebuilding the snapshot — the mesh runs from cache when
+/// a refresh fails, so this flags the health of the last coordinator contact.
+pub async fn set_coord_online(shared: &Shared, online: bool) {
+    shared.write().await.coordinator_online = online;
+}
+
 /// Shared, live status the daemon updates and the control socket reads.
 pub type Shared = Arc<RwLock<StatusReport>>;
 
@@ -91,6 +97,7 @@ pub async fn update(
     disabled: &HashSet<(u64, u64)>,
     connected: bool,
     disable_new_networks: bool,
+    coordinator_online: bool,
 ) {
     let report = StatusReport {
         device: Some(DeviceStatus {
@@ -112,6 +119,8 @@ pub async fn update(
         needs_login: false, // a device present means we're enrolled
         connected,
         disable_new_networks,
+        identity: Some(device.username.clone()),
+        coordinator_online,
     };
     *shared.write().await = report;
 }

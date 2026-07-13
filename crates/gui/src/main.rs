@@ -17,7 +17,7 @@ use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
     ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
 };
-use iced::widget::{button, checkbox, column, row, scrollable, text, text_input, Column};
+use iced::widget::{button, checkbox, column, row, scrollable, text, text_input, toggler, Column};
 use iced::{Element, Length, Subscription, Task};
 
 fn main() -> iced::Result {
@@ -284,19 +284,35 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        // Show login until a status explicitly says we're enrolled — a missing/failed status
-        // (socket not up yet) should still surface the login button, not hide it.
-        let needs_login = self.status.as_ref().is_none_or(|s| s.needs_login);
-        let body = Column::new()
-            .spacing(20)
-            .push_maybe(self.service_section())
-            .push_maybe((!needs_login).then(|| self.connection_section()).flatten())
-            .push_maybe(needs_login.then(|| self.login_section()))
-            .push(self.device_section())
-            .push(self.networks_section())
-            .push(self.peers_section())
-            .push(self.devices_section())
-            .push(self.exposed_section())
+        let service = self.service_section();
+        let body = match self.status.as_ref() {
+            // Engine reachable — it told us its state. Only offer login when the engine itself says
+            // we're not enrolled; otherwise show the live mesh/device UI.
+            Some(s) => {
+                let needs_login = s.needs_login;
+                Column::new()
+                    .spacing(20)
+                    .push_maybe(service)
+                    .push_maybe((!needs_login).then(|| self.connection_section()).flatten())
+                    .push_maybe(needs_login.then(|| self.login_section()))
+                    .push(self.device_section())
+                    .push(self.networks_section())
+                    .push(self.peers_section())
+                    .push(self.devices_section())
+                    .push(self.exposed_section())
+            }
+            // Engine not reachable (socket down / not started yet): don't show the login button — it
+            // can't work without the daemon, and the mesh/device sections have no data. Show the
+            // service control (Windows) and a plain notice instead.
+            None => {
+                let notice = service.is_none().then(|| self.engine_notice());
+                Column::new()
+                    .spacing(20)
+                    .push_maybe(service)
+                    .push_maybe(notice)
+            }
+        };
+        let body = body
             .push_maybe(
                 self.error
                     .as_ref()
@@ -304,6 +320,20 @@ impl App {
             )
             .padding(20);
         scrollable(body).into()
+    }
+
+    /// Shown when we have no status: the control socket isn't reachable, so the engine is either
+    /// still starting or not running. Distinct from "not logged in" — offering login here would
+    /// just fail against a dead socket.
+    fn engine_notice(&self) -> Element<'_, Message> {
+        let msg = if self.error.is_some() {
+            "Engine not reachable — is the UnityLAN engine running? Retrying automatically."
+        } else {
+            "Connecting to engine…"
+        };
+        column![text("engine").size(18), text(msg).size(14)]
+            .spacing(6)
+            .into()
     }
 
     /// Engine-service status (the engine *process* lifecycle, distinct from the mesh connection).
@@ -344,7 +374,8 @@ impl App {
     /// all peers, withdrawing us from co-members' seed lists. Connect brings the link back up.
     /// Hidden until we have a status (need the socket) and only when enrolled (`!needs_login`).
     fn connection_section(&self) -> Option<Element<'_, Message>> {
-        let connected = self.status.as_ref()?.connected;
+        let status = self.status.as_ref()?;
+        let connected = status.connected;
         let (state, label, target) = if connected {
             ("connected", "disconnect", false)
         } else {
@@ -361,8 +392,22 @@ impl App {
             b,
         ]
         .spacing(8);
+        // Who we're enrolled as, and whether the coordinator is currently reachable (the mesh keeps
+        // running from cache when it isn't, so this is a distinct health line).
+        let identity = status
+            .identity
+            .as_deref()
+            .map(|u| text(format!("signed in as {u}")).size(14));
+        let coord = if status.coordinator_online {
+            "coordinator: online"
+        } else {
+            "coordinator: offline (mesh running from cache)"
+        };
         Some(
-            column![text("connection").size(18), controls]
+            column![text("connection").size(18)]
+                .push_maybe(identity)
+                .push(text(coord).size(14))
+                .push(controls)
                 .spacing(6)
                 .into(),
         )
@@ -372,13 +417,10 @@ impl App {
         let inner: Element<'_, Message> = match self.status.as_ref().and_then(|s| s.device.as_ref())
         {
             Some(d) => {
+                // Networks are listed (with toggles) in the networks section below — don't repeat
+                // them here. This line is just the device's identity on the mesh.
                 let primary = if d.is_primary { "  [primary]" } else { "" };
-                column![
-                    text(format!("{}  {}{}", d.wg_ip, d.hostname, primary)),
-                    text(format!("networks: {}", d.networks.join(", "))).size(14),
-                ]
-                .spacing(4)
-                .into()
+                text(format!("{}  {}{}", d.wg_ip, d.hostname, primary)).into()
             }
             None => text("not joined to any network").into(),
         };
@@ -469,19 +511,20 @@ impl App {
             .unwrap_or(&[]);
         let mut col = Column::new().spacing(6);
         for n in nets {
-            let state = if n.enabled { "on" } else { "off" };
-            let label = if n.enabled { "disable" } else { "enable" };
             let title = if n.guild_name.is_empty() {
                 n.name.clone()
             } else {
                 format!("{} @ {}", n.name, n.guild_name)
             };
+            // A switch (not a button): flipping it applies immediately, and its position shows the
+            // current state — no separate on/off label needed.
+            let (guild_id, role_id) = (n.guild_id, n.role_id);
             let r = row![
-                text(format!("{}  [{}]", title, state)).width(Length::Fill),
-                button(text(label).size(13)).on_press(Message::ToggleNetwork {
-                    guild_id: n.guild_id,
-                    role_id: n.role_id,
-                    enabled: !n.enabled,
+                text(title).width(Length::Fill),
+                toggler(n.enabled).on_toggle(move |enabled| Message::ToggleNetwork {
+                    guild_id,
+                    role_id,
+                    enabled,
                 }),
             ]
             .spacing(8);
@@ -585,6 +628,8 @@ mod tests {
             needs_login: false,
             connected: true,
             disable_new_networks: true,
+            identity: None,
+            coordinator_online: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -676,6 +721,8 @@ mod tests {
             needs_login: false,
             connected: true,
             disable_new_networks: true,
+            identity: None,
+            coordinator_online: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -725,6 +772,8 @@ mod tests {
             needs_login: false,
             connected: false,
             disable_new_networks: true,
+            identity: None,
+            coordinator_online: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

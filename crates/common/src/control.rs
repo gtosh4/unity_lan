@@ -146,6 +146,14 @@ pub struct StatusReport {
     /// secure default is `true`; the GUI toggles it via `SetNewNetworkDefault`.
     #[serde(default = "default_true")]
     pub disable_new_networks: bool,
+    /// The Discord identity this device is enrolled as (the owner's handle). `None` before login.
+    #[serde(default)]
+    pub identity: Option<String>,
+    /// Whether the last coordinator refresh succeeded — the mesh keeps running from cache when the
+    /// coordinator is unreachable, so this is a health signal, distinct from `connected`. Defaults
+    /// to `true` (an older daemon with no field reads as reachable).
+    #[serde(default = "default_true")]
+    pub coordinator_online: bool,
 }
 
 fn default_true() -> bool {
