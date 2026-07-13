@@ -11,21 +11,41 @@ mod keys;
 mod nat;
 mod netcfg;
 mod resolver;
+#[cfg(windows)]
+mod service;
+mod shutdown;
 mod wg;
 
 use anyhow::Context;
 
 use crate::config::Config;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    let arg1 = std::env::args().nth(1).unwrap_or_default();
+
+    // The Windows service subcommands run *outside* a tokio runtime: `service run` hands the thread
+    // to the SCM dispatcher (which builds its own runtime), and install/uninstall are synchronous
+    // SCM calls with plain stdout output.
+    #[cfg(windows)]
+    if arg1 == "service" {
+        return service::main();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
-    let arg1 = std::env::args().nth(1).unwrap_or_default();
+    // Everything else runs on a multi-threaded runtime (as `#[tokio::main]` did before).
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("building tokio runtime")?;
+    rt.block_on(async_main(arg1))
+}
+
+async fn async_main(arg1: String) -> anyhow::Result<()> {
     if arg1 == "wg-smoke" {
         let ifname = std::env::args()
             .nth(2)
@@ -52,19 +72,28 @@ async fn main() -> anyhow::Result<()> {
         return dns::serve(bind, zone).await;
     }
     if arg1 == "resolver-install" {
-        // Dev/test: drive the real ResolverHook. `resolver-install <iface> <server>`.
-        use resolver::ResolverHook;
+        // Dev/test: drive this platform's ResolverHook. `resolver-install <iface> <server>`.
         let iface = std::env::args().nth(2).unwrap();
         let server: std::net::SocketAddr = std::env::args().nth(3).unwrap().parse()?;
-        return resolver::ResolvectlHook.install(&iface, server);
+        let hook = resolver::platform_hook()
+            .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
+        return hook.install(&iface, server);
     }
     if arg1 == "resolver-revert" {
-        use resolver::ResolverHook;
         let iface = std::env::args().nth(2).unwrap();
-        return resolver::ResolvectlHook.revert(&iface);
+        let hook = resolver::platform_hook()
+            .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
+        return hook.revert(&iface);
     }
     if arg1 == "run" {
-        return daemon::run(load_config(std::env::args().nth(2))?).await;
+        let cfg = load_config(std::env::args().nth(2))?;
+        // Console mode: Ctrl-C latches the shutdown signal the daemon awaits.
+        let (trigger, shutdown) = shutdown::channel();
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            trigger.trigger();
+        });
+        return daemon::run(cfg, shutdown).await;
     }
     if arg1 == "ctl" {
         return ctl().await;
@@ -86,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.enrollment_key.clone(),
         Vec::new(),
         keys::load_token(&cfg.state_dir),
+        false,
     )
     .await?;
 
@@ -141,6 +171,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
             None,
             Vec::new(),
             None, // login binds a fresh identity; nothing to supersede
+            false,
         )
         .await
         {
@@ -182,6 +213,9 @@ async fn ctl() -> anyhow::Result<()> {
             let report = control::client_status(&socket).await?;
             if report.needs_login {
                 println!("not logged in — run `unitylan ctl login {cfg_path}`");
+            }
+            if !report.connected {
+                println!("mesh: disconnected — run `unitylan ctl connect {cfg_path}`");
             }
             match &report.device {
                 None => println!("not joined to any network"),
@@ -264,6 +298,12 @@ async fn ctl() -> anyhow::Result<()> {
             println!("The daemon binds this device once you complete the browser step.");
             Ok(())
         }
+        "connect" | "disconnect" => {
+            let connect = sub == "connect";
+            let resp = control::client_set_connected(&socket, connect).await?;
+            println!("{}", resp.message);
+            Ok(())
+        }
         "net" => {
             let action = need_arg()?; // enable | disable
             let name = std::env::args()
@@ -294,8 +334,8 @@ async fn ctl() -> anyhow::Result<()> {
             Ok(())
         }
         other => anyhow::bail!(
-            "unknown ctl subcommand '{other}' (try: status, devices, rename, set-primary, \
-             remove, expose, unexpose, exposes, net)"
+            "unknown ctl subcommand '{other}' (try: status, connect, disconnect, devices, rename, \
+             set-primary, remove, expose, unexpose, exposes, net)"
         ),
     }
 }

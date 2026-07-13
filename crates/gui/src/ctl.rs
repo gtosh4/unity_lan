@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use common::api::{ManageOp, ManageResp};
 use common::control::{
-    ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, NetworkResp, StatusReport,
+    ConnectedResp, ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, NetworkResp,
+    StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -106,6 +107,14 @@ pub async fn set_network(
 pub async fn login(path: PathBuf) -> Result<LoginResp, String> {
     match request(path, ControlRequest::Login).await? {
         ControlResponse::Login(r) => Ok(r),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedResp, String> {
+    match request(path, ControlRequest::SetConnected { connected }).await? {
+        ControlResponse::Connected(r) => Ok(r),
         ControlResponse::Error(e) => Err(e),
         _ => Err("unexpected response".into()),
     }

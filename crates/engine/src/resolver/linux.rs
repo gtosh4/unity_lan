@@ -1,45 +1,15 @@
-//! Point the OS resolver at our `.internal` DNS resolver (design.md §6, M6). `dns.rs` serves
-//! correct answers on a UDP socket; this makes the OS actually *route* `.internal` queries there.
-//!
 //! Linux/systemd-resolved backend: per-link config on the wg interface with a `~internal`
 //! *routing domain*, so only `*.internal` lookups go to our resolver — global DNS is untouched.
 //! The config is scoped to the wg link, so it clears automatically when the link disappears; we
-//! also `revert` it on clean shutdown. Windows (NRPT) and macOS (`/etc/resolver`) are future
-//! backends behind the same trait.
-//!
-//! Best-effort: requires privilege (the daemon already runs privileged for `ip link`/nft). A
-//! failure only means names don't auto-resolve — it never blocks meshing.
+//! also `revert` it on clean shutdown.
 
 use std::net::SocketAddr;
 use std::process::Command;
 
-/// The `.internal` zone we serve. Used as the systemd-resolved routing domain (`~internal`).
+use super::ResolverHook;
+
+/// The `.internal` zone we serve, used as the systemd-resolved routing domain (`~internal`).
 const DOMAIN: &str = "internal";
-
-/// Hooks the OS resolver to our `.internal` server on the wg link, and reverts it.
-pub trait ResolverHook: Send + Sync {
-    /// Route `.internal` queries on `iface` to our resolver at `server`.
-    fn install(&self, iface: &str, server: SocketAddr) -> anyhow::Result<()>;
-    /// Undo the per-link resolver config.
-    fn revert(&self, iface: &str) -> anyhow::Result<()>;
-}
-
-/// The OS resolver backend for this platform, or `None` where we don't hook the resolver yet.
-///
-/// Linux drives systemd-resolved ([`ResolvectlHook`]). Windows would use NRPT
-/// (`Add-DnsClientNrptRule -Namespace .internal -NameServers <ip>` / `Remove-DnsClientNrptRule`)
-/// and macOS `/etc/resolver/internal`; both are deferred, so `.internal` names still resolve when
-/// queried directly at `dns_bind` but aren't wired into the OS resolver automatically there.
-pub fn platform_hook() -> Option<Box<dyn ResolverHook>> {
-    #[cfg(target_os = "linux")]
-    {
-        Some(Box::new(ResolvectlHook))
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
 
 /// systemd-resolved backend driving `resolvectl`.
 pub struct ResolvectlHook;

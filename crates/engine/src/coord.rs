@@ -38,6 +38,7 @@ pub struct SeedPeer {
     pub networks: Vec<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn register(
     base_url: &str,
     wg_pubkey: WgPublicKey,
@@ -46,6 +47,7 @@ pub async fn register(
     enrollment_key: Option<String>,
     disabled_networks: Vec<NetworkRef>,
     supersede: Option<String>,
+    paused: bool,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
     // observed endpoints to report. `supersede` carries our stored device token so the coordinator
@@ -61,6 +63,7 @@ pub async fn register(
         disabled_networks,
         Vec::new(),
         supersede,
+        paused,
     )
     .await
 }
@@ -77,6 +80,7 @@ pub async fn refresh(
     since: Option<u64>,
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
+    paused: bool,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     post(
         base_url,
@@ -89,6 +93,7 @@ pub async fn refresh(
         disabled_networks,
         observed,
         None, // refresh never supersedes: a re-key retires the old key on the initial register
+        paused,
     )
     .await
 }
@@ -105,6 +110,7 @@ async fn post(
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
     supersede: Option<String>,
+    paused: bool,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -126,6 +132,7 @@ async fn post(
             disabled_networks,
             observed,
             supersede,
+            paused,
         })
         .send()
         .await

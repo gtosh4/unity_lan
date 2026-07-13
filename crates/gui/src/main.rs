@@ -8,13 +8,14 @@
 //! them over the control socket.
 
 mod ctl;
+mod svc;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
-    ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
+    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
 };
 use iced::widget::{button, column, row, scrollable, text, text_input, Column};
 use iced::{Element, Length, Subscription, Task};
@@ -44,6 +45,12 @@ struct App {
     expose_net_input: String,
     /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
     login_url: Option<String>,
+    /// Engine Windows-service state (None until first queried; `Unsupported` off Windows).
+    service: Option<svc::SvcState>,
+    /// A service start is in flight — disables the button meanwhile.
+    service_busy: bool,
+    /// A mesh connect/disconnect is in flight — disables the button meanwhile.
+    connect_busy: bool,
     error: Option<String>,
 }
 
@@ -81,6 +88,16 @@ enum Message {
     OpenUrl(String),
     /// Copy a URL to the clipboard.
     CopyUrl(String),
+    /// Engine-service status poll result.
+    ServiceFetched(Result<svc::SvcState, String>),
+    /// Start the engine service (only when it's stopped — there's no socket to talk to otherwise).
+    ServiceStart,
+    /// A service start finished (Ok) or failed (Err) → refresh.
+    ServiceActionDone(Result<(), String>),
+    /// Connect (`true`) / disconnect (`false`) the mesh over the control socket.
+    SetConnected(bool),
+    /// A mesh connect/disconnect finished → refresh.
+    ConnectedDone(Result<ConnectedResp, String>),
 }
 
 impl App {
@@ -94,11 +111,14 @@ impl App {
             expose_port_input: String::new(),
             expose_net_input: String::new(),
             login_url: None,
+            service: None,
+            service_busy: false,
+            connect_busy: false,
             error: None,
         }
     }
 
-    /// Fetch status + device list + exposed ports concurrently.
+    /// Fetch status + device list + exposed ports + engine-service state concurrently.
     fn reload(&self) -> Task<Message> {
         Task::batch([
             Task::perform(
@@ -113,6 +133,7 @@ impl App {
                 ctl::expose(self.socket.clone(), ExposeOp::List),
                 Message::ExposesFetched,
             ),
+            Task::perform(svc::query(), Message::ServiceFetched),
         ])
     }
 
@@ -185,6 +206,33 @@ impl App {
                 let _ = open::that(&url);
             }
             Message::CopyUrl(url) => return iced::clipboard::write(url),
+            Message::ServiceFetched(Ok(s)) => self.service = Some(s),
+            Message::ServiceFetched(Err(e)) => {
+                self.service = None;
+                self.error = Some(e);
+            }
+            Message::ServiceStart => {
+                self.service_busy = true;
+                self.service = Some(svc::SvcState::Pending);
+                return Task::perform(svc::start(), Message::ServiceActionDone);
+            }
+            Message::ServiceActionDone(res) => {
+                self.service_busy = false;
+                self.error = res.err();
+                return self.reload(); // pull the settled service + engine state
+            }
+            Message::SetConnected(connected) => {
+                self.connect_busy = true;
+                return Task::perform(
+                    ctl::set_connected(self.socket.clone(), connected),
+                    Message::ConnectedDone,
+                );
+            }
+            Message::ConnectedDone(res) => {
+                self.connect_busy = false;
+                self.error = res.err();
+                return self.reload(); // pull the settled connection state + peers
+            }
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -222,6 +270,8 @@ impl App {
         let needs_login = self.status.as_ref().is_none_or(|s| s.needs_login);
         let body = Column::new()
             .spacing(20)
+            .push_maybe(self.service_section())
+            .push_maybe((!needs_login).then(|| self.connection_section()).flatten())
             .push_maybe(needs_login.then(|| self.login_section()))
             .push(self.device_section())
             .push(self.networks_section())
@@ -235,6 +285,67 @@ impl App {
             )
             .padding(20);
         scrollable(body).into()
+    }
+
+    /// Engine-service status (the engine *process* lifecycle, distinct from the mesh connection).
+    /// `None` (hidden) off Windows or before the first query. Day-to-day on/off is the mesh
+    /// connect/disconnect below; `start` appears only when the service is stopped, to bring the
+    /// engine up (there's no control socket to connect to until it's running). The install-time
+    /// DACL lets `start` work without elevation.
+    fn service_section(&self) -> Option<Element<'_, Message>> {
+        let state = self.service?;
+        if state == svc::SvcState::Unsupported {
+            return None;
+        }
+        let mut controls =
+            row![text(format!("engine service: {}", state.label())).size(14)].spacing(8);
+
+        match state {
+            svc::SvcState::Stopped => {
+                let b = button(text("start").size(13));
+                let b = if self.service_busy {
+                    b
+                } else {
+                    b.on_press(Message::ServiceStart)
+                };
+                controls = controls.push(b);
+            }
+            svc::SvcState::NotInstalled => {
+                controls = controls.push(
+                    text("run `unitylan-engine service install` (elevated) to enable").size(13),
+                );
+            }
+            svc::SvcState::Running | svc::SvcState::Pending | svc::SvcState::Unsupported => {}
+        }
+        Some(column![text("engine").size(18), controls].spacing(6).into())
+    }
+
+    /// Mesh connect/disconnect over the control socket. Disconnect keeps the engine resident and
+    /// polling (instant reconnect) but drops all peers and withdraws us from co-members' seed lists.
+    /// Hidden until we have a status (need the socket) and only when enrolled (`!needs_login`).
+    fn connection_section(&self) -> Option<Element<'_, Message>> {
+        let connected = self.status.as_ref()?.connected;
+        let (state, label, target) = if connected {
+            ("connected", "disconnect", false)
+        } else {
+            ("disconnected", "connect", true)
+        };
+        let b = button(text(label).size(13));
+        let b = if self.connect_busy {
+            b
+        } else {
+            b.on_press(Message::SetConnected(target))
+        };
+        let controls = row![
+            text(format!("mesh: {state}")).size(14).width(Length::Fill),
+            b,
+        ]
+        .spacing(8);
+        Some(
+            column![text("connection").size(18), controls]
+                .spacing(6)
+                .into(),
+        )
     }
 
     fn device_section(&self) -> Element<'_, Message> {
@@ -438,6 +549,7 @@ mod tests {
             }],
             networks: vec![],
             needs_login: false,
+            connected: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -526,11 +638,58 @@ mod tests {
                 enabled: false,
             }],
             needs_login: false,
+            connected: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
         assert_eq!(nets.len(), 1);
         assert!(!nets[0].enabled);
+    }
+
+    #[test]
+    fn service_fetched_sets_state() {
+        let mut a = app();
+        let _ = a.update(Message::ServiceFetched(Ok(svc::SvcState::Running)));
+        assert_eq!(a.service, Some(svc::SvcState::Running));
+    }
+
+    #[test]
+    fn service_action_marks_busy_then_clears_on_done() {
+        let mut a = app();
+        // Pressing start marks the service busy and optimistically shows Pending.
+        let _ = a.update(Message::ServiceStart);
+        assert!(a.service_busy);
+        assert_eq!(a.service, Some(svc::SvcState::Pending));
+        // A failed action clears busy and surfaces the error.
+        let _ = a.update(Message::ServiceActionDone(Err("access denied".into())));
+        assert!(!a.service_busy);
+        assert_eq!(a.error.as_deref(), Some("access denied"));
+    }
+
+    #[test]
+    fn set_connected_marks_busy_then_clears_on_done() {
+        let mut a = app();
+        // Requesting a disconnect marks the connect action in-flight.
+        let _ = a.update(Message::SetConnected(false));
+        assert!(a.connect_busy);
+        // A failed toggle clears busy and surfaces the error.
+        let _ = a.update(Message::ConnectedDone(Err("no daemon".into())));
+        assert!(!a.connect_busy);
+        assert_eq!(a.error.as_deref(), Some("no daemon"));
+    }
+
+    #[test]
+    fn status_carries_connection_state() {
+        let mut a = app();
+        let report = StatusReport {
+            device: None,
+            peers: vec![],
+            networks: vec![],
+            needs_login: false,
+            connected: false,
+        };
+        let _ = a.update(Message::StatusFetched(Ok(report)));
+        assert!(!a.status.unwrap().connected);
     }
 
     #[test]

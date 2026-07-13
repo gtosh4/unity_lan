@@ -29,3 +29,6 @@ hickory-proto = "0.26.1"
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

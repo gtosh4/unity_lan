@@ -44,6 +44,13 @@ pub struct RegisterReq {
     /// waiting for the reaper. `None` in the common case.
     #[serde(default)]
     pub supersede: Option<String>,
+    /// The device has locally **disconnected** (paused the mesh): keep the coordinator session
+    /// (so reconnect is instant) but withdraw the device from every co-member's seed list, so
+    /// peers prune it and see it as offline. Distinct from `disabled_networks` (a per-network
+    /// opt-out): pausing withdraws presence globally while still returning the caller's own grant
+    /// (its IP) and seeds, so the client can re-mesh the instant it reconnects.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 /// "I saw device `pubkey` sending from `endpoint`." A peer's reflexive address as observed across

@@ -160,6 +160,23 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
 - [x] Async control-socket client (shared `common::control` DTOs; GUI needs no engine dep).
 - [x] Screens: live status (this device + peers) and device management (rename / set-primary /
       remove) — exactly what the control socket backs today. `unitylan-gui [control.sock]`.
+- [x] **Mesh connect / disconnect** — the GUI's primary on/off is a mesh **connect/disconnect** over
+      the control socket (`ControlRequest::SetConnected`), *not* a Windows-service stop. Disconnect
+      keeps the engine resident and still long-polling (so reconnect is instant) but drops the local
+      peer-set (interface stays up holding our `/32`) **and** withdraws us from every co-member's seed
+      list so peers prune us and see us offline. **Client is the source of truth**: a global paused
+      flag persisted separately (`<state_dir>/paused.json`), layered *on top of* the per-network
+      opt-out (so a connect/disconnect cycle never clobbers individual per-network prefs), enforced
+      locally (empty active seed set) so it works while the coordinator is **unreachable** — the
+      toggle wakes the daemon (`tokio::Notify`) to tear down / re-mesh from the last snapshot at once.
+      It rides to the coordinator as `RegisterReq.paused`, which skips recording the device's presence
+      and evicts any existing (peers wake on the version bump and prune), while still returning the
+      device's own grant (its IP) + seeds so reconnect re-meshes instantly. `StatusReport.connected`
+      surfaces the state; `ctl connect|disconnect` is the CLI. The engine **Windows service stays
+      resident** (auto-start); the GUI keeps only a **start** affordance for the stopped case (no
+      socket to talk to until it's running) — routine stop/restart is gone (mesh disconnect replaces
+      it). Verified: `netcfg` pause-persistence test + 2 GUI reducer tests (connect busy/clears,
+      status carries connection state).
 - [x] `expose` / `unexpose` / exposed-ports list — added in M7d (the engine now backs them over
       the control socket).
 - [x] **Networks list + per-network peering toggle** — a device can enable/disable peering on
@@ -266,18 +283,29 @@ port — useless for punch.
       best-effort (needs privilege — the daemon already runs privileged; a failure only means names
       don't auto-resolve). The resolver binds loopback (`dns_bind`) and resolved routes to it because
       the wg iface is operational (carries its `/32`) — resolved ignores per-link DNS on a
-      non-operational link. Windows NRPT + macOS `/etc/resolver` are future backends behind the trait.
+      non-operational link. macOS `/etc/resolver` is a future backend behind the trait.
+- [x] **Per-OS resolver hookup (Windows)** ✅ (M-win2) — `resolver/windows.rs`: `NrptHook` drives the
+      Name Resolution Policy Table via PowerShell (`Add-DnsClientNrptRule -Namespace '.internal'
+      -NameServers <ip>` / `Remove-DnsClientNrptRule`). NRPT is namespace-scoped (system-wide), not
+      link-scoped — same split-horizon effect as resolved's routing domain. Every rule carries
+      `-Comment UnityLAN`, so `install` clears stale rules then re-adds (idempotent) and `revert`
+      removes only ours. Two NRPT constraints vs. Linux: nameservers are port-53-only (`install`
+      errors if `dns_bind` isn't on :53), and rules persist across an unclean exit (self-healed by the
+      clear-on-install). `resolver.rs` split into `resolver/{mod,linux,windows}.rs` mirroring `fw/`;
+      `platform_hook()` now selects resolved (Linux) vs NRPT (Windows). Needs elevation.
 - [x] **Multi-homing / cross-network isolation** ✅ — obsolete under **Model B** (design §6): one
       device IP in a flat `100.64/10`, networks are pure ACL. Isolation is already enforced by
       seed-scoping (you only peer co-members sharing ≥1 network) + the firewall's `--net` source
       scoping (M7c-2), not per-role `/32`s.
 
-**Verify:** ✅ 2 `resolver.rs` unit tests (resolvectl arg construction); `scripts/resolver-hook-test.sh`
-(live, root) — on this host's real systemd-resolved, scoped to a throwaway link: the daemon's actual
-`ResolvectlHook` routes `.internal` and `resolvectl query host-a.alice.lan.internal → 100.64.0.9`,
-then reverts. `mesh-test.sh` still green (in-netns the hook warns best-effort — no resolved there).
-Per-OS hookup for Windows/macOS deferred (untestable here; consistent with the M2 spike / M7c
-cross-OS deferrals).
+**Verify:** ✅ 2 `resolver/linux.rs` unit tests (resolvectl arg construction) + 2 `resolver/windows.rs`
+tests (NRPT script construction); `scripts/resolver-hook-test.sh` (live, root) — on this host's real
+systemd-resolved, scoped to a throwaway link: the daemon's actual `ResolvectlHook` routes `.internal`
+and `resolvectl query host-a.alice.lan.internal → 100.64.0.9`, then reverts. `mesh-test.sh` still
+green (in-netns the hook warns best-effort — no resolved there). Windows NRPT: builds + unit tests
+pass on Windows; the `resolver-install`/`resolver-revert` dev subcommands drive the real `NrptHook`,
+and the port-53 guard errors cleanly. Live NRPT rule install + `.internal` resolution needs an
+elevated box. macOS `/etc/resolver` still deferred.
 
 ---
 
@@ -359,7 +387,27 @@ cross-OS deferrals).
 
 ## Cross-cutting (ongoing)
 - [ ] `tracing` logging across binaries.
-- [ ] Per-OS service packaging (systemd unit · Windows Service · launchd plist).
+- [~] Per-OS service packaging (systemd unit · **Windows Service** ✅ · launchd plist).
+      **Windows Service** landed (M-win2): `service.rs` wraps the engine as a `LocalSystem`
+      auto-start service via the `windows-service` crate. `service install [config.toml]` registers
+      it (config canonicalized to an absolute path + baked into the SCM command line, since a service
+      runs with CWD=System32); `service uninstall` stops + deletes; `service run` is the SCM entry
+      (dispatcher → control handler translating Stop/Shutdown into the daemon's shutdown signal). The
+      daemon's shutdown was refactored off `ctrl_c()` onto a shared `shutdown::Shutdown` (watch-based,
+      fire-once) so console mode (Ctrl-C) and the service (SCM Stop) share one path. Service logs to
+      `unitylan-engine-service.log` next to the exe (no console). **GUI service control** (M-win2):
+      `install` relaxes the service DACL (`sc.exe sdset`, `RELAXED_DACL`) so the interactive user gets
+      `SERVICE_START`/`SERVICE_STOP` — the unprivileged GUI (`gui/src/svc.rs`) queries status and can
+      **start** the engine with no UAC prompt (blocking SCM calls hopped onto `spawn_blocking`). The GUI
+      shows an "engine" section: running/stopped/not-installed; `WINDOWS_SERVICE_NAME` lives in `common`
+      so engine + GUI can't drift. **Note (M4 connect/disconnect):** the service is meant to stay
+      **resident** (auto-start) — day-to-day on/off is a mesh connect/disconnect over the control socket
+      (which needs no SCM access at all), so the GUI now keeps only **start** here (bootstrap when the
+      engine is stopped and there's no socket yet); routine stop/restart is gone. Stopping the service
+      only drops the mesh (firewall rules are scoped to the vanishing wg iface), so it can't open the
+      host. Still TODO: an MSI/WiX installer to bundle engine+gui+`wireguard.dll`, register the service,
+      and write a default config; systemd + launchd packaging. Follow-up: with GUI stop gone, the `WP`
+      (`SERVICE_STOP`) grant in `RELAXED_DACL` could be dropped to `SERVICE_START` only.
 - [ ] CI: `cargo fmt`/`clippy`/`test`.
 - [x] Endpoint-record spoof hardening ✅ — the coordinator accepts a peer-observed reflexive
       (`RegisterReq.observed`) only for a pubkey the caller actually meshes with (a co-member seed),

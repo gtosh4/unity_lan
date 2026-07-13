@@ -196,28 +196,33 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
         network_names.push(net.name);
 
-        // Record the device as present in this network (for others' seeds).
-        changed |= st.presence.record(
-            net.guild_id,
-            net.role_id,
-            MemberPresence {
-                pubkey: req.wg_pubkey,
-                ip,
-                user_id,
-                username: username.clone(),
-                device_name: device_name.clone(),
-                is_primary,
-                endpoint: req.endpoint,
-            },
-            now,
-        );
+        // Record the device as present in this network (for others' seeds) — unless it has locally
+        // disconnected (`paused`), in which case we still build its grant + seeds (so it can
+        // re-mesh instantly on reconnect) but advertise no presence, so co-members prune it.
+        if !req.paused {
+            changed |= st.presence.record(
+                net.guild_id,
+                net.role_id,
+                MemberPresence {
+                    pubkey: req.wg_pubkey,
+                    ip,
+                    user_id,
+                    username: username.clone(),
+                    device_name: device_name.clone(),
+                    is_primary,
+                    endpoint: req.endpoint,
+                },
+                now,
+            );
+        }
         held.push((net.guild_id, net.role_id));
     }
 
     // Self-eviction: drop our presence from any network we were recorded in but no longer hold
-    // (role revoked). Peers pick this up on their next (long-poll-woken) refresh and prune us.
+    // (role revoked) — or from *every* network while disconnected (`paused`). Peers pick this up
+    // on their next (long-poll-woken) refresh and prune us.
     for (g, r) in st.presence.networks_of(&req.wg_pubkey) {
-        if !held.contains(&(g, r)) {
+        if req.paused || !held.contains(&(g, r)) {
             changed |= st.presence.evict(g, r, &req.wg_pubkey);
         }
     }

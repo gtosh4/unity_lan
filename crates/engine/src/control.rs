@@ -11,8 +11,8 @@ use std::sync::Arc;
 use anyhow::Context;
 use common::api::{ManageOp, ManageResp, NetworkStatus};
 use common::control::{
-    ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp, NetworkResp,
-    PeerStatus, StatusReport,
+    ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp,
+    NetworkResp, PeerStatus, StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -61,6 +61,11 @@ pub async fn set_needs_login(shared: &Shared, needs: bool) {
     shared.write().await.needs_login = needs;
 }
 
+/// Set the mesh connection state the daemon reports (`true` = connected, `false` = disconnected).
+pub async fn set_connected(shared: &Shared, connected: bool) {
+    shared.write().await.connected = connected;
+}
+
 /// Shared, live status the daemon updates and the control socket reads.
 pub type Shared = Arc<RwLock<StatusReport>>;
 
@@ -76,6 +81,7 @@ pub async fn update(
     device: &SelfDevice,
     seeds: &[SeedPeer],
     disabled: &HashSet<(u64, u64)>,
+    connected: bool,
 ) {
     let report = StatusReport {
         device: Some(DeviceStatus {
@@ -95,6 +101,7 @@ pub async fn update(
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
         needs_login: false, // a device present means we're enrolled
+        connected,
     };
     *shared.write().await = report;
 }
@@ -274,6 +281,23 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             }),
             Err(e) => ControlResponse::Error(format!("{e:#}")),
         },
+        // Connect/disconnect the mesh: flip the local paused flag (persist + wake the daemon to
+        // re-mesh or tear the mesh down at once). The daemon carries `paused` to the coordinator on
+        // the next refresh, which withdraws/re-advertises this device's presence to co-members.
+        ControlRequest::SetConnected { connected } => match ctx.localnet.set_paused(!connected) {
+            Ok(_) => ControlResponse::Connected(ConnectedResp {
+                connected,
+                message: format!(
+                    "mesh {} (locally; syncs to coordinator on next refresh)",
+                    if connected {
+                        "connected"
+                    } else {
+                        "disconnected"
+                    }
+                ),
+            }),
+            Err(e) => ControlResponse::Error(format!("{e:#}")),
+        },
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
@@ -361,6 +385,18 @@ pub async fn client_expose(endpoint: &str, op: ExposeOp) -> anyhow::Result<Expos
 pub async fn client_login(endpoint: &str) -> anyhow::Result<LoginResp> {
     match request(endpoint, &ControlRequest::Login).await? {
         ControlResponse::Login(r) => Ok(r),
+        ControlResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Client: connect (`true`) or disconnect (`false`) the mesh.
+pub async fn client_set_connected(
+    endpoint: &str,
+    connected: bool,
+) -> anyhow::Result<common::control::ConnectedResp> {
+    match request(endpoint, &ControlRequest::SetConnected { connected }).await? {
+        ControlResponse::Connected(r) => Ok(r),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
     }

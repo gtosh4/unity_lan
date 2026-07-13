@@ -11,6 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{ManageOp, ManageResp, NetworkStatus};
 
+/// The Windows SCM service key the engine installs itself under. Shared so the engine (installer +
+/// SCM entry point) and the GUI (status query + start/stop) address the same service.
+pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
+
 #[derive(Serialize, Deserialize)]
 pub enum ControlRequest {
     Status,
@@ -28,6 +32,14 @@ pub enum ControlRequest {
     /// Begin interactive login: ask the coordinator (via the daemon) for the Discord authorize URL
     /// to open. The daemon's register loop binds the device once the browser completes the flow.
     Login,
+    /// Connect (`true`) or disconnect (`false`) the mesh. Disconnect keeps the daemon resident and
+    /// still polling the coordinator (so reconnect is instant) but brings the local peer-set down
+    /// and withdraws this device from every co-member's seed list — peers see it go offline.
+    /// Handled locally (persisted, source of truth), so it works even when the coordinator is
+    /// unreachable; the change rides to the coordinator on the next refresh.
+    SetConnected {
+        connected: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,7 +49,15 @@ pub enum ControlResponse {
     Expose(ExposeResp),
     Network(NetworkResp),
     Login(LoginResp),
+    Connected(ConnectedResp),
     Error(String),
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ConnectedResp {
+    /// The mesh connection state after the toggle (`true` = connected).
+    pub connected: bool,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -112,6 +132,14 @@ pub struct StatusReport {
     /// "Log in with Discord" button.
     #[serde(default)]
     pub needs_login: bool,
+    /// Whether the mesh is connected (vs. locally disconnected/paused). Defaults to `true` so a
+    /// status from an older daemon (no field) reads as connected. Toggled by `SetConnected`.
+    #[serde(default = "default_true")]
+    pub connected: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

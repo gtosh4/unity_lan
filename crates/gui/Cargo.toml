@@ -21,3 +21,8 @@ iced = { version = "0.13", features = ["tokio"] }
 interprocess = { version = "2.4.2", features = ["tokio"] }
 # Open the Discord authorize URL in the user's default browser.
 open = "5"
+
+# Query + start the engine's Windows service (the install-time DACL grants the interactive user
+# those rights, so no elevation is needed here).
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"

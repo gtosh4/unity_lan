@@ -17,9 +17,10 @@ use crate::fw::{self, Exposed, Firewall};
 use crate::keys;
 use crate::netcfg::LocalNet;
 use crate::resolver::ResolverHook;
+use crate::shutdown::Shutdown;
 use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
 
-pub async fn run(cfg: Config) -> anyhow::Result<()> {
+pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
@@ -72,6 +73,8 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     // Control socket up first — so a frontend (GUI) can drive interactive login before we're
     // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
     let status = control::shared();
+    // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
+    control::set_connected(&status, !localnet.is_paused()).await;
     {
         let name = cfg.control_name();
         let control_group = cfg.control_group.clone();
@@ -109,7 +112,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
 
     // Register, waiting (serving control) until we're logged in and hold a network to mesh.
     let Some((resp, device)) =
-        register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw).await?
+        register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw, &shutdown).await?
     else {
         return Ok(()); // interrupted before login
     };
@@ -145,7 +148,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 }
                 Some(hook)
             }
-            None => None, // no OS resolver backend on this platform yet (e.g. Windows NRPT deferred)
+            None => None, // no OS resolver backend on this platform yet (e.g. macOS /etc/resolver)
         },
         _ => None,
     };
@@ -240,7 +243,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         let poll_since = if changed { None } else { since };
         let refreshed = tokio::select! {
             // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown.wait() => {
                 if let Some(fw) = &fw {
                     if let Err(e) = fw.reset() {
                         tracing::warn!("firewall reset on shutdown: {e:#}");
@@ -276,6 +279,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
                 poll_since,
                 localnet.as_refs(),
                 observed.clone(),
+                localnet.is_paused(),
             ) => r,
         };
         match refreshed {
@@ -333,13 +337,16 @@ async fn apply_state(
     peers: &mut HashMap<[u8; 32], PeerConfig>,
 ) -> anyhow::Result<()> {
     let disabled = localnet.snapshot();
+    let paused = localnet.is_paused();
+    // Disconnected: keep the interface up (holding our /32) but drop every peer — no mesh. The
+    // coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
     let active: Vec<SeedPeer> = match device {
-        Some(dev) => filter_active(seeds, &disabled, &dev.networks_status),
-        None => Vec::new(),
+        Some(dev) if !paused => filter_active(seeds, &disabled, &dev.networks_status),
+        _ => Vec::new(),
     };
     if let Some(dev) = device {
         dns::update(zone, dev, &active).await;
-        control::update(status, dev, &active, &disabled).await;
+        control::update(status, dev, &active, &disabled, !paused).await;
     }
     if let Some(fw) = fw {
         fw.update_peers(peers_by_net(&active))?;
@@ -376,7 +383,7 @@ fn filter_active(
 }
 
 /// Register in a loop, keeping the control socket alive, until we're logged in *and* hold a
-/// network to mesh. Sets `needs_login` so a frontend can start OAuth; returns `None` on ctrl_c.
+/// network to mesh. Sets `needs_login` so a frontend can start OAuth; returns `None` on shutdown.
 async fn register_until_ready(
     cfg: &Config,
     endpoint: Option<SocketAddr>,
@@ -384,6 +391,7 @@ async fn register_until_ready(
     localnet: &LocalNet,
     status: &control::Shared,
     fw: &Option<Arc<Firewall>>,
+    shutdown: &Shutdown,
 ) -> anyhow::Result<Option<(common::api::RegisterResp, SelfDevice)>> {
     // Our persisted device token as of startup. If we re-keyed (new wg.key) since it was issued,
     // it still names the old pubkey → the coordinator retires that stale identity on our first
@@ -391,7 +399,7 @@ async fn register_until_ready(
     let supersede = keys::load_token(&cfg.state_dir);
     loop {
         let attempt = tokio::select! {
-            _ = tokio::signal::ctrl_c() => {
+            _ = shutdown.wait() => {
                 if let Some(fw) = fw {
                     if let Err(e) = fw.reset() { tracing::warn!("firewall reset on shutdown: {e:#}"); }
                 }
@@ -406,6 +414,7 @@ async fn register_until_ready(
                 cfg.enrollment_key.clone(),
                 localnet.as_refs(),
                 supersede.clone(),
+                localnet.is_paused(),
             ) => r,
         };
         match attempt {
