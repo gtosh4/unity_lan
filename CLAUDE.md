@@ -80,26 +80,31 @@ Windows wireguard-nt via `wireguard.dll`) are per-OS optimizations. Windows is a
 `TwilightRoleSource` (live bot token, `discord.rs`) and `FakeRoleSource` (config-seeded, offline
 dev/tests). Slash commands + gateway events (role revocation, evictions) live in `commands.rs`.
 
-## Coordinator: check burst traffic patterns
+## Keep the coordinator off the hot path (decentralization goal)
 
-The coordinator is a fan-in/fan-out chokepoint. **Before adding or changing work on any
-coordinator request path, reason explicitly about how it behaves under a burst** — a single
-membership change can wake every client at once, and one deployment serves many clients across
-possibly-many guilds.
+UnityLAN's north star is **decentralization**: any online member can bootstrap a new joiner, the
+data plane is pure P2P, and the coordinator is a lightweight control plane that a mesh can run
+without once tunnels are established. Every design decision should push work *toward* the peers and
+*away* from the coordinator — never the reverse. Treat coordinator load as a cost to minimize, not a
+resource to spend.
+
+**So before adding or changing work on any coordinator request path, ask what it does to that
+goal** — and specifically how it behaves under a burst, because the coordinator is a fan-in/fan-out
+chokepoint: one membership change can wake every client at once, and one deployment serves many
+clients across possibly-many guilds.
 
 - **Fan-in (thundering herd on version bump).** `wait_for_change` parks *all* long-pollers on one
-  shared version (`api.rs`). Anything that bumps that version — a member's roles changing, a
-  presence eviction, an enrollment — releases every parked client simultaneously, each of which
-  re-runs `build_snapshot`. Bump the version only when membership actually changed, and never do
-  per-client work in the wake path that a herd would multiply. When adding a new bump site, ask:
-  how many parked clients does this release, and what does each then do?
+  shared version (`api.rs`). Anything that bumps it — roles changing, a presence eviction, an
+  enrollment — releases every parked client at once, each re-running `build_snapshot`. Bump the
+  version only when membership actually changed; keep the wake path cheap since a herd multiplies it.
 - **Fan-out (per-request external calls).** `build_snapshot` runs per client per renewal (≈ every
-  `LONGPOLL_HOLD_SECS`, *plus* on every herd wake). Any external/Discord REST call added inside it
-  is multiplied by client count. Discord rate-limits per route/bucket (e.g. `GET guild roles` is a
-  **per-guild** bucket), so N clients in one guild hitting the same route at once serialize or 429.
-  Deduplicate and cache: resolve shared per-guild data once and reuse it across clients (see
-  `TwilightRoleSource`'s per-guild role-name TTL cache in `discord.rs`), rather than one REST call
-  per client per request.
+  `LONGPOLL_HOLD_SECS`, *plus* on every herd wake). Any Discord REST call inside it is multiplied by
+  client count, and Discord rate-limits per route/bucket (e.g. `GET guild roles` is a **per-guild**
+  bucket) — so N clients in one guild hit the same bucket at once and serialize or 429. Cache/dedup
+  shared per-guild data once and reuse across clients (see `TwilightRoleSource`'s per-guild
+  role-name TTL cache in `discord.rs`).
 
-When a change to the coordinator (or a request it serves) could amplify traffic in either
-direction, call it out and prefer caching/dedup/coalescing over per-request external work.
+Prefer a solution the peers can carry themselves, or that the coordinator answers once and caches,
+over one that makes each client's request do more coordinator/Discord work. When a change pulls
+work onto the coordinator or amplifies its traffic, flag it and weigh it against the decentralization
+goal before proceeding.
