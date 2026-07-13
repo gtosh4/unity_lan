@@ -5,7 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")"          # -> packaging/
 ROOT="$(cd .. && pwd)"
 
-VERSION="$(grep '^version' "$ROOT/crates/engine/Cargo.toml" | head -1 | cut -d'"' -f2)"
+# Release CI presets VERSION from the git tag; otherwise take the crate version.
+VERSION="${VERSION:-$(grep '^version' "$ROOT/crates/engine/Cargo.toml" | head -1 | cut -d'"' -f2)}"
 case "$(uname -m)" in
     x86_64)        ARCH=amd64 ;;
     aarch64|arm64) ARCH=arm64 ;;

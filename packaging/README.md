@@ -26,6 +26,19 @@ so there is no per-distro build environment.
 docker build -f packaging/docker/coordinator.Dockerfile -t unitylan-coordinator .
 ```
 
+## Automated releases
+
+`.github/workflows/release.yml` runs on a `v*` tag: it builds the `.deb`/`.rpm` (amd64) and
+attaches them to the GitHub Release, and pushes `ghcr.io/<owner>/unitylan-coordinator:<tag>` +
+`:latest`. Cut a release with:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The package version comes from the tag (`VERSION=<tag without v> build.sh`). For arm64, add a
+matrix leg that builds via [`cross`](https://github.com/cross-rs/cross).
+
 ## One release covers every configuration — the two fork axes
 
 The design goal is a **single package/release regardless of the node's environment**. Two things
