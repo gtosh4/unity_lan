@@ -3,9 +3,15 @@
 **/*.rs.bk
 *.pdb
 
+# Packaging build output
+/packaging/dist
+
 # Local secrets / state
 *.db
 *.db-*
 /secrets
 coordinator.toml
 *.key
+# Local engine dev state (WG key, device token, control socket) + local config
+/engine-state
+/engine.toml

@@ -78,11 +78,33 @@ fn default_refresh() -> u64 {
     15
 }
 
+/// Starter config written by `load_or_init` when the default path is missing. Points at a
+/// local coordinator; `device_name` is omitted so it falls back to the system hostname.
+const DEFAULT_CONFIG: &str = "\
+coordinator = \"http://127.0.0.1:8080\"
+state_dir = \"engine-state\"
+iface = \"unl0\"
+listen_port = 51820
+endpoint = \"127.0.0.1:51820\"
+refresh_secs = 15
+";
+
 impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
         Ok(toml::from_str(&text)?)
+    }
+
+    /// Load `path`, first writing a starter config if it's missing. Used only for the default
+    /// path (no config argument) so a bare `unitylan-engine run` bootstraps a local dev config.
+    pub fn load_or_init(path: &std::path::Path) -> anyhow::Result<Self> {
+        if !path.exists() {
+            std::fs::write(path, DEFAULT_CONFIG)
+                .map_err(|e| anyhow::anyhow!("writing default {}: {e}", path.display()))?;
+            tracing::info!("no config found — wrote default → {}", path.display());
+        }
+        Self::load(path)
     }
 
     /// Control-socket path: the configured value, else `<state_dir>/control.sock`. Used as the

@@ -139,6 +139,18 @@ pub async fn serve(endpoint: &str, ctx: Ctx) -> anyhow::Result<()> {
         .name(to_name(endpoint)?)
         .create_tokio()
         .with_context(|| format!("binding control socket {endpoint}"))?;
+    // The control socket grants full device authority, so keep it off-limits to other local users
+    // (mode 660). When the daemon is launched via sudo, hand ownership to the invoking user so
+    // their unprivileged GUI/CLI can connect; otherwise it stays root-only.
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::{chown, PermissionsExt};
+        let _ = std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o660));
+        if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
+            let gid = std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok());
+            let _ = chown(endpoint, Some(uid), gid);
+        }
+    }
     tracing::info!(socket = %endpoint, "control socket listening");
     loop {
         let stream = listener.accept().await?;

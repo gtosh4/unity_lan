@@ -1,0 +1,44 @@
+# nfpm config for the `unitylan` package (engine daemon + CLI).
+# Builds .deb and .rpm from one spec:  nfpm pkg -f engine.yaml -p deb  (and -p rpm)
+# VERSION is injected by build.sh.
+name: unitylan
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: gtosh4 <gtosh4@gmail.com>
+description: |
+  UnityLAN mesh engine — WireGuard mesh node driven by a Discord-role coordinator.
+  Ships the engine daemon, CLI, and a systemd unit.
+license: MIT
+homepage: https://github.com/gtosh4/unity_lan
+
+# Runtime deps that are actually invoked. The DNS-resolver backend is chosen at RUNTIME
+# (systemd-resolved today), so it is a weak recommend, not a hard dep — one package fits any
+# resolver. nftables (firewall, on by default) and iproute2 (userspace WG interface) are required.
+depends:
+  - iproute2
+  - nftables
+recommends:
+  - systemd-resolved
+
+contents:
+  - src: ../../target/release/unitylan-engine
+    dst: /usr/bin/unitylan-engine
+  # CLI ergonomics: docs/help refer to `unitylan ctl ...`.
+  - src: /usr/bin/unitylan-engine
+    dst: /usr/bin/unitylan
+    type: symlink
+  - src: ../init/systemd/unitylan-engine.service
+    dst: /usr/lib/systemd/system/unitylan-engine.service
+  - src: ../config/engine.toml
+    dst: /etc/unitylan/engine.toml
+    type: config|noreplace
+    file_info:
+      mode: 0640
+
+scripts:
+  postinstall: ../scripts/engine-postinstall.sh
+  preremove: ../scripts/engine-preremove.sh
+  postremove: ../scripts/engine-postremove.sh

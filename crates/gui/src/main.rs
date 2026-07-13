@@ -77,6 +77,10 @@ enum Message {
     /// Start interactive login; the daemon returns the Discord authorize URL to open.
     Login,
     LoginStarted(Result<LoginResp, String>),
+    /// Open a URL in the default browser (re-open the authorize link on demand).
+    OpenUrl(String),
+    /// Copy a URL to the clipboard.
+    CopyUrl(String),
 }
 
 impl App {
@@ -172,10 +176,15 @@ impl App {
                 return Task::perform(ctl::login(self.socket.clone()), Message::LoginStarted)
             }
             Message::LoginStarted(Ok(r)) => {
+                let _ = open::that(&r.authorize_url); // best-effort auto-open; link stays for manual use
                 self.login_url = Some(r.authorize_url);
                 self.error = None;
             }
             Message::LoginStarted(Err(e)) => self.error = Some(e),
+            Message::OpenUrl(url) => {
+                let _ = open::that(&url);
+            }
+            Message::CopyUrl(url) => return iced::clipboard::write(url),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -208,7 +217,9 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let needs_login = self.status.as_ref().is_some_and(|s| s.needs_login);
+        // Show login until a status explicitly says we're enrolled — a missing/failed status
+        // (socket not up yet) should still surface the login button, not hide it.
+        let needs_login = self.status.as_ref().is_none_or(|s| s.needs_login);
         let body = Column::new()
             .spacing(20)
             .push_maybe(needs_login.then(|| self.login_section()))
@@ -308,8 +319,13 @@ impl App {
         .spacing(8);
         if let Some(url) = &self.login_url {
             col = col
-                .push(text("Open this URL in your browser to finish:").size(14))
-                .push(text(url.clone()).size(13));
+                .push(text("Browser opened — if not, use this link to finish:").size(14))
+                .push(
+                    button(text(url.clone()).size(13))
+                        .on_press(Message::OpenUrl(url.clone()))
+                        .style(button::text),
+                )
+                .push(button(text("Copy link").size(13)).on_press(Message::CopyUrl(url.clone())));
         }
         col.into()
     }

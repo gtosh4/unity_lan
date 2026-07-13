@@ -64,32 +64,17 @@ async fn main() -> anyhow::Result<()> {
         return resolver::ResolvectlHook.revert(&iface);
     }
     if arg1 == "run" {
-        let cfg_path = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "engine.toml".to_string());
-        let cfg = Config::load(std::path::Path::new(&cfg_path))
-            .with_context(|| format!("loading config {cfg_path}"))?;
-        return daemon::run(cfg).await;
+        return daemon::run(load_config(std::env::args().nth(2))?).await;
     }
     if arg1 == "ctl" {
         return ctl().await;
     }
     if arg1 == "login" {
-        let cfg_path = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "engine.toml".to_string());
-        let cfg = Config::load(std::path::Path::new(&cfg_path))
-            .with_context(|| format!("loading config {cfg_path}"))?;
-        return login(cfg).await;
+        return login(load_config(std::env::args().nth(2))?).await;
     }
 
-    let config_path = if arg1.is_empty() {
-        "engine.toml".to_string()
-    } else {
-        arg1
-    };
-    let cfg = Config::load(std::path::Path::new(&config_path))
-        .with_context(|| format!("loading config {config_path}"))?;
+    // Bare invocation (register-once): treat a leading non-flag arg as the config path.
+    let cfg = load_config(if arg1.is_empty() { None } else { Some(arg1) })?;
 
     let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
@@ -121,6 +106,18 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Load config from an optional CLI path. An explicit path must exist; the default `engine.toml`
+/// is created with starter values on first run so a bare `run`/`login` bootstraps a dev config.
+fn load_config(arg: Option<String>) -> anyhow::Result<Config> {
+    match arg {
+        Some(p) => {
+            Config::load(std::path::Path::new(&p)).with_context(|| format!("loading config {p}"))
+        }
+        None => Config::load_or_init(std::path::Path::new("engine.toml"))
+            .with_context(|| "loading config engine.toml".to_string()),
+    }
 }
 
 /// `login <config.toml>` — interactive Discord login. Prints the authorize URL to open, then

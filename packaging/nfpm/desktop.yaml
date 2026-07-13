@@ -1,0 +1,24 @@
+# nfpm config for the `unitylan-desktop` package (desktop bundle: engine/CLI + GUI).
+# Ships the GUI and depends on `unitylan`, so installing this pulls in the engine daemon + CLI
+# and adds the desktop app. Servers install `unitylan` alone instead.
+name: unitylan-desktop
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: gtosh4 <gtosh4@gmail.com>
+description: |
+  UnityLAN desktop bundle — the engine daemon + CLI plus the GUI control app for live mesh
+  status and device management.
+license: MIT
+homepage: https://github.com/gtosh4/unity_lan
+
+depends:
+  - unitylan
+
+contents:
+  - src: ../../target/release/unitylan-gui
+    dst: /usr/bin/unitylan-gui
+  - src: ../gui/unitylan-gui.desktop
+    dst: /usr/share/applications/unitylan-gui.desktop

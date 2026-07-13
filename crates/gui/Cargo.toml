@@ -19,3 +19,5 @@ tokio.workspace = true
 iced = { version = "0.13", features = ["tokio"] }
 # Cross-platform local socket (unix socket / Windows named pipe) for the control channel.
 interprocess = { version = "2.4.2", features = ["tokio"] }
+# Open the Discord authorize URL in the user's default browser.
+open = "5"

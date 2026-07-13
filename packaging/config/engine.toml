@@ -1,0 +1,32 @@
+# UnityLAN engine config (installed at /etc/unitylan/engine.toml).
+# Edit `coordinator` and `enrollment_key`, then: systemctl enable --now unitylan-engine
+
+# Coordinator base URL.
+coordinator = "http://127.0.0.1:8080"
+
+# Managed by the systemd unit (StateDirectory / RuntimeDirectory). Leave these as-is.
+state_dir = "/var/lib/unitylan"
+control_socket = "/run/unitylan/control.sock"
+
+# One-time enrollment key that binds this device to its owner on first register.
+# enrollment_key = "..."
+
+# Device name (the <device> DNS label). Defaults to the system hostname.
+# device_name = "my-host"
+
+# --- mesh ---
+# iface = "unl0"
+# listen_port = 51820
+# endpoint = "203.0.113.5:51820"   # set for a manual port-forward; disables UPnP
+# upnp = true
+
+# --- DNS ---
+# Serve the `.internal` resolver on this address to enable name resolution.
+# dns_bind = "127.0.0.1:5353"
+# resolver_hook routes `.internal` at the OS resolver (systemd-resolved today; the backend is
+# chosen at runtime, so no reinstall is needed if you switch resolvers). On by default.
+# resolver_hook = true
+
+# --- firewall (default-deny inbound on the wg iface; secure by default) ---
+# firewall = true
+# expose = [ { port = 25565, proto = "tcp" } ]

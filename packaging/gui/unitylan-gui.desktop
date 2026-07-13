@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=UnityLAN
+Comment=Mesh status and device management
+Exec=unitylan-gui /run/unitylan/control.sock
+Terminal=false
+Categories=Network;

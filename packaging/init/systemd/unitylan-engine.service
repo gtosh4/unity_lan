@@ -1,0 +1,40 @@
+[Unit]
+Description=UnityLAN mesh engine
+Documentation=https://github.com/gtosh4/unity_lan
+# The mesh dials peers over the internet; wait for real connectivity.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/unitylan-engine run /etc/unitylan/engine.toml
+Restart=on-failure
+RestartSec=5
+
+# /var/lib/unitylan (0700 root) — WG private key + pinned trust anchor. State survives restarts.
+StateDirectory=unitylan
+StateDirectoryMode=0700
+# /run/unitylan — holds the control socket the CLI/GUI connect to.
+RuntimeDirectory=unitylan
+RuntimeDirectoryMode=0750
+
+# Privilege: userspace WireGuard (ip/TUN), the nftables firewall, and resolvectl all need
+# CAP_NET_ADMIN; the `.internal` resolver may bind :53 (CAP_NET_BIND_SERVICE). Nothing else.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+DeviceAllow=/dev/net/tun rw
+
+# Hardening — kept compatible with netlink (WG), the nft pipe, and the resolved D-Bus call.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
