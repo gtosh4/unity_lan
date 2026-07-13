@@ -1,6 +1,9 @@
 # Engine config. Copy to engine.toml and edit.
-# dev_user is only used while the coordinator runs in fake mode.
 
 coordinator = "http://127.0.0.1:8080"
 state_dir = "engine-state"
-dev_user = 333
+
+# Enrollment: bind this device to its owner via a one-time key (minted by `/unitylan enroll`, or
+# seeded in the coordinator's [[enroll]] block for local dev). Alternatively, omit this and run
+# `unitylan-engine login engine.toml` for interactive Discord login.
+# enrollment_key = "dev-key-1"

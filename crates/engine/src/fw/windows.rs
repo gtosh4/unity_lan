@@ -13,9 +13,12 @@
 //! `iif`-scoped drop chain, a pre-existing broad allow-inbound rule on the host could still permit
 //! an unexposed port on the wg iface — a strict WFP sublayer is a future hardening.
 //!
-//! Best-effort, like the other backends: individual `New-NetFirewallRule` errors are
-//! non-terminating (they don't abort the batch), so building the firewall before the wg adapter
-//! exists is fine — the rules are (re)created by the first post-up membership `apply`.
+//! Best-effort, like the other backends: every `New-NetFirewallRule` runs with `-ErrorAction
+//! SilentlyContinue`, so building the firewall *before* the wg adapter exists is fine. Unlike
+//! nftables (which matches an interface by name lazily), `-InterfaceAlias` is validated against
+//! present interfaces at creation time and would otherwise error ("interface not found") and set a
+//! non-zero exit — aborting startup. Suppressed, those pre-up rules are simply skipped and then
+//! (re)created by the first post-up membership `apply`, once `unl0` exists.
 
 use std::process::Command;
 
@@ -61,7 +64,7 @@ fn script(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String
     s.push_str(&format!(
         "New-NetFirewallRule -DisplayName 'UnityLAN ICMPv4 echo' -Group '{GROUP}' \
          -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -InterfaceAlias {iface} \
-         | Out-Null\n",
+         -ErrorAction SilentlyContinue | Out-Null\n",
         iface = ps_quote(iface),
     ));
 
@@ -97,7 +100,7 @@ fn script(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String
             // IPs are formatted from Ipv4Addr, so no quoting/escaping concern.
             s.push_str(&format!(" -RemoteAddress {list}"));
         }
-        s.push_str(" | Out-Null\n");
+        s.push_str(" -ErrorAction SilentlyContinue | Out-Null\n");
     }
 
     s
@@ -157,6 +160,9 @@ mod tests {
         assert!(s.contains("-Action Allow -Protocol UDP -LocalPort 34197 -InterfaceAlias 'unl0'"));
         // Unscoped exposes reach any peer — no remote-address restriction.
         assert!(!s.contains("-RemoteAddress"));
+        // Every New-NetFirewallRule tolerates a missing interface (pre-up install): one
+        // `-ErrorAction SilentlyContinue` per rule (ICMP echo + the two ports).
+        assert_eq!(s.matches("-ErrorAction SilentlyContinue | Out-Null").count(), 3);
     }
 
     #[test]
