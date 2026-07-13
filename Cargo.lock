@@ -5808,6 +5808,7 @@ dependencies = [
  "hickory-proto",
  "igd-next",
  "interprocess",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

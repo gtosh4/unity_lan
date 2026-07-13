@@ -131,7 +131,7 @@ fn effective_networks(
 
 /// Serve the control socket until the task is dropped. `endpoint` is the platform local-socket
 /// name (see [`crate::config::Config::control_name`]).
-pub async fn serve(endpoint: &str, ctx: Ctx) -> anyhow::Result<()> {
+pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::Result<()> {
     // Clear a stale unix socket file from a previous run (named pipes have no filesystem residue).
     #[cfg(not(windows))]
     let _ = std::fs::remove_file(endpoint);
@@ -139,18 +139,8 @@ pub async fn serve(endpoint: &str, ctx: Ctx) -> anyhow::Result<()> {
         .name(to_name(endpoint)?)
         .create_tokio()
         .with_context(|| format!("binding control socket {endpoint}"))?;
-    // The control socket grants full device authority, so keep it off-limits to other local users
-    // (mode 660). When the daemon is launched via sudo, hand ownership to the invoking user so
-    // their unprivileged GUI/CLI can connect; otherwise it stays root-only.
     #[cfg(not(windows))]
-    {
-        use std::os::unix::fs::{chown, PermissionsExt};
-        let _ = std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o660));
-        if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
-            let gid = std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok());
-            let _ = chown(endpoint, Some(uid), gid);
-        }
-    }
+    grant_socket_access(endpoint, group.as_deref());
     tracing::info!(socket = %endpoint, "control socket listening");
     loop {
         let stream = listener.accept().await?;
@@ -160,6 +150,50 @@ pub async fn serve(endpoint: &str, ctx: Ctx) -> anyhow::Result<()> {
                 tracing::warn!("control conn: {e:#}");
             }
         });
+    }
+}
+
+/// Restrict the control socket to authorized callers. It grants full device authority, so it's
+/// mode 660 (never world-accessible); ownership decides who beyond root may connect. In order:
+///
+/// - `control_group` set → `root:<group>`, so group members' frontends can drive the daemon
+///   (packaged installs add the intended user to that group).
+/// - else launched via sudo → hand it to the invoking user (`$SUDO_UID`), the dev path.
+/// - else left root-only.
+///
+/// All best-effort: a failure only means the frontend can't connect, never a broken daemon.
+#[cfg(not(windows))]
+fn grant_socket_access(endpoint: &str, group: Option<&str>) {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    let _ = std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o660));
+    match group {
+        Some(name) => match group_gid(name) {
+            Some(gid) => {
+                let _ = chown(endpoint, None, Some(gid));
+            }
+            None => tracing::warn!(
+                group = name,
+                "control_group not found; socket left root-only"
+            ),
+        },
+        None => {
+            if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
+                let gid = std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok());
+                let _ = chown(endpoint, Some(uid), gid);
+            }
+        }
+    }
+}
+
+/// Look up a group's gid by name via `getgrnam`. `None` if the group doesn't exist.
+#[cfg(not(windows))]
+fn group_gid(name: &str) -> Option<u32> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    // SAFETY: getgrnam returns a pointer into a static buffer; we read gr_gid before returning and
+    // make no further libc calls that would clobber it. Single-threaded startup context.
+    unsafe {
+        let grp = libc::getgrnam(cname.as_ptr());
+        grp.as_ref().map(|g| g.gr_gid)
     }
 }
 

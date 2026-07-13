@@ -25,3 +25,7 @@ igd-next = { version = "0.17", features = ["aio_tokio"] }
 interprocess = { version = "2.4.2", features = ["tokio"] }
 base64 = "0.22"
 hickory-proto = "0.26.1"
+
+[target.'cfg(unix)'.dependencies]
+# Resolve `control_group` (name → gid) to own the control socket root:<group>.
+libc = "0.2"

@@ -44,6 +44,10 @@ pub struct Config {
     pub resolver_hook: bool,
     /// Control socket path for CLI/GUI frontends. Defaults to `<state_dir>/control.sock`.
     pub control_socket: Option<PathBuf>,
+    /// Group to own the control socket (mode 660, `root:<group>`) so its members can drive the
+    /// daemon. Set by packaged installs (e.g. `"unitylan"`). When unset, the socket is handed to
+    /// the `sudo`-invoking user if launched via sudo, else left root-only.
+    pub control_group: Option<String>,
     /// Enforce the host firewall (default-deny inbound on the wg iface + explicit `expose`).
     /// On by default — secure posture. Set `false` on platforms without a firewall backend.
     #[serde(default = "default_true")]

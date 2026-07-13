@@ -74,6 +74,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
     let status = control::shared();
     {
         let name = cfg.control_name();
+        let control_group = cfg.control_group.clone();
         let ctx = control::Ctx {
             status: status.clone(),
             coordinator: cfg.coordinator.clone(),
@@ -83,7 +84,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
             pubkey: wg_pub,
         };
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&name, ctx).await {
+            if let Err(e) = control::serve(&name, control_group, ctx).await {
                 tracing::error!("control socket ended: {e:#}");
             }
         });
