@@ -183,7 +183,7 @@ async fn handle_interaction(
     if data.name != "unitylan" {
         return;
     }
-    let content = process(store, &interaction, &data).await;
+    let content = process(http, store, &interaction, &data).await;
 
     let response = InteractionResponse {
         kind: InteractionResponseType::ChannelMessageWithSource,
@@ -203,7 +203,12 @@ async fn handle_interaction(
     }
 }
 
-async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -> String {
+async fn process(
+    http: &twilight_http::Client,
+    store: &Store,
+    interaction: &Interaction,
+    data: &CommandData,
+) -> String {
     let Some(guild_id) = interaction.guild_id else {
         return "Use this in a server.".to_string();
     };
@@ -216,7 +221,7 @@ async fn process(store: &Store, interaction: &Interaction, data: &CommandData) -
             if !is_admin(interaction) {
                 return "You need the Manage Server permission.".to_string();
             }
-            handle_network(store, guild_id.get(), subs).await
+            handle_network(http, store, guild_id.get(), subs).await
         }
         // /unitylan enroll — any member mints a one-time key for their own headless device.
         ("enroll", CommandOptionValue::SubCommand(_)) => {
@@ -316,6 +321,7 @@ fn is_admin(interaction: &Interaction) -> bool {
 }
 
 async fn handle_network(
+    http: &twilight_http::Client,
     store: &Store,
     guild_id: u64,
     subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
@@ -340,7 +346,14 @@ async fn handle_network(
             let Some(role) = role else {
                 return "Missing role.".to_string();
             };
-            let name = name.unwrap_or_else(|| format!("role-{role}"));
+            // Default the network name to the role's own Discord name; fall back to `role-{id}`
+            // only if the API lookup fails (e.g. the role was just deleted).
+            let name = match name {
+                Some(n) => n,
+                None => role_name(http, guild_id, role.get())
+                    .await
+                    .unwrap_or_else(|| format!("role-{role}")),
+            };
             match store.upsert_network(guild_id, role.get(), &name).await {
                 Ok(()) => format!("Registered <@&{role}> as network **{name}**."),
                 Err(e) => format!("Error: {e}"),
@@ -372,4 +385,20 @@ async fn handle_network(
         },
         _ => "Unknown subcommand.".to_string(),
     }
+}
+
+/// The Discord display name of a role in a guild, if the API lookup succeeds. Used to default a
+/// network's name to the role name at registration.
+async fn role_name(http: &twilight_http::Client, guild_id: u64, role_id: u64) -> Option<String> {
+    let roles = http
+        .roles(Id::new(guild_id))
+        .await
+        .ok()?
+        .model()
+        .await
+        .ok()?;
+    roles
+        .into_iter()
+        .find(|r| r.id.get() == role_id)
+        .map(|r| r.name)
 }

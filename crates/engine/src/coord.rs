@@ -169,26 +169,44 @@ async fn post(
     Ok((resp, device))
 }
 
-/// Begin interactive login: ask the coordinator for the Discord authorize URL to open. The
-/// coordinator binds our pubkey to the user when the browser hits its callback; we then just
-/// register (no enrollment key needed).
-pub async fn oauth_start(
-    base_url: &str,
-    wg_pubkey: WgPublicKey,
-) -> anyhow::Result<common::api::OauthStartResp> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(format!("{base_url}/oauth/start"))
-        .json(&common::api::OauthStartReq { wg_pubkey })
+/// Fetch the public PKCE config (Discord `client_id`, fake-mode flag) so the engine can run the
+/// authorization-code + PKCE flow itself.
+pub async fn pkce_config(base_url: &str) -> anyhow::Result<common::api::PkceConfigResp> {
+    let resp = reqwest::Client::new()
+        .get(format!("{base_url}/oauth/pkce-config"))
         .send()
         .await
-        .context("sending /oauth/start")?;
+        .context("sending /oauth/pkce-config")?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        bail!("coordinator rejected oauth/start: {status}: {body}");
+        bail!("coordinator rejected oauth/pkce-config: {status}: {body}");
     }
-    resp.json().await.context("decoding OauthStartResp")
+    resp.json().await.context("decoding PkceConfigResp")
+}
+
+/// Finish login: hand the coordinator the access token we obtained so it verifies it and binds our
+/// pubkey to the authenticated user. Our next register then succeeds (no enrollment key needed).
+pub async fn oauth_complete(
+    base_url: &str,
+    wg_pubkey: WgPublicKey,
+    access_token: &str,
+) -> anyhow::Result<()> {
+    let resp = reqwest::Client::new()
+        .post(format!("{base_url}/oauth/complete"))
+        .json(&common::api::OauthCompleteReq {
+            wg_pubkey,
+            access_token: access_token.to_string(),
+        })
+        .send()
+        .await
+        .context("sending /oauth/complete")?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("coordinator rejected oauth/complete: {status}: {body}");
+    }
+    Ok(())
 }
 
 /// Send an owner-scoped device management op, authenticated by the device token.

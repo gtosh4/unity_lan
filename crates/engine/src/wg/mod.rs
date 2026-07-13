@@ -67,4 +67,7 @@ pub trait WgBackend {
     fn peer_stats(&self) -> anyhow::Result<HashMap<[u8; 32], PeerStat>>;
     /// Tear the interface down.
     fn down(&self) -> anyhow::Result<()>;
+    /// Bring the interface's link administratively up or down *without* destroying the device — the
+    /// device, its uapi socket and addresses persist. Used for mesh connect/disconnect. Idempotent.
+    fn set_link_up(&self, up: bool) -> anyhow::Result<()>;
 }

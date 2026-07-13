@@ -83,6 +83,18 @@ pub fn gen_enrollment_key() -> String {
     s
 }
 
+/// A PKCE `code_verifier`: 64 hex chars from 32 random bytes. Hex is within the allowed
+/// `[A-Za-z0-9-._~]` unreserved set and comfortably inside the 43–128 char length bound.
+pub fn gen_pkce_verifier() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

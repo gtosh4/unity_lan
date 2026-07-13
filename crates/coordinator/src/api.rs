@@ -4,14 +4,14 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
-    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthStartReq,
-    OauthStartResp, ObservedEndpoint, RegisterReq, RegisterResp, Seed,
+    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthCompleteReq,
+    ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp, Seed,
 };
 use common::netid::sanitize_label;
 
@@ -32,8 +32,6 @@ pub struct AppState {
     pub version: Arc<tokio::sync::watch::Sender<u64>>,
     /// Interactive-login provider (Discord OAuth, or a fake in tests); `None` disables login.
     pub oauth: Option<Arc<dyn OauthProvider>>,
-    /// In-flight login attempts: `state` → the device pubkey to bind when the callback arrives.
-    pub oauth_sessions: Arc<Mutex<HashMap<String, [u8; 32]>>>,
     /// Peer-observed reflexive endpoints: device pubkey → the `ip:port` a peer last saw it send
     /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
     /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
@@ -51,9 +49,10 @@ pub fn router(state: AppState) -> Router {
         .route("/register", post(register))
         .route("/refresh", post(register))
         .route("/devices/manage", post(manage))
-        // interactive login: start returns the authorize URL; callback binds pubkey → user.
-        .route("/oauth/start", post(oauth_start))
-        .route("/oauth/callback", get(oauth_callback))
+        // interactive login (engine-owned PKCE): pkce-config hands the engine the public client_id;
+        // complete verifies the engine's access token and binds pubkey → user.
+        .route("/oauth/pkce-config", get(oauth_pkce_config))
+        .route("/oauth/complete", post(oauth_complete))
         .with_state(state)
 }
 
@@ -463,59 +462,42 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError>
         .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))
 }
 
-/// `POST /oauth/start`: mint a login `state` for this device pubkey and return the authorize URL.
-async fn oauth_start(
-    State(st): State<AppState>,
-    Json(req): Json<OauthStartReq>,
-) -> Result<Json<OauthStartResp>, ApiError> {
+/// `GET /oauth/pkce-config`: the public bits the engine needs to run the PKCE flow itself.
+async fn oauth_pkce_config(State(st): State<AppState>) -> Result<Json<PkceConfigResp>, ApiError> {
     let oauth = st.oauth.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "interactive login not configured",
         )
     })?;
-    let state = common::crypto::gen_enrollment_key();
-    st.oauth_sessions
-        .lock()
-        .unwrap()
-        .insert(state.clone(), req.wg_pubkey);
-    let authorize_url = oauth.authorize_url(&state);
-    Ok(Json(OauthStartResp {
-        authorize_url,
-        state,
+    Ok(Json(PkceConfigResp {
+        client_id: oauth.client_id().to_string(),
+        fake: oauth.is_fake(),
     }))
 }
 
-#[derive(serde::Deserialize)]
-struct CallbackQuery {
-    code: String,
-    state: String,
-}
-
-/// `GET /oauth/callback`: Discord redirects here with `code`+`state`. Exchange the code for the
-/// user id and bind it to the pubkey we stashed under `state`, so the client's next register works.
-async fn oauth_callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) -> Response {
-    let Some(oauth) = st.oauth.as_ref() else {
-        return (
+/// `POST /oauth/complete`: the engine finished the PKCE exchange and sends us the access token.
+/// Verify it against Discord (`GET /users/@me`) and bind the resulting user to the device pubkey,
+/// so the client's next register succeeds.
+async fn oauth_complete(
+    State(st): State<AppState>,
+    Json(req): Json<OauthCompleteReq>,
+) -> Result<StatusCode, ApiError> {
+    let oauth = st.oauth.as_ref().ok_or_else(|| {
+        ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "interactive login not configured",
         )
-            .into_response();
-    };
-    let Some(pubkey) = st.oauth_sessions.lock().unwrap().remove(&q.state) else {
-        return (StatusCode::BAD_REQUEST, "unknown or expired login state").into_response();
-    };
-    match oauth.exchange(&q.code).await {
-        Ok(user_id) => match st.store.bind_oauth(&pubkey, user_id).await {
-            Ok(()) => Html(
-                "<h1>Logged in ✓</h1><p>Your device is authorized. Return to UnityLAN; you can \
-                 close this tab.</p>",
-            )
-            .into_response(),
-            Err(e) => internal(e).into_response(),
-        },
-        Err(e) => (StatusCode::UNAUTHORIZED, format!("login failed: {e:#}")).into_response(),
-    }
+    })?;
+    let user_id = oauth
+        .verify(&req.access_token)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, format!("login failed: {e:#}")))?;
+    st.store
+        .bind_oauth(&req.wg_pubkey, user_id)
+        .await
+        .map_err(internal)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 fn internal(e: anyhow::Error) -> ApiError {

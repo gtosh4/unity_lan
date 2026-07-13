@@ -26,7 +26,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
-    let localnet = Arc::new(LocalNet::load(&cfg.state_dir));
+    let localnet = Arc::new(LocalNet::load(&cfg.state_dir, cfg.disable_new_networks));
 
     let token = std::sync::Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
 
@@ -85,6 +85,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             fw: fw.clone(),
             localnet: localnet.clone(),
             pubkey: wg_pub,
+            oauth_redirect: cfg.oauth_redirect.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&name, control_group, ctx).await {
@@ -257,8 +258,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 tracing::info!("shutting down");
                 return Ok(());
             }
-            // Local network toggle: re-mesh from the last snapshot at once (works offline), then
-            // loop round to re-refresh so the coordinator picks up the new opt-out set.
+            // Local network toggle (also mesh connect/disconnect): re-mesh from the last snapshot at
+            // once (works offline), then loop round to re-refresh so the coordinator picks up the
+            // new opt-out / paused state.
             _ = localnet.wake.notified() => {
                 apply_state(
                     backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers,
@@ -336,17 +338,41 @@ async fn apply_state(
     seeds: &[SeedPeer],
     peers: &mut HashMap<[u8; 32], PeerConfig>,
 ) -> anyhow::Result<()> {
+    // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
+    // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
+    // opt-out rides to the coordinator on the next refresh.
+    if let Some(dev) = device {
+        let present: Vec<(u64, u64)> = dev
+            .networks_status
+            .iter()
+            .map(|n| (n.guild_id, n.role_id))
+            .collect();
+        if let Err(e) = localnet.reconcile_new(&present) {
+            tracing::warn!("reconciling new networks: {e:#}");
+        }
+    }
     let disabled = localnet.snapshot();
     let paused = localnet.is_paused();
-    // Disconnected: keep the interface up (holding our /32) but drop every peer — no mesh. The
-    // coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
+    // Disconnected: bring the interface administratively down (no traffic, /32 route inactive) *and*
+    // drop every peer — no mesh. Reconnect brings the link back up. The device, its uapi socket and
+    // the resolver config all persist across the toggle, so this is idempotent and needs no teardown.
+    // The coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
+    backend.set_link_up(!paused)?;
     let active: Vec<SeedPeer> = match device {
         Some(dev) if !paused => filter_active(seeds, &disabled, &dev.networks_status),
         _ => Vec::new(),
     };
     if let Some(dev) = device {
         dns::update(zone, dev, &active).await;
-        control::update(status, dev, &active, &disabled, !paused).await;
+        control::update(
+            status,
+            dev,
+            &active,
+            &disabled,
+            !paused,
+            localnet.disable_new(),
+        )
+        .await;
     }
     if let Some(fw) = fw {
         fw.update_peers(peers_by_net(&active))?;

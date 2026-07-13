@@ -16,6 +16,9 @@
 
 /// Coarse engine-service state for the GUI. Platform-independent so `main.rs` stays OS-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// These variants are only constructed by the `#[cfg(windows)]` service-status mapping; on other
+// platforms the service model is unsupported, so they're legitimately unused.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum SvcState {
     /// No service registered — the user hasn't run `service install` yet.
     NotInstalled,

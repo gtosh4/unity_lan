@@ -109,17 +109,21 @@ pub struct NetworkStatus {
     pub enabled: bool,
 }
 
-/// `POST /oauth/start`: begin interactive Discord login for this device's pubkey.
+/// `GET /oauth/pkce-config`: the public bits the engine needs to run the PKCE flow itself — the
+/// Discord app's `client_id`, and whether the coordinator is in offline `fake` mode (so the engine
+/// skips the real Discord round-trip and treats the callback `code` as the access token directly).
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OauthStartReq {
-    pub wg_pubkey: [u8; 32],
+pub struct PkceConfigResp {
+    pub client_id: String,
+    pub fake: bool,
 }
 
-/// The authorize URL to open in a browser, plus the opaque `state` binding this login attempt.
+/// `POST /oauth/complete`: the engine, having done the PKCE exchange itself, hands the coordinator
+/// the Discord access token to verify (`GET /users/@me`) and bind to this device's pubkey.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OauthStartResp {
-    pub authorize_url: String,
-    pub state: String,
+pub struct OauthCompleteReq {
+    pub wg_pubkey: [u8; 32],
+    pub access_token: String,
 }
 
 /// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.

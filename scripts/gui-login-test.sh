@@ -44,6 +44,7 @@ slug = "lan"
 EOF
 
 # No enrollment_key — the daemon must wait for interactive login.
+REDIR_PORT=8766
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://127.0.0.1:8088"
 state_dir = "$TMP/a"
@@ -52,6 +53,8 @@ iface = "unla"
 listen_port = 51820
 endpoint = "127.0.0.1:51820"
 refresh_secs = 2
+disable_new_networks = false
+oauth_redirect = "http://127.0.0.1:$REDIR_PORT/callback"
 EOF
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
@@ -65,16 +68,17 @@ for _ in $(seq 1 40); do "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q '
   || { echo "FAIL: daemon did not report needs_login"; "$ENG" ctl status "$TMP/a.toml"; tail -10 "$TMP/a.log"; exit 1; }
 echo "daemon up, not enrolled: reports needs_login ✓"
 
-# The GUI "Log in" button == this control op: ask the daemon for the authorize URL.
+# The GUI "Log in" button == this control op: the daemon builds the authorize URL + binds its
+# loopback listener, and finishes the exchange in the background once the browser hits the redirect.
 LOGIN=$("$ENG" ctl login "$TMP/a.toml" 2>&1)
-echo "$LOGIN" | grep -q 'oauth/callback' || { echo "FAIL: ctl login returned no authorize URL"; echo "$LOGIN"; exit 1; }
-STATE=$(echo "$LOGIN" | grep -oE 'state=[A-Za-z0-9_]+' | head -1 | cut -d= -f2)
+echo "$LOGIN" | grep -q 'oauth2/authorize' || { echo "FAIL: ctl login returned no authorize URL"; echo "$LOGIN"; exit 1; }
+STATE=$(echo "$LOGIN" | grep -oE 'state=[A-Za-z0-9]+' | head -1 | cut -d= -f2)
 [ -n "$STATE" ] || { echo "FAIL: no state in authorize URL"; echo "$LOGIN"; exit 1; }
 echo "ctl login: got authorize URL with state ✓"
 
-# Simulate the browser redirect → binds pubkey -> user 1.
-curl -sf "http://127.0.0.1:8088/oauth/callback?state=$STATE&code=user:1" >/dev/null \
-  || { echo "FAIL: callback rejected"; exit 1; }
+# Simulate the browser redirect to the daemon's loopback listener → background complete() binds -> 1.
+curl -sf "http://127.0.0.1:$REDIR_PORT/callback?state=$STATE&code=user:1" >/dev/null \
+  || { echo "FAIL: loopback redirect rejected"; exit 1; }
 echo "callback: device bound ✓"
 
 # The daemon's register loop now succeeds → brings up the interface and clears needs_login.

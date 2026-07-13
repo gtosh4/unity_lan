@@ -40,6 +40,12 @@ pub enum ControlRequest {
     SetConnected {
         connected: bool,
     },
+    /// Set the local policy for networks discovered from now on: `disable = true` opts newly-seen
+    /// networks out of peering by default (the secure default), `false` enrols them automatically.
+    /// Handled locally (persisted, source of truth); returns the updated [`StatusReport`].
+    SetNewNetworkDefault {
+        disable: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -136,6 +142,10 @@ pub struct StatusReport {
     /// status from an older daemon (no field) reads as connected. Toggled by `SetConnected`.
     #[serde(default = "default_true")]
     pub connected: bool,
+    /// Whether networks discovered from now on default to *disabled* (opted out of peering). The
+    /// secure default is `true`; the GUI toggles it via `SetNewNetworkDefault`.
+    #[serde(default = "default_true")]
+    pub disable_new_networks: bool,
 }
 
 fn default_true() -> bool {

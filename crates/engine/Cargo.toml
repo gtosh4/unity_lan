@@ -24,6 +24,7 @@ defguard_wireguard_rs = "0.10.0"
 igd-next = { version = "0.17", features = ["aio_tokio"] }
 interprocess = { version = "2.4.2", features = ["tokio"] }
 base64 = "0.22"
+sha2 = "0.10"
 hickory-proto = "0.26.1"
 
 [target.'cfg(unix)'.dependencies]

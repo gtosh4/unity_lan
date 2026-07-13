@@ -119,3 +119,12 @@ pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedRe
         _ => Err("unexpected response".into()),
     }
 }
+
+/// Set the new-network default (secure default: disable on discovery). Returns the updated status.
+pub async fn set_new_network_default(path: PathBuf, disable: bool) -> Result<StatusReport, String> {
+    match request(path, ControlRequest::SetNewNetworkDefault { disable }).await? {
+        ControlResponse::Status(s) => Ok(s),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}

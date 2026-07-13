@@ -63,23 +63,25 @@ fn mask(ip: std::net::Ipv4Addr, cidr: u8) -> IpAddrMask {
     IpAddrMask::new(IpAddr::V4(ip), cidr)
 }
 
-/// defguard's userspace backend creates the TUN but leaves the link admin-down, so route
-/// installation fails ("Network is down"). Bring it up. Linux uses `ip`; the Windows/macOS
-/// native paths manage link state themselves. TODO: replace with a netlink/ioctl call.
+/// Set the link's admin state. defguard's userspace backend creates the TUN but leaves the link
+/// admin-down, so route installation fails ("Network is down") until we bring it up; mesh
+/// connect/disconnect also toggles it. Linux uses `ip`; the Windows/macOS native paths manage link
+/// state themselves. TODO: replace with a netlink/ioctl call.
 #[cfg(target_os = "linux")]
-fn bring_link_up(name: &str) -> anyhow::Result<()> {
+fn set_link_state(name: &str, up: bool) -> anyhow::Result<()> {
+    let state = if up { "up" } else { "down" };
     let status = std::process::Command::new("ip")
-        .args(["link", "set", name, "up"])
+        .args(["link", "set", name, state])
         .status()
-        .map_err(|e| anyhow::anyhow!("running `ip link set {name} up`: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("running `ip link set {name} {state}`: {e}"))?;
     if !status.success() {
-        anyhow::bail!("`ip link set {name} up` exited with {status}");
+        anyhow::bail!("`ip link set {name} {state}` exited with {status}");
     }
     Ok(())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn bring_link_up(_name: &str) -> anyhow::Result<()> {
+fn set_link_state(_name: &str, _up: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
@@ -104,7 +106,7 @@ impl WgBackend for UserspaceBackend {
             fwmark: None,
         };
         self.api.configure_interface(&config)?;
-        bring_link_up(&self.name)?;
+        set_link_state(&self.name, true)?;
         Ok(())
     }
 
@@ -131,5 +133,9 @@ impl WgBackend for UserspaceBackend {
     fn down(&self) -> anyhow::Result<()> {
         self.api.remove_interface()?;
         Ok(())
+    }
+
+    fn set_link_up(&self, up: bool) -> anyhow::Result<()> {
+        set_link_state(&self.name, up)
     }
 }

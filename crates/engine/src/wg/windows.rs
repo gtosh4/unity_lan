@@ -140,6 +140,12 @@ impl WgBackend for KernelBackend {
         self.api.lock().unwrap().remove_interface()?;
         Ok(())
     }
+
+    fn set_link_up(&self, _up: bool) -> anyhow::Result<()> {
+        // wireguard-nt manages the adapter's link state itself; a mesh disconnect still drops every
+        // peer (via the empty seed set), so no admin-toggle is wired here. No-op.
+        Ok(())
+    }
 }
 
 fn mask(ip: Ipv4Addr, cidr: u8) -> IpAddrMask {

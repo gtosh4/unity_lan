@@ -172,17 +172,23 @@ The engine (privileged daemon) owns all mesh state and the coordinator session. 
 is a thin front-end over the engine's control socket. They talk via `interprocess`
 (UDS/named pipe) using `common::control` RPC types.
 
-### 5.1 Auth flow (`engine/auth.rs`, GUI-triggered)
-Discord OAuth2 **authorization-code + PKCE**, loopback redirect — but the **engine** owns the
-session (it's the one calling `/register`); the **GUI** just opens the browser:
-1. GUI sends `Control::Login` → engine spawns a one-shot `127.0.0.1:<port>` listener and
-   returns the authorize URL.
-2. GUI opens the URL; Discord → coordinator `/oauth/callback` → redirect to the engine's
-   loopback with a session token.
-3. Engine stores the session token + WG private key under its state dir (0600 / DPAPI on
-   Windows) and proceeds to `/register`.
+### 5.1 Auth flow (`engine/oauth.rs`, GUI/CLI-triggered)
+Discord OAuth2 **authorization-code + PKCE**, loopback redirect. The **engine** is the public
+client (it owns the session and calls `/register`); the coordinator holds no secret and only
+verifies the resulting token. The **GUI** just opens the browser.
+1. `Control::Login` (GUI button / `login` CLI) → engine `GET /oauth/pkce-config` (Discord
+   `client_id` + fake-mode flag), generates the PKCE `verifier`/`challenge`, binds a one-shot
+   `127.0.0.1:<port>` listener (the fixed `oauth_redirect`), and returns the authorize URL.
+2. The URL is opened; Discord redirects **straight to the engine's loopback** with `code`+`state`.
+   The engine exchanges the code at Discord's token endpoint (PKCE `code_verifier`, **no secret**)
+   for an access token, then `POST /oauth/complete {wg_pubkey, access_token}`.
+3. The coordinator verifies the token (`GET /users/@me`) and binds pubkey → user. The engine's
+   register loop picks up the binding and brings up the mesh.
 
-(Discord has no device-code grant → loopback is the desktop-friendly path.)
+The loopback redirect is fixed and registered once with the Discord app (which needs the
+`PUBLIC_OAUTH2_CLIENT` flag), so login works from any host/VM regardless of LAN address — no
+reachable coordinator URL required. (Discord has no device-code grant → loopback is the
+desktop-friendly path.)
 
 ### 5.2 WG backend (`wg/`)
 ```rust

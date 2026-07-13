@@ -102,6 +102,7 @@ iface = "$2"
 listen_port = $3
 endpoint = "$4:$3"
 refresh_secs = 2
+disable_new_networks = false
 EOF
 }
 node_toml a unla 51820 10.0.0.1 key-a

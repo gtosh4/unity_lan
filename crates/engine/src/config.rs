@@ -55,6 +55,16 @@ pub struct Config {
     /// Ports to expose at startup (before any runtime `ctl expose`).
     #[serde(default)]
     pub expose: Vec<ExposeSeed>,
+    /// Loopback redirect for the interactive-login (PKCE) flow. Must match a redirect URI registered
+    /// with the Discord app; the port is where the engine binds its one-shot OAuth listener. Being
+    /// loopback, it works from any host/VM regardless of LAN address.
+    #[serde(default = "default_oauth_redirect")]
+    pub oauth_redirect: String,
+    /// Default peering posture for networks discovered from now on. `true` (secure default) opts a
+    /// newly-seen network out of peering until the user enables it; `false` enrols it automatically.
+    /// Seeds the persisted policy on first run; thereafter the GUI toggle is the source of truth.
+    #[serde(default = "default_true")]
+    pub disable_new_networks: bool,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.
@@ -80,6 +90,9 @@ fn default_port() -> u16 {
 }
 fn default_refresh() -> u64 {
     15
+}
+fn default_oauth_redirect() -> String {
+    "http://127.0.0.1:8765/callback".to_string()
 }
 
 /// Starter config written by `load_or_init` when the default path is missing. Points at a

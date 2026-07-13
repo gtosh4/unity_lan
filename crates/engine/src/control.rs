@@ -27,6 +27,7 @@ use tokio::sync::RwLock;
 use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::fw::Firewall;
 use crate::netcfg::LocalNet;
+use crate::oauth;
 
 /// Build the platform local-socket name from a config endpoint string: a filesystem path on unix,
 /// a `\\.\pipe\<name>` named pipe on Windows.
@@ -54,6 +55,8 @@ pub struct Ctx {
     pub localnet: Arc<LocalNet>,
     /// This device's WG public key — used to start interactive login (OAuth).
     pub pubkey: [u8; 32],
+    /// Loopback redirect URI for the interactive-login (PKCE) flow.
+    pub oauth_redirect: String,
 }
 
 /// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
@@ -64,6 +67,11 @@ pub async fn set_needs_login(shared: &Shared, needs: bool) {
 /// Set the mesh connection state the daemon reports (`true` = connected, `false` = disconnected).
 pub async fn set_connected(shared: &Shared, connected: bool) {
     shared.write().await.connected = connected;
+}
+
+/// Set the new-network default the daemon reports, so the GUI reflects it without a full refresh.
+pub async fn set_disable_new(shared: &Shared, disable: bool) {
+    shared.write().await.disable_new_networks = disable;
 }
 
 /// Shared, live status the daemon updates and the control socket reads.
@@ -82,6 +90,7 @@ pub async fn update(
     seeds: &[SeedPeer],
     disabled: &HashSet<(u64, u64)>,
     connected: bool,
+    disable_new_networks: bool,
 ) {
     let report = StatusReport {
         device: Some(DeviceStatus {
@@ -102,6 +111,7 @@ pub async fn update(
         networks: effective_networks(&device.networks_status, disabled),
         needs_login: false, // a device present means we're enrolled
         connected,
+        disable_new_networks,
     };
     *shared.write().await = report;
 }
@@ -273,14 +283,30 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
         }
-        // Interactive login: fetch the authorize URL from the coordinator for this device pubkey.
-        // The daemon's register loop binds us once the browser completes the flow.
-        ControlRequest::Login => match coord::oauth_start(&ctx.coordinator, ctx.pubkey).await {
-            Ok(start) => ControlResponse::Login(LoginResp {
-                authorize_url: start.authorize_url,
-            }),
-            Err(e) => ControlResponse::Error(format!("{e:#}")),
-        },
+        // Interactive login (engine-owned PKCE): build the authorize URL and bind a loopback
+        // listener, hand the URL to the frontend to open, and finish the exchange in the background.
+        // The daemon's register loop brings up the mesh once complete() binds the device.
+        ControlRequest::Login => {
+            match oauth::begin(&ctx.coordinator, &ctx.oauth_redirect, ctx.pubkey).await {
+                Ok(login) => {
+                    let authorize_url = login.authorize_url.clone();
+                    tokio::spawn(async move {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(300),
+                            login.complete(),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::error!("interactive login failed: {e:#}"),
+                            Err(_) => tracing::warn!("interactive login timed out; retry `login`"),
+                        }
+                    });
+                    ControlResponse::Login(LoginResp { authorize_url })
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
         // Connect/disconnect the mesh: flip the local paused flag (persist + wake the daemon to
         // re-mesh or tear the mesh down at once). The daemon carries `paused` to the coordinator on
         // the next refresh, which withdraws/re-advertises this device's presence to co-members.
@@ -298,6 +324,18 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             }),
             Err(e) => ControlResponse::Error(format!("{e:#}")),
         },
+        // Set the local default for networks discovered from now on (persisted, source of truth).
+        // Doesn't touch already-known networks, so no re-mesh; mirror it into the live status so the
+        // GUI reflects it at once, then return the updated snapshot.
+        ControlRequest::SetNewNetworkDefault { disable } => {
+            match ctx.localnet.set_disable_new(disable) {
+                Ok(_) => {
+                    set_disable_new(&ctx.status, disable).await;
+                    ControlResponse::Status(ctx.status.read().await.clone())
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');

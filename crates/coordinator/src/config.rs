@@ -50,10 +50,9 @@ pub struct DiscordConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct OauthConfig {
+    /// The Discord app's public `client_id`. The engine runs PKCE as a public client, so no secret
+    /// or redirect URI lives here — the engine owns the loopback redirect and the token exchange.
     pub client_id: String,
-    pub client_secret: String,
-    /// The `/oauth/callback` URL registered with the Discord app (this coordinator's public URL).
-    pub redirect_uri: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]

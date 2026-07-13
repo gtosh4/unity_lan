@@ -10,6 +10,7 @@ mod fw;
 mod keys;
 mod nat;
 mod netcfg;
+mod oauth;
 mod resolver;
 #[cfg(windows)]
 mod service;
@@ -154,39 +155,38 @@ fn load_config(arg: Option<String>) -> anyhow::Result<Config> {
 /// polls register until the coordinator has bound this device to the authenticated user.
 async fn login(cfg: Config) -> anyhow::Result<()> {
     let (_wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
-    let start = coord::oauth_start(&cfg.coordinator, wg_pub).await?;
+    let login = oauth::begin(&cfg.coordinator, &cfg.oauth_redirect, wg_pub).await?;
     println!(
         "Open this URL in your browser to log in with Discord:\n\n  {}\n",
-        start.authorize_url
+        login.authorize_url
     );
     println!("Waiting for authorization (up to 5 minutes)...");
 
-    // Poll register: it fails with 401 until the callback binds our pubkey, then succeeds.
-    for _ in 0..150 {
-        match coord::register(
-            &cfg.coordinator,
-            wg_pub,
-            cfg.device_name(),
-            cfg.endpoint,
-            None,
-            Vec::new(),
-            None, // login binds a fresh identity; nothing to supersede
-            false,
-        )
+    // complete() waits for the browser redirect, does the PKCE exchange, and returns once the
+    // coordinator has bound our pubkey to the authenticated user.
+    tokio::time::timeout(std::time::Duration::from_secs(300), login.complete())
         .await
-        {
-            Ok((_, Some(dev))) => {
-                println!("Logged in ✓  {} — {}", dev.wg_ip, dev.hostname);
-                return Ok(());
-            }
-            Ok((_, None)) => {
-                println!("Logged in ✓  (no networks yet — join a role in Discord)");
-                return Ok(());
-            }
-            Err(_) => tokio::time::sleep(std::time::Duration::from_secs(2)).await,
-        }
+        .map_err(|_| {
+            anyhow::anyhow!("login timed out; re-run `login` and complete the browser step")
+        })??;
+
+    // The binding is now in place, so a register succeeds and confirms the device.
+    let (_, device) = coord::register(
+        &cfg.coordinator,
+        wg_pub,
+        cfg.device_name(),
+        cfg.endpoint,
+        None,
+        Vec::new(),
+        None, // login binds a fresh identity; nothing to supersede
+        false,
+    )
+    .await?;
+    match device {
+        Some(dev) => println!("Logged in ✓  {} — {}", dev.wg_ip, dev.hostname),
+        None => println!("Logged in ✓  (no networks yet — join a role in Discord)"),
     }
-    anyhow::bail!("login timed out; re-run `login` and complete the browser step")
+    Ok(())
 }
 
 /// `ctl <sub> <config.toml> [arg]` — talk to a running daemon over its control socket.

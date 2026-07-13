@@ -72,6 +72,7 @@ coordinator = "$2"
 state_dir = "$TMP/client"
 enrollment_key = "key-a"
 device_name = "host-a"
+disable_new_networks = false
 EOF
 }
 

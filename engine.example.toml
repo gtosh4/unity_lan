@@ -7,3 +7,12 @@ state_dir = "engine-state"
 # seeded in the coordinator's [[enroll]] block for local dev). Alternatively, omit this and run
 # `unitylan-engine login engine.toml` for interactive Discord login.
 # enrollment_key = "dev-key-1"
+
+# Interactive-login (Discord PKCE) loopback redirect. Defaults to this if omitted; register the
+# exact URL with the Discord app. Being loopback, it works from any host/VM regardless of LAN IP.
+# oauth_redirect = "http://127.0.0.1:8765/callback"
+
+# Default peering posture for networks discovered from now on. true (secure default) opts a
+# newly-seen network out of peering until you enable it in the GUI; false auto-enrols new networks.
+# Seeds the initial policy on first run; the GUI toggle is the source of truth thereafter.
+# disable_new_networks = true

@@ -38,26 +38,30 @@ slug = "lan"
 EOF
 
 # Client config: note there is NO enrollment_key — login must bind the device instead.
+REDIR_PORT=8765
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://127.0.0.1:8087"
 state_dir = "$TMP/a"
 device_name = "host-a"
+disable_new_networks = false
+oauth_redirect = "http://127.0.0.1:$REDIR_PORT/callback"
 EOF
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8087/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-# Start interactive login (the headless/direct path); it prints the authorize URL (with state)
-# and polls register. The daemon-mediated GUI path is covered by gui-login-test.sh.
+# Start interactive login (the headless/direct path); it prints the authorize URL (with state) and
+# binds a loopback listener, then waits. The daemon-mediated GUI path is covered by gui-login-test.sh.
 "$ENG" login "$TMP/a.toml" >"$TMP/login.out" 2>&1 &
-for _ in $(seq 1 40); do grep -q 'oauth/callback' "$TMP/login.out" 2>/dev/null && break; sleep 0.25; done
-STATE=$(grep -oE 'state=[A-Za-z0-9_]+' "$TMP/login.out" | head -1 | cut -d= -f2)
+for _ in $(seq 1 40); do grep -q 'oauth2/authorize' "$TMP/login.out" 2>/dev/null && break; sleep 0.25; done
+STATE=$(grep -oE 'state=[A-Za-z0-9]+' "$TMP/login.out" | head -1 | cut -d= -f2)
 [ -n "$STATE" ] || { echo "FAIL: no authorize URL / state from login"; cat "$TMP/login.out"; exit 1; }
 echo "login: got authorize URL with state ✓"
 
-# Simulate the browser redirect: the callback exchanges the fake code and binds pubkey -> user 1.
-curl -sf "http://127.0.0.1:8087/oauth/callback?state=$STATE&code=user:1" >/dev/null \
-  || { echo "FAIL: callback rejected"; exit 1; }
+# Simulate the browser redirect to the engine's loopback listener with a fake code (`user:1`). The
+# engine (coordinator in fake mode) passes it through as the token; /oauth/complete binds pubkey -> 1.
+curl -sf "http://127.0.0.1:$REDIR_PORT/callback?state=$STATE&code=user:1" >/dev/null \
+  || { echo "FAIL: loopback redirect rejected"; exit 1; }
 echo "callback: fake code exchanged + device bound ✓"
 
 # The login poll must now see a successful register.

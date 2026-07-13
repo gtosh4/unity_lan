@@ -36,10 +36,10 @@ verified `wg_ip` + hostname obtained from the coordinator.
 - [ ] `store.rs`: SQLite via sqlx — `allocations`, `signing_key`, `tombstones`; migrations.
 - [ ] `signer.rs`: load/generate Ed25519 key; `sign_attestation(user, role, …, ttl=30m)`.
 - [ ] `discord.rs`: twilight-http `GET member` → roles + nick.
-- [x] `oauth.rs`: Discord OAuth2 auth-code; exchange code → `user_id` (`identify`). Confidential
-      server-mediated flow (PKCE deferred). `FakeOauth` for offline tests.
+- [x] `oauth.rs`: Discord OAuth2 auth-code + **PKCE** (engine is the public client, no secret);
+      coordinator verifies the access token → `user_id` (`identify`). `FakeOauth` for offline tests.
 - [ ] `alloc.rs`: allocate stable `wg_ip` per `(guild,role,user)`; persist; collision-resolve.
-- [x] `api.rs` (axum): `POST /oauth/start`, `GET /oauth/callback`, `POST /register`.
+- [x] `api.rs` (axum): `GET /oauth/pkce-config`, `POST /oauth/complete`, `POST /register`.
 - [ ] `main.rs`: load config, open store, serve.
 
 ### M1.3 `engine` (headless)
@@ -190,19 +190,21 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       (guild/role/name/enabled). Verified: `scripts/net-toggle-test.sh` (3 nodes/2 nets — online:
       A disables mesh2 → drops C both ways, keeps B, re-enable → C returns; **offline**:
       coordinator killed → `ctl net disable` still succeeds and A drops C locally) + GUI unit tests.
-- [x] **Interactive login (OAuth)** — `unitylan login <config>` runs Discord OAuth2 (auth-code):
-      the coordinator is a confidential client (holds the secret, exchanges server-side), so the
-      client only opens the authorize URL and polls register. `/oauth/start` (mint state → pubkey)
-      + `/oauth/callback` (exchange code → bind pubkey→user in `oauth_authorized`); `resolve_user`
-      accepts an OAuth-bound device. A `FakeOauth` provider (parses `user:<id>`) backs offline
-      tests. PKCE deferred (unnecessary for a confidential server-mediated flow). Two frontends:
-      the headless/direct `unitylan login`, and the **GUI/daemon-mediated** path — the daemon now
-      serves the control socket *before* enrollment (reporting `needs_login` instead of bailing),
-      the GUI shows a **Log in with Discord** button (`ControlRequest::Login` → authorize URL), and
-      the daemon's register loop binds the device + brings up the mesh once the browser completes.
-      Verified: `scripts/oauth-test.sh` (direct: no-key refused → login → fake callback → register
-      succeeds) and `scripts/gui-login-test.sh` (daemon-mediated: needs_login → `ctl login` → fake
-      callback → daemon meshes).
+- [x] **Interactive login (OAuth)** — `unitylan login <config>` runs Discord OAuth2 **auth-code +
+      PKCE**: the engine is the **public client** — it fetches `client_id` from `/oauth/pkce-config`,
+      binds a fixed loopback listener (`oauth_redirect`, registered once with the app), exchanges the
+      code itself with a `code_verifier` (no secret), and hands the coordinator the access token via
+      `/oauth/complete`. The coordinator verifies it (`GET /users/@me`) and binds pubkey→user in
+      `oauth_authorized`; `resolve_user` accepts an OAuth-bound device. Because the redirect is
+      loopback, login works from any host/VM without a reachable coordinator URL (needs the app's
+      `PUBLIC_OAUTH2_CLIENT` flag). A `FakeOauth` provider (token `user:<id>`) backs offline tests.
+      Two frontends: the headless/direct `unitylan login`, and the **GUI/daemon-mediated** path — the
+      daemon serves the control socket *before* enrollment (reporting `needs_login` instead of
+      bailing), the GUI shows a **Log in with Discord** button (`ControlRequest::Login` → authorize
+      URL), and the daemon finishes the exchange in the background + brings up the mesh once the
+      browser hits the loopback. Verified: `scripts/oauth-test.sh` (direct: no-key refused → login →
+      fake loopback redirect → register succeeds) and `scripts/gui-login-test.sh` (daemon-mediated:
+      needs_login → `ctl login` → fake loopback redirect → daemon meshes).
 - [ ] Tray — deferred: the engine doesn't yet back it over the socket (post-M5).
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +

@@ -17,7 +17,7 @@ use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
     ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
 };
-use iced::widget::{button, column, row, scrollable, text, text_input, Column};
+use iced::widget::{button, checkbox, column, row, scrollable, text, text_input, Column};
 use iced::{Element, Length, Subscription, Task};
 
 fn main() -> iced::Result {
@@ -98,6 +98,10 @@ enum Message {
     SetConnected(bool),
     /// A mesh connect/disconnect finished → refresh.
     ConnectedDone(Result<ConnectedResp, String>),
+    /// Set whether networks discovered from now on default to disabled (secure) or enabled.
+    SetNewNetworkDefault(bool),
+    /// The new-network default was set → the daemon returns the updated status.
+    NewNetworkDefaultSet(Result<StatusReport, String>),
 }
 
 impl App {
@@ -237,6 +241,17 @@ impl App {
                 self.error = res.err();
                 return self.reload(); // pull the settled connection state + peers
             }
+            Message::SetNewNetworkDefault(disable) => {
+                return Task::perform(
+                    ctl::set_new_network_default(self.socket.clone(), disable),
+                    Message::NewNetworkDefaultSet,
+                )
+            }
+            Message::NewNetworkDefaultSet(Ok(s)) => {
+                self.status = Some(s);
+                self.error = None;
+            }
+            Message::NewNetworkDefaultSet(Err(e)) => self.error = Some(e),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -325,7 +340,8 @@ impl App {
     }
 
     /// Mesh connect/disconnect over the control socket. Disconnect keeps the engine resident and
-    /// polling (instant reconnect) but drops all peers and withdraws us from co-members' seed lists.
+    /// polling (instant reconnect) but brings the interface's link administratively down and drops
+    /// all peers, withdrawing us from co-members' seed lists. Connect brings the link back up.
     /// Hidden until we have a status (need the socket) and only when enrolled (`!needs_login`).
     fn connection_section(&self) -> Option<Element<'_, Message>> {
         let connected = self.status.as_ref()?.connected;
@@ -471,7 +487,16 @@ impl App {
             .spacing(8);
             col = col.push(r);
         }
-        column![text("networks").size(18), col].spacing(6).into()
+        // Secure default: newly-discovered networks stay off until enabled here. No status yet
+        // (socket not up) → assume the secure posture.
+        let disable_new = self.status.as_ref().is_none_or(|s| s.disable_new_networks);
+        let policy = checkbox("Disable new networks on discovery", disable_new)
+            .on_toggle(Message::SetNewNetworkDefault)
+            .size(16)
+            .text_size(14);
+        column![text("networks").size(18), col, policy]
+            .spacing(6)
+            .into()
     }
 
     fn exposed_section(&self) -> Element<'_, Message> {
@@ -559,6 +584,7 @@ mod tests {
             networks: vec![],
             needs_login: false,
             connected: true,
+            disable_new_networks: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -649,6 +675,7 @@ mod tests {
             }],
             needs_login: false,
             connected: true,
+            disable_new_networks: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -697,6 +724,7 @@ mod tests {
             networks: vec![],
             needs_login: false,
             connected: false,
+            disable_new_networks: true,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);
