@@ -162,7 +162,11 @@ mod tests {
         assert!(!s.contains("-RemoteAddress"));
         // Every New-NetFirewallRule tolerates a missing interface (pre-up install): one
         // `-ErrorAction SilentlyContinue` per rule (ICMP echo + the two ports).
-        assert_eq!(s.matches("-ErrorAction SilentlyContinue | Out-Null").count(), 3);
+        assert_eq!(
+            s.matches("-ErrorAction SilentlyContinue | Out-Null")
+                .count(),
+            3
+        );
     }
 
     #[test]
