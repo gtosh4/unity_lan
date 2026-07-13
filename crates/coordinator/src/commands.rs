@@ -65,7 +65,7 @@ pub async fn run_gateway(
                 Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
             },
             Event::InteractionCreate(interaction) => {
-                handle_interaction(&http, app_id, &store, interaction.0).await;
+                handle_interaction(&http, app_id, &store, &version, interaction.0).await;
             }
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
@@ -175,6 +175,7 @@ async fn handle_interaction(
     http: &twilight_http::Client,
     app_id: Id<ApplicationMarker>,
     store: &Store,
+    version: &watch::Sender<u64>,
     interaction: Interaction,
 ) {
     let Some(InteractionData::ApplicationCommand(data)) = interaction.data.clone() else {
@@ -183,7 +184,7 @@ async fn handle_interaction(
     if data.name != "unitylan" {
         return;
     }
-    let content = process(http, store, &interaction, &data).await;
+    let content = process(http, store, version, &interaction, &data).await;
 
     let response = InteractionResponse {
         kind: InteractionResponseType::ChannelMessageWithSource,
@@ -206,6 +207,7 @@ async fn handle_interaction(
 async fn process(
     http: &twilight_http::Client,
     store: &Store,
+    version: &watch::Sender<u64>,
     interaction: &Interaction,
     data: &CommandData,
 ) -> String {
@@ -221,7 +223,7 @@ async fn process(
             if !is_admin(interaction) {
                 return "You need the Manage Server permission.".to_string();
             }
-            handle_network(http, store, guild_id.get(), subs).await
+            handle_network(http, store, version, guild_id.get(), subs).await
         }
         // /unitylan enroll — any member mints a one-time key for their own headless device.
         ("enroll", CommandOptionValue::SubCommand(_)) => {
@@ -323,6 +325,7 @@ fn is_admin(interaction: &Interaction) -> bool {
 async fn handle_network(
     http: &twilight_http::Client,
     store: &Store,
+    version: &watch::Sender<u64>,
     guild_id: u64,
     subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
 ) -> String {
@@ -355,7 +358,11 @@ async fn handle_network(
                     .unwrap_or_else(|| format!("role-{role}")),
             };
             match store.upsert_network(guild_id, role.get(), &name).await {
-                Ok(()) => format!("Registered <@&{role}> as network **{name}**."),
+                Ok(()) => {
+                    // Wake parked long-polls so clients pick up the new network immediately.
+                    version.send_modify(|v| *v += 1);
+                    format!("Registered <@&{role}> as network **{name}**.")
+                }
                 Err(e) => format!("Error: {e}"),
             }
         }
@@ -368,7 +375,11 @@ async fn handle_network(
                 return "Missing role.".to_string();
             };
             match store.remove_network(guild_id, role.get()).await {
-                Ok(()) => format!("Unregistered <@&{role}>."),
+                Ok(()) => {
+                    // Wake parked long-polls so clients drop the removed network immediately.
+                    version.send_modify(|v| *v += 1);
+                    format!("Unregistered <@&{role}>.")
+                }
                 Err(e) => format!("Error: {e}"),
             }
         }
