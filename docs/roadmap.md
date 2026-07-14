@@ -347,8 +347,14 @@ falls back to a responder on the coordinator host when none is online.
       herd otherwise), and hands each seed the peer's `(peer, caller)` offer. Pure relay — the
       coordinator never runs ICE, so the data path stays P2P. Engine still sends `ice: []` (gathering
       is stage 3). Compiles across all three crates.
-- [ ] **Stage 2 — STUN** — coordinator-host STUN Binding responder (fallback) + client gather
-      (relay-first, coord fallback); a lone/all-NAT'd mesh obtains a reflexive with no observer peer.
+- [x] **Stage 2 — STUN fallback responder** ✅ — `coordinator/src/stun.rs`: a stateless,
+      unauthenticated UDP STUN Binding responder (answers with the caller's `XOR-MAPPED-ADDRESS`,
+      the exact reflexive a relay node's `turn::server` already returns). Config `stun_bind`
+      (`Option<SocketAddr>`, default off) starts it as a detached task; its address is advertised in
+      `RegisterResp.stun_addr` so the ICE agent can use it as the server-reflexive fallback when no
+      relay co-member is online to STUN. Off the data path (control-plane-only). 2 unit tests
+      (echoes reflexive + transaction id; ignores non-Binding). Client-side gather (relay-first,
+      coord fallback) is built into the agent config in stage 3.
 - [ ] **Stage 3 — ICE agent** — `engine/ice.rs`: `Agent` per stuck peer on a side socket, gathers
       host/srflx/relay (relay via M5.4 TURN creds), feeds the peer's candidates in, runs checks;
       reports gathered candidates each loop (a change breaks the long-poll hold, like `observed`).

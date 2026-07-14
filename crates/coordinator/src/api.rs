@@ -52,6 +52,9 @@ pub struct AppState {
     /// snapshot the coordinator hands `(owner, peer)` back as `peer`'s [`common::api::Seed::ice`] for
     /// reaching `owner`. Last write wins; lost on restart (repopulated as peers refresh).
     pub ice: Arc<Mutex<IceExchange>>,
+    /// The coordinator-hosted STUN Binding responder's client-reachable address (M5.5 ICE bootstrap
+    /// fallback), advertised in every `RegisterResp`. `None` when no responder is configured.
+    pub stun_addr: Option<std::net::SocketAddr>,
     /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
     /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
     /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
@@ -506,6 +509,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         seeds,
         version: *st.version.borrow(),
         networks: networks_status,
+        stun_addr: st.stun_addr,
     })
 }
 

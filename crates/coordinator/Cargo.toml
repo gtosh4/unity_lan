@@ -29,3 +29,4 @@ async-trait = "0.1.89"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 twilight-gateway = "0.17"
 twilight-util = { version = "0.17", features = ["builder"] }
+stun = "0.17"

@@ -12,6 +12,7 @@ mod roles;
 mod rotate;
 mod signer;
 mod store;
+mod stun;
 
 use std::sync::Arc;
 
@@ -134,6 +135,17 @@ async fn main() -> anyhow::Result<()> {
         (None, false) => None,
     };
 
+    // STUN Binding responder (M5.5 ICE bootstrap fallback), when configured. Advertised to clients
+    // via RegisterResp.stun_addr; carries no traffic, so it runs as a detached background task.
+    let stun_addr = cfg.stun_bind;
+    if let Some(bind) = stun_addr {
+        tokio::spawn(async move {
+            if let Err(e) = crate::stun::serve(bind).await {
+                tracing::error!("STUN responder exited: {e:#}");
+            }
+        });
+    }
+
     let state = AppState {
         signer,
         roles,
@@ -145,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
         relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relay_allocs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        stun_addr,
         rotation_chain,
     };
 

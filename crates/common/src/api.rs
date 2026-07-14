@@ -180,6 +180,11 @@ pub struct RegisterResp {
     /// ones (so they can be re-enabled); disabled networks are excluded from `grant`/`seeds`.
     #[serde(default)]
     pub networks: Vec<NetworkStatus>,
+    /// The coordinator-hosted STUN Binding responder's address (§7.2, M5.5), if configured — the
+    /// ICE agent's server-reflexive fallback when no relay co-member is online to STUN. `None`
+    /// disables the fallback (clients rely on relay-node STUN only).
+    #[serde(default)]
+    pub stun_addr: Option<SocketAddr>,
 }
 
 /// One of a device's networks (a role@guild) and whether this device peers on it.
