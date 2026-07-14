@@ -253,6 +253,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let mut since = Some(resp.version);
         // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
         let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
+        // The last relay need/allocations we reported — a change must break the long-poll hold too,
+        // else a freshly-`Unreachable` peer's relay request would sit until the hold elapses.
+        let mut last_relay_need: Vec<[u8; 32]> = Vec::new();
+        let mut last_relay_alloc: Vec<common::api::RelayAllocation> = Vec::new();
         // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
         let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
         loop {
@@ -324,9 +328,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
+            // Sorted for a stable change comparison against the last report.
+            want_relay.sort();
+            let mut allocated = relays.allocations();
+            allocated.sort_by_key(|a| a.peer);
             let mut relay_iter = relay_report.clone();
             relay_iter.need_relay = want_relay;
-            relay_iter.allocated = relays.allocations();
+            relay_iter.allocated = allocated;
+            let this_relay_need = relay_iter.need_relay.clone();
+            let this_relay_alloc = relay_iter.allocated.clone();
 
             let changed = observed != last_reported;
             if changed {
@@ -335,8 +345,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     "reflexive: reporting observed endpoints to coordinator"
                 );
             }
+            // A relay need/allocation change must also report at once (a new `Unreachable` peer's
+            // relay request, or a freshly-allocated relayed address the peer is waiting to learn).
+            let relay_changed =
+                this_relay_need != last_relay_need || this_relay_alloc != last_relay_alloc;
             // Report immediately (no hold) when our view changed; else hold for membership.
-            let poll_since = if changed { None } else { since };
+            let poll_since = if changed || relay_changed {
+                None
+            } else {
+                since
+            };
             let refreshed = tokio::select! {
                 // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
                 _ = shutdown.wait() => {
@@ -368,7 +386,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 }
                 // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
                 // reported on the next loop). Only while unchanged — a change goes straight to a report.
-                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed => {
+                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed && !relay_changed => {
                     continue;
                 }
                 r = coord::refresh(
@@ -389,6 +407,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     coord_online = true;
                     since = Some(resp.version);
                     last_reported = observed; // the coordinator now has this reflexive set
+                    last_relay_need = this_relay_need; // …and this relay need/allocation set
+                    last_relay_alloc = this_relay_alloc;
                     match coord::verified_seeds(&resp) {
                         Ok(seeds) => {
                             last_seeds = seeds;
@@ -722,13 +742,18 @@ fn apply_seeds(
             endpoint,
             keepalive: Some(25),
         };
-        let is_new = match peers.get(&pubkey) {
-            Some(existing) => {
-                existing.allowed_ips != peer.allowed_ips || existing.endpoint != peer.endpoint
-            }
+        let existing = peers.get(&pubkey);
+        let differs = match existing {
+            Some(e) => e.allowed_ips != peer.allowed_ips || e.endpoint != peer.endpoint,
             None => true,
         };
-        if is_new {
+        if differs {
+            // The userspace (boringtun) backend can't modify a peer in place — it panics on an
+            // endpoint/allowed-ips change (e.g. when a peer switches from a punch target to its relay
+            // shim). Remove the old peer first, then add the updated one.
+            if existing.is_some() {
+                backend.remove_peer(&pubkey)?;
+            }
             backend.set_peer(&peer)?;
             tracing::info!(peer = %hex8(&pubkey), ips = ?peer.allowed_ips, "peer set");
             peers.insert(pubkey, peer);

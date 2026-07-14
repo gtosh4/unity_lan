@@ -295,18 +295,25 @@ follow-on, not a GA blocker.
       `turn::server::Server` (`engine/relay.rs`) with a `LongTermAuthHandler` over its persisted
       `relay_secret`; advertises `relay_capable`/`relay_addr` via `RegisterReq`. Config `relay`
       (default off) + `relay_port` (3478). Verified: boots "TURN server up", binds UDP :port.
-- [ ] **TURN client + loopback proxy shim** (stage 3) — a peer whose punch went `Unreachable` reports
-      `need_relay`, gets `Seed.relay`, allocates on the relay (`turn::client::Client`), and bridges its
-      WG traffic boringtun↔allocation via a `127.0.0.1:<shim>` socket. **Relayed-address exchange:** TURN
-      assigns each relayed address at allocation time, so each side must learn the *other's* — add
-      `RegisterReq.relay_allocated` (report our relayed addr per peer) + `RelayInfo.peer_relayed`
-      (coordinator hands back the peer's); converges over ~2 long-poll rounds. `classify_reach` gains
-      `Relayed`; wire `Seed.relay` → shim → WG endpoint.
+- [x] **TURN client + loopback proxy shim** ✅ (stage 3) — a peer whose punch went `Unreachable`
+      reports `need_relay`, gets `Seed.relay`, allocates on the relay (`turn::client::Client`), and
+      bridges its WG traffic boringtun↔allocation via a `127.0.0.1:<shim>` socket (`RelayManager` in
+      `engine/relay.rs`). **Relayed-address exchange** implemented: `RegisterReq.relay_allocated` +
+      `RelayInfo.peer_relayed`, converging over ~2 long-poll rounds (a relay need/alloc change now
+      breaks the long-poll hold, like an observed-endpoint change). `PeerReach::Relayed`; WG endpoint
+      precedence endpoint > relay-shim > punch. Also fixed a latent boringtun panic: the userspace
+      backend can't modify a peer in place, so `apply_seeds` now removes-then-adds on an
+      endpoint/allowed-ips change (this is what an endpoint switch punch→relay triggers).
 - [ ] **Consent / DoS surface** — opt-in already covered by `relay = false` default. TODO: per-peer
       rate/fairness caps so a relay's uplink isn't silently spent (the reflector/DoS surface, cf. the
       endpoint-spoof hardening done for reflexives).
-- **Verify:** extend `nat-test.sh` with a symmetric-both-ends netns (punch fails → relay carries
-      the tunnel, ping succeeds); assert the relay path carries WG ciphertext only (no plaintext).
+- **Verify:** ✅ `scripts/relay-test.sh` — 3 netns (A public+relay, B & C behind NATs whose externals
+      are firewall-isolated from each other so the punch structurally can't complete): B & C go
+      `Unreachable`, allocate on A's TURN server, exchange relayed addresses, and **ping B→C over the
+      relay succeeds** (gated — TURN's client↔server leg is one conntrack-friendly flow, so it
+      traverses netns NAT reliably, unlike the punch). `ctl status` shows `[relayed]`. Relay carries WG
+      ciphertext by construction (boringtun frames; the relay holds no keys). `mesh-test.sh` +
+      `nat-test.sh` still green. **Remaining:** the consent/DoS rate-caps item above (not GA-blocking).
 
 ### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
 **Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,
