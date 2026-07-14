@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unprivileged ciphertext-relay test (M5.4).
+# Unprivileged side-socket ICE test (M5.5).
 #
 # Topology (all inside one user+net+mount namespace, no host root):
 #
@@ -8,19 +8,22 @@
 #                 └── hub (public) ─┘
 #                     10.0.0.1  = coordinator + node A (reachable, RELAY)
 #
-# Same base topology as nat-test.sh, with two changes that force the relay path:
-#   1. Node A opts in as a relay (`relay = true`) — it runs an embedded TURN server on :3478.
-#   2. The two NAT externals (10.0.0.2 and 10.0.0.3) are firewall-isolated from *each other* (but
-#      both still reach A at 10.0.0.1). So B and C can never punch a direct tunnel — every dial of
-#      the other's reflexive is dropped — and the ONLY way a B↔C tunnel forms is through A's relay.
+# Same base topology as relay-test.sh, but ICE is left ON (the default) instead of forced off — so
+# this exercises the M5.5 side-socket ICE path, where the M5.4 relay is reached as ICE's *relay
+# candidate* rather than by the standalone RelayManager:
+#   1. Node A opts in as a relay (`relay = true`) — it runs the embedded TURN server on :3478, which
+#      also answers STUN Binding (so it doubles as B's and C's server-reflexive source).
+#   2. The two NAT externals (10.0.0.2 and 10.0.0.3) are firewall-isolated from *each other* (both
+#      still reach A at 10.0.0.1). So B and C can never punch, and their ICE host/srflx candidate
+#      pairs can't connect either — the ONLY pair that validates is relay↔relay through A.
 #
-# Flow: B & C mesh with A directly, punch each other, fail (isolated) → classify `Unreachable` →
-# request a relay → the coordinator matches A and mints TURN credentials → B & C each allocate on A
-# and exchange relayed addresses via the coordinator → WG ciphertext rides A's TURN relay → B pings
-# C. Unlike the hole punch (nat-test.sh), the relay data-plane hop IS GATED: TURN's client↔server
-# leg is a single conntrack-friendly flow to A:3478, so it traverses netns NAT reliably.
+# Flow: B & C mesh with A, punch each other, fail (isolated) → `Unreachable` → each runs a side-socket
+# ICE agent (webrtc-ice) for the other, gathering host + srflx (STUN A) + relay (TURN A) candidates,
+# exchanging them over the coordinator long-poll → connectivity checks pick the relay↔relay pair →
+# WG ciphertext rides A's TURN relay via ICE → B pings C. GATED like relay-test: the winning pair's
+# legs are single conntrack-friendly flows to A:3478, so they traverse netns NAT reliably.
 #
-# Usage:  cargo build && scripts/relay-test.sh
+# Usage:  cargo build && scripts/ice-test.sh
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
@@ -147,7 +150,6 @@ firewall = false
 relay = true
 relay_port = 3478
 refresh_secs = 2
-ice = false
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
@@ -160,7 +162,6 @@ listen_port = 51821
 upnp = false
 firewall = false
 refresh_secs = 2
-ice = false
 EOF
 cat >"$TMP/c.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
@@ -173,7 +174,6 @@ listen_port = 51822
 upnp = false
 firewall = false
 refresh_secs = 2
-ice = false
 EOF
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
@@ -198,37 +198,38 @@ C_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/c.log" | head -1 | awk '{
 [ -n "$B_IP" ] && [ -n "$C_IP" ] || { echo "FAIL: NAT'd nodes did not register"; tail -20 "$TMP/b.log" "$TMP/c.log"; exit 1; }
 echo "A=10.0.0.1 (relay)  B=$B_IP  C=$C_IP (behind isolated NATs)"
 
-# B and C punch, fail (isolated), go Unreachable, request a relay; the coordinator matches A and
-# both allocate on it. Gate on both nodes allocating a TURN relay (the punch simply never completes).
-echo "=== waiting for relay allocation (punch fails → Unreachable → relay via A) ==="
-RELAYED=0
+# B and C punch, fail (isolated), go Unreachable, then each starts a side-socket ICE agent for the
+# other and negotiates a working pair. Gate on both nodes' ICE agents connecting (the relay↔relay
+# pair is the only one that validates here).
+echo "=== waiting for ICE to connect (punch fails → Unreachable → ICE agent → relay pair) ==="
+CONNECTED=0
 for _ in $(seq 1 200); do
-  if grep -q "relay: allocated" "$TMP/b.log" 2>/dev/null && grep -q "relay: allocated" "$TMP/c.log" 2>/dev/null; then
-    RELAYED=1; break
+  if grep -q "ice: connected" "$TMP/b.log" 2>/dev/null && grep -q "ice: connected" "$TMP/c.log" 2>/dev/null; then
+    CONNECTED=1; break
   fi
   sleep 0.5
 done
-[ "$RELAYED" = 1 ] || { echo "FAIL: B and C never allocated a relay"; echo "-- b --"; tail -30 "$TMP/b.log"; echo "-- c --"; tail -30 "$TMP/c.log"; exit 1; }
-echo "  B allocated: $(grep -h 'relay: allocated' "$TMP/b.log" | tail -1 | grep -oE 'relayed=10\.0\.0\.1:[0-9]+')"
-echo "  C allocated: $(grep -h 'relay: allocated' "$TMP/c.log" | tail -1 | grep -oE 'relayed=10\.0\.0\.1:[0-9]+')"
-echo "relay allocation ✓  both stuck peers allocated on A's TURN server"
+[ "$CONNECTED" = 1 ] || { echo "FAIL: B and C never connected via ICE"; echo "-- b --"; tail -40 "$TMP/b.log"; echo "-- c --"; tail -40 "$TMP/c.log"; exit 1; }
+echo "  B: $(grep -h 'ice: connected' "$TMP/b.log" | tail -1)"
+echo "  C: $(grep -h 'ice: connected' "$TMP/c.log" | tail -1)"
+echo "ICE connect ✓  both stuck peers negotiated a pair via ICE"
 
-# Data-plane hop (GATED): carry a ping B -> C over the relay. This must succeed — all relay traffic
-# is client↔A on A:3478, a single conntrack-friendly flow that traverses the NATs.
-echo "=== data-plane: ping B -> C over the relay ($B_IP -> $C_IP) ==="
+# Data-plane hop (GATED): carry a ping B -> C over the ICE-negotiated (relay↔relay) path. This must
+# succeed — the winning pair's legs are conntrack-friendly flows to A:3478 that traverse the NATs.
+echo "=== data-plane: ping B -> C over the ICE path ($B_IP -> $C_IP) ==="
 OK=0
 for _ in $(seq 1 40); do
   if $IB ping -c2 -W2 -I "$B_IP" "$C_IP" >/dev/null 2>&1; then OK=1; break; fi
   sleep 1
 done
-[ "$OK" = 1 ] || { echo "FAIL: ping did not traverse the relay"; echo "-- b --"; tail -30 "$TMP/b.log"; echo "-- c --"; tail -30 "$TMP/c.log"; exit 1; }
+[ "$OK" = 1 ] || { echo "FAIL: ping did not traverse the ICE path"; echo "-- b --"; tail -30 "$TMP/b.log"; echo "-- c --"; tail -30 "$TMP/c.log"; exit 1; }
 $IB ping -c3 -W2 -I "$B_IP" "$C_IP"
-echo "data-plane ✓  ping traversed the ciphertext relay through A"
+echo "data-plane ✓  ping traversed the ICE-negotiated path through A"
 
-# The daemon marks a relayed peer `[relayed]` over the control socket.
+# The daemon marks an ICE-routed peer `[ice]` over the control socket.
 echo "=== diagnostics: B's view of C via ctl status ==="
 "$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -E "peers|$C_IP" || echo "  (ctl status unavailable)"
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -q "relayed" && echo "ctl status: C shown [relayed] ✓"
+"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -q "ice" && echo "ctl status: C shown [ice] ✓"
 
-echo "RESULT: PASS ✓  punch isolated → relay matched → TURN allocated → WG ciphertext relayed end-to-end"
+echo "RESULT: PASS ✓  punch isolated → ICE negotiated → relay pair selected → WG ciphertext rides ICE end-to-end"
 exit 0

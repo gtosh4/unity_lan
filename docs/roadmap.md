@@ -374,10 +374,21 @@ falls back to a responder on the coordinator host when none is online.
       restricted-cone/symmetric but **not** pure bootstrap (no observer → `classify_reach` reads
       `Direct`, never `Unreachable`); a bootstrap trigger needs a "non-dialable, unpunchable, unconnected
       after grace" gate.
-- [ ] **Stage 4 — status polish + verify** — `PeerReach::Ice` surfaced in `ctl status` / GUI; the
-      bootstrap trigger above; e2e verification below.
-- **Verify:** `nat-test.sh` restricted-cone case reaches a peer via ICE; bootstrap case (no observer
-      peer online) still obtains a reflexive via STUN.
+- [x] **Stage 4 — status polish + bootstrap trigger + verify** ✅ — `PeerReach::Ice` (`ctl status`
+      shows `[ice]`; the GUI carries it). Bootstrap trigger added: a peer with no endpoint *and* no
+      punch target (no observer reported a reflexive) that hasn't connected is tracked separately and,
+      after a 15s grace, run through ICE (userspace) — `classify_reach` reads such a peer as `Direct`,
+      so it never becomes `Unreachable` on its own. New `ice` config (default on) gates the userspace
+      ICE path; **off** falls back to the M5.2 punch + M5.4 relay (the escape hatch, and how the M5.4
+      relay path stays exercised on Linux — `relay-test.sh` now pins `ice = false`).
+- **Verify:** ✅ `scripts/ice-test.sh` — 3 netns (A public+relay, B & C behind NATs whose externals
+      are firewall-isolated from each other): B & C go `Unreachable`, each runs a side-socket ICE
+      agent, gathers host + srflx (STUN A) + relay (TURN A) candidates, exchanges them over the
+      long-poll, and the **relay↔relay pair validates → ping B→C succeeds over the ICE path** (gated);
+      `ctl status` shows `[ice]`. `relay-test.sh` (M5.4, `ice = false`), `nat-test.sh` (punch),
+      `mesh-test.sh` all still PASS — no regression. Restricted-cone *direct*-pair selection and the
+      pure-bootstrap (no relay peer) case can't be faithfully emulated in netns (same NAT limitation
+      as the M5.2 punch data-plane) — real networks select the direct srflx pair when one validates.
 - **Note:** leaves a residual gap (efficient direct paths through restricted-cone NAT; UDP-blocked
       networks) that only **in-socket magicsock** closes — deferred to Post-GA (prior-art §6.4/§6.5).
 

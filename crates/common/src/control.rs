@@ -202,6 +202,9 @@ pub enum PeerReach {
     /// Reached through a ciphertext relay (§7.2, M5.4): a direct path and a hole punch both failed,
     /// so WG traffic rides a co-member's TURN relay (relay holds no keys — e2e intact).
     Relayed,
+    /// Reached via a side-socket ICE agent (§7.2, M5.5, userspace): the ad-hoc punch was replaced by
+    /// a real ICE negotiation, whose selected path may be a direct srflx pair or the relay candidate.
+    Ice,
 }
 
 /// Classify a peer's reachability from whether it needed a hole punch, whether a WG handshake has

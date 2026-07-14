@@ -244,7 +244,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // boringtun and route its WG traffic through the negotiated path via a loopback shim (like the
         // relay). `ice_eps` maps such a peer to its shim; on the kernel path it stays empty (that path
         // keeps the M5.4 relay above). `coord_stun` is the coordinator's STUN bootstrap fallback.
-        let ice_enabled = backend.is_userspace();
+        let ice_enabled = backend.is_userspace() && cfg.ice;
         let mut ice = crate::ice::IceManager::new();
         let mut coord_stun = resp.stun_addr;
         let mut ice_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
@@ -278,6 +278,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let mut last_ice_offers: Vec<common::api::IceEndpoint> = Vec::new();
         // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
         let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
+        // When a peer first became *unpunchable* (no endpoint, no reflexive → no punch target) and
+        // still unconnected — the bootstrap case (no observer online to report a reflexive). After a
+        // grace we run ICE for it (userspace), whose STUN gets a reflexive with no observer needed.
+        let mut bootstrap_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
         loop {
             // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
             // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
@@ -330,6 +334,22 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 let age = punch_since
                     .get(pk)
                     .map_or(0, |t| now.duration_since(*t).as_secs());
+                // Bootstrap case: a peer with no dialable endpoint *and* no punch target (no observer
+                // reported a reflexive) that hasn't connected. `classify_reach` reads this as `Direct`
+                // (a normal peer still bootstrapping), so it never becomes `Unreachable`; track it
+                // separately and, after a grace, run ICE — whose STUN yields a reflexive with no
+                // observer needed. Cleared the moment a punch target or handshake appears.
+                let unpunchable = last_seeds
+                    .iter()
+                    .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_none());
+                if unpunchable && !connected {
+                    bootstrap_since.entry(*pk).or_insert(now);
+                } else {
+                    bootstrap_since.remove(pk);
+                }
+                let bootstrap_stuck = bootstrap_since
+                    .get(pk)
+                    .is_some_and(|t| now.duration_since(*t).as_secs() >= 15);
                 let relaying = relays.is_relaying(pk);
                 // On the userspace path a peer routed through ICE reads as connected; keep it in the
                 // want set so its Seed.relay (ICE's TURN candidate) + Seed.ice keep flowing, else the
@@ -337,10 +357,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 let icing = ice.is_connected(pk);
                 let r = if relaying {
                     common::control::PeerReach::Relayed
+                } else if icing {
+                    common::control::PeerReach::Ice
                 } else {
                     common::control::classify_reach(punched, connected, age)
                 };
-                if relaying || icing || r == common::control::PeerReach::Unreachable {
+                if relaying
+                    || icing
+                    || r == common::control::PeerReach::Unreachable
+                    || (ice_enabled && bootstrap_stuck)
+                {
                     want_relay.push(*pk);
                 }
                 if let Some((ip, _)) = cfg.allowed_ips.first() {

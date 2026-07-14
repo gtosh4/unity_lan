@@ -79,6 +79,11 @@ pub struct Config {
     /// uplink a relayed mesh can spend (§7.2 DoS surface). A new client over the cap is refused.
     #[serde(default = "default_relay_max_allocations")]
     pub relay_max_allocations: usize,
+    /// Side-socket ICE for stuck peers (M5.5), on the userspace backend only. Default on. When off,
+    /// the userspace path falls back to the M5.2 punch + M5.4 relay (the pre-ICE behavior) — an
+    /// escape hatch and how the M5.4 relay path is exercised on Linux. No effect on kernel backends.
+    #[serde(default = "default_true")]
+    pub ice: bool,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.

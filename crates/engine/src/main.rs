@@ -353,6 +353,7 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                     common::control::PeerReach::Punching => "  [hole-punching…]",
                     common::control::PeerReach::Unreachable => "  [unreachable: symmetric NAT?]",
                     common::control::PeerReach::Relayed => "  [relayed]",
+                    common::control::PeerReach::Ice => "  [ice]",
                 };
                 println!("  {:<16} {:<40} {}{}", p.wg_ip, p.hostname, ep, nat);
             }
