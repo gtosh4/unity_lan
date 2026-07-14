@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use common::crypto::{gen_wg_keypair, wg_public_from_private, WgPrivateKey, WgPublicKey};
 use common::rotation::walk_chain;
 use common::wire::Signed;
@@ -69,6 +69,20 @@ pub fn load_token(state_dir: &Path) -> Option<String> {
 /// Persist the device token (0600) when the coordinator issues one.
 pub fn save_token(state_dir: &Path, token: &str) -> anyhow::Result<()> {
     write_secret(&state_dir.join("token"), token.as_bytes())
+}
+
+/// Discard local enrollment on logout: delete the device token and the WG private key, so the next
+/// enrollment generates a *fresh* key (the old one is never reused). The pinned coordinator anchor
+/// is kept — logging out doesn't change who we trust. Missing files are not an error.
+pub fn clear_enrollment(state_dir: &Path) -> anyhow::Result<()> {
+    for name in ["token", "wg.key"] {
+        match std::fs::remove_file(state_dir.join(name)) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).context(format!("removing {name}")),
+        }
+    }
+    Ok(())
 }
 
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {

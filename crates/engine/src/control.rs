@@ -12,7 +12,7 @@ use anyhow::Context;
 use common::api::{ManageOp, ManageResp, NetworkStatus};
 use common::control::{
     ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp,
-    NetworkResp, PeerStatus, StatusReport,
+    LogoutResp, NetworkResp, PeerStatus, StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -22,7 +22,7 @@ use interprocess::local_socket::GenericFilePath;
 use interprocess::local_socket::GenericNamespaced;
 use interprocess::local_socket::{ListenerOptions, Name};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 use crate::coord::{self, SeedPeer, SelfDevice};
 use crate::fw::Firewall;
@@ -53,10 +53,13 @@ pub struct Ctx {
     pub fw: Option<Arc<Firewall>>,
     /// Local per-network peering opt-out — handles the network toggle locally.
     pub localnet: Arc<LocalNet>,
-    /// This device's WG public key — used to start interactive login (OAuth).
-    pub pubkey: [u8; 32],
+    /// This device's WG public key — used to start interactive login (OAuth). Shared because a
+    /// logout re-keys the device: the daemon updates this in place so a later login binds the new key.
+    pub pubkey: Arc<RwLock<[u8; 32]>>,
     /// Loopback redirect URI for the interactive-login (PKCE) flow.
     pub oauth_redirect: String,
+    /// Signalled on `Logout` to wake the daemon's mesh loop into its teardown + re-key path.
+    pub logout: Arc<Notify>,
 }
 
 /// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
@@ -78,6 +81,15 @@ pub async fn set_disable_new(shared: &Shared, disable: bool) {
 /// a refresh fails, so this flags the health of the last coordinator contact.
 pub async fn set_coord_online(shared: &Shared, online: bool) {
     shared.write().await.coordinator_online = online;
+}
+
+/// Reset the status to the logged-out state: no device/peers/identity, `needs_login` set so the GUI
+/// shows the login screen. Called after a logout tears the mesh down and before we re-register.
+pub async fn set_logged_out(shared: &Shared) {
+    *shared.write().await = StatusReport {
+        needs_login: true,
+        ..Default::default()
+    };
 }
 
 /// Shared, live status the daemon updates and the control socket reads.
@@ -296,7 +308,8 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         // listener, hand the URL to the frontend to open, and finish the exchange in the background.
         // The daemon's register loop brings up the mesh once complete() binds the device.
         ControlRequest::Login => {
-            match oauth::begin(&ctx.coordinator, &ctx.oauth_redirect, ctx.pubkey).await {
+            let pubkey = *ctx.pubkey.read().await;
+            match oauth::begin(&ctx.coordinator, &ctx.oauth_redirect, pubkey).await {
                 Ok(login) => {
                     let authorize_url = login.authorize_url.clone();
                     tokio::spawn(async move {
@@ -333,6 +346,15 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             }),
             Err(e) => ControlResponse::Error(format!("{e:#}")),
         },
+        // Log out: wake the daemon's mesh loop, which un-enrolls at the coordinator, tears the mesh
+        // down (drops every peer + brings the interface down), discards the local key/token, and
+        // returns to the not-logged-in state with a fresh key. Fire-and-signal, like `Login`.
+        ControlRequest::Logout => {
+            ctx.logout.notify_one();
+            ControlResponse::Logout(LogoutResp {
+                message: "logging out — tearing down the mesh and un-enrolling".into(),
+            })
+        }
         // Set the local default for networks discovered from now on (persisted, source of truth).
         // Doesn't touch already-known networks, so no re-mesh; mirror it into the live status so the
         // GUI reflects it at once, then return the updated snapshot.

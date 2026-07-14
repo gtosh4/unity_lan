@@ -84,6 +84,9 @@ enum Message {
     /// Start interactive login; the daemon returns the Discord authorize URL to open.
     Login,
     LoginStarted(Result<LoginResp, String>),
+    /// Log out: tear down the mesh, un-enroll, and re-key. The daemon returns to not-logged-in.
+    Logout,
+    LoggedOut(Result<String, String>),
     /// Open a URL in the default browser (re-open the authorize link on demand).
     OpenUrl(String),
     /// Copy a URL to the clipboard.
@@ -208,6 +211,14 @@ impl App {
                 self.error = None;
             }
             Message::LoginStarted(Err(e)) => self.error = Some(e),
+            Message::Logout => {
+                self.login_url = None; // drop any stale authorize link
+                return Task::perform(ctl::logout(self.socket.clone()), Message::LoggedOut);
+            }
+            Message::LoggedOut(res) => {
+                self.error = res.err();
+                return self.reload(); // pull the settled (logged-out) state once teardown lands
+            }
             Message::OpenUrl(url) => {
                 if !cfg!(test) {
                     let _ = open::that(&url);
@@ -392,12 +403,18 @@ impl App {
             b,
         ]
         .spacing(8);
-        // Who we're enrolled as, and whether the coordinator is currently reachable (the mesh keeps
-        // running from cache when it isn't, so this is a distinct health line).
-        let identity = status
-            .identity
-            .as_deref()
-            .map(|u| text(format!("signed in as {u}")).size(14));
+        // Who we're enrolled as, with a log out control (tears the mesh down, un-enrolls, and
+        // re-keys → back to the login screen), and whether the coordinator is currently reachable
+        // (the mesh keeps running from cache when it isn't, so that's a distinct health line).
+        let identity = status.identity.as_deref().map(|u| {
+            row![
+                text(format!("signed in as {u}"))
+                    .size(14)
+                    .width(Length::Fill),
+                button(text("log out").size(13)).on_press(Message::Logout),
+            ]
+            .spacing(8)
+        });
         let coord = if status.coordinator_online {
             "coordinator: online"
         } else {
@@ -789,6 +806,20 @@ mod tests {
             a.login_url.as_deref(),
             Some("https://discord.com/oauth2/authorize?x")
         );
+        assert!(a.error.is_none());
+    }
+
+    #[test]
+    fn logout_drops_stale_login_url() {
+        let mut a = app();
+        a.login_url = Some("https://discord.com/oauth2/authorize?x".into());
+        // Requesting logout clears any lingering authorize link (the daemon re-keys, so it's dead).
+        let _ = a.update(Message::Logout);
+        assert!(a.login_url.is_none());
+        // A failed logout surfaces the error; a success clears it.
+        let _ = a.update(Message::LoggedOut(Err("no daemon".into())));
+        assert_eq!(a.error.as_deref(), Some("no daemon"));
+        let _ = a.update(Message::LoggedOut(Ok("logging out".into())));
         assert!(a.error.is_none());
     }
 

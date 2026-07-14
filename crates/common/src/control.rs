@@ -46,6 +46,10 @@ pub enum ControlRequest {
     SetNewNetworkDefault {
         disable: bool,
     },
+    /// Log out: tear down the mesh (drop every peer, bring the interface down), un-enroll this
+    /// device at the coordinator, and discard the local key + token so the next enrollment uses a
+    /// fresh key. The daemon stays resident and returns to the not-logged-in state (`needs_login`).
+    Logout,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -56,6 +60,7 @@ pub enum ControlResponse {
     Network(NetworkResp),
     Login(LoginResp),
     Connected(ConnectedResp),
+    Logout(LogoutResp),
     Error(String),
 }
 
@@ -70,6 +75,11 @@ pub struct ConnectedResp {
 pub struct LoginResp {
     /// The Discord authorize URL the user opens to complete login.
     pub authorize_url: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LogoutResp {
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

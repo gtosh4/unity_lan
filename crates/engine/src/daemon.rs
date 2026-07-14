@@ -21,14 +21,18 @@ use crate::shutdown::Shutdown;
 use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
 
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
-    let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
-
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
     let localnet = Arc::new(LocalNet::load(&cfg.state_dir, cfg.disable_new_networks));
 
     let token = std::sync::Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
+    // This device's WG public key, shared with the control socket so interactive login binds the
+    // *current* key. A logout re-keys the device; the enrollment loop below refreshes this each
+    // iteration.
+    let pubkey = std::sync::Arc::new(tokio::sync::RwLock::new([0u8; 32]));
+    // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
+    let logout = std::sync::Arc::new(tokio::sync::Notify::new());
 
     // Optional `.internal` resolver: serves our device + peers by name (empty until we mesh).
     let zone = dns::empty_zone();
@@ -84,8 +88,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             token: token.clone(),
             fw: fw.clone(),
             localnet: localnet.clone(),
-            pubkey: wg_pub,
+            pubkey: pubkey.clone(),
             oauth_redirect: cfg.oauth_redirect.clone(),
+            logout: logout.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&name, control_group, ctx).await {
@@ -111,223 +116,271 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         None => None,
     };
 
-    // Register, waiting (serving control) until we're logged in and hold a network to mesh.
-    let Some((resp, device)) =
-        register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw, &shutdown).await?
-    else {
-        return Ok(()); // interrupted before login
-    };
-    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
-    if let Some(tok) = &resp.device_token {
-        keys::save_token(&cfg.state_dir, tok)?;
-        *token.write().await = Some(tok.clone());
-    }
-    tracing::info!(
-        "{} -> {}{}  (networks: {})",
-        device.wg_ip,
-        device.hostname,
-        if device.is_primary { " [primary]" } else { "" },
-        device.networks.join(", ")
-    );
+    // Enrollment lifecycle. Runs once normally; a `Logout` tears the mesh down and loops back here
+    // to re-key and wait for the next login. Setup above (dns, firewall, control socket, endpoint)
+    // is done once and outlives every enrollment.
+    'lifecycle: loop {
+        // Fresh key per enrollment: a logout deletes `wg.key`, so this regenerates one (steady state
+        // just reloads the existing key). Publish it so an interactive login binds the current key.
+        let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
+        *pubkey.write().await = wg_pub;
 
-    // Bring up the single interface with our device /32.
-    let mut backend = wg::new_backend(&cfg.iface)?;
-    backend.up(&IfaceConfig {
-        private_key: wg_priv,
-        addresses: vec![(device.wg_ip, 32)],
-        listen_port: cfg.listen_port,
-    })?;
-    tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
+        // Register, waiting (serving control) until we're logged in and hold a network to mesh.
+        let Some((resp, device)) =
+            register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw, &shutdown)
+                .await?
+        else {
+            return Ok(()); // interrupted before login
+        };
+        keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
+        if let Some(tok) = &resp.device_token {
+            keys::save_token(&cfg.state_dir, tok)?;
+            *token.write().await = Some(tok.clone());
+        }
+        tracing::info!(
+            "{} -> {}{}  (networks: {})",
+            device.wg_ip,
+            device.hostname,
+            if device.is_primary { " [primary]" } else { "" },
+            device.networks.join(", ")
+        );
 
-    // Point the OS resolver at our `.internal` server on this link (best-effort). Reverted on
-    // clean shutdown; also clears with the link if we exit uncleanly.
-    let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
-        (true, Some(bind)) => match crate::resolver::platform_hook() {
-            Some(hook) => {
-                if let Err(e) = hook.install(&cfg.iface, bind) {
-                    tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
+        // Bring up the single interface with our device /32.
+        let mut backend = wg::new_backend(&cfg.iface)?;
+        backend.up(&IfaceConfig {
+            private_key: wg_priv,
+            addresses: vec![(device.wg_ip, 32)],
+            listen_port: cfg.listen_port,
+        })?;
+        tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
+
+        // Point the OS resolver at our `.internal` server on this link (best-effort). Reverted on
+        // clean shutdown; also clears with the link if we exit uncleanly.
+        let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
+            (true, Some(bind)) => match crate::resolver::platform_hook() {
+                Some(hook) => {
+                    if let Err(e) = hook.install(&cfg.iface, bind) {
+                        tracing::warn!(
+                            "resolver hook (set `resolver_hook = false` to disable): {e:#}"
+                        );
+                    }
+                    Some(hook)
                 }
-                Some(hook)
-            }
-            None => None, // no OS resolver backend on this platform yet (e.g. macOS /etc/resolver)
-        },
-        _ => None,
-    };
+                None => None, // no OS resolver backend on this platform yet (e.g. macOS /etc/resolver)
+            },
+            _ => None,
+        };
 
-    // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
-    // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
-    let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
-    let mut last_seeds = coord::verified_seeds(&resp)?;
-    let mut last_device = Some(device);
-    // Whether the last coordinator refresh succeeded. We just registered, so start `true`; a failed
-    // refresh flips it (the mesh keeps running from cache), a successful one flips it back.
-    let mut coord_online = true;
-    apply_state(
-        backend.as_ref(),
-        &fw,
-        &zone,
-        &status,
-        &localnet,
-        &last_device,
-        &last_seeds,
-        &mut peers,
-        coord_online,
-    )
-    .await?;
+        // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
+        // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
+        let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
+        let mut last_seeds = coord::verified_seeds(&resp)?;
+        let mut last_device = Some(device);
+        // Whether the last coordinator refresh succeeded. We just registered, so start `true`; a failed
+        // refresh flips it (the mesh keeps running from cache), a successful one flips it back.
+        let mut coord_online = true;
+        apply_state(
+            backend.as_ref(),
+            &fw,
+            &zone,
+            &status,
+            &localnet,
+            &last_device,
+            &last_seeds,
+            &mut peers,
+            coord_online,
+        )
+        .await?;
 
-    // Long-poll loop: each /refresh blocks at the coordinator until membership changes or the
-    // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
-    // a co-member joining wakes this call at once. `since` echoes the last version we applied.
-    let mut since = Some(resp.version);
-    // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
-    let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
-    // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
-    let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
-    loop {
-        // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
-        // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
-        // hole-punch. The reflexive appears only after a peer handshakes — later than a long-poll
-        // hold would return — so we re-read every couple seconds and report on change (a cheap
-        // local uapi read; no network traffic unless the set actually changed). A failed read
-        // (boringtun's uapi is racy under load) is treated as "unchanged" so it never flaps.
-        let stats = backend.peer_stats().ok();
-        let observed = match &stats {
-            Some(map) => {
-                let mut v: Vec<common::api::ObservedEndpoint> = map
-                    .iter()
-                    .filter_map(|(pk, s)| {
-                        s.endpoint.map(|endpoint| common::api::ObservedEndpoint {
-                            pubkey: *pk,
-                            endpoint,
+        // Long-poll loop: each /refresh blocks at the coordinator until membership changes or the
+        // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
+        // a co-member joining wakes this call at once. `since` echoes the last version we applied.
+        let mut since = Some(resp.version);
+        // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
+        let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
+        // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
+        let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
+        loop {
+            // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
+            // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
+            // hole-punch. The reflexive appears only after a peer handshakes — later than a long-poll
+            // hold would return — so we re-read every couple seconds and report on change (a cheap
+            // local uapi read; no network traffic unless the set actually changed). A failed read
+            // (boringtun's uapi is racy under load) is treated as "unchanged" so it never flaps.
+            let stats = backend.peer_stats().ok();
+            let observed = match &stats {
+                Some(map) => {
+                    let mut v: Vec<common::api::ObservedEndpoint> = map
+                        .iter()
+                        .filter_map(|(pk, s)| {
+                            s.endpoint.map(|endpoint| common::api::ObservedEndpoint {
+                                pubkey: *pk,
+                                endpoint,
+                            })
                         })
-                    })
-                    .collect();
-                v.sort_by_key(|o| o.pubkey);
-                v
-            }
-            None => last_reported.clone(),
-        };
-
-        // Reachability diagnostics (§7.2): classify each peer and overlay it onto the status so a
-        // stuck hole punch surfaces. A peer is "punched" if its only endpoint is a punch target
-        // (no dialable endpoint); "connected" if WG has a recent handshake for it.
-        let now = std::time::Instant::now();
-        let mut reach: HashMap<std::net::Ipv4Addr, common::control::PeerReach> = HashMap::new();
-        for (pk, cfg) in &peers {
-            let punched = last_seeds
-                .iter()
-                .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
-            if punched {
-                punch_since.entry(*pk).or_insert(now);
-            } else {
-                punch_since.remove(pk);
-            }
-            let connected = stats
-                .as_ref()
-                .and_then(|m| m.get(pk))
-                .and_then(|s| s.last_handshake)
-                .is_some_and(|t| t.elapsed().map_or(true, |d| d < Duration::from_secs(180)));
-            let age = punch_since
-                .get(pk)
-                .map_or(0, |t| now.duration_since(*t).as_secs());
-            let r = common::control::classify_reach(punched, connected, age);
-            if let Some((ip, _)) = cfg.allowed_ips.first() {
-                reach.insert(*ip, r);
-            }
-        }
-        control::set_reach(&status, &reach).await;
-
-        let changed = observed != last_reported;
-        if changed {
-            tracing::info!(
-                eps = ?observed.iter().map(|o| o.endpoint).collect::<Vec<_>>(),
-                "reflexive: reporting observed endpoints to coordinator"
-            );
-        }
-        // Report immediately (no hold) when our view changed; else hold for membership.
-        let poll_since = if changed { None } else { since };
-        let refreshed = tokio::select! {
-            // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
-            _ = shutdown.wait() => {
-                if let Some(fw) = &fw {
-                    if let Err(e) = fw.reset() {
-                        tracing::warn!("firewall reset on shutdown: {e:#}");
-                    }
+                        .collect();
+                    v.sort_by_key(|o| o.pubkey);
+                    v
                 }
-                if let Some(r) = &resolver {
-                    if let Err(e) = r.revert(&cfg.iface) {
-                        tracing::warn!("resolver revert on shutdown: {e:#}");
-                    }
+                None => last_reported.clone(),
+            };
+
+            // Reachability diagnostics (§7.2): classify each peer and overlay it onto the status so a
+            // stuck hole punch surfaces. A peer is "punched" if its only endpoint is a punch target
+            // (no dialable endpoint); "connected" if WG has a recent handshake for it.
+            let now = std::time::Instant::now();
+            let mut reach: HashMap<std::net::Ipv4Addr, common::control::PeerReach> = HashMap::new();
+            for (pk, cfg) in &peers {
+                let punched = last_seeds
+                    .iter()
+                    .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
+                if punched {
+                    punch_since.entry(*pk).or_insert(now);
+                } else {
+                    punch_since.remove(pk);
                 }
-                tracing::info!("shutting down");
-                return Ok(());
+                let connected = stats
+                    .as_ref()
+                    .and_then(|m| m.get(pk))
+                    .and_then(|s| s.last_handshake)
+                    .is_some_and(|t| t.elapsed().map_or(true, |d| d < Duration::from_secs(180)));
+                let age = punch_since
+                    .get(pk)
+                    .map_or(0, |t| now.duration_since(*t).as_secs());
+                let r = common::control::classify_reach(punched, connected, age);
+                if let Some((ip, _)) = cfg.allowed_ips.first() {
+                    reach.insert(*ip, r);
+                }
             }
-            // Local network toggle (also mesh connect/disconnect): re-mesh from the last snapshot at
-            // once (works offline), then loop round to re-refresh so the coordinator picks up the
-            // new opt-out / paused state.
-            _ = localnet.wake.notified() => {
-                apply_state(
-                    backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online,
-                ).await?;
-                continue;
+            control::set_reach(&status, &reach).await;
+
+            let changed = observed != last_reported;
+            if changed {
+                tracing::info!(
+                    eps = ?observed.iter().map(|o| o.endpoint).collect::<Vec<_>>(),
+                    "reflexive: reporting observed endpoints to coordinator"
+                );
             }
-            // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
-            // reported on the next loop). Only while unchanged — a change goes straight to a report.
-            _ = tokio::time::sleep(Duration::from_secs(2)), if !changed => {
-                continue;
-            }
-            r = coord::refresh(
-                &cfg.coordinator,
-                wg_pub,
-                cfg.device_name(),
-                endpoint,
-                cfg.enrollment_key.clone(),
-                poll_since,
-                localnet.as_refs(),
-                observed.clone(),
-                localnet.is_paused(),
-            ) => r,
-        };
-        match refreshed {
-            Ok((resp, dev)) => {
-                coord_online = true;
-                since = Some(resp.version);
-                last_reported = observed; // the coordinator now has this reflexive set
-                match coord::verified_seeds(&resp) {
-                    Ok(seeds) => {
-                        last_seeds = seeds;
-                        // A grant of `None` means we hold no networks (role revoked): keep the last
-                        // device for name context, but the empty seed set prunes every peer.
-                        if dev.is_some() {
-                            last_device = dev;
-                        } else {
-                            tracing::warn!("no grant — access revoked; dropping all peers");
+            // Report immediately (no hold) when our view changed; else hold for membership.
+            let poll_since = if changed { None } else { since };
+            let refreshed = tokio::select! {
+                // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
+                _ = shutdown.wait() => {
+                    if let Some(fw) = &fw {
+                        if let Err(e) = fw.reset() {
+                            tracing::warn!("firewall reset on shutdown: {e:#}");
                         }
-                        apply_state(
-                            backend.as_ref(),
-                            &fw,
-                            &zone,
-                            &status,
-                            &localnet,
-                            &last_device,
-                            &last_seeds,
-                            &mut peers,
-                            coord_online,
-                        )
-                        .await?;
                     }
-                    Err(e) => tracing::warn!("bad seeds: {e:#}"),
+                    if let Some(r) = &resolver {
+                        if let Err(e) = r.revert(&cfg.iface) {
+                            tracing::warn!("resolver revert on shutdown: {e:#}");
+                        }
+                    }
+                    tracing::info!("shutting down");
+                    return Ok(());
+                }
+                // Logout: break out to the teardown path below, which un-enrolls, drops the mesh, and
+                // loops back to `'lifecycle` to re-key and await the next login.
+                _ = logout.notified() => break,
+                // Local network toggle (also mesh connect/disconnect): re-mesh from the last snapshot at
+                // once (works offline), then loop round to re-refresh so the coordinator picks up the
+                // new opt-out / paused state.
+                _ = localnet.wake.notified() => {
+                    apply_state(
+                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online,
+                    ).await?;
+                    continue;
+                }
+                // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
+                // reported on the next loop). Only while unchanged — a change goes straight to a report.
+                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed => {
+                    continue;
+                }
+                r = coord::refresh(
+                    &cfg.coordinator,
+                    wg_pub,
+                    cfg.device_name(),
+                    endpoint,
+                    cfg.enrollment_key.clone(),
+                    poll_since,
+                    localnet.as_refs(),
+                    observed.clone(),
+                    localnet.is_paused(),
+                ) => r,
+            };
+            match refreshed {
+                Ok((resp, dev)) => {
+                    coord_online = true;
+                    since = Some(resp.version);
+                    last_reported = observed; // the coordinator now has this reflexive set
+                    match coord::verified_seeds(&resp) {
+                        Ok(seeds) => {
+                            last_seeds = seeds;
+                            // A grant of `None` means we hold no networks (role revoked): keep the last
+                            // device for name context, but the empty seed set prunes every peer.
+                            if dev.is_some() {
+                                last_device = dev;
+                            } else {
+                                tracing::warn!("no grant — access revoked; dropping all peers");
+                            }
+                            apply_state(
+                                backend.as_ref(),
+                                &fw,
+                                &zone,
+                                &status,
+                                &localnet,
+                                &last_device,
+                                &last_seeds,
+                                &mut peers,
+                                coord_online,
+                            )
+                            .await?;
+                        }
+                        Err(e) => tracing::warn!("bad seeds: {e:#}"),
+                    }
+                }
+                // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive but
+                // flag it so the GUI shows the coordinator as offline.
+                Err(e) => {
+                    tracing::warn!("refresh failed: {e:#}");
+                    coord_online = false;
+                    control::set_coord_online(&status, false).await;
+                    tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
                 }
             }
-            // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive but
-            // flag it so the GUI shows the coordinator as offline.
-            Err(e) => {
-                tracing::warn!("refresh failed: {e:#}");
-                coord_online = false;
-                control::set_coord_online(&status, false).await;
-                tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
+        }
+
+        // Reached only when the mesh loop broke on a logout signal.
+        tracing::info!("logout: un-enrolling and tearing down the mesh");
+        // Un-enroll this device at the coordinator (best-effort — the re-key below already prevents any
+        // reuse of the old identity, so a failure here just leaves an orphaned device row to expire).
+        if let Some(tok) = token.read().await.clone() {
+            let op = common::api::ManageOp::Remove {
+                device_name: cfg.device_name(),
+            };
+            if let Err(e) = coord::manage(&cfg.coordinator, tok, op).await {
+                tracing::warn!("logout: coordinator un-enroll failed (continuing): {e:#}");
             }
         }
+        // Drop every peer and destroy the interface; a fresh one comes up on the next login.
+        if let Err(e) = backend.down() {
+            tracing::warn!("logout: interface down: {e:#}");
+        }
+        if let Some(fw) = &fw {
+            if let Err(e) = fw.update_peers(crate::fw::PeersByNet::new()) {
+                tracing::warn!("logout: clearing firewall peers: {e:#}");
+            }
+        }
+        if let Some(r) = &resolver {
+            if let Err(e) = r.revert(&cfg.iface) {
+                tracing::warn!("logout: resolver revert: {e:#}");
+            }
+        }
+        // Discard the local key + token so the next register re-keys and reports not-logged-in.
+        keys::clear_enrollment(&cfg.state_dir)?;
+        *token.write().await = None;
+        control::set_logged_out(&status).await;
+        continue 'lifecycle;
     }
 }
 

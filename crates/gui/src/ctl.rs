@@ -112,6 +112,14 @@ pub async fn login(path: PathBuf) -> Result<LoginResp, String> {
     }
 }
 
+pub async fn logout(path: PathBuf) -> Result<String, String> {
+    match request(path, ControlRequest::Logout).await? {
+        ControlResponse::Logout(r) => Ok(r.message),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
 pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedResp, String> {
     match request(path, ControlRequest::SetConnected { connected }).await? {
         ControlResponse::Connected(r) => Ok(r),
