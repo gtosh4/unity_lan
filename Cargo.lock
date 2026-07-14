@@ -5765,10 +5765,12 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "hmac",
  "ipnet",
  "postcard",
  "rand_core 0.6.4",
  "serde",
+ "sha1",
  "siphasher",
  "thiserror 2.0.18",
  "x25519-dalek",

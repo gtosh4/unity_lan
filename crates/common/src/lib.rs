@@ -7,6 +7,7 @@ pub mod attestation;
 pub mod control;
 pub mod crypto;
 pub mod netid;
+pub mod relay;
 pub mod rotation;
 pub mod wire;
 
@@ -28,6 +29,11 @@ pub const PRESENCE_TTL_SECS: u64 = LONGPOLL_HOLD_SECS * 2 + 60;
 /// Private DNS suffix (design.md §6.3): project namespace under ICANN-reserved `.internal`,
 /// not `.local`.
 pub const DNS_SUFFIX: &str = "unity.internal";
+
+/// Lifetime of a minted TURN relay credential (design.md §7.2, M5.4). Comfortably exceeds the
+/// long-poll hold (~TTL/2) so a client re-issued creds each coordinator refresh never sees one
+/// expire mid-session; the relay's TURN server rejects an allocation past this.
+pub const RELAY_CRED_TTL_SECS: u64 = 3600;
 
 /// Current unix time in seconds.
 pub fn now_unix() -> u64 {

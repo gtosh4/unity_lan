@@ -51,6 +51,46 @@ pub struct RegisterReq {
     /// (its IP) and seeds, so the client can re-mesh the instant it reconnects.
     #[serde(default)]
     pub paused: bool,
+    /// This device offers itself as a **ciphertext relay** (§7.2, M5.4): it runs an embedded TURN
+    /// server so co-members whose hole punch fails (symmetric NAT / CGNAT / UDP-blocked) can reach
+    /// each other through it. Set only when the device is directly dialable *and* the owner opted
+    /// in (`relay = true`). `relay_addr` + `relay_secret` accompany it.
+    #[serde(default)]
+    pub relay_capable: bool,
+    /// The dialable `ip:port` of this device's embedded TURN server (distinct from the WG
+    /// `endpoint` — boringtun owns the WG port, so TURN listens separately). Present iff
+    /// `relay_capable`.
+    #[serde(default)]
+    pub relay_addr: Option<SocketAddr>,
+    /// The HMAC secret this relay's TURN server validates credentials against, shared with the
+    /// coordinator so it can mint short-lived TURN credentials for authorized clients (the coturn
+    /// `use-auth-secret` / TURN REST pattern). Present iff `relay_capable`. The coordinator is the
+    /// trust anchor, so sharing it here (over TLS in prod) is within the existing trust boundary.
+    #[serde(default)]
+    pub relay_secret: Option<String>,
+    /// Pubkeys of current peers this device **cannot reach directly** — its hole punch to each
+    /// went `Unreachable` (§7.2). The coordinator matches a relay for each such pair and returns it
+    /// in the peer's [`Seed::relay`]. Empty in the common (directly-reachable) case.
+    #[serde(default)]
+    pub need_relay: Vec<[u8; 32]>,
+}
+
+/// Everything a stuck peer needs to reach a co-member through a relay's TURN server (§7.2, M5.4).
+/// Minted by the coordinator (off the data path) for one (caller, peer) pair; the credential is a
+/// short-lived HMAC over `username` keyed by the relay's `relay_secret`, so the relay's TURN server
+/// authorizes the allocation without the coordinator ever carrying traffic.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayInfo {
+    /// The relay's TURN server `ip:port` (its `relay_addr`).
+    pub turn_addr: SocketAddr,
+    /// TURN long-term-credential username, `"<unix_expiry>:<hint>"` (the REST-API form). The
+    /// expiry bounds credential lifetime; the relay's server rejects it past that.
+    pub username: String,
+    /// TURN credential: base64(HMAC-SHA1(relay_secret, username)). Used as the long-term-credential
+    /// password when allocating on the relay.
+    pub credential: String,
+    /// TURN realm the relay's server presents (the relay's identity).
+    pub realm: String,
 }
 
 /// "I saw device `pubkey` sending from `endpoint`." A peer's reflexive address as observed across
@@ -191,4 +231,10 @@ pub struct Seed {
     /// `expose --net <role>` to just this network's peers.
     #[serde(default)]
     pub networks: Vec<String>,
+    /// Relay reservation for reaching this peer when a direct path and a hole punch both fail
+    /// (§7.2, M5.4). Set by the coordinator when either side reported the other in `need_relay`;
+    /// the client allocates on the named TURN server and routes this peer's WG traffic through it.
+    /// `None` in the common case (direct or punchable).
+    #[serde(default)]
+    pub relay: Option<RelayInfo>,
 }

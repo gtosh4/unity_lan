@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         version,
         oauth,
         reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         rotation_chain,
     };
 

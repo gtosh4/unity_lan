@@ -20,3 +20,5 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
 ipnet = "2"
 siphasher = "1"
+hmac = "0.12"
+sha1 = "0.10"

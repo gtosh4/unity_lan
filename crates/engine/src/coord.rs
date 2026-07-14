@@ -135,6 +135,12 @@ async fn post(
             observed,
             supersede,
             paused,
+            // Relay reporting is wired in M5.4 stage 3 (the client learns Unreachable peers +
+            // advertises its own TURN server); until then the fields carry their defaults.
+            relay_capable: false,
+            relay_addr: None,
+            relay_secret: None,
+            need_relay: Vec::new(),
         })
         .send()
         .await

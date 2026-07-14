@@ -36,10 +36,25 @@ pub struct AppState {
     /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
     /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
     pub reflexive: Arc<Mutex<HashMap<[u8; 32], std::net::SocketAddr>>>,
+    /// Relay-capable devices: pubkey → its embedded TURN server address + HMAC secret. Populated
+    /// from `RegisterReq.{relay_addr,relay_secret}` when a device advertises `relay_capable`, cleared
+    /// when it stops. Read when matching a relay for a stuck pair (§7.2, M5.4). Last write wins; lost
+    /// on restart (repopulated as relays refresh). A stale entry only means an allocation attempt
+    /// fails and the client falls back — no correctness impact.
+    pub relays: Arc<Mutex<HashMap<[u8; 32], RelayReg>>>,
     /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
     /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
     /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
     pub rotation_chain: Vec<String>,
+}
+
+/// A relay-capable device's TURN reachability, kept in [`AppState::relays`].
+#[derive(Clone, Debug)]
+pub struct RelayReg {
+    /// The relay's dialable TURN server `ip:port`.
+    pub addr: std::net::SocketAddr,
+    /// The HMAC secret its TURN server validates minted credentials against.
+    pub secret: String,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -325,6 +340,45 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
+    // Record / clear this device's relay capability: an opted-in, directly-dialable co-member that
+    // runs an embedded TURN server for stuck pairs. Not a membership change, so it deliberately
+    // doesn't bump the version (a new relay must not wake the whole herd — a stuck peer re-polls on
+    // its own cadence and picks it up). Cleared when the device stops advertising.
+    {
+        let mut relays = st.relays.lock().unwrap();
+        match (req.relay_capable, req.relay_addr, req.relay_secret.as_ref()) {
+            (true, Some(addr), Some(secret)) => {
+                relays.insert(
+                    req.wg_pubkey,
+                    RelayReg {
+                        addr,
+                        secret: secret.clone(),
+                    },
+                );
+            }
+            _ => {
+                relays.remove(&req.wg_pubkey);
+            }
+        }
+    }
+
+    // Relay candidates for the caller: co-members that advertise a TURN relay, captured with their
+    // shared-with-caller network names before the seed loop consumes `by_pubkey`. A relay is used
+    // for a peer only if it *also* shares a network with that peer (symmetric authorization) — and
+    // both endpoints, building their own snapshots, pick the same min-pubkey relay from the same
+    // set, so they meet on it.
+    let relay_regs = st.relays.lock().unwrap().clone();
+    let relay_candidates: Vec<([u8; 32], Vec<String>, RelayReg)> = by_pubkey
+        .iter()
+        .filter_map(|(pk, (_mp, nets, _c))| {
+            relay_regs
+                .get(pk)
+                .map(|reg| (*pk, nets.clone(), reg.clone()))
+        })
+        .collect();
+    let need_relay: std::collections::HashSet<[u8; 32]> = req.need_relay.iter().copied().collect();
+    let now = common::now_unix();
+
     // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
     // forward). If so, a NAT'd peer just dials us and no punch is needed on either side.
     let caller_dialable = req.endpoint.is_some();
@@ -336,6 +390,13 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             mp.endpoint,
             reflexive.get(&mp.pubkey).copied(),
         );
+        // If we told the coordinator we can't reach this peer directly (punch went Unreachable),
+        // hand back a relay we both share a network with.
+        let relay = if need_relay.contains(&mp.pubkey) {
+            relay_target(&mp.pubkey, &networks, &relay_candidates, now)
+        } else {
+            None
+        };
         let signed = st
             .signer
             .sign_attestation(
@@ -353,6 +414,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             endpoint: mp.endpoint,
             punch,
             networks,
+            relay,
         });
     }
 
@@ -579,6 +641,32 @@ fn punch_target(
     }
 }
 
+/// The relay to hand a caller for one `peer` it can't punch to (§7.2, M5.4). Picks the
+/// lowest-pubkey candidate relay that shares a network with the peer (the caller already shares one
+/// with every candidate — they're its co-members — and it is itself excluded, so a node never
+/// relays for itself). Deterministic + symmetric: the peer, building its own snapshot from the same
+/// candidate set, selects the same relay, so the pair meets on it. Returns freshly-minted TURN
+/// credentials for that relay, or `None` if no third-party relay serves both.
+fn relay_target(
+    peer: &[u8; 32],
+    peer_networks: &[String],
+    candidates: &[([u8; 32], Vec<String>, RelayReg)],
+    now: u64,
+) -> Option<common::api::RelayInfo> {
+    candidates
+        .iter()
+        .filter(|(pk, nets, _)| pk != peer && nets.iter().any(|n| peer_networks.contains(n)))
+        .min_by_key(|(pk, _, _)| *pk)
+        .map(|(_, _, reg)| {
+            common::relay::issue_relay_creds(
+                reg.addr,
+                &reg.secret,
+                now,
+                common::RELAY_CRED_TTL_SECS,
+            )
+        })
+}
+
 /// Whether a re-key supersede request should retire the old device. The old device token proved
 /// possession; we retire the pubkey it names iff it belongs to the *same* owner (a leaked token
 /// can't retire another member's device) and it's a *different* key than the one now registering
@@ -628,11 +716,47 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_reflexives, punch_target, should_supersede};
+    use super::{accepted_reflexives, punch_target, relay_target, should_supersede, RelayReg};
     use common::api::ObservedEndpoint;
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().unwrap()
+    }
+
+    fn reg(s: &str) -> RelayReg {
+        RelayReg {
+            addr: addr(s),
+            secret: "sekret".into(),
+        }
+    }
+
+    #[test]
+    fn relay_target_picks_shared_network_lowest_pubkey_third_party() {
+        let peer = [9u8; 32];
+        // Two relay candidates sharing "mesh" with the peer, plus one on an unrelated network.
+        let candidates = vec![
+            ([5u8; 32], vec!["mesh".into()], reg("203.0.113.5:3478")),
+            ([2u8; 32], vec!["mesh".into()], reg("203.0.113.2:3478")),
+            ([1u8; 32], vec!["other".into()], reg("203.0.113.1:3478")),
+        ];
+        let now = 1_000;
+
+        // Lowest pubkey among those sharing the peer's network wins → the [2;32] relay at .2.
+        let info = relay_target(&peer, &["mesh".into()], &candidates, now)
+            .expect("a shared-network relay exists");
+        assert_eq!(info.turn_addr, addr("203.0.113.2:3478"));
+        // Credential is the HMAC over the minted username (verifiable by the relay).
+        assert_eq!(
+            info.credential,
+            common::relay::relay_credential("sekret", &info.username)
+        );
+
+        // A peer on a network no candidate shares → no relay.
+        assert!(relay_target(&peer, &["lonely".into()], &candidates, now).is_none());
+
+        // The peer is never handed itself as a relay (no self-relay).
+        let only_self = vec![(peer, vec!["mesh".into()], reg("203.0.113.9:3478"))];
+        assert!(relay_target(&peer, &["mesh".into()], &only_self, now).is_none());
     }
 
     #[test]
