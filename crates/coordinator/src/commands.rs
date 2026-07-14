@@ -341,6 +341,10 @@ async fn handle_network(
             let Some(role) = role else {
                 return "Missing role.".to_string();
             };
+            // `@everyone` has role id == guild id; it's every member, not an ACL group.
+            if role.get() == guild_id {
+                return "`@everyone` cannot be a network.".to_string();
+            }
             // The network name is always the role's own Discord name (kept in sync by the
             // RoleUpdate handler); fall back to `role-{id}` only if the API lookup fails
             // (e.g. the role was just deleted).
@@ -351,6 +355,13 @@ async fn handle_network(
                 Ok(()) => {
                     // Wake parked long-polls so clients pick up the new network immediately.
                     version.send_modify(|v| *v += 1);
+                    tracing::info!(
+                        guild = guild_id,
+                        role = role.get(),
+                        %name,
+                        version = *version.borrow(),
+                        "network add: upserted + bumped membership version"
+                    );
                     format!("Registered <@&{role}> as network **{name}**.")
                 }
                 Err(e) => format!("Error: {e}"),
@@ -368,6 +379,12 @@ async fn handle_network(
                 Ok(()) => {
                     // Wake parked long-polls so clients drop the removed network immediately.
                     version.send_modify(|v| *v += 1);
+                    tracing::info!(
+                        guild = guild_id,
+                        role = role.get(),
+                        version = *version.borrow(),
+                        "network remove: removed + bumped membership version"
+                    );
                     format!("Unregistered <@&{role}>.")
                 }
                 Err(e) => format!("Error: {e}"),

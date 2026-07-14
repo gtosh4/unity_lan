@@ -363,6 +363,19 @@ async fn apply_state(
     }
     let disabled = localnet.snapshot();
     let paused = localnet.is_paused();
+    if let Some(dev) = device {
+        tracing::debug!(
+            paused,
+            coord_online,
+            networks = ?dev
+                .networks_status
+                .iter()
+                .map(|n| format!("{}({}/{})={}", n.name, n.guild_id, n.role_id, n.enabled))
+                .collect::<Vec<_>>(),
+            disabled = ?disabled,
+            "apply_state: networks from coordinator + local opt-out set"
+        );
+    }
     // Disconnected: bring the interface administratively down (no traffic, /32 route inactive) *and*
     // drop every peer — no mesh. Reconnect brings the link back up. The device, its uapi socket and
     // the resolver config all persist across the toggle, so this is idempotent and needs no teardown.

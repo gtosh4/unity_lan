@@ -130,6 +130,12 @@ impl LocalNet {
         for &net in present {
             if known.insert(net) {
                 known_changed = true;
+                tracing::info!(
+                    guild = net.0,
+                    role = net.1,
+                    disable_new,
+                    "reconcile_new: first sighting of network (disabled on discovery = disable_new)"
+                );
                 if disable_new {
                     disabled_changed |= disabled.insert(net);
                 }

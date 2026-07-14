@@ -171,8 +171,25 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 m
             }
         };
-        let Some(member) = member else { continue };
+        let Some(member) = member else {
+            tracing::debug!(
+                user = user_id,
+                guild = net.guild_id,
+                role = net.role_id,
+                net = %net.name,
+                "snapshot: skip network — caller not a member of its guild"
+            );
+            continue;
+        };
         if !member.role_ids.contains(&net.role_id) {
+            tracing::debug!(
+                user = user_id,
+                guild = net.guild_id,
+                role = net.role_id,
+                net = %net.name,
+                held = ?member.role_ids,
+                "snapshot: skip network — caller does not hold its role"
+            );
             continue;
         }
 
@@ -201,14 +218,22 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             guild_name: guild_label.clone(),
             enabled,
         });
-        if !enabled {
-            continue;
-        }
 
+        // Identity resolves from any held role — even a disabled one — so the device still gets a
+        // grant (stable name/IP/hostname) and the client can render the toggle list. Otherwise a
+        // network that is auto-disabled on discovery (secure default) would yield no grant, the
+        // engine would treat us as holding no networks, and the toggle needed to *enable* it would
+        // never appear: a chicken-and-egg lockout.
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
         if community_name.is_none() {
             community_name = Some(guild_label);
+        }
+
+        // A disabled network is listed (above) but contributes no presence / grant-network / seeds
+        // (so it doesn't peer, in either direction) until the user enables it.
+        if !enabled {
+            continue;
         }
         network_names.push(name);
 
@@ -243,8 +268,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
-    // Self-grant: one device attestation (None if the caller holds no networks).
-    let grant = if held.is_empty() {
+    // Self-grant: one device attestation. Issued whenever the caller holds ≥1 network role, even if
+    // every one is currently disabled (`networks` is then empty) — the device still needs its
+    // identity/IP and the client needs the grant to surface the toggle list. `None` only when the
+    // caller holds no network roles at all.
+    let grant = if networks_status.is_empty() {
         None
     } else {
         let signed = st
@@ -338,6 +366,20 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     if changed {
         st.version.send_modify(|v| *v += 1);
     }
+
+    tracing::debug!(
+        user = user_id,
+        since = ?req.since,
+        version = *st.version.borrow(),
+        held_networks = networks_status.len(),
+        networks = ?networks_status
+            .iter()
+            .map(|n| format!("{}({}/{})={}", n.name, n.guild_id, n.role_id, n.enabled))
+            .collect::<Vec<_>>(),
+        grant = if networks_status.is_empty() { "none" } else { "issued" },
+        enabled_networks = held.len(),
+        "snapshot built"
+    );
 
     Ok(RegisterResp {
         coord_pubkey: st.signer.anchor_bytes(),
