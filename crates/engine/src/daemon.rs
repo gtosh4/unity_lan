@@ -116,6 +116,45 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         None => None,
     };
 
+    // Ciphertext relay (§7.2, M5.4): if opted in *and* directly dialable, run an embedded TURN
+    // server and advertise it so co-members whose hole punch fails can relay WG ciphertext through
+    // us. A NAT'd device (no endpoint) can't serve as a relay, so it's skipped. The server + secret
+    // outlive an enrollment cycle (a logout/login doesn't tear them down); a spawned task stops it
+    // on shutdown (its internal tasks keep it running without us holding the handle).
+    let relay_report = match (cfg.relay, endpoint) {
+        (true, Some(ep)) => {
+            let secret = keys::load_or_create_relay_secret(&cfg.state_dir)?;
+            let relay_addr = SocketAddr::new(ep.ip(), cfg.relay_port);
+            let bind = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), cfg.relay_port);
+            match crate::relay::RelayServer::start(bind, ep.ip(), secret.clone()).await {
+                Ok(server) => {
+                    let sd = shutdown.clone();
+                    tokio::spawn(async move {
+                        sd.wait().await;
+                        if let Err(e) = server.stop().await {
+                            tracing::warn!("relay: TURN server stop on shutdown: {e:#}");
+                        }
+                    });
+                    coord::RelayReport {
+                        capable: true,
+                        addr: Some(relay_addr),
+                        secret: Some(secret),
+                        need_relay: Vec::new(),
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("relay: TURN server failed to start ({e:#}); not advertising");
+                    coord::RelayReport::default()
+                }
+            }
+        }
+        (true, None) => {
+            tracing::info!("relay: enabled but not dialable (no endpoint); not advertising");
+            coord::RelayReport::default()
+        }
+        (false, _) => coord::RelayReport::default(),
+    };
+
     // Enrollment lifecycle. Runs once normally; a `Logout` tears the mesh down and loops back here
     // to re-key and wait for the next login. Setup above (dns, firewall, control socket, endpoint)
     // is done once and outlives every enrollment.
@@ -126,9 +165,17 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         *pubkey.write().await = wg_pub;
 
         // Register, waiting (serving control) until we're logged in and hold a network to mesh.
-        let Some((resp, device)) =
-            register_until_ready(&cfg, endpoint, wg_pub, &localnet, &status, &fw, &shutdown)
-                .await?
+        let Some((resp, device)) = register_until_ready(
+            &cfg,
+            endpoint,
+            wg_pub,
+            &localnet,
+            &status,
+            &fw,
+            &shutdown,
+            &relay_report,
+        )
+        .await?
         else {
             return Ok(()); // interrupted before login
         };
@@ -306,6 +353,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     localnet.as_refs(),
                     observed.clone(),
                     localnet.is_paused(),
+                    relay_report.clone(),
                 ) => r,
             };
             match refreshed {
@@ -487,6 +535,7 @@ fn filter_active(
 
 /// Register in a loop, keeping the control socket alive, until we're logged in *and* hold a
 /// network to mesh. Sets `needs_login` so a frontend can start OAuth; returns `None` on shutdown.
+#[allow(clippy::too_many_arguments)]
 async fn register_until_ready(
     cfg: &Config,
     endpoint: Option<SocketAddr>,
@@ -495,6 +544,7 @@ async fn register_until_ready(
     status: &control::Shared,
     fw: &Option<Arc<Firewall>>,
     shutdown: &Shutdown,
+    relay: &coord::RelayReport,
 ) -> anyhow::Result<Option<(common::api::RegisterResp, SelfDevice)>> {
     // Our persisted device token as of startup. If we re-keyed (new wg.key) since it was issued,
     // it still names the old pubkey → the coordinator retires that stale identity on our first
@@ -518,6 +568,7 @@ async fn register_until_ready(
                 localnet.as_refs(),
                 supersede.clone(),
                 localnet.is_paused(),
+                relay.clone(),
             ) => r,
         };
         match attempt {

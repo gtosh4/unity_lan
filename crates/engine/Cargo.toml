@@ -26,6 +26,8 @@ interprocess = { version = "2.4.2", features = ["tokio"] }
 base64 = "0.22"
 sha2 = "0.10"
 hickory-proto = "0.26.1"
+turn = "0.17"
+webrtc-util = "0.17"
 
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.

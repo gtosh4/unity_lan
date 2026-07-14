@@ -11,6 +11,7 @@ mod keys;
 mod nat;
 mod netcfg;
 mod oauth;
+mod relay;
 mod resolver;
 #[cfg(windows)]
 mod service;
@@ -117,6 +118,7 @@ async fn async_main(arg1: String) -> anyhow::Result<()> {
         Vec::new(),
         keys::load_token(&cfg.state_dir),
         false,
+        coord::RelayReport::default(),
     )
     .await?;
 
@@ -180,6 +182,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
         Vec::new(),
         None, // login binds a fresh identity; nothing to supersede
         false,
+        coord::RelayReport::default(),
     )
     .await?;
     match device {

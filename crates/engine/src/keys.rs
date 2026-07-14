@@ -71,6 +71,23 @@ pub fn save_token(state_dir: &Path, token: &str) -> anyhow::Result<()> {
     write_secret(&state_dir.join("token"), token.as_bytes())
 }
 
+/// Load this device's persisted relay HMAC secret, generating and persisting one (0600) on first
+/// use. Stable across restarts so a re-registering relay keeps validating credentials the
+/// coordinator already minted against it.
+pub fn load_or_create_relay_secret(state_dir: &Path) -> anyhow::Result<String> {
+    let path = state_dir.join("relay_secret");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let s = s.trim().to_string();
+        if !s.is_empty() {
+            return Ok(s);
+        }
+    }
+    std::fs::create_dir_all(state_dir)?;
+    let secret = common::relay::generate_secret();
+    write_secret(&path, secret.as_bytes())?;
+    Ok(secret)
+}
+
 /// Discard local enrollment on logout: delete the device token and the WG private key, so the next
 /// enrollment generates a *fresh* key (the old one is never reused). The pinned coordinator anchor
 /// is kept — logging out doesn't change who we trust. Missing files are not an error.

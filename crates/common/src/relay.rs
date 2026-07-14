@@ -8,9 +8,18 @@
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use hmac::{Hmac, Mac};
+use rand_core::{OsRng, RngCore};
 use sha1::Sha1;
 
 use crate::api::RelayInfo;
+
+/// A fresh 256-bit relay HMAC secret (base64). A relay generates one on first use and persists it;
+/// it's shared only with the coordinator, which mints credentials against it.
+pub fn generate_secret() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    STANDARD.encode(bytes)
+}
 
 /// TURN realm the embedded relay servers present. Fixed across the mesh (identity is carried by
 /// the per-relay `relay_secret`, not the realm).
@@ -35,7 +44,9 @@ pub fn issue_relay_creds(
     now: u64,
     ttl: u64,
 ) -> RelayInfo {
-    let username = format!("{}:{RELAY_REALM}", now + ttl);
+    // Bare `<expiry>` (unix seconds): the webrtc-rs `LongTermAuthHandler` on the relay parses the
+    // whole username as the expiry, so no `:id` suffix.
+    let username = (now + ttl).to_string();
     let credential = relay_credential(relay_secret, &username);
     RelayInfo {
         turn_addr,

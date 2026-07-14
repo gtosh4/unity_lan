@@ -24,6 +24,17 @@ pub struct SelfDevice {
     pub networks_status: Vec<common::api::NetworkStatus>,
 }
 
+/// This device's relay-related fields for a register/refresh (§7.2, M5.4): whether we offer
+/// ourselves as a TURN relay (+ our address/secret), and which peers we currently can't reach and
+/// want a relay for. Bundled so the register/refresh signatures don't sprout four more arguments.
+#[derive(Clone, Default)]
+pub struct RelayReport {
+    pub capable: bool,
+    pub addr: Option<SocketAddr>,
+    pub secret: Option<String>,
+    pub need_relay: Vec<[u8; 32]>,
+}
+
 /// A verified co-member to peer with.
 #[derive(Clone)]
 pub struct SeedPeer {
@@ -50,6 +61,7 @@ pub async fn register(
     disabled_networks: Vec<NetworkRef>,
     supersede: Option<String>,
     paused: bool,
+    relay: RelayReport,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
     // observed endpoints to report. `supersede` carries our stored device token so the coordinator
@@ -66,6 +78,7 @@ pub async fn register(
         Vec::new(),
         supersede,
         paused,
+        relay,
     )
     .await
 }
@@ -83,6 +96,7 @@ pub async fn refresh(
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
     paused: bool,
+    relay: RelayReport,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     post(
         base_url,
@@ -96,6 +110,7 @@ pub async fn refresh(
         observed,
         None, // refresh never supersedes: a re-key retires the old key on the initial register
         paused,
+        relay,
     )
     .await
 }
@@ -113,6 +128,7 @@ async fn post(
     observed: Vec<common::api::ObservedEndpoint>,
     supersede: Option<String>,
     paused: bool,
+    relay: RelayReport,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -135,12 +151,10 @@ async fn post(
             observed,
             supersede,
             paused,
-            // Relay reporting is wired in M5.4 stage 3 (the client learns Unreachable peers +
-            // advertises its own TURN server); until then the fields carry their defaults.
-            relay_capable: false,
-            relay_addr: None,
-            relay_secret: None,
-            need_relay: Vec::new(),
+            relay_capable: relay.capable,
+            relay_addr: relay.addr,
+            relay_secret: relay.secret,
+            need_relay: relay.need_relay,
         })
         .send()
         .await

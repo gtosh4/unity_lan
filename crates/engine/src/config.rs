@@ -65,6 +65,16 @@ pub struct Config {
     /// Seeds the persisted policy on first run; thereafter the GUI toggle is the source of truth.
     #[serde(default = "default_true")]
     pub disable_new_networks: bool,
+    /// Offer this device as a **ciphertext relay** for co-members whose hole punch fails (§7.2,
+    /// M5.4). Opt-in (default `false`) — relaying spends this host's uplink for others. Only takes
+    /// effect when the device is directly dialable (a self `endpoint`, manual or UPnP): a NAT'd
+    /// device can't serve as a relay. Runs an embedded TURN server on `relay_port`.
+    #[serde(default)]
+    pub relay: bool,
+    /// UDP port for the embedded TURN relay server (when `relay` is on). Separate from the WG port,
+    /// which boringtun owns. Advertised to co-members via the coordinator as our relay address.
+    #[serde(default = "default_relay_port")]
+    pub relay_port: u16,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.
@@ -93,6 +103,9 @@ fn default_refresh() -> u64 {
 }
 fn default_oauth_redirect() -> String {
     "http://127.0.0.1:8765/callback".to_string()
+}
+fn default_relay_port() -> u16 {
+    3478 // the IANA-registered TURN port
 }
 
 /// Starter config written by `load_or_init` when the default path is missing. Points at a
