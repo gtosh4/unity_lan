@@ -320,15 +320,38 @@ follow-on, not a GA blocker.
 
 ### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
 **Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,
-reusing mature Rust libs (`webrtc-rs` `ice`/`stun`/`turn`, or `str0m`) on a socket beside boringtun
+reusing mature Rust libs (`webrtc-rs` `ice`/`stun`/`turn`) on a socket beside boringtun
 (`docs/prior-art.md` §6.2). Gets STUN reflexive (fixes **bootstrap** — a lone/all-NAT'd mesh with
 no online observer, which peer-observed can't start), host/srflx candidates, and TURN relay
-(= M5.4) for little code. Userspace-only (owns the socket); kernel backends keep punch + M5.4 relay.
-- [ ] ICE agent beside boringtun; **candidate exchange rides the existing long-poll** (no separate
-      Signal server — stays coordinator-mediated, decentralization-consistent).
-- [ ] Direct handoff: full-cone → set WG endpoint to the negotiated addr; restricted-cone →
-      userspace proxy or relay. **Document the handoff seam** (prior-art §6.5; cf. NetBird #2507/#6054).
-- [ ] STUN config (self-host / reuse coordinator host); TURN = the M5.4 relay.
+(= M5.4) for little code. Userspace-only (owns the socket); **kernel backends (Windows) keep punch +
+M5.4 relay** — full ICE-on-Windows waits for the Post-GA userspace-Windows (Wintun) backend; until
+then a Windows node behind bad NAT degrades to the M5.4 relay in exactly the cases ICE would improve
+(no functional hole, just a directness/perf gap). **STUN hosting = relay-first, coordinator-host
+fallback**: a stuck peer STUNs a dialable relay co-member (decentralized, coordinator off-path) and
+falls back to a responder on the coordinator host when none is online.
+
+- [x] **Stage 0 — spike / gate** ✅ — proved `webrtc-ice`'s `Agent` connects two peers with
+      candidates + ufrag/pwd exchanged **out-of-band** (post-gather, the coordinator-long-poll shape,
+      not the crate's built-in signaling), yields a `webrtc_util::Conn`, and carries bytes both ways
+      (`crates/engine/tests/ice_spike.rs`). Handoff viable: that `Conn` is the same `webrtc_util::Conn`
+      trait `RelaySession` already pumps (restricted-cone reuses the shim pump); full-cone reads the
+      selected pair's remote addr → sets the WG endpoint. **STUN is free on relay nodes**: the M5.4
+      `turn::server::Server` already answers STUN Binding (XOR-MAPPED-ADDRESS, unauthenticated), so the
+      relay-node half needs no extra server — only the coordinator-host fallback responder is new.
+      Dep `webrtc-ice = "0.17"` added (pairs with our `turn`/`webrtc-util`/`stun` 0.17).
+- [ ] **Stage 1 — control plane: candidate exchange** — `RegisterReq.ice_candidates` + `Seed.ice`
+      (peer candidates + ufrag/pwd); coordinator caches per-device candidates (like `reflexive`) and
+      hands each stuck pair the other's; deterministic role (min-pubkey = controlling); version bump
+      only on candidate change (no new herd — CLAUDE.md fan-in rule).
+- [ ] **Stage 2 — STUN** — coordinator-host STUN Binding responder (fallback) + client gather
+      (relay-first, coord fallback); a lone/all-NAT'd mesh obtains a reflexive with no observer peer.
+- [ ] **Stage 3 — ICE agent** — `engine/ice.rs`: `Agent` per stuck peer on a side socket, gathers
+      host/srflx/relay (relay via M5.4 TURN creds), feeds the peer's candidates in, runs checks;
+      reports gathered candidates each loop (a change breaks the long-poll hold, like `observed`).
+- [ ] **Stage 4 — handoff / data plane** — on nomination: direct → set WG endpoint to the selected
+      remote addr; restricted-cone/relay → pump the ICE `Conn`↔boringtun via a loopback shim
+      (RelayManager-style). New `PeerReach`; endpoint precedence updated; ICE primary on userspace,
+      M5.2 punch kept for kernel. **Document the handoff seam** (prior-art §6.5; cf. NetBird #2507/#6054).
 - **Verify:** `nat-test.sh` restricted-cone case reaches a peer via ICE; bootstrap case (no observer
       peer online) still obtains a reflexive via STUN.
 - **Note:** leaves a residual gap (efficient direct paths through restricted-cone NAT; UDP-blocked
