@@ -39,7 +39,7 @@ impl Attestation {
         now >= self.expires_at
     }
 
-    /// `<device>.<user>.<community>.internal`. The community name lives at the coordinator and
+    /// `<device>.<user>.<community>.unity.internal`. The community name lives at the coordinator and
     /// is passed in (only ids/labels are in the attestation).
     pub fn hostname(&self, community_name: &str) -> String {
         format!(
@@ -51,7 +51,7 @@ impl Attestation {
         )
     }
 
-    /// `<user>.<community>.internal` — the alias for the owner's primary device; `None` otherwise.
+    /// `<user>.<community>.unity.internal` — the alias for the owner's primary device; `None` otherwise.
     pub fn primary_alias(&self, community_name: &str) -> Option<String> {
         self.is_primary.then(|| {
             format!(
@@ -129,7 +129,7 @@ mod tests {
         let att = sample(0);
         assert_eq!(
             att.hostname("My Community!"),
-            "laptop.alice.my-community.internal"
+            "laptop.alice.my-community.unity.internal"
         );
     }
 }

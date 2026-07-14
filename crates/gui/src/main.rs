@@ -631,12 +631,12 @@ mod tests {
         let report = StatusReport {
             device: Some(DeviceStatus {
                 wg_ip: Ipv4Addr::new(100, 64, 0, 1),
-                hostname: "host-a.alice.lan.internal".into(),
+                hostname: "host-a.alice.lan.unity.internal".into(),
                 is_primary: true,
                 networks: vec!["mesh".into()],
             }),
             peers: vec![PeerStatus {
-                hostname: "host-b.bob.lan.internal".into(),
+                hostname: "host-b.bob.lan.unity.internal".into(),
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
                 reach: common::control::PeerReach::Direct,

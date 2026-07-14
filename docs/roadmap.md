@@ -335,16 +335,17 @@ no online observer, which peer-observed can't start), host/srflx candidates, and
       device IP in a flat `100.64/10`, networks are pure ACL. Isolation is already enforced by
       seed-scoping (you only peer co-members sharing ≥1 network) + the firewall's `--net` source
       scoping (M7c-2), not per-role `/32`s.
-- [ ] **Namespace rename `.internal` → `.unity.internal`** — align code with design (header + §6,
-      already standardized there). Zone suffix is centralized: flip `common::DNS_SUFFIX`
-      (`crates/common/src/lib.rs:29`) `"internal"` → `"unity.internal"` and the `hostname` /
-      `primary_alias` builders (`attestation.rs`) cascade. Then fix the sites that hardcode the
-      suffix: resolver `DOMAIN` consts (`resolver/linux.rs:12` routing domain `~internal` →
-      `~unity.internal`; `resolver/windows.rs:28` NRPT namespace `.internal` → `.unity.internal`),
-      `dns.rs:85` `ends_with(".internal")`, and the `.internal` test fixtures/comments across
-      `attestation.rs`, `dns.rs`, `gui/src/main.rs`, plus scripts (`mesh-test.sh`,
-      `gui-login-test.sh`, `resolver-hook-test.sh`). **Verify:** `mesh-test.sh` +
-      `resolver-hook-test.sh` resolve `<device>.<user>.<community>.unity.internal`.
+- [x] **Namespace rename `.internal` → `.unity.internal`** ✅ — code now matches design (header + §6).
+      Flipped `common::DNS_SUFFIX` (`crates/common/src/lib.rs`) `"internal"` → `"unity.internal"`; the
+      `hostname` / `primary_alias` builders (`attestation.rs`) cascade from it. Killed the drift-prone
+      hardcodes by wiring them to the shared const: resolver `DOMAIN` consts (`resolver/linux.rs`,
+      `resolver/windows.rs`) are now `= common::DNS_SUFFIX` (→ `~unity.internal` / `.unity.internal`),
+      and `dns.rs`'s zone check is `ends_with(&format!(".{}", common::DNS_SUFFIX))`. Updated the
+      `.internal` test fixtures/comments across `attestation.rs`, `dns.rs`, `gui/src/main.rs` and
+      scripts (`mesh-test.sh`, `gui-login-test.sh`, `resolver-hook-test.sh`). **Verify:** ✅
+      `mesh-test.sh` resolves `host-b.nodeb.lan.unity.internal` + `nodeb.lan.unity.internal` alias →
+      B's IP (live PASS); 60 unit tests green (fmt/clippy/test). `resolver-hook-test.sh` (root) updated
+      to query `.unity.internal` — not re-run here (needs elevation).
 
 **Verify:** ✅ 2 `resolver/linux.rs` unit tests (resolvectl arg construction) + 2 `resolver/windows.rs`
 tests (NRPT script construction); `scripts/resolver-hook-test.sh` (live, root) — on this host's real

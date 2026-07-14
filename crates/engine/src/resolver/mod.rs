@@ -1,9 +1,9 @@
-//! Point the OS resolver at our `.internal` DNS resolver (design.md §6, M6). `dns.rs` serves
-//! correct answers on a UDP socket; this makes the OS actually *route* `.internal` queries there.
+//! Point the OS resolver at our `.unity.internal` DNS resolver (design.md §6, M6). `dns.rs` serves
+//! correct answers on a UDP socket; this makes the OS actually *route* `.unity.internal` queries there.
 //!
 //! Per-OS backends behind [`ResolverHook`]: Linux drives systemd-resolved (per-link routing
 //! domain, [`linux`]); Windows drives NRPT (namespace policy, [`windows`]). macOS (`/etc/resolver`)
-//! is a future backend. Where no backend exists, [`platform_hook`] returns `None` and `.internal`
+//! is a future backend. Where no backend exists, [`platform_hook`] returns `None` and `.unity.internal`
 //! names still resolve when queried directly at `dns_bind` — they just aren't wired into the OS
 //! resolver automatically.
 //!
@@ -17,9 +17,9 @@ mod linux;
 #[cfg(windows)]
 mod windows;
 
-/// Hooks the OS resolver to our `.internal` server, and reverts it.
+/// Hooks the OS resolver to our `.unity.internal` server, and reverts it.
 pub trait ResolverHook: Send + Sync {
-    /// Route `.internal` queries to our resolver at `server`. `iface` is the wg link (used by
+    /// Route `.unity.internal` queries to our resolver at `server`. `iface` is the wg link (used by
     /// link-scoped backends like systemd-resolved; ignored by namespace-scoped ones like NRPT).
     fn install(&self, iface: &str, server: SocketAddr) -> anyhow::Result<()>;
     /// Undo the resolver config.

@@ -102,9 +102,9 @@ B_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b.log" | head -1 | awk '{
 [ -n "$A_IP" ] && [ -n "$B_IP" ] || { echo "FAIL: nodes did not mesh"; cat "$TMP/a.log" "$TMP/b.log"; exit 1; }
 echo "A=$A_IP  B=$B_IP  (meshed via coordinator seeds)"
 
-# Naming: the community slug must appear in the device hostname (<device>.<user>.lan.internal).
-if grep -q '\.lan\.internal' "$TMP/a.log"; then
-  echo "hostname: $(grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.lan\.internal' "$TMP/a.log" | head -1) (community slug applied)"
+# Naming: the community slug must appear in the device hostname (<device>.<user>.lan.unity.internal).
+if grep -q '\.lan\.unity\.internal' "$TMP/a.log"; then
+  echo "hostname: $(grep -oE '[a-z0-9-]+\.[a-z0-9-]+\.lan\.unity\.internal' "$TMP/a.log" | head -1) (community slug applied)"
 else
   echo "FAIL: community slug not in hostname"; grep -E '100\.[0-9]' "$TMP/a.log"; exit 1
 fi
@@ -114,10 +114,10 @@ grep -q '\[primary\]' "$TMP/a.log" || { echo "FAIL: node A not marked primary"; 
 echo "primary: node A auto-assigned primary ✓"
 
 # DNS: query node A's resolver for peer B by name (A learned B as a seed).
-echo "=== dns: resolve peer B via node A's .internal resolver ==="
-DNS_IP=$(dig @127.0.0.1 -p 15353 +short host-b.nodeb.lan.internal A | head -1)
-ALIAS_IP=$(dig @127.0.0.1 -p 15353 +short nodeb.lan.internal A | head -1)
-echo "host-b.nodeb.lan.internal -> ${DNS_IP:-<none>}   nodeb.lan.internal (primary alias) -> ${ALIAS_IP:-<none>}   (B=$B_IP)"
+echo "=== dns: resolve peer B via node A's .unity.internal resolver ==="
+DNS_IP=$(dig @127.0.0.1 -p 15353 +short host-b.nodeb.lan.unity.internal A | head -1)
+ALIAS_IP=$(dig @127.0.0.1 -p 15353 +short nodeb.lan.unity.internal A | head -1)
+echo "host-b.nodeb.lan.unity.internal -> ${DNS_IP:-<none>}   nodeb.lan.unity.internal (primary alias) -> ${ALIAS_IP:-<none>}   (B=$B_IP)"
 { [ "$DNS_IP" = "$B_IP" ] && [ "$ALIAS_IP" = "$B_IP" ]; } || { echo "FAIL: resolver did not map peer name to its device IP"; exit 1; }
 echo "dns: peer hostname + primary alias resolve to B ✓"
 

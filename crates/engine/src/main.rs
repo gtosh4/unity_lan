@@ -62,7 +62,7 @@ async fn async_main(arg1: String) -> anyhow::Result<()> {
         return wg_node();
     }
     if arg1 == "dns-serve" {
-        // Dev/test: serve a single `<name> <ip>` on `<bind>` from the `.internal` resolver.
+        // Dev/test: serve a single `<name> <ip>` on `<bind>` from the `.unity.internal` resolver.
         let bind: std::net::SocketAddr = std::env::args().nth(2).unwrap().parse()?;
         let name = std::env::args().nth(3).unwrap();
         let ip: std::net::Ipv4Addr = std::env::args().nth(4).unwrap().parse()?;

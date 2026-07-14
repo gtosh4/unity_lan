@@ -1,5 +1,5 @@
-//! Linux/systemd-resolved backend: per-link config on the wg interface with a `~internal`
-//! *routing domain*, so only `*.internal` lookups go to our resolver — global DNS is untouched.
+//! Linux/systemd-resolved backend: per-link config on the wg interface with a `~unity.internal`
+//! *routing domain*, so only `*.unity.internal` lookups go to our resolver — global DNS is untouched.
 //! The config is scoped to the wg link, so it clears automatically when the link disappears; we
 //! also `revert` it on clean shutdown.
 
@@ -8,8 +8,8 @@ use std::process::Command;
 
 use super::ResolverHook;
 
-/// The `.internal` zone we serve, used as the systemd-resolved routing domain (`~internal`).
-const DOMAIN: &str = "internal";
+/// The zone we serve, used as the systemd-resolved routing domain (`~unity.internal`).
+const DOMAIN: &str = common::DNS_SUFFIX;
 
 /// systemd-resolved backend driving `resolvectl`.
 pub struct ResolvectlHook;
@@ -18,7 +18,7 @@ impl ResolverHook for ResolvectlHook {
     fn install(&self, iface: &str, server: SocketAddr) -> anyhow::Result<()> {
         run(&dns_args(iface, server))?;
         run(&domain_args(iface))?;
-        tracing::info!(%iface, %server, "resolver: routed .internal via systemd-resolved");
+        tracing::info!(%iface, %server, "resolver: routed .unity.internal via systemd-resolved");
         Ok(())
     }
 
@@ -37,7 +37,7 @@ fn dns_args(iface: &str, server: SocketAddr) -> Vec<String> {
     vec!["dns".into(), iface.into(), server]
 }
 
-/// `resolvectl domain <iface> ~internal` — a routing domain: only `*.internal` uses our server.
+/// `resolvectl domain <iface> ~unity.internal` — a routing domain: only `*.unity.internal` uses our server.
 fn domain_args(iface: &str) -> Vec<String> {
     vec!["domain".into(), iface.into(), format!("~{DOMAIN}")]
 }
@@ -72,6 +72,9 @@ mod tests {
 
     #[test]
     fn domain_is_a_routing_domain() {
-        assert_eq!(domain_args("unl0"), vec!["domain", "unl0", "~internal"]);
+        assert_eq!(
+            domain_args("unl0"),
+            vec!["domain", "unl0", "~unity.internal"]
+        );
     }
 }

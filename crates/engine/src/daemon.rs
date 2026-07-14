@@ -34,7 +34,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = std::sync::Arc::new(tokio::sync::Notify::new());
 
-    // Optional `.internal` resolver: serves our device + peers by name (empty until we mesh).
+    // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
     let zone = dns::empty_zone();
     if let Some(bind) = cfg.dns_bind {
         let z = zone.clone();
@@ -154,7 +154,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         })?;
         tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
 
-        // Point the OS resolver at our `.internal` server on this link (best-effort). Reverted on
+        // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
         // clean shutdown; also clears with the link if we exit uncleanly.
         let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
             (true, Some(bind)) => match crate::resolver::platform_hook() {

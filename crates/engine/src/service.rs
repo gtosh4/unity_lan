@@ -92,7 +92,7 @@ fn install(config: Option<String>) -> Result<()> {
         .create_service(&info, ServiceAccess::CHANGE_CONFIG)
         .context("creating the service (already installed? run `service uninstall` first)")?;
     let _ = service.set_description(
-        "UnityLAN mesh engine: WireGuard mesh, host firewall, and .internal DNS resolver.",
+        "UnityLAN mesh engine: WireGuard mesh, host firewall, and .unity.internal DNS resolver.",
     );
 
     // Relax the DACL so the unprivileged GUI can start/stop without UAC. Best-effort: on failure the

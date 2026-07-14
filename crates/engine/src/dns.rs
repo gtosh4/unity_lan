@@ -1,6 +1,6 @@
-//! A tiny authoritative resolver for the `.internal` zone (design.md §6.4). Answers A queries
+//! A tiny authoritative resolver for the `.unity.internal` zone (design.md §6.4). Answers A queries
 //! from an in-memory name→IP map built from our verified attestations (self + seeds), so peers
-//! are reachable by `<device>.<user>.<community>.internal` and primaries by `<user>.<community>`.
+//! are reachable by `<device>.<user>.<community>.unity.internal` and primaries by `<user>.<community>`.
 //!
 //! Per-OS resolver hookup (systemd-resolved / NRPT / macOS resolver dir) is separate polish;
 //! this just serves correct answers on a UDP socket.
@@ -82,7 +82,7 @@ async fn answer(bytes: &[u8], zone: &Zone) -> Option<Vec<u8>> {
         if let Some(ip) = map.get(&name) {
             resp.add_answer(Record::from_rdata(q.name().clone(), 30, RData::A(A(*ip))));
             answered = true;
-        } else if name.ends_with(".internal") {
+        } else if name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
             ours_but_missing = true;
         }
     }
@@ -110,13 +110,13 @@ mod tests {
         {
             let mut w = zone.write().await;
             w.insert(
-                "host-b.nodeb.lan.internal".into(),
+                "host-b.nodeb.lan.unity.internal".into(),
                 Ipv4Addr::new(100, 69, 1, 2),
             );
         }
 
         // Known name → A record with the mapped IP.
-        let reply = answer(&query_bytes("host-b.nodeb.lan.internal."), &zone)
+        let reply = answer(&query_bytes("host-b.nodeb.lan.unity.internal."), &zone)
             .await
             .unwrap();
         let msg = Message::from_vec(&reply).unwrap();
@@ -126,8 +126,8 @@ mod tests {
             other => panic!("expected A, got {other:?}"),
         }
 
-        // Unknown .internal name → NXDomain, no answers.
-        let reply = answer(&query_bytes("nope.nodeb.lan.internal."), &zone)
+        // Unknown .unity.internal name → NXDomain, no answers.
+        let reply = answer(&query_bytes("nope.nodeb.lan.unity.internal."), &zone)
             .await
             .unwrap();
         let msg = Message::from_vec(&reply).unwrap();
@@ -139,7 +139,7 @@ mod tests {
     async fn serves_over_udp_socket() {
         let zone = empty_zone();
         zone.write().await.insert(
-            "host-b.nodeb.lan.internal".into(),
+            "host-b.nodeb.lan.unity.internal".into(),
             Ipv4Addr::new(100, 69, 1, 2),
         );
 
@@ -154,7 +154,7 @@ mod tests {
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client
-            .send_to(&query_bytes("host-b.nodeb.lan.internal."), addr)
+            .send_to(&query_bytes("host-b.nodeb.lan.unity.internal."), addr)
             .await
             .unwrap();
         let mut buf = [0u8; 512];

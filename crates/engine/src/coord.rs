@@ -18,7 +18,7 @@ pub struct SelfDevice {
     pub wg_ip: Ipv4Addr,
     pub hostname: String,
     pub is_primary: bool,
-    /// `<user>.<community>.internal` if we're the owner's primary device.
+    /// `<user>.<community>.unity.internal` if we're the owner's primary device.
     pub primary_alias: Option<String>,
     /// Every network our roles grant (role@guild) with per-device enabled state — for the toggle.
     pub networks_status: Vec<common::api::NetworkStatus>,
@@ -32,9 +32,9 @@ pub struct SeedPeer {
     pub endpoint: Option<SocketAddr>,
     /// Hole-punch target (peer's reflexive `ip:port`) when neither side is directly dialable.
     pub punch: Option<SocketAddr>,
-    /// `<device>.<user>.<community>.internal`.
+    /// `<device>.<user>.<community>.unity.internal`.
     pub hostname: String,
-    /// `<user>.<community>.internal` if this is the owner's primary device, else `None`.
+    /// `<user>.<community>.unity.internal` if this is the owner's primary device, else `None`.
     pub primary_alias: Option<String>,
     /// Networks (display names) shared with us — used to scope `expose --net`.
     pub networks: Vec<String>,

@@ -25,8 +25,9 @@ pub const LONGPOLL_HOLD_SECS: u64 = ATTESTATION_TTL_SECS / 2;
 /// pubkey a re-keyed device abandoned (the reaper backstop to the explicit supersede).
 pub const PRESENCE_TTL_SECS: u64 = LONGPOLL_HOLD_SECS * 2 + 60;
 
-/// Private DNS suffix (design.md §6.3): ICANN-reserved `.internal`, not `.local`.
-pub const DNS_SUFFIX: &str = "internal";
+/// Private DNS suffix (design.md §6.3): project namespace under ICANN-reserved `.internal`,
+/// not `.local`.
+pub const DNS_SUFFIX: &str = "unity.internal";
 
 /// Current unix time in seconds.
 pub fn now_unix() -> u64 {
