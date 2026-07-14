@@ -425,6 +425,17 @@ async fn manage(
                 .remove_device(user_id, &pk)
                 .await
                 .map_err(internal)?;
+            // The store row is gone, but the device's presence would linger under its pubkey until
+            // the reaper ages it out — long enough that a device logging out (un-enroll + re-key)
+            // keeps showing up as a stale peer to everyone, including its own re-keyed self. Evict
+            // it now and bump the version so parked long-pollers wake and prune it.
+            let mut changed = false;
+            for (g, r) in st.presence.networks_of(&pk) {
+                changed |= st.presence.evict(g, r, &pk);
+            }
+            if changed {
+                st.version.send_modify(|v| *v += 1);
+            }
             format!("removed {}", sanitize_label(&device_name))
         }
     };
