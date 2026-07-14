@@ -275,22 +275,38 @@ useless for punch: refresh is HTTP/TCP, a different NAT mapping than the WG UDP 
 ### M5.4 — Relay fallback (backend-agnostic) — the symmetric/CGNAT/UDP-blocked tail
 **Goal:** reach pairs where punch structurally can't (both symmetric, CGNAT, or outbound-UDP
 blocked). A relay forwards WG **ciphertext** between the pair; e2e stays intact (relay holds no
-keys). Backend-agnostic — WG endpoint just points at the relay, so it works on today's kernel(win)
-+ userspace(unix) split with **no data-plane rewrite**. Highest-value next NAT increment
+keys). **Transport = TURN** (`webrtc-rs turn`), chosen over a bespoke forward so the M5.5 ICE agent
+reuses the same server + shim (no throwaway relay protocol). Highest-value next NAT increment
 (`docs/prior-art.md` §6.3). Supersedes the old "no relay in v1" stance (design §7.2) as the planned
 follow-on, not a GA blocker.
-- [ ] **Relay-peer selection + authorization** — a stuck-`Unreachable` pair picks a relay-capable
-      co-member (public/dialable endpoint) advertised via attestation/seed; the coordinator pairs
-      relay↔client the same way it pairs a punch, staying off the data path (north-star aligned).
-      Relay session authed by attestation → members relay for members only.
-- [ ] **Consent / DoS surface** — relaying is opt-in per peer; rate/fairness caps so a peer's uplink
-      isn't silently spent. (Design must cover the reflector/DoS surface, cf. the endpoint-spoof
-      hardening already done for reflexives.)
-- [ ] **Data-plane forward** — thin length-prefixed UDP forward of WG frames (or TURN); WG endpoint
-      = the relay socket. `classify_reach` gains `Relayed`.
+
+> **TURN implies a local proxy shim** (revises the old "no data-plane rewrite" note): a TURN relay
+> only forwards TURN-encapsulated traffic, and boringtun emits raw UDP to a fixed endpoint. So each
+> stuck peer points its WG endpoint at a local `127.0.0.1:<shim>` socket and the engine bridges those
+> packets through its TURN allocation. Backend-agnostic (the shim is loopback), and the shim + server
+> are exactly what M5.5 ICE needs — hence TURN now.
+
+- [x] **Relay-peer selection + authorization** ✅ (stage 1) — coordinator matches a stuck pair to a
+      relay-capable co-member and mints short-lived TURN credentials (coturn `use-auth-secret`:
+      base64(HMAC-SHA1(relay_secret, "<expiry>")), `common::relay`), staying off the data path.
+      `relay_target()` picks the lowest-pubkey third-party relay sharing a network with both — symmetric,
+      so both sides meet on it. Members relay for members only. Unit-tested (`relay_target`, credential).
+- [x] **Embedded TURN server + advertisement** ✅ (stage 2) — a dialable, opted-in node runs
+      `turn::server::Server` (`engine/relay.rs`) with a `LongTermAuthHandler` over its persisted
+      `relay_secret`; advertises `relay_capable`/`relay_addr` via `RegisterReq`. Config `relay`
+      (default off) + `relay_port` (3478). Verified: boots "TURN server up", binds UDP :port.
+- [ ] **TURN client + loopback proxy shim** (stage 3) — a peer whose punch went `Unreachable` reports
+      `need_relay`, gets `Seed.relay`, allocates on the relay (`turn::client::Client`), and bridges its
+      WG traffic boringtun↔allocation via a `127.0.0.1:<shim>` socket. **Relayed-address exchange:** TURN
+      assigns each relayed address at allocation time, so each side must learn the *other's* — add
+      `RegisterReq.relay_allocated` (report our relayed addr per peer) + `RelayInfo.peer_relayed`
+      (coordinator hands back the peer's); converges over ~2 long-poll rounds. `classify_reach` gains
+      `Relayed`; wire `Seed.relay` → shim → WG endpoint.
+- [ ] **Consent / DoS surface** — opt-in already covered by `relay = false` default. TODO: per-peer
+      rate/fairness caps so a relay's uplink isn't silently spent (the reflector/DoS surface, cf. the
+      endpoint-spoof hardening done for reflexives).
 - **Verify:** extend `nat-test.sh` with a symmetric-both-ends netns (punch fails → relay carries
-      the tunnel, ping succeeds); relay-selection unit test; assert the relay path carries WG
-      ciphertext only (no plaintext).
+      the tunnel, ping succeeds); assert the relay path carries WG ciphertext only (no plaintext).
 
 ### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
 **Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,
