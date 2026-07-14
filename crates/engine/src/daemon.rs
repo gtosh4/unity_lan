@@ -126,7 +126,14 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             let secret = keys::load_or_create_relay_secret(&cfg.state_dir)?;
             let relay_addr = SocketAddr::new(ep.ip(), cfg.relay_port);
             let bind = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), cfg.relay_port);
-            match crate::relay::RelayServer::start(bind, ep.ip(), secret.clone()).await {
+            match crate::relay::RelayServer::start(
+                bind,
+                ep.ip(),
+                secret.clone(),
+                cfg.relay_max_allocations,
+            )
+            .await
+            {
                 Ok(server) => {
                     let sd = shutdown.clone();
                     tokio::spawn(async move {

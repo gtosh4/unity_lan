@@ -304,9 +304,12 @@ follow-on, not a GA blocker.
       precedence endpoint > relay-shim > punch. Also fixed a latent boringtun panic: the userspace
       backend can't modify a peer in place, so `apply_seeds` now removes-then-adds on an
       endpoint/allowed-ips change (this is what an endpoint switch punch→relay triggers).
-- [ ] **Consent / DoS surface** — opt-in already covered by `relay = false` default. TODO: per-peer
-      rate/fairness caps so a relay's uplink isn't silently spent (the reflector/DoS surface, cf. the
-      endpoint-spoof hardening done for reflexives).
+- [x] **Consent / DoS surface** ✅ — opt-in via `relay = false` default; plus a **concurrent-allocation
+      cap** (`relay_max_allocations`, default 64) enforced in the TURN server's auth handler
+      (`CappedAuth` counts distinct client 5-tuples, decrements via `alloc_close_notify`) so an
+      authorized member still can't spend an unbounded share of the relay's uplink. Unit-tested
+      (cap limits new clients, allows refreshes, refuses expired creds). A finer per-allocation
+      *bandwidth* cap would need forking `webrtc-rs turn`'s data path — deferred, not GA-blocking.
 - **Verify:** ✅ `scripts/relay-test.sh` — 3 netns (A public+relay, B & C behind NATs whose externals
       are firewall-isolated from each other so the punch structurally can't complete): B & C go
       `Unreachable`, allocate on A's TURN server, exchange relayed addresses, and **ping B→C over the

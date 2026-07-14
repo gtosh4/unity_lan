@@ -10,23 +10,66 @@
 //! and this server's [`LongTermAuthHandler`] validates it against the same `relay_secret` without
 //! ever contacting the coordinator. The secret is per-relay and shared with the coordinator only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
 use common::api::{RelayAllocation, RelayInfo};
 use tokio::net::UdpSocket;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use turn::auth::LongTermAuthHandler;
+use turn::allocation::AllocationInfo;
+use turn::auth::{generate_auth_key, AuthHandler};
 use turn::client::{Client, ClientConfig};
 use turn::relay::relay_static::RelayAddressGeneratorStatic;
 use turn::server::config::{ConnConfig, ServerConfig};
 use turn::server::Server;
+use turn::Error as TurnError;
 use webrtc_util::conn::Conn;
 use webrtc_util::vnet::net::Net;
+
+/// TURN auth handler that both validates a minted credential (coturn `use-auth-secret`: the key is
+/// derived from the shared `secret` + the `<expiry>` username) and **caps concurrent allocations**,
+/// so an authorized member still can't spend an unbounded share of the relay's uplink (§7.2 DoS
+/// surface). The cap counts distinct client source 5-tuples: a first sighting over the limit is
+/// refused; a refresh / permission / channel-bind for an already-counted client passes; the count
+/// is decremented when the allocation closes (via `alloc_close_notify`).
+struct CappedAuth {
+    secret: String,
+    max_allocations: usize,
+    active: Arc<Mutex<HashSet<SocketAddr>>>,
+}
+
+impl AuthHandler for CappedAuth {
+    fn auth_handle(
+        &self,
+        username: &str,
+        realm: &str,
+        src_addr: SocketAddr,
+    ) -> Result<Vec<u8>, TurnError> {
+        // Reject an expired time-windowed username (same rule as the built-in LongTermAuthHandler).
+        let expiry: u64 = username
+            .parse()
+            .map_err(|_| TurnError::Other("malformed relay username".into()))?;
+        if expiry < common::now_unix() {
+            return Err(TurnError::Other("expired relay credential".into()));
+        }
+        {
+            let mut active = self.active.lock().unwrap();
+            if !active.contains(&src_addr) {
+                if active.len() >= self.max_allocations {
+                    tracing::warn!(%src_addr, max = self.max_allocations, "relay: allocation cap reached — refusing");
+                    return Err(TurnError::Other("relay allocation cap reached".into()));
+                }
+                active.insert(src_addr);
+            }
+        }
+        let password = common::relay::relay_credential(&self.secret, username);
+        Ok(generate_auth_key(username, realm, &password))
+    }
+}
 
 /// A running embedded TURN server. Holds the server task alive; [`stop`](Self::stop) tears it down.
 pub struct RelayServer {
@@ -35,11 +78,13 @@ pub struct RelayServer {
 
 impl RelayServer {
     /// Start a TURN server bound to `bind` (UDP), advertising `public_ip` as the relayed address
-    /// clients reach it at, authorizing credentials minted against `secret`.
+    /// clients reach it at, authorizing credentials minted against `secret`, and capping concurrent
+    /// allocations at `max_allocations`.
     pub async fn start(
         bind: SocketAddr,
         public_ip: IpAddr,
         secret: String,
+        max_allocations: usize,
     ) -> anyhow::Result<Self> {
         // turn itself allocates no sockets — we hand it the listener (an `Arc<UdpSocket>` is a
         // `webrtc_util::Conn`). The relay generator hands each allocation a relayed address on
@@ -49,6 +94,17 @@ impl RelayServer {
                 .await
                 .with_context(|| format!("binding TURN UDP socket {bind}"))?,
         );
+        // Track active allocations for the cap; decrement as they close.
+        let active: Arc<Mutex<HashSet<SocketAddr>>> = Arc::new(Mutex::new(HashSet::new()));
+        let (close_tx, mut close_rx) = mpsc::channel::<AllocationInfo>(64);
+        {
+            let active = active.clone();
+            tokio::spawn(async move {
+                while let Some(info) = close_rx.recv().await {
+                    active.lock().unwrap().remove(&info.five_tuple.src_addr);
+                }
+            });
+        }
         let server = Server::new(ServerConfig {
             conn_configs: vec![ConnConfig {
                 conn,
@@ -59,13 +115,17 @@ impl RelayServer {
                 }),
             }],
             realm: common::relay::RELAY_REALM.to_owned(),
-            auth_handler: Arc::new(LongTermAuthHandler::new(secret)),
+            auth_handler: Arc::new(CappedAuth {
+                secret,
+                max_allocations,
+                active,
+            }),
             channel_bind_timeout: Duration::from_secs(0),
-            alloc_close_notify: None,
+            alloc_close_notify: Some(close_tx),
         })
         .await
         .context("starting TURN server")?;
-        tracing::info!(%bind, %public_ip, "relay: TURN server up");
+        tracing::info!(%bind, %public_ip, max_allocations, "relay: TURN server up");
         Ok(Self { server })
     }
 
@@ -220,5 +280,41 @@ impl RelaySession {
             peer_relayed_tx,
             _task: task,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn handler(max: usize) -> CappedAuth {
+        CappedAuth {
+            secret: "s3cret".into(),
+            max_allocations: max,
+            active: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    #[test]
+    fn cap_limits_distinct_clients_but_allows_refresh() {
+        let h = handler(2);
+        let u = (common::now_unix() + 3600).to_string();
+        let a: SocketAddr = "10.0.0.2:1".parse().unwrap();
+        let b: SocketAddr = "10.0.0.3:1".parse().unwrap();
+        let c: SocketAddr = "10.0.0.4:1".parse().unwrap();
+        assert!(h.auth_handle(&u, "unitylan", a).is_ok());
+        assert!(h.auth_handle(&u, "unitylan", b).is_ok());
+        // A refresh from an already-counted client still passes even at the cap.
+        assert!(h.auth_handle(&u, "unitylan", a).is_ok());
+        // A new client over the cap is refused.
+        assert!(h.auth_handle(&u, "unitylan", c).is_err());
+    }
+
+    #[test]
+    fn expired_credential_refused() {
+        let h = handler(8);
+        let past = (common::now_unix() - 1).to_string();
+        let a: SocketAddr = "10.0.0.2:1".parse().unwrap();
+        assert!(h.auth_handle(&past, "unitylan", a).is_err());
     }
 }

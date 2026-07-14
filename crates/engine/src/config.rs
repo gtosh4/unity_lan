@@ -75,6 +75,10 @@ pub struct Config {
     /// which boringtun owns. Advertised to co-members via the coordinator as our relay address.
     #[serde(default = "default_relay_port")]
     pub relay_port: u16,
+    /// Cap on concurrent relay allocations (when `relay` is on) — bounds the share of this host's
+    /// uplink a relayed mesh can spend (§7.2 DoS surface). A new client over the cap is refused.
+    #[serde(default = "default_relay_max_allocations")]
+    pub relay_max_allocations: usize,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.
@@ -106,6 +110,9 @@ fn default_oauth_redirect() -> String {
 }
 fn default_relay_port() -> u16 {
     3478 // the IANA-registered TURN port
+}
+fn default_relay_max_allocations() -> usize {
+    64
 }
 
 /// Starter config written by `load_or_init` when the default path is missing. Points at a
