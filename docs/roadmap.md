@@ -18,37 +18,38 @@ M1 spine ─▶ M2 wg+control ─▶ M3 gossip ─▶ M4 gui
 verified `wg_ip` + hostname obtained from the coordinator.
 
 ### M1.0 Workspace
-- [ ] Cargo workspace `Cargo.toml`; crates `common`, `coordinator`, `engine` (+ `gui` stub later).
-- [ ] Shared workspace deps (tokio, serde, tracing) via `[workspace.dependencies]`.
-- [ ] `.gitignore` for `/target`, secrets, `*.db`.
+- [x] Cargo workspace `Cargo.toml`; crates `common`, `coordinator`, `engine` (+ `gui` stub later).
+- [x] Shared workspace deps (tokio, serde, tracing) via `[workspace.dependencies]`.
+- [x] `.gitignore` for `/target`, secrets, `*.db`.
 
 ### M1.1 `common` (pure, unit-tested — no network)
-- [ ] `crypto.rs`: Ed25519 keypair, `sign`/`verify` (ed25519-dalek); WG key types (x25519-dalek).
-- [ ] `wire.rs`: `Signed<T>` envelope, postcard encode/decode, base64 transport form.
-- [ ] `attestation.rs`: `Attestation` struct (serde) + `verify(anchor, now)`.
-- [ ] `netid.rs`: `subnet_of(guild,role)`, `host_hint(user)`, `sanitize_label`, siphash.
-- [ ] `api.rs`: coordinator DTOs (`RegisterReq/Resp`, `SeedRecord`, `RefreshReq/Resp`).
-- [ ] **Tests**: sign→verify round-trip; tamper → fail; TTL expiry → fail; subnet in `100.64/10`.
+- [x] `crypto.rs`: Ed25519 keypair, `sign`/`verify` (ed25519-dalek); WG key types (x25519-dalek).
+- [x] `wire.rs`: `Signed<T>` envelope, postcard encode/decode, base64 transport form.
+- [x] `attestation.rs`: `Attestation` struct (serde) + `verify(anchor, now)`.
+- [x] `netid.rs`: `subnet_of(guild,role)`, `host_hint(user)`, `sanitize_label`, siphash.
+- [x] `api.rs`: coordinator DTOs (`RegisterReq/Resp`, `SeedRecord`, `RefreshReq/Resp`).
+- [x] **Tests**: sign→verify round-trip; tamper → fail; TTL expiry → fail; subnet in `100.64/10`.
 
 ### M1.2 `coordinator`
-- [ ] `config.rs`: TOML (guild_id, bot_token, oauth client id/secret + redirect, role→network
+- [x] `config.rs`: TOML (guild_id, bot_token, oauth client id/secret + redirect, role→network
       allowlist, bind addr, db path, signing-key path).
-- [ ] `store.rs`: SQLite via sqlx — `allocations`, `signing_key`, `tombstones`; migrations.
-- [ ] `signer.rs`: load/generate Ed25519 key; `sign_attestation(user, role, …, ttl=30m)`.
-- [ ] `discord.rs`: twilight-http `GET member` → roles + nick.
+- [x] `store.rs`: SQLite via sqlx — `allocations`, `signing_key`, `tombstones`; migrations.
+- [x] `signer.rs`: load/generate Ed25519 key; `sign_attestation(user, role, …, ttl=30m)`.
+- [x] `discord.rs`: twilight-http `GET member` → roles + nick.
 - [x] `oauth.rs`: Discord OAuth2 auth-code + **PKCE** (engine is the public client, no secret);
       coordinator verifies the access token → `user_id` (`identify`). `FakeOauth` for offline tests.
-- [ ] `alloc.rs`: allocate stable `wg_ip` per `(guild,role,user)`; persist; collision-resolve.
+- [x] IP allocation: stable per-device `wg_ip` in flat `100.64/10` — `store.rs::allocate_device_ip`
+      (per-device keying superseded the old per-`(guild,role,user)` `alloc.rs` plan, see M-device ch1).
 - [x] `api.rs` (axum): `GET /oauth/pkce-config`, `POST /oauth/complete`, `POST /register`.
-- [ ] `main.rs`: load config, open store, serve.
+- [x] `main.rs`: load config, open store, serve.
 
 ### M1.3 `engine` (headless)
-- [ ] `config.rs` + state dir (0600).
-- [ ] `auth.rs`: loopback OAuth (return authorize URL, catch redirect → session token).
-- [ ] gen WG keypair (private stays local).
-- [ ] `coord.rs`: `POST /register{wg_pubkey}` → attestations + `coord_pubkey`; **verify** sig +
+- [x] `config.rs` + state dir (0600).
+- [x] `auth.rs`: loopback OAuth (return authorize URL, catch redirect → session token).
+- [x] gen WG keypair (private stays local).
+- [x] `coord.rs`: `POST /register{wg_pubkey}` → attestations + `coord_pubkey`; **verify** sig +
       TTL; **pin** anchor.
-- [ ] `main.rs`: run once → print each `wg_ip` + `<nick>.<role>.<guild>.internal`.
+- [x] `main.rs`: run once → print each `wg_ip` + `<nick>.<role>.<guild>.internal`.
 
 **Verify:** against a test Discord guild, engine logs a signature-verified attestation and
 prints e.g. `alice.minecraft.myguild.internal → 100.64.42.7`. Tamper the payload → engine
@@ -215,13 +216,12 @@ protocol itself is the same one `mesh-test.sh` exercises via the `ctl` CLI.
 
 ## M5 — NAT traversal
 **Goal:** reach members behind NAT. Split by reachability class: *reachable* (UPnP / forward →
-dialable), *cone-NAT'd* (hole punch), *symmetric-both* (diagnostics only, §7.2 non-goal).
+dialable), *cone-NAT'd* (hole punch), *symmetric-both* (relay fallback — M5.4, §7.2).
 Punch architecture (settled): **coordinator-mediated + peer-observed reflexive** — reuses the
 long-poll/presence/endpoint cache already built; the simultaneous long-poll wake *is* the punch
 sync signal; reflexive endpoint is read from a reachable peer's view of us (no STUN server — the
-WG socket is owned by boringtun, so a side-socket STUN is impossible). Corrects design §3.1's
-"reflect the refresh source" note: refresh is HTTP/TCP, a different NAT mapping than the WG UDP
-port — useless for punch.
+WG socket is owned by boringtun, so a side-socket STUN is impossible). Note the refresh source is
+useless for punch: refresh is HTTP/TCP, a different NAT mapping than the WG UDP port.
 
 ### M5.1 — UPnP + endpoint autodiscovery ✅
 - [x] `nat.rs`: UPnP-IGD (`igd-next`) maps the WG UDP port, learns external `ip:port`, renews the
@@ -260,7 +260,7 @@ port — useless for punch.
 - [x] Per-peer reachability classifier (`common::control::classify_reach`): a peer is `Direct`
       (dialable, or a hole punch whose WG handshake completed), `Punching` (dialing a reflexive,
       within a 30s grace window), or `Unreachable` (punch outstanding past the window with no
-      handshake — the symmetric-NAT-both-ends tail; no relay in v1, §7.2).
+      handshake — the symmetric-NAT-both-ends tail, relay fallback planned in M5.4, §7.2).
 - [x] `WgBackend::peer_stats()` surfaces each peer's last-seen endpoint **and** last-handshake
       time; the daemon classifies every peer each loop and overlays it onto the control-socket
       status (`control::set_reach`, cheap — no DNS/firewall work) so a stuck punch shows up even
@@ -335,6 +335,16 @@ no online observer, which peer-observed can't start), host/srflx candidates, and
       device IP in a flat `100.64/10`, networks are pure ACL. Isolation is already enforced by
       seed-scoping (you only peer co-members sharing ≥1 network) + the firewall's `--net` source
       scoping (M7c-2), not per-role `/32`s.
+- [ ] **Namespace rename `.internal` → `.unity.internal`** — align code with design (header + §6,
+      already standardized there). Zone suffix is centralized: flip `common::DNS_SUFFIX`
+      (`crates/common/src/lib.rs:29`) `"internal"` → `"unity.internal"` and the `hostname` /
+      `primary_alias` builders (`attestation.rs`) cascade. Then fix the sites that hardcode the
+      suffix: resolver `DOMAIN` consts (`resolver/linux.rs:12` routing domain `~internal` →
+      `~unity.internal`; `resolver/windows.rs:28` NRPT namespace `.internal` → `.unity.internal`),
+      `dns.rs:85` `ends_with(".internal")`, and the `.internal` test fixtures/comments across
+      `attestation.rs`, `dns.rs`, `gui/src/main.rs`, plus scripts (`mesh-test.sh`,
+      `gui-login-test.sh`, `resolver-hook-test.sh`). **Verify:** `mesh-test.sh` +
+      `resolver-hook-test.sh` resolve `<device>.<user>.<community>.unity.internal`.
 
 **Verify:** ✅ 2 `resolver/linux.rs` unit tests (resolvectl arg construction) + 2 `resolver/windows.rs`
 tests (NRPT script construction); `scripts/resolver-hook-test.sh` (live, root) — on this host's real
@@ -433,7 +443,8 @@ elevated box. macOS `/etc/resolver` still deferred.
 ---
 
 ## Cross-cutting (ongoing)
-- [ ] `tracing` logging across binaries.
+- [x] `tracing` logging across binaries — both binaries init `tracing_subscriber` + `EnvFilter`
+      (coordinator/engine `main.rs`, engine `service.rs`); ~44 `info!/warn!/error!` sites.
 - [~] Per-OS service packaging (systemd unit · **Windows Service** ✅ · launchd plist).
       **Windows Service** landed (M-win2): `service.rs` wraps the engine as a `LocalSystem`
       auto-start service via the `windows-service` crate. `service install [config.toml]` registers
@@ -455,7 +466,9 @@ elevated box. macOS `/etc/resolver` still deferred.
       host. Still TODO: an MSI/WiX installer to bundle engine+gui+`wireguard.dll`, register the service,
       and write a default config; systemd + launchd packaging. Follow-up: with GUI stop gone, the `WP`
       (`SERVICE_STOP`) grant in `RELAXED_DACL` could be dropped to `SERVICE_START` only.
-- [ ] CI: `cargo fmt`/`clippy`/`test`.
+- [x] CI: `cargo fmt`/`clippy`/`test` — `.github/workflows/ci.yml` runs the three gates
+      (`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`);
+      `release.yml` builds artifacts.
 - [x] Endpoint-record spoof hardening ✅ — the coordinator accepts a peer-observed reflexive
       (`RegisterReq.observed`) only for a pubkey the caller actually meshes with (a co-member seed),
       via `accepted_reflexives`. Was: any authenticated member could write an arbitrary endpoint for
@@ -480,8 +493,9 @@ elevated box. macOS `/etc/resolver` still deferred.
       (crashed/dropped client) that would otherwise linger until coordinator restart. Verified:
       `should_supersede` + `reap_evicts_only_stale_entries` +
       `record_refreshes_last_seen_without_reporting_change` unit tests; `mesh-test.sh` still green.
-- [x] Symmetric-NAT policy ✅ — v1 settled as best-effort + `[unreachable: symmetric NAT?]`
-      diagnostic, no relay (design.md §7.2). System already degrades cleanly; no code change.
+- [x] Symmetric-NAT policy ✅ — v1 ships best-effort + `[unreachable: symmetric NAT?]` diagnostic;
+      ciphertext relay is the planned follow-on (M5.4, design.md §7.2), not a GA blocker. System
+      already degrades cleanly; no code change for the v1 diagnostic.
 
 ## Post-GA
 - [→] Symmetric-NAT-both relay — **promoted to M5.4** (now the planned next NAT increment, not

@@ -284,6 +284,15 @@ enum Message {                                                                 /
   durability + simple queries).
 - **Signing-key custody** — file (0600) vs OS keystore vs age-encrypted at rest.
 - **Clock skew** — TTL/`issued_at` assume roughly synced clocks; how much skew to tolerate.
+- **Userspace backend throughput (GSO/GRO)** — the userspace primary (boringtun, via
+  `defguard_boringtun`) is strictly per-packet: one `send_to`/`recv_from` per datagram, `Tunn`
+  encap/decap per packet, no `vnet_hdr` on the TUN. wireguard-go gained Linux UDP GSO/GRO +
+  TUN-side TSO/GRO + vectorized `sendmmsg`/`recvmmsg` (wireguard-go PR #75, 2023) for ~2.2x bulk
+  throughput; boringtun has none of it. Adding it = forking `defguard_boringtun` (not this repo):
+  UDP GSO/GRO alone is a partial win (drops syscall overhead only — crypto stays per-packet),
+  and the big TUN-side TSO win needs a batched vector API through boringtun's noise core.
+  Invisible below ~2 Gbit/s for typical mesh traffic. Defer: accept the gap, track boringtun
+  upstream; revisit only if a workload gates on Linux bulk throughput.
 
 ## 8. M1 Cut (what to build first)
 Smallest vertical slice proving the trust model:
