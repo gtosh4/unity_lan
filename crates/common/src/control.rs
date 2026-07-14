@@ -197,8 +197,11 @@ pub enum PeerReach {
     /// Hole punch in progress: we're dialing the peer's reflexive, no handshake yet.
     Punching,
     /// Hole punch attempted but never completed (no handshake). Likely symmetric NAT on both
-    /// ends — not traversable without a relay (out of scope for v1, §7.2).
+    /// ends — not traversable without a relay (§7.2).
     Unreachable,
+    /// Reached through a ciphertext relay (§7.2, M5.4): a direct path and a hole punch both failed,
+    /// so WG traffic rides a co-member's TURN relay (relay holds no keys — e2e intact).
+    Relayed,
 }
 
 /// Classify a peer's reachability from whether it needed a hole punch, whether a WG handshake has

@@ -140,6 +140,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         addr: Some(relay_addr),
                         secret: Some(secret),
                         need_relay: Vec::new(),
+                        allocated: Vec::new(),
                     }
                 }
                 Err(e) => {
@@ -226,6 +227,12 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // Whether the last coordinator refresh succeeded. We just registered, so start `true`; a failed
         // refresh flips it (the mesh keeps running from cache), a successful one flips it back.
         let mut coord_online = true;
+        // Relay sessions (§7.2, M5.4): a TURN allocation + loopback shim per peer we can only reach
+        // via a relay. `relay_eps` maps such a peer to its shim address, used as the peer's WG
+        // endpoint. Persist across refreshes within an enrollment; rebuilt on re-login.
+        let mut relays = crate::relay::RelayManager::new();
+        let mut relay_eps: HashMap<[u8; 32], SocketAddr> =
+            sync_relays(&mut relays, &last_seeds).await;
         apply_state(
             backend.as_ref(),
             &fw,
@@ -236,6 +243,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             &last_seeds,
             &mut peers,
             coord_online,
+            &relay_eps,
         )
         .await?;
 
@@ -277,6 +285,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // (no dialable endpoint); "connected" if WG has a recent handshake for it.
             let now = std::time::Instant::now();
             let mut reach: HashMap<std::net::Ipv4Addr, common::control::PeerReach> = HashMap::new();
+            // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`)
+            // *plus* those we're already relaying — a working relay tunnel reads as connected, so
+            // without this it would drop out of `need_relay` and the coordinator would withdraw the
+            // relay, flapping it.
+            let mut want_relay: Vec<[u8; 32]> = Vec::new();
             for (pk, cfg) in &peers {
                 let punched = last_seeds
                     .iter()
@@ -294,12 +307,26 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 let age = punch_since
                     .get(pk)
                     .map_or(0, |t| now.duration_since(*t).as_secs());
-                let r = common::control::classify_reach(punched, connected, age);
+                let relaying = relays.is_relaying(pk);
+                let r = if relaying {
+                    common::control::PeerReach::Relayed
+                } else {
+                    common::control::classify_reach(punched, connected, age)
+                };
+                if relaying || r == common::control::PeerReach::Unreachable {
+                    want_relay.push(*pk);
+                }
                 if let Some((ip, _)) = cfg.allowed_ips.first() {
                     reach.insert(*ip, r);
                 }
             }
             control::set_reach(&status, &reach).await;
+
+            // This iteration's relay report: our fixed capability (from `relay_report`) plus the
+            // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
+            let mut relay_iter = relay_report.clone();
+            relay_iter.need_relay = want_relay;
+            relay_iter.allocated = relays.allocations();
 
             let changed = observed != last_reported;
             if changed {
@@ -333,8 +360,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 // once (works offline), then loop round to re-refresh so the coordinator picks up the
                 // new opt-out / paused state.
                 _ = localnet.wake.notified() => {
+                    relay_eps = sync_relays(&mut relays, &last_seeds).await;
                     apply_state(
-                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online,
+                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps,
                     ).await?;
                     continue;
                 }
@@ -353,7 +381,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     localnet.as_refs(),
                     observed.clone(),
                     localnet.is_paused(),
-                    relay_report.clone(),
+                    relay_iter,
                 ) => r,
             };
             match refreshed {
@@ -371,6 +399,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                             } else {
                                 tracing::warn!("no grant — access revoked; dropping all peers");
                             }
+                            // Ensure/refresh relay allocations for any seed carrying relay info, and
+                            // learn each peer's shim endpoint before applying peers.
+                            relay_eps = sync_relays(&mut relays, &last_seeds).await;
                             apply_state(
                                 backend.as_ref(),
                                 &fw,
@@ -381,6 +412,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                                 &last_seeds,
                                 &mut peers,
                                 coord_online,
+                                &relay_eps,
                             )
                             .await?;
                         }
@@ -448,6 +480,7 @@ async fn apply_state(
     seeds: &[SeedPeer],
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     coord_online: bool,
+    relay_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<()> {
     // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
     // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
@@ -502,8 +535,29 @@ async fn apply_state(
     if let Some(fw) = fw {
         fw.update_peers(peers_by_net(&active))?;
     }
-    apply_seeds(backend, active, peers)?;
+    apply_seeds(backend, active, peers, relay_eps)?;
     Ok(())
+}
+
+/// For every seed carrying relay info, ensure a TURN allocation + loopback shim exists (allocating
+/// on first sight, refreshing the peer's relayed address each time), and return the map of
+/// relayed-peer → local shim endpoint. Sessions for peers no longer relayed are dropped.
+async fn sync_relays(
+    relays: &mut crate::relay::RelayManager,
+    seeds: &[SeedPeer],
+) -> HashMap<[u8; 32], SocketAddr> {
+    let mut eps = HashMap::new();
+    let mut keep = HashSet::new();
+    for s in seeds {
+        if let Some(info) = &s.relay {
+            keep.insert(s.pubkey);
+            if let Some(shim) = relays.ensure(s.pubkey, info).await {
+                eps.insert(s.pubkey, shim);
+            }
+        }
+    }
+    relays.retain(&keep);
+    eps
 }
 
 /// Keep peers that share at least one network we haven't locally disabled. Shared networks arrive
@@ -615,20 +669,27 @@ fn apply_seeds(
     backend: &dyn WgBackend,
     seeds: Vec<SeedPeer>,
     peers: &mut HashMap<[u8; 32], PeerConfig>,
+    relay_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<()> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
     #[allow(clippy::type_complexity)]
     let mut desired: HashMap<[u8; 32], (Vec<(Ipv4Addr, u8)>, Option<SocketAddr>)> = HashMap::new();
     for s in seeds {
-        // A directly dialable endpoint wins; otherwise fall back to the punch target (reflexive) so
-        // WG handshakes toward it — the coordinator only sets `punch` when both sides will punch.
-        if s.endpoint.is_none() {
+        // Endpoint precedence: a directly dialable endpoint wins; else our relay shim if we have a
+        // session for this peer (punch already failed → we're relaying); else the punch target
+        // (reflexive) so WG handshakes toward it. The relay endpoint is loopback — the shim forwards
+        // through our TURN allocation.
+        let relay_ep = relay_eps.get(&s.pubkey).copied();
+        if s.endpoint.is_none() && relay_ep.is_none() {
             if let Some(p) = s.punch {
                 tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
             }
         }
-        let ep = s.endpoint.or(s.punch);
+        if let Some(shim) = relay_ep {
+            tracing::debug!(peer = %hex8(&s.pubkey), %shim, "relay: routing peer via TURN shim");
+        }
+        let ep = s.endpoint.or(relay_ep).or(s.punch);
         let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), ep));
         e.0.push((s.ip, 32));
         if e.1.is_none() {

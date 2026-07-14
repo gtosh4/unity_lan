@@ -73,6 +73,20 @@ pub struct RegisterReq {
     /// in the peer's [`Seed::relay`]. Empty in the common (directly-reachable) case.
     #[serde(default)]
     pub need_relay: Vec<[u8; 32]>,
+    /// TURN relayed addresses this device has allocated to reach specific peers (§7.2, M5.4). TURN
+    /// assigns each relayed address at allocation time, so the coordinator collects ours and hands
+    /// it to the peer as [`RelayInfo::peer_relayed`] — the address it sends to, to reach us. Empty
+    /// unless we're relaying.
+    #[serde(default)]
+    pub relay_allocated: Vec<RelayAllocation>,
+}
+
+/// "To reach `peer`, I allocated the TURN relayed address `relayed`." Reported so the coordinator
+/// can hand `relayed` to `peer` as the address it sends to (the relayed-candidate exchange).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayAllocation {
+    pub peer: [u8; 32],
+    pub relayed: SocketAddr,
 }
 
 /// Everything a stuck peer needs to reach a co-member through a relay's TURN server (§7.2, M5.4).
@@ -83,14 +97,19 @@ pub struct RegisterReq {
 pub struct RelayInfo {
     /// The relay's TURN server `ip:port` (its `relay_addr`).
     pub turn_addr: SocketAddr,
-    /// TURN long-term-credential username, `"<unix_expiry>:<hint>"` (the REST-API form). The
-    /// expiry bounds credential lifetime; the relay's server rejects it past that.
+    /// TURN long-term-credential username: the bare `"<unix_expiry>"` the webrtc-rs handler parses.
+    /// The expiry bounds credential lifetime; the relay's server rejects it past that.
     pub username: String,
     /// TURN credential: base64(HMAC-SHA1(relay_secret, username)). Used as the long-term-credential
     /// password when allocating on the relay.
     pub credential: String,
     /// TURN realm the relay's server presents (the relay's identity).
     pub realm: String,
+    /// The peer's own TURN relayed address on this same relay — the address we send to, to reach
+    /// them. `None` until the peer has allocated and reported it (the coordinator fills it on a
+    /// later refresh); until then we allocate + listen but can't yet forward (a ~2-round converge).
+    #[serde(default)]
+    pub peer_relayed: Option<SocketAddr>,
 }
 
 /// "I saw device `pubkey` sending from `endpoint`." A peer's reflexive address as observed across

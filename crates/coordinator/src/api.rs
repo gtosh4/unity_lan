@@ -42,11 +42,20 @@ pub struct AppState {
     /// on restart (repopulated as relays refresh). A stale entry only means an allocation attempt
     /// fails and the client falls back — no correctness impact.
     pub relays: Arc<Mutex<HashMap<[u8; 32], RelayReg>>>,
+    /// TURN relayed-address exchange (§7.2, M5.4): `(owner, peer)` → the relayed address `owner`
+    /// allocated to reach `peer`. Populated from `RegisterReq.relay_allocated`; when building
+    /// `peer`'s snapshot the coordinator hands back `(owner, peer)` as `peer`'s
+    /// [`RelayInfo::peer_relayed`] for reaching `owner`. Last write wins; lost on restart.
+    pub relay_allocs: Arc<Mutex<RelayAllocs>>,
     /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
     /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
     /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
     pub rotation_chain: Vec<String>,
 }
+
+/// `(owner, peer)` → the relayed address `owner` allocated to reach `peer` (the relayed-candidate
+/// exchange table in [`AppState::relay_allocs`]).
+pub type RelayAllocs = HashMap<([u8; 32], [u8; 32]), std::net::SocketAddr>;
 
 /// A relay-capable device's TURN reachability, kept in [`AppState::relays`].
 #[derive(Clone, Debug)]
@@ -362,6 +371,19 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
+    // Record this device's TURN relayed addresses (relayed-candidate exchange). A new/changed
+    // relayed address bumps the version so the peer wakes and learns it as its `peer_relayed` — the
+    // second half of the ~2-round relay converge.
+    {
+        let mut allocs = st.relay_allocs.lock().unwrap();
+        for a in &req.relay_allocated {
+            if allocs.get(&(req.wg_pubkey, a.peer)) != Some(&a.relayed) {
+                allocs.insert((req.wg_pubkey, a.peer), a.relayed);
+                changed = true;
+            }
+        }
+    }
+
     // Relay candidates for the caller: co-members that advertise a TURN relay, captured with their
     // shared-with-caller network names before the seed loop consumes `by_pubkey`. A relay is used
     // for a peer only if it *also* shares a network with that peer (symmetric authorization) — and
@@ -377,6 +399,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         })
         .collect();
     let need_relay: std::collections::HashSet<[u8; 32]> = req.need_relay.iter().copied().collect();
+    let relay_allocs = st.relay_allocs.lock().unwrap().clone();
     let now = common::now_unix();
 
     // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
@@ -391,9 +414,13 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             reflexive.get(&mp.pubkey).copied(),
         );
         // If we told the coordinator we can't reach this peer directly (punch went Unreachable),
-        // hand back a relay we both share a network with.
+        // hand back a relay we both share a network with, plus the peer's own relayed address on it
+        // (once the peer has reported one) so we know where to send.
         let relay = if need_relay.contains(&mp.pubkey) {
-            relay_target(&mp.pubkey, &networks, &relay_candidates, now)
+            relay_target(&mp.pubkey, &networks, &relay_candidates, now).map(|mut info| {
+                info.peer_relayed = relay_allocs.get(&(mp.pubkey, req.wg_pubkey)).copied();
+                info
+            })
         } else {
             None
         };

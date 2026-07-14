@@ -33,6 +33,7 @@ pub struct RelayReport {
     pub addr: Option<SocketAddr>,
     pub secret: Option<String>,
     pub need_relay: Vec<[u8; 32]>,
+    pub allocated: Vec<common::api::RelayAllocation>,
 }
 
 /// A verified co-member to peer with.
@@ -49,6 +50,9 @@ pub struct SeedPeer {
     pub primary_alias: Option<String>,
     /// Networks (display names) shared with us — used to scope `expose --net`.
     pub networks: Vec<String>,
+    /// Relay reservation for reaching this peer when direct + punch both fail (§7.2, M5.4): the TURN
+    /// server + credentials to allocate on, and (once known) the peer's own relayed address.
+    pub relay: Option<common::api::RelayInfo>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -155,6 +159,7 @@ async fn post(
             relay_addr: relay.addr,
             relay_secret: relay.secret,
             need_relay: relay.need_relay,
+            relay_allocated: relay.allocated,
         })
         .send()
         .await
@@ -270,6 +275,7 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
             hostname: att.hostname(&seed.community_name),
             primary_alias: att.primary_alias(&seed.community_name),
             networks: seed.networks.clone(),
+            relay: seed.relay.clone(),
         });
     }
     Ok(peers)

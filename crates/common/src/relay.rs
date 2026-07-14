@@ -53,6 +53,7 @@ pub fn issue_relay_creds(
         username,
         credential,
         realm: RELAY_REALM.to_string(),
+        peer_relayed: None,
     }
 }
 
