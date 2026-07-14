@@ -240,6 +240,14 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let mut relays = crate::relay::RelayManager::new();
         let mut relay_eps: HashMap<[u8; 32], SocketAddr> =
             sync_relays(&mut relays, &last_seeds).await;
+        // Side-socket ICE (§7.2, M5.5): userspace-only. For a stuck peer we run an ICE agent beside
+        // boringtun and route its WG traffic through the negotiated path via a loopback shim (like the
+        // relay). `ice_eps` maps such a peer to its shim; on the kernel path it stays empty (that path
+        // keeps the M5.4 relay above). `coord_stun` is the coordinator's STUN bootstrap fallback.
+        let ice_enabled = backend.is_userspace();
+        let mut ice = crate::ice::IceManager::new();
+        let mut coord_stun = resp.stun_addr;
+        let mut ice_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
         apply_state(
             backend.as_ref(),
             &fw,
@@ -251,6 +259,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             &mut peers,
             coord_online,
             &relay_eps,
+            &ice_eps,
         )
         .await?;
 
@@ -264,6 +273,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // else a freshly-`Unreachable` peer's relay request would sit until the hold elapses.
         let mut last_relay_need: Vec<[u8; 32]> = Vec::new();
         let mut last_relay_alloc: Vec<common::api::RelayAllocation> = Vec::new();
+        // The last ICE offers we reported — a change (new candidates / creds) must break the hold too,
+        // so a freshly-gathered candidate reaches the peer promptly instead of waiting out the hold.
+        let mut last_ice_offers: Vec<common::api::IceEndpoint> = Vec::new();
         // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
         let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
         loop {
@@ -319,12 +331,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     .get(pk)
                     .map_or(0, |t| now.duration_since(*t).as_secs());
                 let relaying = relays.is_relaying(pk);
+                // On the userspace path a peer routed through ICE reads as connected; keep it in the
+                // want set so its Seed.relay (ICE's TURN candidate) + Seed.ice keep flowing, else the
+                // coordinator would withdraw them and the session would flap (mirrors `relaying`).
+                let icing = ice.is_connected(pk);
                 let r = if relaying {
                     common::control::PeerReach::Relayed
                 } else {
                     common::control::classify_reach(punched, connected, age)
                 };
-                if relaying || r == common::control::PeerReach::Unreachable {
+                if relaying || icing || r == common::control::PeerReach::Unreachable {
                     want_relay.push(*pk);
                 }
                 if let Some((ip, _)) = cfg.allowed_ips.first() {
@@ -337,6 +353,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
             // Sorted for a stable change comparison against the last report.
             want_relay.sort();
+            // The stuck-peer set for this iteration (Unreachable ∪ relaying ∪ ICE-connected) — the
+            // peers we run ICE / request a relay for.
+            let want_set: HashSet<[u8; 32]> = want_relay.iter().copied().collect();
             let mut allocated = relays.allocations();
             allocated.sort_by_key(|a| a.peer);
             let mut relay_iter = relay_report.clone();
@@ -344,6 +363,17 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             relay_iter.allocated = allocated;
             let this_relay_need = relay_iter.need_relay.clone();
             let this_relay_alloc = relay_iter.allocated.clone();
+
+            // Our ICE offers to report (userspace path only). Sorted for a stable change compare — a
+            // change (fresh candidates as gathering completes, or an ICE restart's creds) must report
+            // at once so the peer gets them without waiting out the long-poll hold.
+            let mut ice_offers = if ice_enabled {
+                ice.offers()
+            } else {
+                Vec::new()
+            };
+            ice_offers.sort_by_key(|e| e.peer);
+            let ice_changed = ice_offers != last_ice_offers;
 
             let changed = observed != last_reported;
             if changed {
@@ -357,7 +387,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             let relay_changed =
                 this_relay_need != last_relay_need || this_relay_alloc != last_relay_alloc;
             // Report immediately (no hold) when our view changed; else hold for membership.
-            let poll_since = if changed || relay_changed {
+            let poll_since = if changed || relay_changed || ice_changed {
                 None
             } else {
                 since
@@ -385,15 +415,19 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 // once (works offline), then loop round to re-refresh so the coordinator picks up the
                 // new opt-out / paused state.
                 _ = localnet.wake.notified() => {
-                    relay_eps = sync_relays(&mut relays, &last_seeds).await;
+                    if ice_enabled {
+                        ice_eps = sync_ice(&mut ice, &last_seeds, wg_pub, coord_stun, &want_set).await;
+                    } else {
+                        relay_eps = sync_relays(&mut relays, &last_seeds).await;
+                    }
                     apply_state(
-                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps,
+                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps,
                     ).await?;
                     continue;
                 }
                 // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
                 // reported on the next loop). Only while unchanged — a change goes straight to a report.
-                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed && !relay_changed => {
+                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed && !relay_changed && !ice_changed => {
                     continue;
                 }
                 r = coord::refresh(
@@ -407,6 +441,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     observed.clone(),
                     localnet.is_paused(),
                     relay_iter,
+                    ice_offers.clone(),
                 ) => r,
             };
             match refreshed {
@@ -416,6 +451,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     last_reported = observed; // the coordinator now has this reflexive set
                     last_relay_need = this_relay_need; // …and this relay need/allocation set
                     last_relay_alloc = this_relay_alloc;
+                    last_ice_offers = ice_offers; // …and this ICE offer set
+                    coord_stun = resp.stun_addr; // the STUN fallback may have (dis)appeared
                     match coord::verified_seeds(&resp) {
                         Ok(seeds) => {
                             last_seeds = seeds;
@@ -426,9 +463,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                             } else {
                                 tracing::warn!("no grant — access revoked; dropping all peers");
                             }
-                            // Ensure/refresh relay allocations for any seed carrying relay info, and
-                            // learn each peer's shim endpoint before applying peers.
-                            relay_eps = sync_relays(&mut relays, &last_seeds).await;
+                            // Ensure/refresh the per-peer overlay for stuck peers before applying: on
+                            // the userspace path an ICE session per stuck peer (its shim as the WG
+                            // endpoint); on the kernel path the M5.4 relay allocation + shim.
+                            if ice_enabled {
+                                ice_eps =
+                                    sync_ice(&mut ice, &last_seeds, wg_pub, coord_stun, &want_set)
+                                        .await;
+                            } else {
+                                relay_eps = sync_relays(&mut relays, &last_seeds).await;
+                            }
                             apply_state(
                                 backend.as_ref(),
                                 &fw,
@@ -440,6 +484,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                                 &mut peers,
                                 coord_online,
                                 &relay_eps,
+                                &ice_eps,
                             )
                             .await?;
                         }
@@ -508,6 +553,7 @@ async fn apply_state(
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     coord_online: bool,
     relay_eps: &HashMap<[u8; 32], SocketAddr>,
+    ice_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<()> {
     // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
     // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
@@ -562,7 +608,7 @@ async fn apply_state(
     if let Some(fw) = fw {
         fw.update_peers(peers_by_net(&active))?;
     }
-    apply_seeds(backend, active, peers, relay_eps)?;
+    apply_seeds(backend, active, peers, relay_eps, ice_eps)?;
     Ok(())
 }
 
@@ -584,6 +630,46 @@ async fn sync_relays(
         }
     }
     relays.retain(&keep);
+    eps
+}
+
+/// For each stuck peer (in `want`), ensure an ICE agent exists (starting it + gathering on first
+/// sight, feeding the peer's latest ICE offer each call) and return the map of peer → local shim
+/// endpoint for those that have connected. Sessions for peers no longer stuck are dropped. STUN is
+/// relay-first (a dialable relay co-member answers Binding too) with the coordinator host as a
+/// fallback; the peer's `relay` reservation doubles as ICE's TURN relay candidate.
+async fn sync_ice(
+    ice: &mut crate::ice::IceManager,
+    seeds: &[SeedPeer],
+    self_pk: [u8; 32],
+    coord_stun: Option<SocketAddr>,
+    want: &HashSet<[u8; 32]>,
+) -> HashMap<[u8; 32], SocketAddr> {
+    let mut eps = HashMap::new();
+    let mut keep = HashSet::new();
+    for s in seeds {
+        if !want.contains(&s.pubkey) {
+            continue;
+        }
+        keep.insert(s.pubkey);
+        let mut stun = Vec::new();
+        if let Some(r) = &s.relay {
+            stun.push(r.turn_addr); // a relay co-member answers STUN Binding too (relay-first)
+        }
+        if let Some(cs) = coord_stun {
+            stun.push(cs); // coordinator-host fallback
+        }
+        let cfg = crate::ice::IcePeerConfig {
+            controlling: self_pk < s.pubkey, // deterministic role: the lower pubkey dials
+            stun,
+            turn: s.relay.clone(),
+            remote: s.ice.clone(),
+        };
+        if let Some(shim) = ice.ensure(s.pubkey, cfg).await {
+            eps.insert(s.pubkey, shim);
+        }
+    }
+    ice.retain(&keep);
     eps
 }
 
@@ -697,26 +783,30 @@ fn apply_seeds(
     seeds: Vec<SeedPeer>,
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     relay_eps: &HashMap<[u8; 32], SocketAddr>,
+    ice_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<()> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
     #[allow(clippy::type_complexity)]
     let mut desired: HashMap<[u8; 32], (Vec<(Ipv4Addr, u8)>, Option<SocketAddr>)> = HashMap::new();
     for s in seeds {
-        // Endpoint precedence: a directly dialable endpoint wins; else our relay shim if we have a
-        // session for this peer (punch already failed → we're relaying); else the punch target
-        // (reflexive) so WG handshakes toward it. The relay endpoint is loopback — the shim forwards
-        // through our TURN allocation.
+        // Endpoint precedence: a directly dialable endpoint wins; else our ICE shim (userspace path,
+        // the negotiated best path — direct srflx or relay); else the M5.4 relay shim (kernel path);
+        // else the punch target (reflexive) so WG handshakes toward it. Both shims are loopback —
+        // the daemon's ICE / TURN pump forwards through them.
+        let ice_ep = ice_eps.get(&s.pubkey).copied();
         let relay_ep = relay_eps.get(&s.pubkey).copied();
-        if s.endpoint.is_none() && relay_ep.is_none() {
+        if s.endpoint.is_none() && ice_ep.is_none() && relay_ep.is_none() {
             if let Some(p) = s.punch {
                 tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
             }
         }
-        if let Some(shim) = relay_ep {
+        if let Some(shim) = ice_ep {
+            tracing::debug!(peer = %hex8(&s.pubkey), %shim, "ice: routing peer via ICE shim");
+        } else if let Some(shim) = relay_ep {
             tracing::debug!(peer = %hex8(&s.pubkey), %shim, "relay: routing peer via TURN shim");
         }
-        let ep = s.endpoint.or(relay_ep).or(s.punch);
+        let ep = s.endpoint.or(ice_ep).or(relay_ep).or(s.punch);
         let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), ep));
         e.0.push((s.ip, 32));
         if e.1.is_none() {

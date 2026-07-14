@@ -70,4 +70,7 @@ pub trait WgBackend {
     /// Bring the interface's link administratively up or down *without* destroying the device — the
     /// device, its uapi socket and addresses persist. Used for mesh connect/disconnect. Idempotent.
     fn set_link_up(&self, up: bool) -> anyhow::Result<()>;
+    /// Whether this backend owns its UDP socket in-process (userspace/boringtun). Only such backends
+    /// can run the side-socket ICE agent (M5.5); kernel backends keep the M5.2 punch + M5.4 relay.
+    fn is_userspace(&self) -> bool;
 }

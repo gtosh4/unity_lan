@@ -53,6 +53,9 @@ pub struct SeedPeer {
     /// Relay reservation for reaching this peer when direct + punch both fail (§7.2, M5.4): the TURN
     /// server + credentials to allocate on, and (once known) the peer's own relayed address.
     pub relay: Option<common::api::RelayInfo>,
+    /// The peer's ICE offer (ufrag/pwd + candidates) for reaching us (§7.2, M5.5), relayed by the
+    /// coordinator. `None` until the peer offers ICE for this pair.
+    pub ice: Option<common::api::IceParams>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -83,6 +86,7 @@ pub async fn register(
         supersede,
         paused,
         relay,
+        Vec::new(), // no ICE offers at initial register (no peers yet)
     )
     .await
 }
@@ -101,6 +105,7 @@ pub async fn refresh(
     observed: Vec<common::api::ObservedEndpoint>,
     paused: bool,
     relay: RelayReport,
+    ice: Vec<common::api::IceEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     post(
         base_url,
@@ -115,6 +120,7 @@ pub async fn refresh(
         None, // refresh never supersedes: a re-key retires the old key on the initial register
         paused,
         relay,
+        ice,
     )
     .await
 }
@@ -133,6 +139,7 @@ async fn post(
     supersede: Option<String>,
     paused: bool,
     relay: RelayReport,
+    ice: Vec<common::api::IceEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -160,7 +167,7 @@ async fn post(
             relay_secret: relay.secret,
             need_relay: relay.need_relay,
             relay_allocated: relay.allocated,
-            ice: Vec::new(), // engine-side ICE gathering lands in M5.5 stage 3
+            ice,
         })
         .send()
         .await
@@ -277,6 +284,7 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
             primary_alias: att.primary_alias(&seed.community_name),
             networks: seed.networks.clone(),
             relay: seed.relay.clone(),
+            ice: seed.ice.clone(),
         });
     }
     Ok(peers)

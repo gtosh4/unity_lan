@@ -138,4 +138,8 @@ impl WgBackend for UserspaceBackend {
     fn set_link_up(&self, up: bool) -> anyhow::Result<()> {
         set_link_state(&self.name, up)
     }
+
+    fn is_userspace(&self) -> bool {
+        true // boringtun in-process — the side-socket ICE agent (M5.5) applies here
+    }
 }

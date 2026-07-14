@@ -146,6 +146,10 @@ impl WgBackend for KernelBackend {
         // peer (via the empty seed set), so no admin-toggle is wired here. No-op.
         Ok(())
     }
+
+    fn is_userspace(&self) -> bool {
+        false // wireguard-nt owns the UDP socket — no side-socket ICE; keeps M5.2 punch + M5.4 relay
+    }
 }
 
 fn mask(ip: Ipv4Addr, cidr: u8) -> IpAddrMask {

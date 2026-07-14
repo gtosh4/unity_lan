@@ -7,6 +7,7 @@ mod coord;
 mod daemon;
 mod dns;
 mod fw;
+mod ice;
 mod keys;
 mod nat;
 mod netcfg;

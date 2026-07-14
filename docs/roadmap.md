@@ -355,13 +355,27 @@ falls back to a responder on the coordinator host when none is online.
       relay co-member is online to STUN. Off the data path (control-plane-only). 2 unit tests
       (echoes reflexive + transaction id; ignores non-Binding). Client-side gather (relay-first,
       coord fallback) is built into the agent config in stage 3.
-- [ ] **Stage 3 — ICE agent** — `engine/ice.rs`: `Agent` per stuck peer on a side socket, gathers
-      host/srflx/relay (relay via M5.4 TURN creds), feeds the peer's candidates in, runs checks;
-      reports gathered candidates each loop (a change breaks the long-poll hold, like `observed`).
-- [ ] **Stage 4 — handoff / data plane** — on nomination: direct → set WG endpoint to the selected
-      remote addr; restricted-cone/relay → pump the ICE `Conn`↔boringtun via a loopback shim
-      (RelayManager-style). New `PeerReach`; endpoint precedence updated; ICE primary on userspace,
-      M5.2 punch kept for kernel. **Document the handoff seam** (prior-art §6.5; cf. NetBird #2507/#6054).
+- [x] **Stage 3 — ICE agent + data-plane handoff** ✅ — `engine/ice.rs`: an `IceManager` (mirrors
+      `RelayManager`) runs one `webrtc-ice` `Agent` per stuck peer on a side socket, gathering
+      host/srflx/relay candidates (`build_urls`: relay-first STUN + the peer's `Seed.relay` as the
+      TURN candidate), feeding the peer's candidates in as they trickle over refreshes, running
+      checks (min-pubkey dials), and on success **pumping boringtun↔ICE `Conn` through a
+      `127.0.0.1:<shim>` socket** — the `Conn` already routes over the best validated pair (direct
+      srflx when one works, relay only as a last resort). Wired into the daemon: gated to the
+      userspace backend (`WgBackend::is_userspace()`; kernel keeps M5.4 relay — running both would
+      double-allocate); reports `ice.offers()` via `RegisterReq.ice` with change-breaks-the-hold like
+      `observed`; `sync_ice` creates/feeds sessions for the stuck set; endpoint precedence is now
+      `endpoint > ice-shim > relay-shim > punch`. **Handoff seam:** the always-pump approach (vs. the
+      "set WG endpoint direct" optimization for endpoint-independent pairs) is deliberate — the
+      localhost hop is negligible and pumping is correct for every NAT combo ICE can traverse; the
+      direct-endpoint optimization is magicsock territory (prior-art §6.5, deferred). Compiles;
+      `build_urls` unit-tested; `mesh-test.sh` still PASS (no regression to the direct path).
+      **Follow-up (stage 4):** ICE currently triggers on the `Unreachable` stuck set, which covers
+      restricted-cone/symmetric but **not** pure bootstrap (no observer → `classify_reach` reads
+      `Direct`, never `Unreachable`); a bootstrap trigger needs a "non-dialable, unpunchable, unconnected
+      after grace" gate.
+- [ ] **Stage 4 — status polish + verify** — `PeerReach::Ice` surfaced in `ctl status` / GUI; the
+      bootstrap trigger above; e2e verification below.
 - **Verify:** `nat-test.sh` restricted-cone case reaches a peer via ICE; bootstrap case (no observer
       peer online) still obtains a reflexive via STUN.
 - **Note:** leaves a residual gap (efficient direct paths through restricted-cone NAT; UDP-blocked
