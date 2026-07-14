@@ -45,12 +45,15 @@ their own devices (name, primary, remove) from the client app / CLI (§8).
 - Fully serverless / botless. Enforcing *someone else's* Discord role requires reading the
   guild members API — only a bot can. So a coordinator is required. (Why botless fails:
   [§12](#12-alternatives-considered).)
-- Data-plane relay for peers where both ends are behind symmetric NAT (best-effort only, see §7.2).
 - Web dashboard. The client is a **native desktop app** (iced) + a background engine.
 
-**Platforms**: **Windows-primary**, Linux, macOS-if-convenient. WireGuard uses a
-**userspace-portable primary** backend, with native kernel drivers as a per-OS optimization
-(Linux netlink · Windows WireGuardNT; macOS is userspace-only). See §7.3.
+  *(A data-plane relay for symmetric-NAT/CGNAT pairs was the original v1 non-goal — v1 shipped
+  best-effort diagnostics first; a ciphertext-only peer relay is now **planned**, §7.2.)*
+
+**Platforms**: Windows, Linux, macOS — **and mobile (iOS/Android) as the end-state**, all served
+by a single **userspace** WireGuard data plane, the only backend that exists on macOS/iOS/Android
+(no kernel WG there). Native kernel drivers (Linux netlink · Windows WireGuardNT) are an
+**optional per-OS throughput boost**, not required. See §7.3.
 
 ## 3. Components
 
@@ -64,9 +67,12 @@ Responsibilities:
 - Read the user's **roles** and **nick** via the bot token (guild members).
 - **Allocate** each member a stable IP within each role's subnet (§6).
 - **Sign attestations** (§4) for the roles the user holds; **re-sign** periodically (TTL).
-- Keep a **soft endpoint cache** (`pubkey → ip:port`, self-reported on refresh) and act as a
-  **STUN reflector** (observe a refresh packet's source, return the reflexive endpoint) — used
-  only to build bootstrap **seed lists**, never as the real-time source of truth.
+- Keep a **soft endpoint cache** (`pubkey → ip:port`, self-reported on refresh) to build
+  bootstrap **seed lists**, never the real-time source of truth. It also brokers **ICE candidate
+  exchange over the long-poll** (the signal channel — no separate signal server) and pairs a
+  **relay** peer with a stuck client (§7.2) — always as a broker, **never on the traffic path**.
+  *(Today it observes the reflexive from a co-member's view; end-state, the client's own userspace
+  ICE agent gathers candidates via STUN, §7.2/§7.3.)*
 - Optionally publish signed **revocation tombstones** for immediate kicks.
 
 ### 3.2 Client = engine + GUI ✅
@@ -78,7 +84,9 @@ mesh state and the coordinator session. One device = one engine:
 - **Enroll** the device under a user (§3.3), then fetch attestations + trust anchor + seeds.
 - Generate the WireGuard keypair (**private key never leaves the machine**).
 - Configure WireGuard: **one interface**, one peer per online co-device (§6).
-- **NAT**: open a reachable port (UPnP); relay hole-punch coordination for NAT'd peers.
+- **NAT**: open a reachable port (UPnP); run a userspace **ICE** agent (STUN candidates +
+  hole-punch) for NAT'd peers, with a **ciphertext-only relay** fallback when punch can't (§7.2).
+  *Today:* UPnP + coordinator-mediated cone punch; ICE + relay are the next increments.
 - Local DNS resolver for `*.internal`.
 - Exposes a local control socket (UDS / Windows named pipe).
 
@@ -264,30 +272,55 @@ resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); ho
 Full **mesh per network**: every pair of online members of a role forms a direct WG tunnel.
 No traffic transits the coordinator.
 
-### 7.2 NAT traversal ✅ (best-effort tail)
-- **Reachable members**: open the WG listen port via **UPnP-IGD** (or manual forward) →
-  directly dialable. Covers most home setups.
-- **NAT'd members**: the mesh **is the signaling fabric** — a mutually-connected peer relays
-  live endpoints + a synchronized punch signal so two NAT'd members can UDP hole-punch. This
-  is the back-channel the earlier botless design lacked.
-- **Symmetric-NAT on both ends**: hole punch may fail (each end's NAT picks a per-destination
-  port, so the peer-observed reflexive is structurally wrong — retrying can't help). **v1 policy
-  (settled): best-effort punch + clear `[unreachable: symmetric NAT?]` diagnostic, no relay.**
-  The system already degrades cleanly (classifies `Unreachable` after the 30s grace, surfaces it
-  in status). Rare for the target audience (home peers — usually ≥1 end is cone/port-forwardable,
-  which works); mainly bites strict corporate/CGNAT. Data-plane relay through a common peer is a
-  **post-GA** item (see roadmap Post-GA).
+### 7.2 NAT traversal — connectivity ladder (end-state)
+Most-direct-first ladder; the **userspace socket owns traversal** (§7.3), so STUN/ICE machinery
+can attach to the data path:
+- **Reachable members**: open the WG listen port via **UPnP-IGD** (or manual forward) → directly
+  dialable. Covers most home setups.
+- **Cone-NAT members**: a userspace **ICE** agent gathers candidates (host + STUN reflexive) and
+  hole-punches. Candidates are exchanged over the coordinator **long-poll** — the signal channel,
+  so no separate signal server and it stays coordinator-mediated. STUN yields a reflexive even
+  with no online peer to observe us, fixing cold-start **bootstrap** (a lone / all-NAT'd mesh).
+- **Symmetric / CGNAT / UDP-blocked pairs**: a **relay** peer forwards WG **ciphertext** between
+  the pair (e2e intact — the relay holds no keys). Any online member with a public endpoint is a
+  candidate relay; the coordinator pairs relay↔client the same way it pairs a punch, staying off
+  the traffic path. This is the last rung every magicsock/DERP-class system has.
 
-### 7.3 WireGuard backend ✅
-Trait-based, **userspace-portable primary** with native optimization where available (via
-`defguard_wireguard_rs`, which covers both):
+**Intermediate states** (roadmap M5):
+- *Shipped:* UPnP + endpoint autodiscovery; **peer-observed reflexive** (no STUN server — today
+  boringtun owns the WG socket via `defguard_wireguard_rs`, so we read the reflexive from a
+  co-member's view instead); coordinator-mediated **cone punch**; reachability diagnostics
+  (`Direct` / `Punching` / `Unreachable`).
+- *Next (M5.4):* the **ciphertext relay** — backend-agnostic (works on today's kernel+userspace
+  split), closes the symmetric/CGNAT tail; current `Unreachable` peers become `Relayed`.
+- *Then (M5.5):* replace the ad-hoc peer-observed punch with a real userspace **ICE agent**
+  (STUN + ICE + TURN via mature crates), keeping the long-poll as the signal channel.
+
+**Residual (Post-GA):** side-socket ICE still leaves restricted-cone pairs on a proxy/relay hop
+rather than a truly-direct path, and UDP-blocked networks need a **:443** relay. Both close with
+**in-socket magicsock** — multiplexing STUN/DISCO onto the WG socket itself (needs owning the
+socket, §7.3). Deferred; see `docs/prior-art.md` §6.5.
+
+### 7.3 WireGuard backend — userspace-primary (end-state)
+The data plane is **userspace-primary**: a userspace WireGuard (boringtun) is the one backend
+that exists on **every** target — Linux, Windows, macOS, iOS, Android (macOS/mobile have no kernel
+WG) — so it is the canonical path, not a fallback. Owning the UDP socket is also what makes
+**in-socket traversal** (§7.2 magicsock) reachable; the end-state drives boringtun's `Tunn` on our
+own socket (`Bind`) rather than through a device layer that hides it.
 ```
 trait WgBackend { set_peer, remove_peer, ensure_iface, gen_keypair, ... }
-  ├── UserspaceBackend // boringtun/wireguard-go — Linux/Windows/macOS. The always-available path.
-  └── NativeBackend    // Linux netlink kernel · Windows WireGuardNT. Optimization; needs privilege.
+  ├── UserspaceBackend // boringtun — every OS incl. mobile. THE canonical data plane.
+  └── NativeBackend    // Linux netlink · Windows WireGuardNT. OPTIONAL per-OS perf boost.
 ```
-Select native where present; else userspace. macOS = userspace only. All paths run inside the
-**privileged engine** (§3.2).
+Kernel drivers are an **optional throughput optimization**, not required: the workload (gaming
+vLANs, gameserver sharing, light file transfer) is latency-bound, not throughput-bound, so the
+userspace ceiling is ample — a deployment may drop kernel backends entirely to maintain **one**
+data plane (Tailscale's choice). All paths run inside the **privileged engine** (§3.2).
+
+**Intermediate:** today Linux runs userspace (via `defguard_wireguard_rs`) and Windows runs the
+wg-nt **kernel** backend; `defguard_wireguard_rs`'s userspace path is unix-only, so a userspace
+Windows backend (boringtun + **Wintun** TUN) is a future item — the prerequisite for
+magicsock-on-Windows and for collapsing to one data plane. Linux netlink is **deferred** (optional).
 
 ## 8. Local Control (GUI + CLI over the control socket)
 
@@ -313,6 +346,11 @@ engine via its control socket (no privilege in the front-ends):
   anchor — no manual step. A gap the chain can't bridge (key lost/compromised, nothing to sign) is
   refused → manual re-pin (MITM protection preserved). Trigger: offline `coordinator rotate-key`
   admin subcommand, then restart.
+- **Trust-root hardening (future, optional):** the single pinned anchor is one forge point — a
+  compromised coordinator could sign an attestation for any pubkey and inject a rogue peer. A
+  **tailnet-lock-style co-signature** (a *new* device's attestation additionally signed by a
+  trusted admin/peer key) would fail-closed against coordinator compromise. Deferred (post-GA);
+  see `docs/prior-art.md` §7.
 - Access control = Discord roles, enforced via the peer-set (§4.3). Revocation via TTL /
   tombstone (§4.4).
 - Attestation replay bounded by TTL. **Re-key handling (settled):** a device that rotates its WG
@@ -353,10 +391,12 @@ flowchart TB
    ⚠️ verify native paths per-OS. Engine control socket (interprocess).
 3. **M3** — Gossip: seed → anti-entropy exchange → peer-set → mesh forms. Two-node then N-node.
 4. **M4** — iced GUI + tray: login, network toggles, live status over the control socket.
-5. **M5** — NAT: UPnP port open; mesh-relayed hole-punch coordination.
+5. **M5** — NAT: UPnP port open; cone-NAT hole-punch coordination; then **ciphertext relay**
+   (M5.4) + userspace **ICE** agent (M5.5); in-socket magicsock is Post-GA (§7.2).
 6. **M6** — DNS resolver + `*.internal` (per-OS hookup); multi-homing across overlapping networks.
 7. **M7** — Revocation (TTL refresh + tombstones); `expose`, status polish.
-8. **M8** — Native kernel backends (Linux netlink, Windows WireGuardNT) as optimization.
+8. **M8** — Native kernel backends (Windows WireGuardNT shipped; Linux netlink **deferred**) as an
+   **optional** per-OS perf boost — userspace is the primary data plane (§7.3).
 
 ## 12. Alternatives Considered
 
@@ -386,8 +426,9 @@ flowchart TB
   the old pubkey immediately; a presence reaper (`PRESENCE_TTL_SECS`) backstops any unclean drop
   (§9).
 - ~~**Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
-  data path?~~ **Resolved:** v1 = best-effort + diagnostics, no relay (§7.2). Relay deferred
-  post-GA.
+  data path?~~ **Resolved (updated):** v1 shipped best-effort + diagnostics; a ciphertext
+  relay-through-peer is now **planned (roadmap M5.4)** as the next NAT increment — no longer
+  post-GA (§7.2).
 - **Coordinator endpoint discovery**: instead of the client hardcoding/human-configuring the
   coordinator URL, the coordinator could **advertise its endpoint via Discord** so the client
   auto-discovers it from the guild. Candidate spots a bot can publish to at runtime: its

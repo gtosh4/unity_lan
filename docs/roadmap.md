@@ -272,6 +272,42 @@ port — useless for punch.
       handshake for C and reads `Direct`; the `last_handshake` liveness signal is correct on real
       networks, where a lost return path also fails the handshake). `mesh-test.sh` still green.
 
+### M5.4 — Relay fallback (backend-agnostic) — the symmetric/CGNAT/UDP-blocked tail
+**Goal:** reach pairs where punch structurally can't (both symmetric, CGNAT, or outbound-UDP
+blocked). A relay forwards WG **ciphertext** between the pair; e2e stays intact (relay holds no
+keys). Backend-agnostic — WG endpoint just points at the relay, so it works on today's kernel(win)
++ userspace(unix) split with **no data-plane rewrite**. Highest-value next NAT increment
+(`docs/prior-art.md` §6.3). Supersedes the old "no relay in v1" stance (design §7.2) as the planned
+follow-on, not a GA blocker.
+- [ ] **Relay-peer selection + authorization** — a stuck-`Unreachable` pair picks a relay-capable
+      co-member (public/dialable endpoint) advertised via attestation/seed; the coordinator pairs
+      relay↔client the same way it pairs a punch, staying off the data path (north-star aligned).
+      Relay session authed by attestation → members relay for members only.
+- [ ] **Consent / DoS surface** — relaying is opt-in per peer; rate/fairness caps so a peer's uplink
+      isn't silently spent. (Design must cover the reflector/DoS surface, cf. the endpoint-spoof
+      hardening already done for reflexives.)
+- [ ] **Data-plane forward** — thin length-prefixed UDP forward of WG frames (or TURN); WG endpoint
+      = the relay socket. `classify_reach` gains `Relayed`.
+- **Verify:** extend `nat-test.sh` with a symmetric-both-ends netns (punch fails → relay carries
+      the tunnel, ping succeeds); relay-selection unit test; assert the relay path carries WG
+      ciphertext only (no plaintext).
+
+### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
+**Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,
+reusing mature Rust libs (`webrtc-rs` `ice`/`stun`/`turn`, or `str0m`) on a socket beside boringtun
+(`docs/prior-art.md` §6.2). Gets STUN reflexive (fixes **bootstrap** — a lone/all-NAT'd mesh with
+no online observer, which peer-observed can't start), host/srflx candidates, and TURN relay
+(= M5.4) for little code. Userspace-only (owns the socket); kernel backends keep punch + M5.4 relay.
+- [ ] ICE agent beside boringtun; **candidate exchange rides the existing long-poll** (no separate
+      Signal server — stays coordinator-mediated, decentralization-consistent).
+- [ ] Direct handoff: full-cone → set WG endpoint to the negotiated addr; restricted-cone →
+      userspace proxy or relay. **Document the handoff seam** (prior-art §6.5; cf. NetBird #2507/#6054).
+- [ ] STUN config (self-host / reuse coordinator host); TURN = the M5.4 relay.
+- **Verify:** `nat-test.sh` restricted-cone case reaches a peer via ICE; bootstrap case (no observer
+      peer online) still obtains a reflexive via STUN.
+- **Note:** leaves a residual gap (efficient direct paths through restricted-cone NAT; UDP-blocked
+      networks) that only **in-socket magicsock** closes — deferred to Post-GA (prior-art §6.4/§6.5).
+
 ---
 
 ## M6 — DNS + multi-homing
@@ -376,12 +412,21 @@ elevated box. macOS `/etc/resolver` still deferred.
 
 ## M8 — Native kernel backends (optimization)
 **Goal:** faster path where the OS offers it.
+
+> **Direction note (2026-07, `docs/prior-art.md` §6.1):** the data plane is converging on
+> **userspace-primary** — userspace is the only backend spanning Linux/Windows/**macOS/iOS/Android**
+> (no kernel WG exists on macOS or mobile), and owning the socket keeps in-socket NAT traversal
+> (magicsock) reachable. For the gaming/light-file workload the userspace throughput ceiling is
+> ample. **Kernel backends are now an optional per-OS perf boost, not the target**; Linux netlink
+> (below) is **deferred** accordingly. Windows wg-nt already landed but may later be replaced by
+> userspace boringtun + Wintun (Post-GA) to collapse to one data plane.
 - [x] **Windows WireGuardNT** (M-win): `wg/windows.rs` `KernelBackend` drives defguard's
       `WGApi<Kernel>` (wireguard-nt). Since defguard's Windows `configure_peer`/`remove_peer` are
       no-ops, it holds the desired iface + peer state and re-applies the full `configure_interface`
       on every change (endpoint-less peers skipped — wireguard-nt requires an endpoint).
       `wg::new_backend()` selects userspace (unix) vs this (Windows). Needs elevation + `wireguard.dll`.
 - [ ] `wg/native.rs`: Linux netlink; select native when present, else userspace; parity tests.
+      **Deferred** per the direction note — optional perf boost, not on the critical path.
 
 **Verify:** same behavior as userspace on Linux + Windows, measurably lower overhead.
 
@@ -439,7 +484,21 @@ elevated box. macOS `/etc/resolver` still deferred.
       diagnostic, no relay (design.md §7.2). System already degrades cleanly; no code change.
 
 ## Post-GA
-- [ ] Symmetric-NAT-both relay: data-plane forward through a common mesh peer for pairs where both
-      ends are symmetric-NAT'd (punch structurally can't work). Relay sees WG ciphertext only
-      (e2e intact); design must cover relay-peer selection/authorization + consent/DoS surface.
-      Deferred: rare for home peers, mostly corporate/CGNAT.
+- [→] Symmetric-NAT-both relay — **promoted to M5.4** (now the planned next NAT increment, not
+      Post-GA): data-plane forward through a common mesh peer, ciphertext-only, backend-agnostic.
+      See M5.4 for the task breakdown.
+- [ ] **In-socket magicsock (userspace)** — multiplex STUN/DISCO onto the WG socket to close the
+      side-socket residual (`docs/prior-art.md` §6.5): truly-direct paths through restricted-cone
+      NAT (no proxy hop), single-socket firewall footprint, and :443/HTTPS relay for UDP-hostile
+      networks. Bespoke — only if the M5.5 residual bites. Requires driving boringtun `Tunn` on our
+      own `Bind` (dropping `defguard_wireguard_rs`'s device layer).
+- [ ] **Userspace Windows backend (Wintun)** — boringtun + Wintun TUN on Windows
+      (`defguard_wireguard_rs`'s userspace path is unix-only), replacing the wg-nt dependency.
+      Prerequisite for magicsock-on-Windows and for collapsing to a single data plane
+      (prior-art §6.1).
+- [ ] **macOS + mobile clients** — userspace + utun (macOS) / NetworkExtension (iOS) / VpnService
+      (Android). Userspace is *mandatory* there — no kernel WG exists. Unlocked by the
+      userspace-primary direction (prior-art §6.1, §8).
+- [ ] **Tailnet-lock-style co-signature** (prior-art §7) — optional admin/peer co-signature on a
+      new device's attestation so a compromised coordinator alone can't inject a peer. Hardens the
+      single-anchor trust root; fail-closed. Secure-by-default aligned.
