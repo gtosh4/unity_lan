@@ -18,20 +18,132 @@ mod service;
 mod shutdown;
 mod wg;
 
+use std::net::{Ipv4Addr, SocketAddr};
+
 use anyhow::Context;
+use clap::{Parser, Subcommand};
 
 use crate::config::Config;
 
-fn main() -> anyhow::Result<()> {
-    let arg1 = std::env::args().nth(1).unwrap_or_default();
+/// UnityLAN engine — headless data-plane daemon.
+#[derive(Parser)]
+#[command(name = "unitylan-engine", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+    /// Bare invocation (register-once): config path (defaults to engine.toml).
+    config: Option<String>,
+}
 
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the engine daemon (console mode; Ctrl-C shuts down).
+    Run { config: Option<String> },
+    /// Interactive Discord login, then confirm this device.
+    Login { config: Option<String> },
+    /// Talk to a running daemon over its control socket.
+    Ctl {
+        #[command(subcommand)]
+        sub: CtlCmd,
+    },
+    /// Print a fresh WireGuard keypair as `priv pub` (base64).
+    WgKeygen,
+    /// Bring a WG iface up, add a dummy peer, tear down (needs CAP_NET_ADMIN).
+    WgSmoke {
+        #[arg(default_value = "unl-smoke")]
+        ifname: String,
+    },
+    /// Bring up one WG node, hold it up, then tear down (netns tunnel test).
+    WgNode {
+        iface: String,
+        priv_b64: String,
+        port: u16,
+        /// addr/cidr
+        addr: String,
+        peer_pub_b64: String,
+        peer_ep: SocketAddr,
+        /// peer allowed/cidr
+        peer_allowed: String,
+        hold_secs: u64,
+    },
+    /// Serve a single `<name> <ip>` record on `<bind>` (dev/test).
+    DnsServe {
+        bind: SocketAddr,
+        name: String,
+        ip: Ipv4Addr,
+    },
+    /// Install this platform's OS resolver hook.
+    ResolverInstall { iface: String, server: SocketAddr },
+    /// Revert this platform's OS resolver hook.
+    ResolverRevert { iface: String },
+}
+
+/// `ctl` subcommands. Each takes the config path first (defaults to engine.toml where the
+/// subcommand has no other required argument).
+#[derive(Subcommand)]
+enum CtlCmd {
+    Status {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Devices {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Rename {
+        config: String,
+        new_name: String,
+    },
+    SetPrimary {
+        config: String,
+        device: String,
+    },
+    Remove {
+        config: String,
+        device: String,
+    },
+    Expose {
+        config: String,
+        port: String,
+        net: Option<String>,
+    },
+    Unexpose {
+        config: String,
+        port: String,
+    },
+    Exposes {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Login {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Connect {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Disconnect {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
+    Net {
+        config: String,
+        action: String,
+        network: String,
+    },
+}
+
+fn main() -> anyhow::Result<()> {
     // The Windows service subcommands run *outside* a tokio runtime: `service run` hands the thread
     // to the SCM dispatcher (which builds its own runtime), and install/uninstall are synchronous
-    // SCM calls with plain stdout output.
+    // SCM calls with plain stdout output. Dispatch it before clap so it never enters the runtime.
     #[cfg(windows)]
-    if arg1 == "service" {
+    if std::env::args().nth(1).as_deref() == Some("service") {
         return service::main();
     }
+
+    let cli = Cli::parse();
 
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -44,68 +156,75 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(async_main(arg1))
+    rt.block_on(async_main(cli))
 }
 
-async fn async_main(arg1: String) -> anyhow::Result<()> {
-    if arg1 == "wg-smoke" {
-        let ifname = std::env::args()
-            .nth(2)
-            .unwrap_or_else(|| "unl-smoke".to_string());
-        return wg_smoke(&ifname);
+async fn async_main(cli: Cli) -> anyhow::Result<()> {
+    match cli.cmd {
+        Some(Cmd::WgSmoke { ifname }) => wg_smoke(&ifname),
+        Some(Cmd::WgKeygen) => {
+            let (priv_k, pub_k) = common::crypto::gen_wg_keypair();
+            println!("{} {}", base64_std(&priv_k), base64_std(&pub_k));
+            Ok(())
+        }
+        Some(Cmd::WgNode {
+            iface,
+            priv_b64,
+            port,
+            addr,
+            peer_pub_b64,
+            peer_ep,
+            peer_allowed,
+            hold_secs,
+        }) => wg_node(
+            &iface,
+            &priv_b64,
+            port,
+            &addr,
+            &peer_pub_b64,
+            peer_ep,
+            &peer_allowed,
+            hold_secs,
+        ),
+        Some(Cmd::DnsServe { bind, name, ip }) => {
+            // Dev/test: serve a single `<name> <ip>` on `<bind>` from the `.unity.internal` resolver.
+            let zone = dns::empty_zone();
+            zone.write()
+                .await
+                .insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
+            dns::serve(bind, zone).await
+        }
+        Some(Cmd::ResolverInstall { iface, server }) => {
+            // Dev/test: drive this platform's ResolverHook.
+            let hook = resolver::platform_hook()
+                .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
+            hook.install(&iface, server)
+        }
+        Some(Cmd::ResolverRevert { iface }) => {
+            let hook = resolver::platform_hook()
+                .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
+            hook.revert(&iface)
+        }
+        Some(Cmd::Run { config }) => {
+            let cfg = load_config(config)?;
+            // Console mode: Ctrl-C latches the shutdown signal the daemon awaits.
+            let (trigger, shutdown) = shutdown::channel();
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                trigger.trigger();
+            });
+            daemon::run(cfg, shutdown).await
+        }
+        Some(Cmd::Ctl { sub }) => ctl(sub).await,
+        Some(Cmd::Login { config }) => login(load_config(config)?).await,
+        None => register_once(cli.config).await,
     }
-    if arg1 == "wg-keygen" {
-        let (priv_k, pub_k) = common::crypto::gen_wg_keypair();
-        println!("{} {}", base64_std(&priv_k), base64_std(&pub_k));
-        return Ok(());
-    }
-    if arg1 == "wg-node" {
-        return wg_node();
-    }
-    if arg1 == "dns-serve" {
-        // Dev/test: serve a single `<name> <ip>` on `<bind>` from the `.unity.internal` resolver.
-        let bind: std::net::SocketAddr = std::env::args().nth(2).unwrap().parse()?;
-        let name = std::env::args().nth(3).unwrap();
-        let ip: std::net::Ipv4Addr = std::env::args().nth(4).unwrap().parse()?;
-        let zone = dns::empty_zone();
-        zone.write()
-            .await
-            .insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
-        return dns::serve(bind, zone).await;
-    }
-    if arg1 == "resolver-install" {
-        // Dev/test: drive this platform's ResolverHook. `resolver-install <iface> <server>`.
-        let iface = std::env::args().nth(2).unwrap();
-        let server: std::net::SocketAddr = std::env::args().nth(3).unwrap().parse()?;
-        let hook = resolver::platform_hook()
-            .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
-        return hook.install(&iface, server);
-    }
-    if arg1 == "resolver-revert" {
-        let iface = std::env::args().nth(2).unwrap();
-        let hook = resolver::platform_hook()
-            .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
-        return hook.revert(&iface);
-    }
-    if arg1 == "run" {
-        let cfg = load_config(std::env::args().nth(2))?;
-        // Console mode: Ctrl-C latches the shutdown signal the daemon awaits.
-        let (trigger, shutdown) = shutdown::channel();
-        tokio::spawn(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            trigger.trigger();
-        });
-        return daemon::run(cfg, shutdown).await;
-    }
-    if arg1 == "ctl" {
-        return ctl().await;
-    }
-    if arg1 == "login" {
-        return login(load_config(std::env::args().nth(2))?).await;
-    }
+}
 
-    // Bare invocation (register-once): treat a leading non-flag arg as the config path.
-    let cfg = load_config(if arg1.is_empty() { None } else { Some(arg1) })?;
+/// Bare invocation (register-once): register with the coordinator, verify + pin the trust anchor,
+/// and print the resulting IP + hostname.
+async fn register_once(config: Option<String>) -> anyhow::Result<()> {
+    let cfg = load_config(config)?;
 
     let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
@@ -192,33 +311,27 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `ctl <sub> <config.toml> [arg]` — talk to a running daemon over its control socket.
-/// subs: `status`, `devices`, `rename <name>`, `set-primary <device>`, `remove <device>`.
-async fn ctl() -> anyhow::Result<()> {
+/// Talk to a running daemon over its control socket. Each subcommand's config path resolves the
+/// socket; see [`CtlCmd`].
+async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
     use common::api::ManageOp;
 
-    let sub = std::env::args().nth(2).unwrap_or_default();
-    let cfg_path = std::env::args()
-        .nth(3)
-        .unwrap_or_else(|| "engine.toml".to_string());
-    let arg = std::env::args().nth(4);
-    let cfg = Config::load(std::path::Path::new(&cfg_path))
-        .with_context(|| format!("loading config {cfg_path}"))?;
-    let socket = cfg.control_name();
-
-    let need_arg = || {
-        arg.clone()
-            .ok_or_else(|| anyhow::anyhow!("'{sub}' needs a device/name argument"))
+    // Resolve the control socket for a subcommand's config path.
+    let socket_for = |cfg_path: &str| -> anyhow::Result<String> {
+        Ok(Config::load(std::path::Path::new(cfg_path))
+            .with_context(|| format!("loading config {cfg_path}"))?
+            .control_name())
     };
 
-    match sub.as_str() {
-        "status" => {
+    match sub {
+        CtlCmd::Status { config } => {
+            let socket = socket_for(&config)?;
             let report = control::client_status(&socket).await?;
             if report.needs_login {
-                println!("not logged in — run `unitylan ctl login {cfg_path}`");
+                println!("not logged in — run `unitylan ctl login {config}`");
             }
             if !report.connected {
-                println!("mesh: disconnected — run `unitylan ctl connect {cfg_path}`");
+                println!("mesh: disconnected — run `unitylan ctl connect {config}`");
             }
             match &report.device {
                 None => println!("not joined to any network"),
@@ -244,57 +357,55 @@ async fn ctl() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        "devices" => print_devices(control::client_manage(&socket, ManageOp::List).await?),
-        "rename" => print_devices(
-            control::client_manage(
-                &socket,
-                ManageOp::Rename {
-                    new_name: need_arg()?,
-                },
-            )
-            .await?,
+        CtlCmd::Devices { config } => {
+            print_devices(control::client_manage(&socket_for(&config)?, ManageOp::List).await?)
+        }
+        CtlCmd::Rename { config, new_name } => print_devices(
+            control::client_manage(&socket_for(&config)?, ManageOp::Rename { new_name }).await?,
         ),
-        "set-primary" => print_devices(
+        CtlCmd::SetPrimary { config, device } => print_devices(
             control::client_manage(
-                &socket,
+                &socket_for(&config)?,
                 ManageOp::SetPrimary {
-                    device_name: need_arg()?,
+                    device_name: device,
                 },
             )
             .await?,
         ),
-        "remove" => print_devices(
+        CtlCmd::Remove { config, device } => print_devices(
             control::client_manage(
-                &socket,
+                &socket_for(&config)?,
                 ManageOp::Remove {
-                    device_name: need_arg()?,
+                    device_name: device,
                 },
             )
             .await?,
         ),
-        "expose" => {
-            let (proto, port) = parse_port(&need_arg()?)?;
-            let net = std::env::args().nth(5);
+        CtlCmd::Expose { config, port, net } => {
+            let (proto, port) = parse_port(&port)?;
             print_exposed(
                 control::client_expose(
-                    &socket,
+                    &socket_for(&config)?,
                     common::control::ExposeOp::Add { proto, port, net },
                 )
                 .await?,
             )
         }
-        "unexpose" => {
-            let (proto, port) = parse_port(&need_arg()?)?;
+        CtlCmd::Unexpose { config, port } => {
+            let (proto, port) = parse_port(&port)?;
             print_exposed(
-                control::client_expose(&socket, common::control::ExposeOp::Remove { proto, port })
-                    .await?,
+                control::client_expose(
+                    &socket_for(&config)?,
+                    common::control::ExposeOp::Remove { proto, port },
+                )
+                .await?,
             )
         }
-        "exposes" => {
-            print_exposed(control::client_expose(&socket, common::control::ExposeOp::List).await?)
-        }
-        "login" => {
-            let resp = control::client_login(&socket).await?;
+        CtlCmd::Exposes { config } => print_exposed(
+            control::client_expose(&socket_for(&config)?, common::control::ExposeOp::List).await?,
+        ),
+        CtlCmd::Login { config } => {
+            let resp = control::client_login(&socket_for(&config)?).await?;
             println!(
                 "Open this URL to log in with Discord:\n\n  {}\n",
                 resp.authorize_url
@@ -302,17 +413,22 @@ async fn ctl() -> anyhow::Result<()> {
             println!("The daemon binds this device once you complete the browser step.");
             Ok(())
         }
-        "connect" | "disconnect" => {
-            let connect = sub == "connect";
-            let resp = control::client_set_connected(&socket, connect).await?;
+        CtlCmd::Connect { config } => {
+            let resp = control::client_set_connected(&socket_for(&config)?, true).await?;
             println!("{}", resp.message);
             Ok(())
         }
-        "net" => {
-            let action = need_arg()?; // enable | disable
-            let name = std::env::args()
-                .nth(5)
-                .ok_or_else(|| anyhow::anyhow!("net needs <enable|disable> <network>"))?;
+        CtlCmd::Disconnect { config } => {
+            let resp = control::client_set_connected(&socket_for(&config)?, false).await?;
+            println!("{}", resp.message);
+            Ok(())
+        }
+        CtlCmd::Net {
+            config,
+            action,
+            network,
+        } => {
+            let socket = socket_for(&config)?;
             let enabled = match action.as_str() {
                 "enable" => true,
                 "disable" => false,
@@ -322,11 +438,11 @@ async fn ctl() -> anyhow::Result<()> {
             let net = status
                 .networks
                 .iter()
-                .find(|n| n.name == name)
+                .find(|n| n.name == network)
                 .ok_or_else(|| {
                     let names: Vec<&str> =
                         status.networks.iter().map(|n| n.name.as_str()).collect();
-                    anyhow::anyhow!("no network named '{name}' (yours: {})", names.join(", "))
+                    anyhow::anyhow!("no network named '{network}' (yours: {})", names.join(", "))
                 })?;
             let resp =
                 control::client_set_network(&socket, net.guild_id, net.role_id, enabled).await?;
@@ -337,10 +453,6 @@ async fn ctl() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        other => anyhow::bail!(
-            "unknown ctl subcommand '{other}' (try: status, connect, disconnect, devices, rename, \
-             set-primary, remove, expose, unexpose, exposes, net)"
-        ),
     }
 }
 
@@ -439,27 +551,25 @@ fn parse_cidr(s: &str) -> anyhow::Result<(std::net::Ipv4Addr, u8)> {
 }
 
 /// Bring up one WG node from CLI args, hold it up, then tear down. For the netns tunnel test.
-/// args: wg-node <iface> <priv_b64> <port> <addr/cidr> <peer_pub_b64> <peer_ip:port> <peer_allowed/cidr> <hold_secs>
-fn wg_node() -> anyhow::Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn wg_node(
+    iface: &str,
+    priv_b64: &str,
+    port: u16,
+    addr: &str,
+    peer_pub_b64: &str,
+    peer_ep: SocketAddr,
+    peer_allowed: &str,
+    hold: u64,
+) -> anyhow::Result<()> {
     use std::io::Write;
-    use std::net::SocketAddr;
     use std::time::Duration;
     use wg::{IfaceConfig, PeerConfig};
 
-    let a: Vec<String> = std::env::args().collect();
-    if a.len() < 10 {
-        anyhow::bail!(
-            "usage: wg-node <iface> <priv_b64> <port> <addr/cidr> <peer_pub_b64> <peer_ip:port> <peer_allowed/cidr> <hold_secs>"
-        );
-    }
-    let iface = &a[2];
-    let priv_k = b64_key(&a[3])?;
-    let port: u16 = a[4].parse()?;
-    let addr = parse_cidr(&a[5])?;
-    let peer_pub = b64_key(&a[6])?;
-    let peer_ep: SocketAddr = a[7].parse()?;
-    let peer_allowed = parse_cidr(&a[8])?;
-    let hold: u64 = a[9].parse()?;
+    let priv_k = b64_key(priv_b64)?;
+    let addr = parse_cidr(addr)?;
+    let peer_pub = b64_key(peer_pub_b64)?;
+    let peer_allowed = parse_cidr(peer_allowed)?;
 
     let mut backend = wg::new_backend(iface)?;
     backend.up(&IfaceConfig {
