@@ -465,8 +465,10 @@ elevated box. macOS `/etc/resolver` still deferred.
       engine is stopped and there's no socket yet); routine stop/restart is gone. Stopping the service
       only drops the mesh (firewall rules are scoped to the vanishing wg iface), so it can't open the
       host. Still TODO: an MSI/WiX installer to bundle engine+gui+`wireguard.dll`, register the service,
-      and write a default config; systemd + launchd packaging. Follow-up: with GUI stop gone, the `WP`
-      (`SERVICE_STOP`) grant in `RELAXED_DACL` could be dropped to `SERVICE_START` only.
+      and write a default config; systemd + launchd packaging. Done: with GUI stop gone, the `WP`
+      (`SERVICE_STOP`) grant in `RELAXED_DACL` was dropped — the interactive `IU` ACE is now query +
+      `SERVICE_START` (`RP`) only (least-privilege). Windows-only code (`cfg(windows)`),
+      verified-by-construction (doesn't compile on the Linux CI host).
 - [x] CI: `cargo fmt`/`clippy`/`test` — `.github/workflows/ci.yml` runs the three gates
       (`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`);
       `release.yml` builds artifacts.

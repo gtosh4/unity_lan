@@ -35,15 +35,17 @@ const SERVICE_NAME: &str = common::control::WINDOWS_SERVICE_NAME;
 const DISPLAY_NAME: &str = "UnityLAN Engine";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-/// DACL applied to the service at install so the *unprivileged* GUI can start/stop it without a UAC
+/// DACL applied to the service at install so the *unprivileged* GUI can start it without a UAC
 /// prompt. Grants: SYSTEM standard service control, Administrators full control (so `uninstall` and
 /// `services.msc` keep working), and Interactive users (`IU` = the logged-on desktop user) query +
-/// **start** (`RP`) + **stop** (`WP`). Interactive-only is deliberate — remote/network logons don't
-/// get it. Stopping only tears down the mesh (the firewall rules are scoped to the wg interface that
-/// disappears with it), so this can't be used to open the host.
+/// **start** (`RP`) only. Interactive-only is deliberate — remote/network logons don't get it. Stop
+/// is *not* granted: day-to-day on/off is a mesh connect/disconnect over the control socket (no SCM
+/// access), and the GUI's only SCM affordance is *start* (bootstrap from a stopped engine), so `WP`
+/// (`SERVICE_STOP`) is unneeded — dropping it is least-privilege (stopping a service only ever tears
+/// down the mesh, never opens the host, but the interactive user has no reason to hold the right).
 const RELAXED_DACL: &str = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)\
     (A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)\
-    (A;;CCLCSWRPWPLOCRRC;;;IU)";
+    (A;;CCLCSWRPLOCRRC;;;IU)";
 
 /// Dispatch the `service` subcommand (called from `main` outside any tokio runtime).
 pub fn main() -> Result<()> {
