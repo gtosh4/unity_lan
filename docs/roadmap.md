@@ -339,10 +339,14 @@ falls back to a responder on the coordinator host when none is online.
       `turn::server::Server` already answers STUN Binding (XOR-MAPPED-ADDRESS, unauthenticated), so the
       relay-node half needs no extra server — only the coordinator-host fallback responder is new.
       Dep `webrtc-ice = "0.17"` added (pairs with our `turn`/`webrtc-util`/`stun` 0.17).
-- [ ] **Stage 1 — control plane: candidate exchange** — `RegisterReq.ice_candidates` + `Seed.ice`
-      (peer candidates + ufrag/pwd); coordinator caches per-device candidates (like `reflexive`) and
-      hands each stuck pair the other's; deterministic role (min-pubkey = controlling); version bump
-      only on candidate change (no new herd — CLAUDE.md fan-in rule).
+- [x] **Stage 1 — control plane: candidate exchange** ✅ — `common::api` gains `IceParams`
+      (ufrag/pwd + marshaled candidates) + `IceEndpoint` (per-peer offer); `RegisterReq.ice` carries
+      a device's offers, `Seed.ice` returns the peer's. Coordinator `AppState.ice` is an
+      `(owner, peer) → IceParams` table (mirrors `relay_allocs`): the register handler records
+      `req.ice`, bumps the version only on a changed offer (fresh candidates / ICE-restart creds — no
+      herd otherwise), and hands each seed the peer's `(peer, caller)` offer. Pure relay — the
+      coordinator never runs ICE, so the data path stays P2P. Engine still sends `ice: []` (gathering
+      is stage 3). Compiles across all three crates.
 - [ ] **Stage 2 — STUN** — coordinator-host STUN Binding responder (fallback) + client gather
       (relay-first, coord fallback); a lone/all-NAT'd mesh obtains a reflexive with no observer peer.
 - [ ] **Stage 3 — ICE agent** — `engine/ice.rs`: `Agent` per stuck peer on a side socket, gathers

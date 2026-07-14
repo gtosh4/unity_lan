@@ -160,6 +160,7 @@ async fn post(
             relay_secret: relay.secret,
             need_relay: relay.need_relay,
             relay_allocated: relay.allocated,
+            ice: Vec::new(), // engine-side ICE gathering lands in M5.5 stage 3
         })
         .send()
         .await

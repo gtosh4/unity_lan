@@ -144,6 +144,7 @@ async fn main() -> anyhow::Result<()> {
         reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relay_allocs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         rotation_chain,
     };
 

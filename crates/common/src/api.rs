@@ -79,6 +79,32 @@ pub struct RegisterReq {
     /// unless we're relaying.
     #[serde(default)]
     pub relay_allocated: Vec<RelayAllocation>,
+    /// ICE session offers (§7.2, M5.5): for each peer this device is reaching via a side-socket ICE
+    /// agent, its ufrag/pwd + gathered candidates. The coordinator relays each to the named peer as
+    /// its [`Seed::ice`] (never running ICE itself, so it stays off the data path). Empty unless the
+    /// userspace ICE path is active for some peer.
+    #[serde(default)]
+    pub ice: Vec<IceEndpoint>,
+}
+
+/// ICE session parameters for one (owner → peer) pair (§7.2, M5.5): the owner's short ICE
+/// credentials (ufrag/pwd) and its gathered candidates as `webrtc-ice` `Candidate::marshal()`
+/// strings. Relayed by the coordinator over the long-poll — it never runs ICE — so the data path
+/// stays peer-to-peer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceParams {
+    pub ufrag: String,
+    pub pwd: String,
+    pub candidates: Vec<String>,
+}
+
+/// "For peer `peer`, here are my ICE session params." Reported in [`RegisterReq::ice`]; the
+/// coordinator hands `params` to `peer` as its [`Seed::ice`] so both sides run connectivity checks
+/// (the controlling side, min-pubkey, dials; the other accepts).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IceEndpoint {
+    pub peer: [u8; 32],
+    pub params: IceParams,
 }
 
 /// "To reach `peer`, I allocated the TURN relayed address `relayed`." Reported so the coordinator
@@ -256,4 +282,9 @@ pub struct Seed {
     /// `None` in the common case (direct or punchable).
     #[serde(default)]
     pub relay: Option<RelayInfo>,
+    /// The peer's ICE session params for reaching this device (§7.2, M5.5): its ufrag/pwd +
+    /// candidates, relayed by the coordinator from the peer's [`RegisterReq::ice`]. `None` until the
+    /// peer offers ICE for us. The client feeds these into its ICE agent to run connectivity checks.
+    #[serde(default)]
+    pub ice: Option<IceParams>,
 }

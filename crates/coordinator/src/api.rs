@@ -10,7 +10,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
-    DeviceInfo, Grant, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthCompleteReq,
+    DeviceInfo, Grant, IceParams, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthCompleteReq,
     ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp, Seed,
 };
 use common::netid::sanitize_label;
@@ -47,6 +47,11 @@ pub struct AppState {
     /// `peer`'s snapshot the coordinator hands back `(owner, peer)` as `peer`'s
     /// [`RelayInfo::peer_relayed`] for reaching `owner`. Last write wins; lost on restart.
     pub relay_allocs: Arc<Mutex<RelayAllocs>>,
+    /// ICE candidate exchange (§7.2, M5.5): `(owner, peer)` → `owner`'s ICE session params (ufrag/pwd
+    /// and candidates) for reaching `peer`. Populated from `RegisterReq.ice`; when building `peer`'s
+    /// snapshot the coordinator hands `(owner, peer)` back as `peer`'s [`common::api::Seed::ice`] for
+    /// reaching `owner`. Last write wins; lost on restart (repopulated as peers refresh).
+    pub ice: Arc<Mutex<IceExchange>>,
     /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
     /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
     /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
@@ -56,6 +61,10 @@ pub struct AppState {
 /// `(owner, peer)` → the relayed address `owner` allocated to reach `peer` (the relayed-candidate
 /// exchange table in [`AppState::relay_allocs`]).
 pub type RelayAllocs = HashMap<([u8; 32], [u8; 32]), std::net::SocketAddr>;
+
+/// `(owner, peer)` → `owner`'s ICE session params for reaching `peer` (the candidate-exchange table
+/// in [`AppState::ice`]).
+pub type IceExchange = HashMap<([u8; 32], [u8; 32]), IceParams>;
 
 /// A relay-capable device's TURN reachability, kept in [`AppState::relays`].
 #[derive(Clone, Debug)]
@@ -384,6 +393,20 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
+    // Record this device's ICE session offers (candidate exchange, M5.5). A new/changed offer (fresh
+    // candidates, or an ICE restart's new ufrag/pwd) bumps the version so the peer wakes, picks up
+    // the candidates as its `Seed::ice`, and runs connectivity checks. The coordinator only relays —
+    // it never runs ICE — so the data path stays peer-to-peer.
+    {
+        let mut ice = st.ice.lock().unwrap();
+        for e in &req.ice {
+            if ice.get(&(req.wg_pubkey, e.peer)) != Some(&e.params) {
+                ice.insert((req.wg_pubkey, e.peer), e.params.clone());
+                changed = true;
+            }
+        }
+    }
+
     // Relay candidates for the caller: co-members that advertise a TURN relay, captured with their
     // shared-with-caller network names before the seed loop consumes `by_pubkey`. A relay is used
     // for a peer only if it *also* shares a network with that peer (symmetric authorization) — and
@@ -400,6 +423,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         .collect();
     let need_relay: std::collections::HashSet<[u8; 32]> = req.need_relay.iter().copied().collect();
     let relay_allocs = st.relay_allocs.lock().unwrap().clone();
+    let ice_exchange = st.ice.lock().unwrap().clone();
     let now = common::now_unix();
 
     // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
@@ -435,6 +459,9 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 mp.pubkey,
             )
             .map_err(internal)?;
+        // The peer's ICE offer for reaching us (if it has run ICE toward this caller): key is
+        // (owner=peer, peer=caller). The client feeds it into its agent to run connectivity checks.
+        let ice = ice_exchange.get(&(mp.pubkey, req.wg_pubkey)).cloned();
         seeds.push(Seed {
             attestation: signed.to_base64(),
             community_name: community,
@@ -442,6 +469,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
             punch,
             networks,
             relay,
+            ice,
         });
     }
 
