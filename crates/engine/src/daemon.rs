@@ -351,10 +351,14 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 } else {
                     punch_since.remove(pk);
                 }
-                let connected = stats
+                let last_handshake = stats
                     .as_ref()
                     .and_then(|m| m.get(pk))
-                    .and_then(|s| s.last_handshake)
+                    .and_then(|s| s.last_handshake);
+                let last_handshake_secs = last_handshake
+                    .and_then(|t| t.elapsed().ok())
+                    .map(|d| d.as_secs());
+                let connected = last_handshake
                     .is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
                 let age = punch_since
                     .get(pk)
@@ -407,6 +411,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                             latency_ms: latency.get(ip).copied(),
                             rx_bytes,
                             tx_bytes,
+                            last_handshake_secs,
                         },
                     );
                 }

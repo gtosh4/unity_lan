@@ -16,11 +16,12 @@ anyhow.workspace = true
 tokio.workspace = true
 
 # tokio executor so the async control-socket client runs inside iced's runtime.
-iced = { version = "0.13", features = ["tokio"] }
+iced = { version = "0.13", features = ["tokio", "svg"] }
 # Cross-platform local socket (unix socket / Windows named pipe) for the control channel.
 interprocess = { version = "2.4.2", features = ["tokio"] }
 # Open the Discord authorize URL in the user's default browser.
 open = "5"
+iced_aw = { version = "0.12", default-features = false, features = ["drop_down"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.5"

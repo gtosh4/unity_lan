@@ -135,6 +135,8 @@ pub async fn update(
                 latency_ms: None,
                 rx_bytes: 0,
                 tx_bytes: 0,
+                last_handshake_secs: None,
+                networks: s.networks.clone(),
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
@@ -178,6 +180,7 @@ pub struct PeerLive {
     pub latency_ms: Option<u32>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    pub last_handshake_secs: Option<u64>,
 }
 
 /// Overlay per-peer live telemetry onto the current status without rebuilding it (cheap — no DNS or
@@ -195,6 +198,7 @@ pub async fn set_live(
             p.latency_ms = l.latency_ms;
             p.rx_bytes = l.rx_bytes;
             p.tx_bytes = l.tx_bytes;
+            p.last_handshake_secs = l.last_handshake_secs;
         }
     }
 }

@@ -22,10 +22,12 @@ use common::control::{
 use iced::alignment::Vertical;
 use iced::font::Weight;
 use iced::widget::{
-    button, checkbox, column, container, row, scrollable, text, text_input, toggler, Column, Text,
+    button, checkbox, column, container, horizontal_space, row, scrollable, svg, text, text_input,
+    toggler, tooltip, Column, Row, Text,
 };
 use iced::window;
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
+use iced_aw::{drop_down, DropDown};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tray::TrayMsg;
 
@@ -33,8 +35,6 @@ use tray::TrayMsg;
 const GREEN: Color = Color::from_rgb(0.30, 0.78, 0.47); // healthy / connected / direct
 const AMBER: Color = Color::from_rgb(0.93, 0.69, 0.22); // in-progress / degraded
 const RED: Color = Color::from_rgb(0.90, 0.37, 0.37); // failed / unreachable / destructive
-const BLUE: Color = Color::from_rgb(0.42, 0.60, 0.95); // relayed
-const TEAL: Color = Color::from_rgb(0.35, 0.78, 0.82); // ICE-traversed
 const MUTED: Color = Color::from_rgb(0.74, 0.74, 0.80); // secondary text (IPs, endpoints, hints)
 
 /// A section title: slightly larger and semibold so sections read as a hierarchy above their rows.
@@ -79,6 +79,72 @@ fn dot<'a>(color: Color) -> Element<'a, Message> {
             },
             ..Default::default()
         })
+        .into()
+}
+
+/// A vertical "kebab" (⋮) glyph, embedded as SVG. Drawn as an icon rather than a text symbol
+/// because the default font renders such codepoints as tofu (same reason as [`dot`]). `fill` uses
+/// `currentColor`; the widget tints it via [`svg::Style::color`].
+const KEBAB_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>"##;
+
+/// The kebab button that opens a peer's action menu — a borderless icon that toggles the dropdown.
+fn kebab_button<'a>(user_id: u64) -> Element<'a, Message> {
+    let icon = svg(svg::Handle::from_memory(KEBAB_ICON))
+        .width(Length::Fixed(16.0))
+        .height(Length::Fixed(16.0))
+        .style(|_theme, _status| svg::Style { color: Some(MUTED) });
+    button(icon)
+        .style(button::text)
+        .padding(2)
+        .on_press(Message::ToggleMenu(user_id))
+        .into()
+}
+
+/// One left-aligned, full-width row in a peer's action menu.
+fn menu_item<'a>(label: &str, msg: Message) -> Element<'a, Message> {
+    button(text(label.to_owned()).size(13))
+        .style(button::text)
+        .width(Length::Fill)
+        .on_press(msg)
+        .into()
+}
+
+/// Surface style for the floating peer menu: an opaque, bordered card so it reads clearly over the
+/// content it overlaps.
+fn menu_surface(theme: &Theme) -> container::Style {
+    let p = theme.extended_palette();
+    container::Style {
+        background: Some(p.background.weak.color.into()),
+        border: iced::Border {
+            radius: 6.0.into(),
+            width: 1.0,
+            color: p.background.strong.color,
+        },
+        ..Default::default()
+    }
+}
+
+/// A peer's action menu: a kebab button that opens a floating dropdown (copy hostname / copy IP /
+/// block). `open` drives whether the overlay is shown; a click outside dismisses it via `CloseMenu`.
+fn peer_menu<'a>(hostname: String, ip: String, user_id: u64, open: bool) -> Element<'a, Message> {
+    let menu = container(
+        column![
+            menu_item("copy hostname", Message::CopyText(hostname)),
+            menu_item("copy IP", Message::CopyText(ip)),
+            menu_item("block", Message::AskConfirm(Confirm::BlockPeer(user_id))),
+        ]
+        .spacing(2),
+    )
+    .padding(4)
+    .width(Length::Fill)
+    .style(menu_surface);
+    // Anchor the menu below the kebab, extending left (right edge at the kebab) so it stays inside
+    // the narrow window rather than spilling off the right edge. `width` sizes the overlay itself —
+    // without it the overlay defaults to the kebab's width and the labels wrap to one char per line.
+    DropDown::new(kebab_button(user_id), menu, open)
+        .on_dismiss(Message::CloseMenu)
+        .alignment(drop_down::Alignment::BottomStart)
+        .width(Length::Fixed(160.0))
         .into()
 }
 
@@ -178,6 +244,8 @@ struct App {
     connect_busy: bool,
     /// A pending destructive action awaiting a second confirming click (remove device / log out).
     confirm: Option<Confirm>,
+    /// Which peer's action menu (kebab dropdown) is open, by owner `user_id`; `None` when closed.
+    menu_open: Option<u64>,
     /// Which content tab is showing (below the always-visible connection header).
     tab: Tab,
     /// The last action error, shown as a banner until the next action clears it.
@@ -244,8 +312,8 @@ enum Message {
     LoggedOut(Result<String, String>),
     /// Open a URL in the default browser (re-open the authorize link on demand).
     OpenUrl(String),
-    /// Copy a URL to the clipboard.
-    CopyUrl(String),
+    /// Copy arbitrary text to the clipboard (an authorize link, a peer's hostname + IP).
+    CopyText(String),
     /// Connect (`true`) / disconnect (`false`) the mesh over the control socket.
     SetConnected(bool),
     /// A mesh connect/disconnect finished → refresh.
@@ -269,6 +337,10 @@ enum Message {
     AskConfirm(Confirm),
     /// Dismiss the armed destructive action without running it.
     CancelConfirm,
+    /// Toggle a peer's action menu (kebab dropdown) open/closed, keyed by owner `user_id`.
+    ToggleMenu(u64),
+    /// Close any open peer action menu (a click landed outside it).
+    CloseMenu,
     /// Dismiss the current error banner.
     DismissError,
     /// Switch the visible content tab.
@@ -294,6 +366,7 @@ impl App {
             login_url: None,
             connect_busy: false,
             confirm: None,
+            menu_open: None,
             tab: Tab::default(),
             error: None,
             tray_rx: Arc::new(Mutex::new(None)),
@@ -416,7 +489,10 @@ impl App {
                     let _ = open::that(&url);
                 }
             }
-            Message::CopyUrl(url) => return iced::clipboard::write(url),
+            Message::CopyText(s) => {
+                self.menu_open = None; // copied from the peer menu → dismiss it
+                return iced::clipboard::write(s);
+            }
             Message::SetConnected(connected) => {
                 self.connect_busy = true;
                 return Task::perform(
@@ -494,8 +570,19 @@ impl App {
                     Message::DevicesFetched,
                 );
             }
-            Message::AskConfirm(c) => self.confirm = Some(c),
+            Message::AskConfirm(c) => {
+                self.menu_open = None; // an action was chosen from the menu (or elsewhere)
+                self.confirm = Some(c);
+            }
             Message::CancelConfirm => self.confirm = None,
+            Message::ToggleMenu(id) => {
+                self.menu_open = if self.menu_open == Some(id) {
+                    None
+                } else {
+                    Some(id)
+                };
+            }
+            Message::CloseMenu => self.menu_open = None,
             Message::DismissError => self.error = None,
             Message::SelectTab(t) => self.tab = t,
         }
@@ -738,40 +825,63 @@ impl App {
                     .endpoint
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "—".to_string());
-                let (rc, rlabel) = reach_style(p.reach);
-                // Per peer: hostname + reachability + a block control on one line, then a muted
-                // IP · endpoint line below — keeps long hostnames readable in the narrow window.
-                let mut top = row![
-                    dot(rc),
-                    text(p.hostname.clone()).size(14).width(Length::Fill),
-                    muted(rlabel),
+                let (sc, slabel) = peer_status(p.reach, p.up);
+                // Status dot + hostname own the first line so a long FQDN gets the full width. The
+                // dot's color is the single health signal (green up / amber connecting / red down);
+                // hovering it reveals when WG last handshook — the raw fact behind up/down.
+                let hover = match p.last_handshake_secs {
+                    Some(s) => format!("last handshake {} ago", fmt_ago(s)),
+                    None => "no handshake yet".to_string(),
+                };
+                // Hostname carries two hovers' worth of context without cluttering the row: the dot
+                // shows WG liveness (last handshake), the name shows which shared networks the peer is
+                // reachable over (the ACL intersection). The kebab at the end opens the action menu.
+                let net_hover = if p.networks.is_empty() {
+                    "no shared networks".to_string()
+                } else {
+                    format!("shared networks: {}", p.networks.join(", "))
+                };
+                let name_line = row![
+                    tooltip(dot(sc), muted(hover), tooltip::Position::Right)
+                        .padding(6)
+                        .style(container::rounded_box),
+                    tooltip(
+                        text(p.hostname.clone()).size(14),
+                        muted(net_hover),
+                        tooltip::Position::Bottom,
+                    )
+                    .padding(6)
+                    .style(container::rounded_box),
+                    horizontal_space(),
+                    peer_menu(
+                        p.hostname.clone(),
+                        p.wg_ip.to_string(),
+                        p.user_id,
+                        self.menu_open == Some(p.user_id),
+                    ),
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
-                // Block is destructive → arm an inline confirm first (one misclick otherwise drops
-                // the peer). Keyed by the owner's user_id, so it blocks the person, not one device.
-                let arming_block = self.confirm == Some(Confirm::BlockPeer(p.user_id));
-                for e in confirm_controls(
-                    arming_block,
-                    "block",
-                    false,
-                    Message::AskConfirm(Confirm::BlockPeer(p.user_id)),
-                    "confirm block",
-                    Message::BlockPeer {
-                        user_id: p.user_id,
-                        username: p.username.clone(),
-                    },
-                ) {
-                    top = top.push(e);
+                // Second line: the status label (same color as the dot, never contradicting it).
+                // Blocking a peer is chosen from the kebab menu — it arms an inline confirm here
+                // rather than acting immediately, keeping the destructive action a two-step.
+                let mut status_line = row![text(slabel).size(13).color(sc).width(Length::Fill)]
+                    .spacing(8)
+                    .align_y(Vertical::Center);
+                if self.confirm == Some(Confirm::BlockPeer(p.user_id)) {
+                    status_line = status_line
+                        .push(
+                            button(text("confirm block").size(13))
+                                .style(button::danger)
+                                .on_press(Message::BlockPeer {
+                                    user_id: p.user_id,
+                                    username: p.username.clone(),
+                                }),
+                        )
+                        .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
                 }
-                // Live telemetry line: up/down (WG handshake liveness, distinct from the reach path
-                // type), latency (last ICMP RTT, only meaningful while up), and cumulative transfer.
-                let updown = if p.up {
-                    text("up").size(13).color(GREEN)
-                } else {
-                    text("down").size(13).color(RED)
-                };
-                let mut metrics = row![updown].spacing(10).align_y(Vertical::Center);
+                // Telemetry line: latency (last ICMP RTT, only meaningful while up) + transfer totals.
+                let mut metrics = Row::new().spacing(10).align_y(Vertical::Center);
                 if p.up {
                     if let Some(ms) = p.latency_ms {
                         metrics = metrics.push(muted(format!("{ms} ms")));
@@ -782,8 +892,8 @@ impl App {
                     fmt_bytes(p.rx_bytes),
                     fmt_bytes(p.tx_bytes)
                 )));
-                col = col
-                    .push(column![top, muted(format!("{}   {}", p.wg_ip, ep)), metrics].spacing(2));
+                let ip_line = muted(format!("{}   {}", p.wg_ip, ep));
+                col = col.push(column![name_line, status_line, ip_line, metrics].spacing(2));
             }
             // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
             // push everything else off-screen. Small meshes render at natural height (no scrollbar).
@@ -909,7 +1019,7 @@ impl App {
                     row![
                         button(text("Open Discord login").size(13))
                             .on_press(Message::OpenUrl(url.clone())),
-                        button(text("Copy link").size(13)).on_press(Message::CopyUrl(url.clone())),
+                        button(text("Copy link").size(13)).on_press(Message::CopyText(url.clone())),
                     ]
                     .spacing(8),
                 );
@@ -1019,13 +1129,30 @@ impl App {
 }
 
 /// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
-fn reach_style(r: PeerReach) -> (Color, &'static str) {
-    match r {
-        PeerReach::Direct => (GREEN, "direct"),
-        PeerReach::Punching => (AMBER, "punching"),
-        PeerReach::Unreachable => (RED, "unreachable"),
-        PeerReach::Relayed => (BLUE, "relayed"),
-        PeerReach::Ice => (TEAL, "ice"),
+/// A peer's status as a single health color plus a label. One color axis: green = the tunnel is up
+/// (however it's reached), amber = still connecting, red = down. The label carries the path detail
+/// (`direct`/`relayed`/`ice`) or the reason it's not up — so the dot never contradicts the word.
+fn peer_status(reach: PeerReach, up: bool) -> (Color, &'static str) {
+    match (up, reach) {
+        (true, PeerReach::Relayed) => (GREEN, "relayed"),
+        (true, PeerReach::Ice) => (GREEN, "ice"),
+        (true, _) => (GREEN, "direct"),
+        (false, PeerReach::Punching) => (AMBER, "connecting"),
+        (false, PeerReach::Unreachable) => (RED, "unreachable"),
+        (false, _) => (RED, "down"),
+    }
+}
+
+/// A compact "time since" for the last-handshake hover, e.g. `12s`, `4m`, `2h`, `3d`.
+fn fmt_ago(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
     }
 }
 
@@ -1098,6 +1225,8 @@ mod tests {
                 latency_ms: Some(12),
                 rx_bytes: 2048,
                 tx_bytes: 512,
+                last_handshake_secs: Some(5),
+                networks: vec!["mesh".into()],
             }],
             networks: vec![],
             needs_login: false,
