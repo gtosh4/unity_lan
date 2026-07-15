@@ -15,10 +15,63 @@ use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
-    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
+    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, PeerReach, Proto,
+    StatusReport,
 };
-use iced::widget::{button, checkbox, column, row, scrollable, text, text_input, toggler, Column};
-use iced::{Element, Length, Subscription, Task};
+use iced::alignment::Vertical;
+use iced::font::Weight;
+use iced::widget::{
+    button, checkbox, column, container, row, scrollable, text, text_input, toggler, Column, Text,
+};
+use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
+
+// Palette — semantic status colors, tuned for the dark theme. `Color` literals are const.
+const GREEN: Color = Color::from_rgb(0.30, 0.78, 0.47); // healthy / connected / direct
+const AMBER: Color = Color::from_rgb(0.93, 0.69, 0.22); // in-progress / degraded
+const RED: Color = Color::from_rgb(0.90, 0.37, 0.37); // failed / unreachable / destructive
+const BLUE: Color = Color::from_rgb(0.42, 0.60, 0.95); // relayed
+const TEAL: Color = Color::from_rgb(0.35, 0.78, 0.82); // ICE-traversed
+const MUTED: Color = Color::from_rgb(0.74, 0.74, 0.80); // secondary text (IPs, endpoints, hints)
+
+/// A section title: slightly larger and semibold so sections read as a hierarchy above their rows.
+fn header<'a>(s: impl Into<String>) -> Text<'a> {
+    text(s.into()).size(16).font(Font {
+        weight: Weight::Semibold,
+        ..Font::DEFAULT
+    })
+}
+
+/// De-emphasized secondary text (endpoints, hints, current-value notes).
+fn muted<'a>(s: impl Into<String>) -> Text<'a> {
+    text(s.into()).size(13).color(MUTED)
+}
+
+/// A colored status dot to prefix a state line — reads faster than the word alone. Drawn as a
+/// small rounded quad rather than a `●` glyph, which the default font (Fira Sans) renders as tofu.
+fn dot<'a>(color: Color) -> Element<'a, Message> {
+    container(text(""))
+        .width(Length::Fixed(9.0))
+        .height(Length::Fixed(9.0))
+        .style(move |_| container::Style {
+            background: Some(iced::Background::Color(color)),
+            border: iced::Border {
+                radius: 4.5.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Wrap a section's contents in a bordered, padded card so sections read as distinct groups
+/// instead of one flat stack.
+fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content)
+        .padding(14)
+        .width(Length::Fill)
+        .style(container::rounded_box)
+        .into()
+}
 
 fn main() -> iced::Result {
     let socket = PathBuf::from(
@@ -28,6 +81,9 @@ fn main() -> iced::Result {
     );
     iced::application("UnityLAN", App::update, App::view)
         .subscription(App::subscription)
+        .theme(|_| Theme::Dark)
+        .window_size((440.0, 640.0))
+        .centered()
         .run_with(move || {
             let app = App::new(socket);
             let init = app.reload();
@@ -51,7 +107,28 @@ struct App {
     service_busy: bool,
     /// A mesh connect/disconnect is in flight — disables the button meanwhile.
     connect_busy: bool,
+    /// A pending destructive action awaiting a second confirming click (remove device / log out).
+    confirm: Option<Confirm>,
+    /// Which content tab is showing (below the always-visible connection header).
+    tab: Tab,
     error: Option<String>,
+}
+
+/// Content tabs shown under the persistent connection header. Networks = the ACL groups this
+/// device peers on; Peers = this device + the live mesh members; Manage = device + port admin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Tab {
+    #[default]
+    Networks,
+    Peers,
+    Manage,
+}
+
+/// A destructive action armed by a first click; the second click on the confirm control runs it.
+#[derive(Debug, Clone, PartialEq)]
+enum Confirm {
+    RemoveDevice(String),
+    Logout,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +182,14 @@ enum Message {
     SetNewNetworkDefault(bool),
     /// The new-network default was set → the daemon returns the updated status.
     NewNetworkDefaultSet(Result<StatusReport, String>),
+    /// Arm a destructive action: show its inline confirm/cancel controls.
+    AskConfirm(Confirm),
+    /// Dismiss the armed destructive action without running it.
+    CancelConfirm,
+    /// Dismiss the current error banner.
+    DismissError,
+    /// Switch the visible content tab.
+    SelectTab(Tab),
 }
 
 impl App {
@@ -121,6 +206,8 @@ impl App {
             service: None,
             service_busy: false,
             connect_busy: false,
+            confirm: None,
+            tab: Tab::default(),
             error: None,
         }
     }
@@ -212,6 +299,7 @@ impl App {
             }
             Message::LoginStarted(Err(e)) => self.error = Some(e),
             Message::Logout => {
+                self.confirm = None; // consume the armed confirmation
                 self.login_url = None; // drop any stale authorize link
                 return Task::perform(ctl::logout(self.socket.clone()), Message::LoggedOut);
             }
@@ -281,11 +369,16 @@ impl App {
                 )
             }
             Message::Remove(device_name) => {
+                self.confirm = None; // consume the armed confirmation
                 return Task::perform(
                     ctl::manage(self.socket.clone(), ManageOp::Remove { device_name }),
                     Message::DevicesFetched,
-                )
+                );
             }
+            Message::AskConfirm(c) => self.confirm = Some(c),
+            Message::CancelConfirm => self.confirm = None,
+            Message::DismissError => self.error = None,
+            Message::SelectTab(t) => self.tab = t,
         }
         Task::none()
     }
@@ -296,21 +389,27 @@ impl App {
 
     fn view(&self) -> Element<'_, Message> {
         let service = self.service_section();
-        let body = match self.status.as_ref() {
+        let sections = match self.status.as_ref() {
             // Engine reachable — it told us its state. Only offer login when the engine itself says
             // we're not enrolled; otherwise show the live mesh/device UI.
             Some(s) => {
-                let needs_login = s.needs_login;
-                Column::new()
-                    .spacing(20)
-                    .push_maybe(service)
-                    .push_maybe((!needs_login).then(|| self.connection_section()).flatten())
-                    .push_maybe(needs_login.then(|| self.login_section()))
-                    .push(self.device_section())
-                    .push(self.networks_section())
-                    .push(self.peers_section())
-                    .push(self.devices_section())
-                    .push(self.exposed_section())
+                let mut col = Column::new().spacing(12).push_maybe(service.map(card));
+                if s.needs_login {
+                    col = col.push(card(self.login_section()));
+                } else {
+                    // Connection header is always visible; the rest lives under tabs so the peers
+                    // list (which can grow) and the rarely-touched ports don't crowd the header.
+                    // Tab strip + its content share one bordered panel, so the active tab visibly
+                    // owns the surface below it (rather than floating between look-alike cards).
+                    let panel = container(column![self.tab_bar(), self.tab_body()].spacing(10))
+                        .padding(8)
+                        .width(Length::Fill)
+                        .style(container::bordered_box);
+                    col = col
+                        .push_maybe(self.connection_section().map(card))
+                        .push(panel);
+                }
+                col
             }
             // Engine not reachable (socket down / not started yet): don't show the login button — it
             // can't work without the daemon, and the mesh/device sections have no data. Show the
@@ -318,19 +417,62 @@ impl App {
             None => {
                 let notice = service.is_none().then(|| self.engine_notice());
                 Column::new()
-                    .spacing(20)
-                    .push_maybe(service)
-                    .push_maybe(notice)
+                    .spacing(12)
+                    .push_maybe(service.map(card))
+                    .push_maybe(notice.map(card))
             }
         };
-        let body = body
-            .push_maybe(
-                self.error
-                    .as_ref()
-                    .map(|e| text(format!("error: {e}")).size(14)),
-            )
+        // Error banner pinned above the sections so a failure is visible without scrolling. It's
+        // dismissible, and every successful fetch already clears `self.error`.
+        let body = Column::new()
+            .spacing(12)
+            .push_maybe(self.error.as_deref().map(error_banner))
+            .push(sections)
             .padding(20);
         scrollable(body).into()
+    }
+
+    /// The three-tab selector under the connection header. Active tab is the loud primary style,
+    /// the others quiet secondary; buttons butt together into one segmented strip. Each fills a
+    /// third of the width.
+    fn tab_bar(&self) -> Element<'_, Message> {
+        let tab = |label: &'static str, t: Tab| {
+            let b = button(
+                text(label)
+                    .size(14)
+                    .align_x(iced::alignment::Horizontal::Center),
+            )
+            .width(Length::Fill)
+            .on_press(Message::SelectTab(t));
+            if self.tab == t {
+                b
+            } else {
+                b.style(button::secondary)
+            }
+        };
+        row![
+            tab("Networks", Tab::Networks),
+            tab("Peers", Tab::Peers),
+            tab("Manage", Tab::Manage),
+        ]
+        .spacing(2)
+        .into()
+    }
+
+    /// Sections for the active tab, rendered borderless — the enclosing tab panel is the surface,
+    /// so sections are separated by spacing alone (no nested cards). Networks = the ACL groups;
+    /// Peers = this device + mesh members; Manage = devices → exposed ports.
+    fn tab_body(&self) -> Element<'_, Message> {
+        let col = match self.tab {
+            Tab::Networks => Column::new().push(self.networks_section()),
+            Tab::Peers => Column::new()
+                .push(self.device_section())
+                .push(self.peers_section()),
+            Tab::Manage => Column::new()
+                .push(self.devices_section())
+                .push(self.exposed_section()),
+        };
+        col.spacing(18).padding([2, 6]).into()
     }
 
     /// Shown when we have no status: the control socket isn't reachable, so the engine is either
@@ -342,9 +484,7 @@ impl App {
         } else {
             "Connecting to engine…"
         };
-        column![text("engine").size(18), text(msg).size(14)]
-            .spacing(6)
-            .into()
+        column![header("engine"), muted(msg)].spacing(6).into()
     }
 
     /// Engine-service status (the engine *process* lifecycle, distinct from the mesh connection).
@@ -357,8 +497,18 @@ impl App {
         if state == svc::SvcState::Unsupported {
             return None;
         }
-        let mut controls =
-            row![text(format!("engine service: {}", state.label())).size(14)].spacing(8);
+        let scolor = match state {
+            svc::SvcState::Running => GREEN,
+            svc::SvcState::Pending => AMBER,
+            svc::SvcState::Stopped => RED,
+            svc::SvcState::NotInstalled | svc::SvcState::Unsupported => MUTED,
+        };
+        let mut controls = row![
+            dot(scolor),
+            text(format!("engine service: {}", state.label())).size(14),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center);
 
         match state {
             svc::SvcState::Stopped => {
@@ -371,13 +521,13 @@ impl App {
                 controls = controls.push(b);
             }
             svc::SvcState::NotInstalled => {
-                controls = controls.push(
-                    text("run `unitylan-engine service install` (elevated) to enable").size(13),
-                );
+                controls = controls.push(muted(
+                    "run `unitylan-engine service install` (elevated) to enable",
+                ));
             }
             svc::SvcState::Running | svc::SvcState::Pending | svc::SvcState::Unsupported => {}
         }
-        Some(column![text("engine").size(18), controls].spacing(6).into())
+        Some(column![header("engine"), controls].spacing(6).into())
     }
 
     /// Mesh connect/disconnect over the control socket. Disconnect keeps the engine resident and
@@ -387,45 +537,73 @@ impl App {
     fn connection_section(&self) -> Option<Element<'_, Message>> {
         let status = self.status.as_ref()?;
         let connected = status.connected;
-        let (state, label, target) = if connected {
-            ("connected", "disconnect", false)
+        let (state, label, target, mesh_color) = if connected {
+            ("connected", "disconnect", false, GREEN)
         } else {
-            ("disconnected", "connect", true)
+            ("disconnected", "connect", true, MUTED)
         };
+        // Disconnect is the destructive direction (drops peers, withdraws us from seed lists) →
+        // danger style; connect is benign.
         let b = button(text(label).size(13));
+        let b = if connected {
+            b.style(button::danger)
+        } else {
+            b
+        };
         let b = if self.connect_busy {
             b
         } else {
             b.on_press(Message::SetConnected(target))
         };
         let controls = row![
+            dot(mesh_color),
             text(format!("mesh: {state}")).size(14).width(Length::Fill),
             b,
         ]
-        .spacing(8);
+        .spacing(8)
+        .align_y(Vertical::Center);
         // Who we're enrolled as, with a log out control (tears the mesh down, un-enrolls, and
-        // re-keys → back to the login screen), and whether the coordinator is currently reachable
-        // (the mesh keeps running from cache when it isn't, so that's a distinct health line).
+        // re-keys → back to the login screen). Destructive, so it arms an inline confirm first.
+        let logging_out = self.confirm == Some(Confirm::Logout);
         let identity = status.identity.as_deref().map(|u| {
-            row![
-                text(format!("signed in as {u}"))
-                    .size(14)
-                    .width(Length::Fill),
-                button(text("log out").size(13)).on_press(Message::Logout),
-            ]
+            let mut r = row![text(format!("signed in as {u}"))
+                .size(14)
+                .width(Length::Fill)]
             .spacing(8)
+            .align_y(Vertical::Center);
+            if logging_out {
+                r = r
+                    .push(
+                        button(text("confirm log out").size(13))
+                            .style(button::danger)
+                            .on_press(Message::Logout),
+                    )
+                    .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
+            } else {
+                r = r.push(
+                    button(text("log out").size(13))
+                        .style(button::danger)
+                        .on_press(Message::AskConfirm(Confirm::Logout)),
+                );
+            }
+            r
         });
-        let coord = if status.coordinator_online {
-            "coordinator: online"
+        // Whether the coordinator is currently reachable (the mesh keeps running from cache when
+        // it isn't, so that's a distinct health line).
+        let (coord_color, coord) = if status.coordinator_online {
+            (GREEN, "coordinator: online")
         } else {
-            "coordinator: offline (mesh running from cache)"
+            (AMBER, "coordinator: offline (mesh running from cache)")
         };
+        let coord_line = row![dot(coord_color), text(coord).size(14)]
+            .spacing(8)
+            .align_y(Vertical::Center);
         Some(
-            column![text("connection").size(18)]
+            column![header("connection")]
                 .push_maybe(identity)
-                .push(text(coord).size(14))
+                .push(coord_line)
                 .push(controls)
-                .spacing(6)
+                .spacing(8)
                 .into(),
         )
     }
@@ -435,15 +613,29 @@ impl App {
         {
             Some(d) => {
                 // Networks are listed (with toggles) in the networks section below — don't repeat
-                // them here. This line is just the device's identity on the mesh.
+                // them here. Hostname on top, IP as a muted sub-line — same shape as a peer row, so
+                // long FQDNs don't get starved into a mid-token wrap by a fixed IP column.
                 let primary = if d.is_primary { "  [primary]" } else { "" };
-                text(format!("{}  {}{}", d.wg_ip, d.hostname, primary)).into()
+                column![
+                    row![
+                        dot(GREEN),
+                        text(format!("{}{}", d.hostname, primary))
+                            .size(14)
+                            .width(Length::Fill),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                    muted(d.wg_ip.to_string()),
+                ]
+                .spacing(2)
+                .into()
             }
-            None => text("not joined to any network").into(),
+            None => row![dot(MUTED), muted("not joined to any network")]
+                .spacing(8)
+                .align_y(Vertical::Center)
+                .into(),
         };
-        column![text("this device").size(18), inner]
-            .spacing(6)
-            .into()
+        column![header("this device"), inner].spacing(6).into()
     }
 
     fn peers_section(&self) -> Element<'_, Message> {
@@ -452,70 +644,136 @@ impl App {
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[]);
-        let mut col = Column::new().spacing(4);
-        for p in peers {
-            let ep = p
-                .endpoint
-                .map(|e| e.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            col = col.push(text(format!("{:<16} {:<40} {}", p.wg_ip, p.hostname, ep)).size(14));
-        }
-        column![text(format!("peers ({})", peers.len())).size(18), col]
-            .spacing(6)
+        let inner: Element<'_, Message> = if peers.is_empty() {
+            muted("No peers yet — waiting for co-members to come online.").into()
+        } else {
+            let mut col = Column::new().spacing(8);
+            for p in peers {
+                let ep = p
+                    .endpoint
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "—".to_string());
+                let (rc, rlabel) = reach_style(p.reach);
+                // Per peer: hostname + reachability on one line, then a muted IP · endpoint line
+                // below — keeps long hostnames readable in the narrow window.
+                col = col.push(
+                    column![
+                        row![
+                            dot(rc),
+                            text(p.hostname.clone()).size(14).width(Length::Fill),
+                            muted(rlabel),
+                        ]
+                        .spacing(8)
+                        .align_y(Vertical::Center),
+                        muted(format!("{}   {}", p.wg_ip, ep)),
+                    ]
+                    .spacing(2),
+                );
+            }
+            // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
+            // push everything else off-screen. Small meshes render at natural height (no scrollbar).
+            if peers.len() > 6 {
+                scrollable(col).height(Length::Fixed(300.0)).into()
+            } else {
+                col.into()
+            }
+        };
+        column![header(format!("peers ({})", peers.len())), inner]
+            .spacing(8)
             .into()
     }
 
     fn devices_section(&self) -> Element<'_, Message> {
-        let mut list = Column::new().spacing(6);
-        for d in &self.devices {
-            let primary = if d.is_primary { "  [primary]" } else { "" };
-            let this = if d.is_self { "  (this device)" } else { "" };
-            let mut r =
-                row![text(format!("{}{}{}", d.device_name, primary, this)).width(Length::Fill)]
-                    .spacing(8);
-            if !d.is_primary {
-                r = r.push(
-                    button(text("set primary").size(13))
-                        .on_press(Message::SetPrimary(d.device_name.clone())),
-                );
+        let inner: Element<'_, Message> = if self.devices.is_empty() {
+            muted("No devices yet.").into()
+        } else {
+            let mut list = Column::new().spacing(6);
+            for d in &self.devices {
+                let primary = if d.is_primary { "  [primary]" } else { "" };
+                let this = if d.is_self { "  (this device)" } else { "" };
+                let mut r = row![text(format!("{}{}{}", d.device_name, primary, this))
+                    .size(14)
+                    .width(Length::Fill)]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                if !d.is_primary {
+                    r = r.push(
+                        button(text("set primary").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::SetPrimary(d.device_name.clone())),
+                    );
+                }
+                if !d.is_self {
+                    // Remove is destructive → arm an inline confirm first (one misclick otherwise
+                    // drops the device).
+                    let removing =
+                        self.confirm == Some(Confirm::RemoveDevice(d.device_name.clone()));
+                    if removing {
+                        r = r
+                            .push(
+                                button(text("confirm remove").size(13))
+                                    .style(button::danger)
+                                    .on_press(Message::Remove(d.device_name.clone())),
+                            )
+                            .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
+                    } else {
+                        r = r.push(
+                            button(text("remove").size(13))
+                                .style(button::danger)
+                                .on_press(Message::AskConfirm(Confirm::RemoveDevice(
+                                    d.device_name.clone(),
+                                ))),
+                        );
+                    }
+                }
+                list = list.push(r);
             }
-            if !d.is_self {
-                r = r.push(
-                    button(text("remove").size(13))
-                        .on_press(Message::Remove(d.device_name.clone())),
-                );
-            }
-            list = list.push(r);
-        }
+            list.into()
+        };
 
+        // Rename this device. Show the current hostname so it's clear what's being changed.
+        let current = self
+            .status
+            .as_ref()
+            .and_then(|s| s.device.as_ref())
+            .map(|d| muted(format!("current: {}", d.hostname)));
         let rename = row![
             text_input("new name for this device", &self.rename_input)
                 .on_input(Message::RenameInput)
                 .on_submit(Message::RenameSubmit),
-            button(text("rename").size(13)).on_press(Message::RenameSubmit),
+            button(text("rename").size(13))
+                .style(button::secondary)
+                .on_press(Message::RenameSubmit),
         ]
         .spacing(8);
 
-        column![text("devices").size(18), list, rename]
+        column![header("devices"), inner]
+            .push_maybe(current)
+            .push(rename)
             .spacing(8)
             .into()
     }
 
     fn login_section(&self) -> Element<'_, Message> {
         let mut col = column![
-            text("Not logged in").size(18),
+            header("Not logged in"),
+            muted("Sign in with Discord to join your mesh."),
             button(text("Log in with Discord")).on_press(Message::Login),
         ]
         .spacing(8);
         if let Some(url) = &self.login_url {
             col = col
-                .push(text("Browser opened — if not, use this link to finish:").size(14))
+                .push(muted(
+                    "Browser opened — if not, use the buttons below to finish.",
+                ))
                 .push(
-                    button(text(url.clone()).size(13))
-                        .on_press(Message::OpenUrl(url.clone()))
-                        .style(button::text),
-                )
-                .push(button(text("Copy link").size(13)).on_press(Message::CopyUrl(url.clone())));
+                    row![
+                        button(text("Open Discord login").size(13))
+                            .on_press(Message::OpenUrl(url.clone())),
+                        button(text("Copy link").size(13)).on_press(Message::CopyUrl(url.clone())),
+                    ]
+                    .spacing(8),
+                );
         }
         col.into()
     }
@@ -526,57 +784,75 @@ impl App {
             .as_ref()
             .map(|s| s.networks.as_slice())
             .unwrap_or(&[]);
-        let mut col = Column::new().spacing(6);
-        for n in nets {
-            let title = if n.guild_name.is_empty() {
-                n.name.clone()
-            } else {
-                format!("{} @ {}", n.name, n.guild_name)
-            };
-            // A switch (not a button): flipping it applies immediately, and its position shows the
-            // current state — no separate on/off label needed.
-            let (guild_id, role_id) = (n.guild_id, n.role_id);
-            let r = row![
-                text(title).width(Length::Fill),
-                toggler(n.enabled).on_toggle(move |enabled| Message::ToggleNetwork {
-                    guild_id,
-                    role_id,
-                    enabled,
-                }),
-            ]
-            .spacing(8);
-            col = col.push(r);
-        }
         // Secure default: newly-discovered networks stay off until enabled here. No status yet
-        // (socket not up) → assume the secure posture.
+        // (socket not up) → assume the secure posture. Sits at the top of the card: it's a
+        // section-wide policy governing the list below, not a per-network control.
         let disable_new = self.status.as_ref().is_none_or(|s| s.disable_new_networks);
         let policy = checkbox("Disable new networks on discovery", disable_new)
             .on_toggle(Message::SetNewNetworkDefault)
             .size(16)
             .text_size(14);
-        column![text("networks").size(18), col, policy]
-            .spacing(6)
-            .into()
+        let inner: Element<'_, Message> = if nets.is_empty() {
+            muted("No networks discovered yet.").into()
+        } else {
+            let mut col = Column::new().spacing(6);
+            for n in nets {
+                let title = if n.guild_name.is_empty() {
+                    n.name.clone()
+                } else {
+                    format!("{} @ {}", n.name, n.guild_name)
+                };
+                // A switch (not a button): flipping it applies immediately, and its position shows
+                // the current state — no separate on/off label needed. Switch on the left so the
+                // interactive controls line up in one column with the policy checkbox above.
+                let (guild_id, role_id) = (n.guild_id, n.role_id);
+                let r = row![
+                    toggler(n.enabled)
+                        .width(Length::Shrink)
+                        .on_toggle(move |enabled| {
+                            Message::ToggleNetwork {
+                                guild_id,
+                                role_id,
+                                enabled,
+                            }
+                        }),
+                    text(title).size(14).width(Length::Fill),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                col = col.push(r);
+            }
+            col.into()
+        };
+        column![header("networks"), policy, inner].spacing(8).into()
     }
 
     fn exposed_section(&self) -> Element<'_, Message> {
-        let mut list = Column::new().spacing(6);
-        for e in &self.exposed {
-            let scope = e
-                .net
-                .as_deref()
-                .map(|n| format!("  → net: {n}"))
-                .unwrap_or_default();
-            let r = row![
-                text(format!("{}/{}{}", e.proto.as_str(), e.port, scope)).width(Length::Fill),
-                button(text("unexpose").size(13)).on_press(Message::Unexpose {
-                    proto: e.proto,
-                    port: e.port
-                }),
-            ]
-            .spacing(8);
-            list = list.push(r);
-        }
+        let inner: Element<'_, Message> = if self.exposed.is_empty() {
+            muted("No ports exposed.").into()
+        } else {
+            let mut list = Column::new().spacing(6);
+            for e in &self.exposed {
+                let scope = e
+                    .net
+                    .as_deref()
+                    .map(|n| format!("  → net: {n}"))
+                    .unwrap_or_default();
+                let r = row![
+                    text(format!("{}/{}{}", e.proto.as_str(), e.port, scope))
+                        .size(14)
+                        .width(Length::Fill),
+                    button(text("unexpose").size(13)).on_press(Message::Unexpose {
+                        proto: e.proto,
+                        port: e.port
+                    }),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                list = list.push(r);
+            }
+            list.into()
+        };
 
         // Add row: port (e.g. `25565` or `udp/34197`) + optional network to scope it to.
         let add = row![
@@ -586,14 +862,51 @@ impl App {
             text_input("net (optional)", &self.expose_net_input)
                 .on_input(Message::ExposeNetInput)
                 .on_submit(Message::ExposeSubmit),
-            button(text("expose").size(13)).on_press(Message::ExposeSubmit),
+            button(text("expose").size(13))
+                .style(button::secondary)
+                .on_press(Message::ExposeSubmit),
         ]
         .spacing(8);
 
-        column![text("exposed ports").size(18), list, add]
-            .spacing(8)
-            .into()
+        column![
+            header("exposed ports"),
+            inner,
+            add,
+            muted("tcp is the default; write udp/34197 for UDP. Leave net blank to expose on all."),
+        ]
+        .spacing(8)
+        .into()
     }
+}
+
+/// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
+fn reach_style(r: PeerReach) -> (Color, &'static str) {
+    match r {
+        PeerReach::Direct => (GREEN, "direct"),
+        PeerReach::Punching => (AMBER, "punching"),
+        PeerReach::Unreachable => (RED, "unreachable"),
+        PeerReach::Relayed => (BLUE, "relayed"),
+        PeerReach::Ice => (TEAL, "ice"),
+    }
+}
+
+/// A dismissible error banner, pinned above the sections in `view`.
+fn error_banner<'a>(e: &str) -> Element<'a, Message> {
+    let content = row![
+        dot(RED),
+        text(format!("error: {e}"))
+            .size(14)
+            .color(RED)
+            .width(Length::Fill),
+        button(text("dismiss").size(12)).on_press(Message::DismissError),
+    ]
+    .spacing(8)
+    .align_y(Vertical::Center);
+    container(content)
+        .padding(12)
+        .width(Length::Fill)
+        .style(container::bordered_box)
+        .into()
 }
 
 /// Parse a port field: `25565` (tcp default) or `tcp/25565` / `udp/34197`.
@@ -836,5 +1149,37 @@ mod tests {
         assert_eq!(parse_port("udp/34197").unwrap(), (Proto::Udp, 34197));
         assert!(parse_port("sctp/1").is_err());
         assert!(parse_port("70000").is_err());
+    }
+
+    #[test]
+    fn destructive_action_arms_then_confirms_or_cancels() {
+        let mut a = app();
+        // First click only arms the confirmation — nothing destructive runs yet.
+        let _ = a.update(Message::AskConfirm(Confirm::RemoveDevice("laptop".into())));
+        assert_eq!(a.confirm, Some(Confirm::RemoveDevice("laptop".into())));
+        // Cancel clears it without acting.
+        let _ = a.update(Message::CancelConfirm);
+        assert_eq!(a.confirm, None);
+        // Re-arming then confirming (the second click) consumes the pending state.
+        let _ = a.update(Message::AskConfirm(Confirm::Logout));
+        assert_eq!(a.confirm, Some(Confirm::Logout));
+        let _ = a.update(Message::Logout);
+        assert_eq!(a.confirm, None);
+    }
+
+    #[test]
+    fn dismiss_error_clears_banner() {
+        let mut a = app();
+        a.error = Some("boom".into());
+        let _ = a.update(Message::DismissError);
+        assert!(a.error.is_none());
+    }
+
+    #[test]
+    fn tab_defaults_to_networks_and_switches() {
+        let mut a = app();
+        assert_eq!(a.tab, Tab::Networks);
+        let _ = a.update(Message::SelectTab(Tab::Peers));
+        assert_eq!(a.tab, Tab::Peers);
     }
 }
