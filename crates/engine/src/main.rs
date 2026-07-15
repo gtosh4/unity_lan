@@ -12,6 +12,7 @@ mod keys;
 mod nat;
 mod netcfg;
 mod oauth;
+mod ping;
 mod relay;
 mod resolver;
 #[cfg(windows)]
@@ -132,6 +133,16 @@ enum CtlCmd {
         config: String,
         action: String,
         network: String,
+    },
+    /// Locally block a peer's owner (all their devices) by handle — drops them from the mesh.
+    Block {
+        config: String,
+        user: String,
+    },
+    /// Un-block a previously-blocked user by handle.
+    Unblock {
+        config: String,
+        user: String,
     },
 }
 
@@ -357,6 +368,12 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                 };
                 println!("  {:<16} {:<40} {}{}", p.wg_ip, p.hostname, ep, nat);
             }
+            if !report.blocked.is_empty() {
+                println!("blocked ({}):", report.blocked.len());
+                for b in &report.blocked {
+                    println!("  {} (id {})", b.username, b.user_id);
+                }
+            }
             Ok(())
         }
         CtlCmd::Devices { config } => {
@@ -453,6 +470,34 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                 let state = if n.enabled { "on" } else { "off" };
                 println!("  {} [{}]", n.name, state);
             }
+            Ok(())
+        }
+        CtlCmd::Block { config, user } => {
+            let socket = socket_for(&config)?;
+            // Resolve the handle to a user_id from the live peer set (a block acts on the person).
+            let status = control::client_status(&socket).await?;
+            let peer = status
+                .peers
+                .iter()
+                .find(|p| p.username == user)
+                .ok_or_else(|| anyhow::anyhow!("no peer with handle '{user}'"))?;
+            let updated =
+                control::client_set_blocked(&socket, peer.user_id, Some(peer.username.clone()))
+                    .await?;
+            println!("blocked {user} ({} user(s) blocked)", updated.blocked.len());
+            Ok(())
+        }
+        CtlCmd::Unblock { config, user } => {
+            let socket = socket_for(&config)?;
+            // Resolve from the blocked list, so an offline (filtered-out) user can still be un-blocked.
+            let status = control::client_status(&socket).await?;
+            let blocked = status
+                .blocked
+                .iter()
+                .find(|b| b.username == user)
+                .ok_or_else(|| anyhow::anyhow!("no blocked user with handle '{user}'"))?;
+            control::client_set_blocked(&socket, blocked.user_id, None).await?;
+            println!("un-blocked {user}");
             Ok(())
         }
     }

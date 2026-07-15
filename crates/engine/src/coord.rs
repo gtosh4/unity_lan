@@ -40,6 +40,10 @@ pub struct RelayReport {
 #[derive(Clone)]
 pub struct SeedPeer {
     pub pubkey: [u8; 32],
+    /// The peer owner's Discord id + handle (from the verified attestation). `user_id` is the
+    /// identity a local peer-block acts on — stable across the owner re-keying/renaming a device.
+    pub user_id: u64,
+    pub username: String,
     pub ip: Ipv4Addr,
     pub endpoint: Option<SocketAddr>,
     /// Hole-punch target (peer's reflexive `ip:port`) when neither side is directly dialable.
@@ -277,6 +281,8 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
         let att = verify_attestation(&signed, &anchor, now).context("verifying seed")?;
         peers.push(SeedPeer {
             pubkey: att.wg_pubkey,
+            user_id: att.user_id,
+            username: att.username.clone(),
             ip: att.wg_ip,
             endpoint: seed.endpoint,
             punch: seed.punch,

@@ -24,7 +24,7 @@ use iced::font::Weight;
 use iced::widget::{
     button, checkbox, column, container, row, scrollable, text, text_input, toggler, Column, Text,
 };
-use iced::window::{self, Mode};
+use iced::window;
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tray::TrayMsg;
@@ -48,6 +48,21 @@ fn header<'a>(s: impl Into<String>) -> Text<'a> {
 /// De-emphasized secondary text (endpoints, hints, current-value notes).
 fn muted<'a>(s: impl Into<String>) -> Text<'a> {
     text(s.into()).size(13).color(MUTED)
+}
+
+/// Human-readable byte count for the per-peer transfer counters (e.g. `1.2 MB`, `340 KB`).
+fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n < KB {
+        format!("{} B", n as u64)
+    } else if n < KB * KB {
+        format!("{:.0} KB", n / KB)
+    } else if n < KB * KB * KB {
+        format!("{:.1} MB", n / (KB * KB))
+    } else {
+        format!("{:.1} GB", n / (KB * KB * KB))
+    }
 }
 
 /// A colored status dot to prefix a state line — reads faster than the word alone. Drawn as a
@@ -77,6 +92,17 @@ fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         .into()
 }
 
+/// The main window's settings. `exit_on_close_request(false)` so the close button hits our
+/// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
+fn window_settings() -> window::Settings {
+    window::Settings {
+        size: iced::Size::new(440.0, 640.0),
+        position: window::Position::Centered,
+        exit_on_close_request: false,
+        ..Default::default()
+    }
+}
+
 fn main() -> iced::Result {
     let socket = PathBuf::from(
         std::env::args()
@@ -87,18 +113,17 @@ fn main() -> iced::Result {
     // connect/disconnect + reflects status over the socket itself, and hands window/quit requests
     // back to us over this channel.
     let tray_rx = tray::spawn(socket.clone());
-    iced::application("UnityLAN", App::update, App::view)
+    // `daemon` (not `application`) so the process survives with zero windows: hide-to-tray destroys
+    // the window and show reopens a fresh one — the only way to truly leave the taskbar on Wayland,
+    // where winit can't unmap a surface. Quit (from the tray) is the real exit.
+    iced::daemon("UnityLAN", App::update, App::view)
         .subscription(App::subscription)
-        .theme(|_| Theme::Dark)
-        .window_size((440.0, 640.0))
-        .centered()
-        // The window's close button minimizes to the tray instead of exiting (we intercept
-        // CloseRequested); the tray's Quit is the real exit.
-        .exit_on_close_request(false)
+        .theme(|_, _| Theme::Dark)
         .run_with(move || {
-            let app = App::new(socket);
+            let mut app = App::new(socket);
             *app.tray_rx.lock().unwrap() = tray_rx;
-            let init = app.reload();
+            let open = app.open_window();
+            let init = Task::batch([open, app.reload()]);
             (app, init)
         })
 }
@@ -120,11 +145,12 @@ struct App {
     /// Which content tab is showing (below the always-visible connection header).
     tab: Tab,
     error: Option<String>,
-    /// Whether the main window is hidden (minimized to the tray). Toggled from the tray.
-    hidden: bool,
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
     /// there's no tray on this platform / system).
     tray_rx: Arc<Mutex<Option<UnboundedReceiver<TrayMsg>>>>,
+    /// The main window's id while it's open; `None` while hidden to the tray (the window is
+    /// destroyed, not just hidden — see [`window_settings`]). Show reopens a fresh one.
+    window: Option<window::Id>,
 }
 
 /// Content tabs shown under the persistent connection header. Networks = the ACL groups this
@@ -142,6 +168,8 @@ enum Tab {
 enum Confirm {
     RemoveDevice(String),
     Logout,
+    /// Block a peer's owner, armed by the peer's `user_id`.
+    BlockPeer(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +217,17 @@ enum Message {
     SetNewNetworkDefault(bool),
     /// The new-network default was set → the daemon returns the updated status.
     NewNetworkDefaultSet(Result<StatusReport, String>),
+    /// Locally block a peer's owner (all their devices) by Discord `user_id`.
+    BlockPeer {
+        user_id: u64,
+        username: String,
+    },
+    /// Un-block a previously-blocked user.
+    UnblockPeer {
+        user_id: u64,
+    },
+    /// A block/un-block finished → the daemon returns the updated status.
+    BlockDone(Result<StatusReport, String>),
     /// Arm a destructive action: show its inline confirm/cancel controls.
     AskConfirm(Confirm),
     /// Dismiss the armed destructive action without running it.
@@ -200,7 +239,9 @@ enum Message {
     /// A window/quit request from the system tray.
     Tray(TrayMsg),
     /// The window's close button was pressed → hide to the tray instead of exiting.
-    CloseRequested(window::Id),
+    CloseRequested,
+    /// A freshly-opened window finished opening → focus it.
+    WindowOpened(window::Id),
 }
 
 impl App {
@@ -218,8 +259,24 @@ impl App {
             confirm: None,
             tab: Tab::default(),
             error: None,
-            hidden: false,
             tray_rx: Arc::new(Mutex::new(None)),
+            window: None,
+        }
+    }
+
+    /// Open the main window, recording its id. Used at boot and to restore from the tray.
+    fn open_window(&mut self) -> Task<Message> {
+        let (id, task) = window::open(window_settings());
+        self.window = Some(id);
+        task.map(Message::WindowOpened)
+    }
+
+    /// Hide to the tray by destroying the window (the only way off the taskbar on Wayland). The
+    /// process stays alive because we run as an iced `daemon`. No-op if already hidden.
+    fn hide_window(&mut self) -> Task<Message> {
+        match self.window.take() {
+            Some(id) => window::close(id),
+            None => Task::none(),
         }
     }
 
@@ -346,25 +403,36 @@ impl App {
                 self.error = None;
             }
             Message::NewNetworkDefaultSet(Err(e)) => self.error = Some(e),
+            Message::BlockPeer { user_id, username } => {
+                self.confirm = None; // consume the armed confirmation
+                return Task::perform(
+                    ctl::block_peer(self.socket.clone(), user_id, username),
+                    Message::BlockDone,
+                );
+            }
+            Message::UnblockPeer { user_id } => {
+                return Task::perform(
+                    ctl::unblock_peer(self.socket.clone(), user_id),
+                    Message::BlockDone,
+                )
+            }
+            Message::BlockDone(Ok(s)) => {
+                self.status = Some(s);
+                self.error = None;
+                return self.reload(); // pull the settled peer set once the re-mesh lands
+            }
+            Message::BlockDone(Err(e)) => self.error = Some(e),
             Message::Tray(TrayMsg::ToggleWindow) => {
-                self.hidden = !self.hidden;
-                let show = !self.hidden;
-                let mode = if show { Mode::Windowed } else { Mode::Hidden };
-                // Resolve the window id at action time (single-window app) rather than caching it.
-                return window::get_latest().and_then(move |id| {
-                    let change = window::change_mode(id, mode);
-                    if show {
-                        Task::batch([change, window::gain_focus(id)])
-                    } else {
-                        change
-                    }
-                });
+                // Toggle: destroy the window if shown, reopen it if hidden to the tray.
+                return if self.window.is_some() {
+                    self.hide_window()
+                } else {
+                    self.open_window()
+                };
             }
             Message::Tray(TrayMsg::Quit) => return iced::exit(),
-            Message::CloseRequested(id) => {
-                self.hidden = true;
-                return window::change_mode(id, Mode::Hidden);
-            }
+            Message::CloseRequested => return self.hide_window(),
+            Message::WindowOpened(id) => return window::gain_focus(id),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -400,7 +468,7 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
-            window::close_requests().map(Message::CloseRequested),
+            window::close_requests().map(|_| Message::CloseRequested),
             self.tray_subscription(),
         ])
     }
@@ -421,7 +489,7 @@ impl App {
         Subscription::run_with_id("unitylan-tray", stream)
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let sections = match self.status.as_ref() {
             // Engine reachable — it told us its state. Only offer login when the engine itself says
             // we're not enrolled; otherwise show the live mesh/device UI.
@@ -639,21 +707,55 @@ impl App {
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "—".to_string());
                 let (rc, rlabel) = reach_style(p.reach);
-                // Per peer: hostname + reachability on one line, then a muted IP · endpoint line
-                // below — keeps long hostnames readable in the narrow window.
-                col = col.push(
-                    column![
-                        row![
-                            dot(rc),
-                            text(p.hostname.clone()).size(14).width(Length::Fill),
-                            muted(rlabel),
-                        ]
-                        .spacing(8)
-                        .align_y(Vertical::Center),
-                        muted(format!("{}   {}", p.wg_ip, ep)),
-                    ]
-                    .spacing(2),
-                );
+                // Per peer: hostname + reachability + a block control on one line, then a muted
+                // IP · endpoint line below — keeps long hostnames readable in the narrow window.
+                let mut top = row![
+                    dot(rc),
+                    text(p.hostname.clone()).size(14).width(Length::Fill),
+                    muted(rlabel),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                // Block is destructive → arm an inline confirm first (one misclick otherwise drops
+                // the peer). Keyed by the owner's user_id, so it blocks the person, not one device.
+                if self.confirm == Some(Confirm::BlockPeer(p.user_id)) {
+                    top = top
+                        .push(
+                            button(text("confirm block").size(13))
+                                .style(button::danger)
+                                .on_press(Message::BlockPeer {
+                                    user_id: p.user_id,
+                                    username: p.username.clone(),
+                                }),
+                        )
+                        .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
+                } else {
+                    top = top.push(
+                        button(text("block").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::AskConfirm(Confirm::BlockPeer(p.user_id))),
+                    );
+                }
+                // Live telemetry line: up/down (WG handshake liveness, distinct from the reach path
+                // type), latency (last ICMP RTT, only meaningful while up), and cumulative transfer.
+                let updown = if p.up {
+                    text("up").size(13).color(GREEN)
+                } else {
+                    text("down").size(13).color(RED)
+                };
+                let mut metrics = row![updown].spacing(10).align_y(Vertical::Center);
+                if p.up {
+                    if let Some(ms) = p.latency_ms {
+                        metrics = metrics.push(muted(format!("{ms} ms")));
+                    }
+                }
+                metrics = metrics.push(muted(format!(
+                    "rx {}  tx {}",
+                    fmt_bytes(p.rx_bytes),
+                    fmt_bytes(p.tx_bytes)
+                )));
+                col = col
+                    .push(column![top, muted(format!("{}   {}", p.wg_ip, ep)), metrics].spacing(2));
             }
             // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
             // push everything else off-screen. Small meshes render at natural height (no scrollbar).
@@ -663,7 +765,38 @@ impl App {
                 col.into()
             }
         };
+        // Blocked users: shown as a separate list (a blocked owner never appears as a peer) so they
+        // can be un-blocked even while filtered out of the mesh.
+        let blocked = self
+            .status
+            .as_ref()
+            .map(|s| s.blocked.as_slice())
+            .unwrap_or(&[]);
+        let blocked_section: Option<Element<'_, Message>> = if blocked.is_empty() {
+            None
+        } else {
+            let mut list = Column::new().spacing(6);
+            for b in blocked {
+                list = list.push(
+                    row![
+                        text(b.username.clone()).size(14).width(Length::Fill),
+                        button(text("unblock").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::UnblockPeer { user_id: b.user_id }),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                );
+            }
+            Some(
+                column![header(format!("blocked ({})", blocked.len())), list]
+                    .spacing(8)
+                    .into(),
+            )
+        };
+
         column![header(format!("peers ({})", peers.len())), inner]
+            .push_maybe(blocked_section)
             .spacing(8)
             .into()
     }
@@ -938,6 +1071,12 @@ mod tests {
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
                 reach: common::control::PeerReach::Direct,
+                user_id: 42,
+                username: "bob".into(),
+                up: true,
+                latency_ms: Some(12),
+                rx_bytes: 2048,
+                tx_bytes: 512,
             }],
             networks: vec![],
             needs_login: false,
@@ -945,6 +1084,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -952,13 +1092,30 @@ mod tests {
     }
 
     #[test]
-    fn tray_toggle_flips_hidden() {
+    fn fmt_bytes_scales_units() {
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(2048), "2 KB");
+        assert_eq!(fmt_bytes(1024 * 1024 + 200 * 1024), "1.2 MB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn tray_toggle_destroys_and_reopens_window() {
         let mut a = app();
-        assert!(!a.hidden);
+        let _ = a.open_window(); // boot opens the window
+        assert!(a.window.is_some());
         let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
-        assert!(a.hidden); // first click hides to tray
+        assert!(a.window.is_none()); // first click hides to tray (window destroyed)
         let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
-        assert!(!a.hidden); // second click restores
+        assert!(a.window.is_some()); // second click reopens
+    }
+
+    #[test]
+    fn close_request_hides_to_tray() {
+        let mut a = app();
+        let _ = a.open_window();
+        let _ = a.update(Message::CloseRequested);
+        assert!(a.window.is_none()); // the X button hides, doesn't exit
     }
 
     #[test]
@@ -1048,6 +1205,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1079,6 +1237,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

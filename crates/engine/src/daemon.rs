@@ -16,6 +16,7 @@ use crate::dns;
 use crate::fw::{self, Exposed, Firewall};
 use crate::keys;
 use crate::netcfg::LocalNet;
+use crate::ping;
 use crate::resolver::ResolverHook;
 use crate::shutdown::Shutdown;
 use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
@@ -282,6 +283,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // still unconnected — the bootstrap case (no observer online to report a reflexive). After a
         // grace we run ICE for it (userspace), whose STUN gets a reflexive with no observer needed.
         let mut bootstrap_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
+        // Shared ICMP socket for the per-peer latency probe. Opening it needs privilege (we have it);
+        // if it fails we run without latency numbers rather than aborting the daemon.
+        let ping_client = match ping::client() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                tracing::warn!("latency probe disabled: {e:#}");
+                None
+            }
+        };
         loop {
             // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
             // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
@@ -311,7 +321,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // stuck hole punch surfaces. A peer is "punched" if its only endpoint is a punch target
             // (no dialable endpoint); "connected" if WG has a recent handshake for it.
             let now = std::time::Instant::now();
-            let mut reach: HashMap<std::net::Ipv4Addr, common::control::PeerReach> = HashMap::new();
+            // Latency probe: one concurrent ICMP echo per peer's wg IP (peers answer ping by default).
+            let peer_ips: Vec<std::net::Ipv4Addr> = peers
+                .values()
+                .filter_map(|c| c.allowed_ips.first().map(|(ip, _)| *ip))
+                .collect();
+            let latency = match &ping_client {
+                Some(pc) => ping::probe(pc, &peer_ips).await,
+                None => HashMap::new(),
+            };
+            let mut live: HashMap<std::net::Ipv4Addr, control::PeerLive> = HashMap::new();
             // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`)
             // *plus* those we're already relaying — a working relay tunnel reads as connected, so
             // without this it would drop out of `need_relay` and the coordinator would withdraw the
@@ -370,10 +389,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     want_relay.push(*pk);
                 }
                 if let Some((ip, _)) = cfg.allowed_ips.first() {
-                    reach.insert(*ip, r);
+                    let (rx_bytes, tx_bytes) = stats
+                        .as_ref()
+                        .and_then(|m| m.get(pk))
+                        .map_or((0, 0), |s| (s.rx_bytes, s.tx_bytes));
+                    live.insert(
+                        *ip,
+                        control::PeerLive {
+                            reach: r,
+                            up: connected,
+                            latency_ms: latency.get(ip).copied(),
+                            rx_bytes,
+                            tx_bytes,
+                        },
+                    );
                 }
             }
-            control::set_reach(&status, &reach).await;
+            control::set_live(&status, &live).await;
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
@@ -595,6 +627,7 @@ async fn apply_state(
         }
     }
     let disabled = localnet.snapshot();
+    let blocked = localnet.blocked_snapshot();
     let paused = localnet.is_paused();
     if let Some(dev) = device {
         tracing::debug!(
@@ -615,7 +648,7 @@ async fn apply_state(
     // The coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
     backend.set_link_up(!paused)?;
     let active: Vec<SeedPeer> = match device {
-        Some(dev) if !paused => filter_active(seeds, &disabled, &dev.networks_status),
+        Some(dev) if !paused => filter_active(seeds, &disabled, &blocked, &dev.networks_status),
         _ => Vec::new(),
     };
     if let Some(dev) = device {
@@ -625,6 +658,7 @@ async fn apply_state(
             dev,
             &active,
             &disabled,
+            &blocked,
             !paused,
             localnet.disable_new(),
             coord_online,
@@ -703,12 +737,15 @@ async fn sync_ice(
     eps
 }
 
-/// Keep peers that share at least one network we haven't locally disabled. Shared networks arrive
-/// as names; we resolve them to (guild, role) via our own `networks_status` to compare against the
-/// opt-out set. A peer with no known shared network (older coordinator) is kept.
+/// Keep peers that share at least one network we haven't locally disabled and whose owner we
+/// haven't locally blocked. Shared networks arrive as names; we resolve them to (guild, role) via
+/// our own `networks_status` to compare against the opt-out set. A peer with no known shared network
+/// (older coordinator) is kept. A blocked owner's peers are always dropped (a block outranks any
+/// shared network), which prunes their tunnels on the next `apply_seeds`.
 fn filter_active(
     seeds: &[SeedPeer],
     disabled: &HashSet<(u64, u64)>,
+    blocked: &HashMap<u64, String>,
     networks_status: &[common::api::NetworkStatus],
 ) -> Vec<SeedPeer> {
     let name_to_id: HashMap<&str, (u64, u64)> = networks_status
@@ -717,6 +754,7 @@ fn filter_active(
         .collect();
     seeds
         .iter()
+        .filter(|s| !blocked.contains_key(&s.user_id))
         .filter(|s| {
             s.networks.is_empty()
                 || s.networks

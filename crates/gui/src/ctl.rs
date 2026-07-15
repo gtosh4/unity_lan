@@ -136,3 +136,26 @@ pub async fn set_new_network_default(path: PathBuf, disable: bool) -> Result<Sta
         _ => Err("unexpected response".into()),
     }
 }
+
+/// Locally block a user (by Discord `user_id`) — drop all their peers from the mesh. Returns the
+/// updated status.
+pub async fn block_peer(
+    path: PathBuf,
+    user_id: u64,
+    username: String,
+) -> Result<StatusReport, String> {
+    match request(path, ControlRequest::BlockPeer { user_id, username }).await? {
+        ControlResponse::Status(s) => Ok(s),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
+/// Un-block a previously-blocked user. Returns the updated status.
+pub async fn unblock_peer(path: PathBuf, user_id: u64) -> Result<StatusReport, String> {
+    match request(path, ControlRequest::UnblockPeer { user_id }).await? {
+        ControlResponse::Status(s) => Ok(s),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}

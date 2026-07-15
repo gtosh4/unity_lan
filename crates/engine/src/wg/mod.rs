@@ -40,6 +40,9 @@ pub struct IfaceConfig {
 pub struct PeerStat {
     pub endpoint: Option<SocketAddr>,
     pub last_handshake: Option<SystemTime>,
+    /// Cumulative bytes received from / sent to this peer, as counted by the WG backend.
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 /// A single peer in the mesh.

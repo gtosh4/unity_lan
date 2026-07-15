@@ -85,6 +85,9 @@ impl Firewall {
 
     /// Install the base policy + any seeded exposures. Call once at startup.
     pub fn init(&self) -> anyhow::Result<()> {
+        // Warn if another firewall (e.g. Tailscale) blackholes our CGNAT range on the wg interface.
+        #[cfg(target_os = "linux")]
+        nftables::warn_on_cgnat_conflict(&self.iface);
         self.reconcile()
     }
 
