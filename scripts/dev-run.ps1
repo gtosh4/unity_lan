@@ -61,11 +61,25 @@ if (-not (Test-Path $ENG) -or -not (Test-Path $GUI)) {
     Write-Error ("build first:  cargo build{0}" -f $(if ($Release) { ' --release' } else { '' }))
     return
 }
-if (-not (Test-Path (Join-Path $bin 'wireguard.dll'))) {
-    Write-Error ("wireguard.dll (the wireguard-nt runtime) must sit next to the binary at`n" +
-        "  $bin\wireguard.dll`n" +
-        'Get it from https://download.wireguard.com/wireguard-nt/  (bin\amd64\wireguard.dll).')
-    return
+# wireguard-nt runtime: defguard_wireguard_rs (>=0.10) loads it by the *relative* path
+# `resources-windows/binaries/wireguard-amd64.dll`, resolved against the engine's working
+# directory (which we pin to $Root when launching below) — NOT a bare `wireguard.dll` next to the
+# exe. Stage it there: prefer an existing copy at that path, else auto-copy from the legacy
+# `target\<flavor>\wireguard.dll` location if present, else tell the user where to fetch it.
+$wgDll = Join-Path $Root 'resources-windows\binaries\wireguard-amd64.dll'
+if (-not (Test-Path $wgDll)) {
+    $legacy = Join-Path $bin 'wireguard.dll'
+    if (Test-Path $legacy) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $wgDll) | Out-Null
+        Copy-Item $legacy $wgDll
+        Write-Host "staged wireguard.dll -> $wgDll" -ForegroundColor DarkGray
+    }
+    else {
+        Write-Error ("wireguard-nt runtime not found. Place the amd64 DLL at`n" +
+            "  $wgDll`n" +
+            'Get it from https://download.wireguard.com/wireguard-nt/  (bin\amd64\wireguard.dll).')
+        return
+    }
 }
 if (-not (Test-Path $Config)) {
     Write-Error "config not found: $Config  (copy engine.example.toml -> engine.toml, set 'coordinator')"
@@ -87,8 +101,11 @@ else {
 $pipe = "unitylan-$stem"
 
 # --- start the engine (privileged: builds the WG interface). Logs stream to this console. ---
+# -WorkingDirectory $Root pins the CWD so defguard's relative wireguard-nt DLL path (staged above
+# under resources-windows\binaries) resolves.
 Write-Host "engine:  $ENG run $Config" -ForegroundColor Cyan
-$eng = Start-Process -FilePath $ENG -ArgumentList @('run', $Config) -PassThru -NoNewWindow
+$eng = Start-Process -FilePath $ENG -ArgumentList @('run', $Config) -PassThru -NoNewWindow `
+    -WorkingDirectory $Root
 
 try {
     # Wait for the control pipe (best-effort; the GUI also retries every 2s).

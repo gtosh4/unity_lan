@@ -6043,7 +6043,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "unitylan-common",
- "windows-service",
 ]
 
 [[package]]

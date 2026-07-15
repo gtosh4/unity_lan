@@ -18,6 +18,8 @@ mod linux;
 mod stub;
 
 /// Actions the tray asks the iced app to perform (everything else it does itself over the socket).
+// Windows has no tray backend yet (uses `stub.rs`), so nothing constructs these there.
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub enum TrayMsg {
     /// Toggle the main window between shown and hidden (minimize-to-tray / restore).

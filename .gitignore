@@ -3,6 +3,10 @@
 **/*.rs.bk
 *.pdb
 
+# wireguard-nt runtime DLL, staged locally for defguard_wireguard_rs (fetched per-machine,
+# not committed). See scripts/dev-run.ps1.
+/resources-windows
+
 # Packaging build output
 /packaging/dist
 

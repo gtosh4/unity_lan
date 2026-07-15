@@ -169,6 +169,9 @@ fn effective_networks(
 
 /// Serve the control socket until the task is dropped. `endpoint` is the platform local-socket
 /// name (see [`crate::config::Config::control_name`]).
+// `group` only applies to unix socket ownership (`grant_socket_access`); Windows named pipes
+// don't use it.
+#[cfg_attr(windows, allow(unused_variables))]
 pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::Result<()> {
     // Clear a stale unix socket file from a previous run (named pipes have no filesystem residue).
     #[cfg(not(windows))]

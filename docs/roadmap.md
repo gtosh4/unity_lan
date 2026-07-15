@@ -550,21 +550,18 @@ elevated box. macOS `/etc/resolver` still deferred.
       (dispatcher → control handler translating Stop/Shutdown into the daemon's shutdown signal). The
       daemon's shutdown was refactored off `ctrl_c()` onto a shared `shutdown::Shutdown` (watch-based,
       fire-once) so console mode (Ctrl-C) and the service (SCM Stop) share one path. Service logs to
-      `unitylan-engine-service.log` next to the exe (no console). **GUI service control** (M-win2):
-      `install` relaxes the service DACL (`sc.exe sdset`, `RELAXED_DACL`) so the interactive user gets
-      `SERVICE_START`/`SERVICE_STOP` — the unprivileged GUI (`gui/src/svc.rs`) queries status and can
-      **start** the engine with no UAC prompt (blocking SCM calls hopped onto `spawn_blocking`). The GUI
-      shows an "engine" section: running/stopped/not-installed; `WINDOWS_SERVICE_NAME` lives in `common`
-      so engine + GUI can't drift. **Note (M4 connect/disconnect):** the service is meant to stay
-      **resident** (auto-start) — day-to-day on/off is a mesh connect/disconnect over the control socket
-      (which needs no SCM access at all), so the GUI now keeps only **start** here (bootstrap when the
-      engine is stopped and there's no socket yet); routine stop/restart is gone. Stopping the service
-      only drops the mesh (firewall rules are scoped to the vanishing wg iface), so it can't open the
-      host. Still TODO: an MSI/WiX installer to bundle engine+gui+`wireguard.dll`, register the service,
-      and write a default config; systemd + launchd packaging. Done: with GUI stop gone, the `WP`
-      (`SERVICE_STOP`) grant in `RELAXED_DACL` was dropped — the interactive `IU` ACE is now query +
-      `SERVICE_START` (`RP`) only (least-privilege). Windows-only code (`cfg(windows)`),
-      verified-by-construction (doesn't compile on the Linux CI host).
+      `unitylan-engine-service.log` next to the exe (no console). `WINDOWS_SERVICE_NAME` lives in
+      `common`. **GUI service control — removed.** M-win2 briefly gave the GUI an "engine" section that
+      queried the SCM (`gui/src/svc.rs`) and could **start** the engine, backed by an install-time DACL
+      relaxation. It was dropped: the engine is meant to stay **resident** (auto-start service in a
+      packaged install, or the dev-run script), and the GUI's *only* on/off is a mesh connect/disconnect
+      over the control socket (needs no SCM access) — so the GUI never manages the process lifecycle. It
+      now shows the live mesh UI when the socket is up, and a plain "engine not reachable, retrying"
+      notice when it isn't (no process control, no "install the service" nag). `svc.rs` and the GUI's
+      `windows-service` dep are gone. Still TODO: an MSI/WiX installer to bundle engine+gui+`wireguard.dll`,
+      register the service, and write a default config; systemd + launchd packaging. Follow-up: with GUI
+      start/stop gone, `RELAXED_DACL` (`sc.exe sdset` in `service.rs`) is no longer needed at all — the
+      service can keep the SCM default DACL.
 - [x] CI: `cargo fmt`/`clippy`/`test` — `.github/workflows/ci.yml` runs the three gates
       (`fmt --all --check`, `clippy --workspace --all-targets -D warnings`, `test --workspace`);
       `release.yml` builds artifacts.

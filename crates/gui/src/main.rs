@@ -8,7 +8,6 @@
 //! them over the control socket.
 
 mod ctl;
-mod svc;
 mod tray;
 
 use std::path::PathBuf;
@@ -114,10 +113,6 @@ struct App {
     expose_net_input: String,
     /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
     login_url: Option<String>,
-    /// Engine Windows-service state (None until first queried; `Unsupported` off Windows).
-    service: Option<svc::SvcState>,
-    /// A service start is in flight — disables the button meanwhile.
-    service_busy: bool,
     /// A mesh connect/disconnect is in flight — disables the button meanwhile.
     connect_busy: bool,
     /// A pending destructive action awaiting a second confirming click (remove device / log out).
@@ -186,12 +181,6 @@ enum Message {
     OpenUrl(String),
     /// Copy a URL to the clipboard.
     CopyUrl(String),
-    /// Engine-service status poll result.
-    ServiceFetched(Result<svc::SvcState, String>),
-    /// Start the engine service (only when it's stopped — there's no socket to talk to otherwise).
-    ServiceStart,
-    /// A service start finished (Ok) or failed (Err) → refresh.
-    ServiceActionDone(Result<(), String>),
     /// Connect (`true`) / disconnect (`false`) the mesh over the control socket.
     SetConnected(bool),
     /// A mesh connect/disconnect finished → refresh.
@@ -225,8 +214,6 @@ impl App {
             expose_port_input: String::new(),
             expose_net_input: String::new(),
             login_url: None,
-            service: None,
-            service_busy: false,
             connect_busy: false,
             confirm: None,
             tab: Tab::default(),
@@ -236,7 +223,7 @@ impl App {
         }
     }
 
-    /// Fetch status + device list + exposed ports + engine-service state concurrently.
+    /// Fetch status + device list + exposed ports concurrently.
     fn reload(&self) -> Task<Message> {
         Task::batch([
             Task::perform(
@@ -251,7 +238,6 @@ impl App {
                 ctl::expose(self.socket.clone(), ExposeOp::List),
                 Message::ExposesFetched,
             ),
-            Task::perform(svc::query(), Message::ServiceFetched),
         ])
     }
 
@@ -337,21 +323,6 @@ impl App {
                 }
             }
             Message::CopyUrl(url) => return iced::clipboard::write(url),
-            Message::ServiceFetched(Ok(s)) => self.service = Some(s),
-            Message::ServiceFetched(Err(e)) => {
-                self.service = None;
-                self.error = Some(e);
-            }
-            Message::ServiceStart => {
-                self.service_busy = true;
-                self.service = Some(svc::SvcState::Pending);
-                return Task::perform(svc::start(), Message::ServiceActionDone);
-            }
-            Message::ServiceActionDone(res) => {
-                self.service_busy = false;
-                self.error = res.err();
-                return self.reload(); // pull the settled service + engine state
-            }
             Message::SetConnected(connected) => {
                 self.connect_busy = true;
                 return Task::perform(
@@ -451,12 +422,11 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let service = self.service_section();
         let sections = match self.status.as_ref() {
             // Engine reachable — it told us its state. Only offer login when the engine itself says
             // we're not enrolled; otherwise show the live mesh/device UI.
             Some(s) => {
-                let mut col = Column::new().spacing(12).push_maybe(service.map(card));
+                let mut col = Column::new().spacing(12);
                 if s.needs_login {
                     col = col.push(card(self.login_section()));
                 } else {
@@ -475,15 +445,10 @@ impl App {
                 col
             }
             // Engine not reachable (socket down / not started yet): don't show the login button — it
-            // can't work without the daemon, and the mesh/device sections have no data. Show the
-            // service control (Windows) and a plain notice instead.
-            None => {
-                let notice = service.is_none().then(|| self.engine_notice());
-                Column::new()
-                    .spacing(12)
-                    .push_maybe(service.map(card))
-                    .push_maybe(notice.map(card))
-            }
+            // can't work without the daemon, and the mesh/device sections have no data. The engine
+            // runs elsewhere (resident service in a packaged install, or the dev-run script), so the
+            // GUI just waits for it — a plain notice, no process control here.
+            None => Column::new().spacing(12).push(card(self.engine_notice())),
         };
         // Error banner pinned above the sections so a failure is visible without scrolling. It's
         // dismissible, and every successful fetch already clears `self.error`.
@@ -548,49 +513,6 @@ impl App {
             "Connecting to engine…"
         };
         column![header("engine"), muted(msg)].spacing(6).into()
-    }
-
-    /// Engine-service status (the engine *process* lifecycle, distinct from the mesh connection).
-    /// `None` (hidden) off Windows or before the first query. Day-to-day on/off is the mesh
-    /// connect/disconnect below; `start` appears only when the service is stopped, to bring the
-    /// engine up (there's no control socket to connect to until it's running). The install-time
-    /// DACL lets `start` work without elevation.
-    fn service_section(&self) -> Option<Element<'_, Message>> {
-        let state = self.service?;
-        if state == svc::SvcState::Unsupported {
-            return None;
-        }
-        let scolor = match state {
-            svc::SvcState::Running => GREEN,
-            svc::SvcState::Pending => AMBER,
-            svc::SvcState::Stopped => RED,
-            svc::SvcState::NotInstalled | svc::SvcState::Unsupported => MUTED,
-        };
-        let mut controls = row![
-            dot(scolor),
-            text(format!("engine service: {}", state.label())).size(14),
-        ]
-        .spacing(8)
-        .align_y(Vertical::Center);
-
-        match state {
-            svc::SvcState::Stopped => {
-                let b = button(text("start").size(13));
-                let b = if self.service_busy {
-                    b
-                } else {
-                    b.on_press(Message::ServiceStart)
-                };
-                controls = controls.push(b);
-            }
-            svc::SvcState::NotInstalled => {
-                controls = controls.push(muted(
-                    "run `unitylan-engine service install` (elevated) to enable",
-                ));
-            }
-            svc::SvcState::Running | svc::SvcState::Pending | svc::SvcState::Unsupported => {}
-        }
-        Some(column![header("engine"), controls].spacing(6).into())
     }
 
     /// Mesh connect/disconnect over the control socket. Disconnect keeps the engine resident and
@@ -1131,26 +1053,6 @@ mod tests {
         let nets = &a.status.unwrap().networks;
         assert_eq!(nets.len(), 1);
         assert!(!nets[0].enabled);
-    }
-
-    #[test]
-    fn service_fetched_sets_state() {
-        let mut a = app();
-        let _ = a.update(Message::ServiceFetched(Ok(svc::SvcState::Running)));
-        assert_eq!(a.service, Some(svc::SvcState::Running));
-    }
-
-    #[test]
-    fn service_action_marks_busy_then_clears_on_done() {
-        let mut a = app();
-        // Pressing start marks the service busy and optimistically shows Pending.
-        let _ = a.update(Message::ServiceStart);
-        assert!(a.service_busy);
-        assert_eq!(a.service, Some(svc::SvcState::Pending));
-        // A failed action clears busy and surfaces the error.
-        let _ = a.update(Message::ServiceActionDone(Err("access denied".into())));
-        assert!(!a.service_busy);
-        assert_eq!(a.error.as_deref(), Some("access denied"));
     }
 
     #[test]
