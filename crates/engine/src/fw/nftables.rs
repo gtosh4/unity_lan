@@ -117,6 +117,40 @@ fn unscoped_ports(exposed: &[Exposed], proto: Proto) -> String {
         .join(", ")
 }
 
+/// The mesh addresses live in `100.64.0.0/10` (RFC 6598 / CGNAT). Tailscale — and potentially
+/// other tools that share this range — install an nftables anti-spoof rule that DROPs any packet
+/// whose source is in that block when it arrives on a non-Tailscale interface. That rule silently
+/// blackholes *all* UnityLAN traffic on the wg interface (a `drop` in any base chain wins over our
+/// `accept`), so peers appear reachable in the coordinator yet every ping is lost.
+///
+/// Heuristic: an `nft` rule that both drops/rejects and references the CGNAT block, outside our own
+/// table (our default-deny is a bare `drop`, so it never matches). Returns the offending line.
+fn cgnat_conflict(ruleset: &str) -> Option<String> {
+    ruleset
+        .lines()
+        .map(str::trim)
+        .find(|l| (l.contains("drop") || l.contains("reject")) && l.contains("100.64.0.0/10"))
+        .map(str::to_string)
+}
+
+/// Scan the live nftables ruleset for a foreign rule that would blackhole the mesh CGNAT range and,
+/// if found, log an operator warning with remediation. Best-effort: any `nft` failure is ignored.
+#[cfg(target_os = "linux")]
+pub fn warn_on_cgnat_conflict(iface: &str) {
+    let Ok(out) = Command::new("nft").args(["list", "ruleset"]).output() else {
+        return;
+    };
+    let ruleset = String::from_utf8_lossy(&out.stdout);
+    if let Some(rule) = cgnat_conflict(&ruleset) {
+        tracing::warn!(
+            offending_rule = %rule,
+            "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
+             interfaces; UnityLAN traffic on {iface} will be silently blackholed. Exempt the mesh \
+             interface, e.g. for Tailscale: `nft insert rule ip filter ts-input iifname \"{iface}\" accept`"
+        );
+    }
+}
+
 fn run_nft(script: &str) -> anyhow::Result<()> {
     let mut child = Command::new("nft")
         .arg("-f")
@@ -185,6 +219,22 @@ mod tests {
         assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
         // Not a global port accept.
         assert!(!rs.contains("tcp dport { 9001 } accept"));
+    }
+
+    #[test]
+    fn cgnat_conflict_flags_tailscale_drop_but_not_our_own_ruleset() {
+        // Tailscale's anti-spoof rule blackholes the mesh range on non-tailscale interfaces.
+        let ts = r#"chain ts-input {
+            iifname != "tailscale0*" ip saddr 100.64.0.0/10 counter packets 289 bytes 33404 drop
+        }"#;
+        assert!(cgnat_conflict(ts).unwrap().contains("drop"));
+
+        // Our own ruleset drops with a bare verdict (no CGNAT match) → no false positive.
+        let ours = ruleset("unl0", &[exp(Proto::Tcp, 25565, None)], &PeersByNet::new());
+        assert!(cgnat_conflict(&ours).is_none());
+
+        // A benign accept referencing the range must not trip it either.
+        assert!(cgnat_conflict("ip saddr 100.64.0.0/10 accept").is_none());
     }
 
     #[test]
