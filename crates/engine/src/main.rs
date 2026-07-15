@@ -18,6 +18,7 @@ mod resolver;
 #[cfg(windows)]
 mod service;
 mod shutdown;
+mod util;
 mod wg;
 
 use std::net::{Ipv4Addr, SocketAddr};

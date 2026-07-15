@@ -20,8 +20,6 @@
 //! non-zero exit — aborting startup. Suppressed, those pre-up rules are simply skipped and then
 //! (re)created by the first post-up membership `apply`, once `unl0` exists.
 
-use std::process::Command;
-
 use common::control::Proto;
 
 use super::{Exposed, FirewallBackend, PeersByNet};
@@ -38,11 +36,11 @@ impl FirewallBackend for WindowsFwBackend {
         exposed: &[Exposed],
         peers_by_net: &PeersByNet,
     ) -> anyhow::Result<()> {
-        run_ps(&script(iface, exposed, peers_by_net))
+        run_fw_ps(&script(iface, exposed, peers_by_net))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
-        run_ps(&remove_group())
+        run_fw_ps(&remove_group())
     }
 }
 
@@ -119,28 +117,16 @@ fn ps_proto(proto: Proto) -> &'static str {
     }
 }
 
-fn run_ps(script: &str) -> anyhow::Result<()> {
-    // `powershell.exe -Command` takes its *process* exit code from `$?` of the last statement.
-    // Every rule runs `-ErrorAction SilentlyContinue` on purpose (a pre-up missing `-InterfaceAlias`,
-    // or a `Remove-NetFirewallRule` when the group is still empty, is expected and benign): that
-    // silences the error text but still leaves `$? = $false`, so powershell would exit 1 with empty
-    // stderr and we'd abort startup over a best-effort skip. Force a clean exit so the code reflects
-    // "the script ran", not "every best-effort cmdlet succeeded". A *parse* error still exits
-    // non-zero before reaching `exit 0` (surfaced via the bail below, stderr intact), and a missing
-    // `powershell` is caught by the spawn error.
-    let script = format!("{script}\nexit 0\n");
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|e| anyhow::anyhow!("spawning powershell (is it on PATH?): {e}"))?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "powershell firewall script failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
+/// Run a firewall PowerShell script, tolerating its best-effort cmdlets.
+///
+/// Appends `exit 0`: every rule runs `-ErrorAction SilentlyContinue` on purpose (a pre-up missing
+/// `-InterfaceAlias`, or a `Remove-NetFirewallRule` when the group is still empty, is expected and
+/// benign). That silences the error text but still leaves `$? = $false`, so powershell would exit 1
+/// with empty stderr and we'd abort startup over a best-effort skip. `exit 0` makes the exit code
+/// reflect "the script ran", not "every best-effort cmdlet succeeded". A *parse* error still exits
+/// non-zero before reaching `exit 0` (surfaced by the bail in `run_powershell`, stderr intact).
+fn run_fw_ps(script: &str) -> anyhow::Result<()> {
+    crate::util::run_powershell(&format!("{script}\nexit 0\n"), "firewall")
 }
 
 #[cfg(test)]

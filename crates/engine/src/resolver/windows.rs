@@ -19,7 +19,6 @@
 //! Runtime prerequisite: run elevated (adding/removing NRPT rules requires admin).
 
 use std::net::{IpAddr, SocketAddr};
-use std::process::Command;
 
 use super::ResolverHook;
 
@@ -41,13 +40,13 @@ impl ResolverHook for NrptHook {
                  bind the resolver on port 53 to enable the Windows resolver hook"
             );
         }
-        run_ps(&install_script(server.ip()))?;
+        crate::util::run_powershell(&install_script(server.ip()), "NRPT")?;
         tracing::info!(server = %server.ip(), "resolver: routed .unity.internal via NRPT");
         Ok(())
     }
 
     fn revert(&self, _iface: &str) -> anyhow::Result<()> {
-        run_ps(&remove_script())
+        crate::util::run_powershell(&remove_script(), "NRPT")
     }
 }
 
@@ -74,21 +73,6 @@ fn remove_script() -> String {
          -and $_.Comment -eq '{COMMENT}' }} | Remove-DnsClientNrptRule -Force \
          -ErrorAction SilentlyContinue"
     )
-}
-
-fn run_ps(script: &str) -> anyhow::Result<()> {
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .map_err(|e| anyhow::anyhow!("spawning powershell (is it on PATH?): {e}"))?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "powershell NRPT script failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]

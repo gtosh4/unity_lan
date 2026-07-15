@@ -120,6 +120,7 @@ impl RelayServer {
                 max_allocations,
                 active,
             }),
+            // Zero selects the webrtc-turn default channel-bind lifetime, not "disabled".
             channel_bind_timeout: Duration::from_secs(0),
             alloc_close_notify: Some(close_tx),
         })

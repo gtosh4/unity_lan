@@ -11,8 +11,13 @@ pub use userspace::UserspaceBackend;
 mod windows;
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::SystemTime;
+
+use defguard_wireguard_rs::host::Host;
+use defguard_wireguard_rs::key::Key;
+use defguard_wireguard_rs::net::IpAddrMask;
+use defguard_wireguard_rs::peer::Peer;
 
 /// Construct the platform's WireGuard backend: defguard userspace (boringtun) on unix, the
 /// wireguard-nt kernel driver on Windows. Both implement [`WgBackend`], so callers stay OS-agnostic.
@@ -52,6 +57,38 @@ pub struct PeerConfig {
     pub allowed_ips: Vec<(Ipv4Addr, u8)>,
     pub endpoint: Option<SocketAddr>,
     pub keepalive: Option<u16>,
+}
+
+/// A `(Ipv4Addr, cidr)` pair as defguard's `IpAddrMask`. Shared by both backends.
+fn mask(ip: Ipv4Addr, cidr: u8) -> IpAddrMask {
+    IpAddrMask::new(IpAddr::V4(ip), cidr)
+}
+
+/// Translate a [`PeerConfig`] into defguard's `Peer`. Shared by both backends.
+fn to_peer(p: &PeerConfig) -> Peer {
+    let mut peer = Peer::new(Key::new(p.public_key));
+    peer.allowed_ips = p.allowed_ips.iter().map(|(a, c)| mask(*a, *c)).collect();
+    peer.endpoint = p.endpoint;
+    peer.persistent_keepalive_interval = p.keepalive;
+    peer
+}
+
+/// Project a defguard `Host` read-back into our [`PeerStat`] map. Shared by both backends.
+fn peer_stats_from_host(host: &Host) -> HashMap<[u8; 32], PeerStat> {
+    host.peers
+        .iter()
+        .map(|(k, p)| {
+            (
+                k.as_array(),
+                PeerStat {
+                    endpoint: p.endpoint,
+                    last_handshake: p.last_handshake,
+                    rx_bytes: p.rx_bytes,
+                    tx_bytes: p.tx_bytes,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Kernel/userspace-agnostic WireGuard control surface.

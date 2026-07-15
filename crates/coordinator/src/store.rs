@@ -19,6 +19,33 @@ pub struct Network {
     pub name: String,
 }
 
+/// Convert a stored pubkey BLOB into a fixed 32-byte key, erroring on a bad width.
+fn pubkey_from_blob(blob: Vec<u8>) -> anyhow::Result<[u8; 32]> {
+    blob.as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))
+}
+
+/// How a device name resolves against a user's device list.
+pub enum DeviceMatch {
+    /// Exactly one device — its pubkey.
+    One([u8; 32]),
+    /// No device by that name.
+    None,
+    /// The name is ambiguous (more than one device).
+    Many,
+}
+
+/// Classify how a sanitized `name` matches a user's `(pubkey, name)` device list.
+pub fn match_device_by_name(devices: &[([u8; 32], String)], name: &str) -> DeviceMatch {
+    let mut it = devices.iter().filter(|(_, n)| n == name).map(|(pk, _)| *pk);
+    match (it.next(), it.next()) {
+        (Some(pk), None) => DeviceMatch::One(pk),
+        (None, _) => DeviceMatch::None,
+        (Some(_), Some(_)) => DeviceMatch::Many,
+    }
+}
+
 pub struct Store {
     pool: SqlitePool,
 }
@@ -161,8 +188,7 @@ impl Store {
         Ok(())
     }
 
-    // Used by the `/unitylan network remove|list` slash-command handler (wired with live bot).
-    #[allow(dead_code)]
+    /// Used by the `/unitylan network remove` slash-command handler.
     pub async fn remove_network(&self, guild_id: u64, role_id: u64) -> anyhow::Result<()> {
         sqlx::query("DELETE FROM networks WHERE guild_id = ? AND role_id = ?")
             .bind(guild_id as i64)
@@ -172,7 +198,7 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    /// Used by the `/unitylan network revoke|list` slash-command handlers.
     pub async fn networks_in_guild(&self, guild_id: u64) -> anyhow::Result<Vec<Network>> {
         let rows = sqlx::query("SELECT role_id, name FROM networks WHERE guild_id = ?")
             .bind(guild_id as i64)
@@ -318,11 +344,7 @@ impl Store {
             .await?;
         let Some(row) = row else { return Ok(None) };
         let user_id = row.get::<i64, _>("user_id") as u64;
-        let pk: Vec<u8> = row.try_get("pubkey")?;
-        let pk: [u8; 32] = pk
-            .as_slice()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
+        let pk = pubkey_from_blob(row.try_get("pubkey")?)?;
         Ok(Some((user_id, pk)))
     }
 
@@ -375,11 +397,7 @@ impl Store {
             .await?;
         let mut out = Vec::new();
         for r in rows {
-            let pk: Vec<u8> = r.try_get("pubkey")?;
-            let pk: [u8; 32] = pk
-                .as_slice()
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
+            let pk = pubkey_from_blob(r.try_get("pubkey")?)?;
             out.push((pk, r.get::<String, _>("device_name")));
         }
         Ok(out)
@@ -422,14 +440,7 @@ impl Store {
             .await?;
         match row {
             None => Ok(None),
-            Some(r) => {
-                let pk: Vec<u8> = r.try_get("pubkey")?;
-                let pk: [u8; 32] = pk
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("stored pubkey is not 32 bytes"))?;
-                Ok(Some(pk))
-            }
+            Some(r) => Ok(Some(pubkey_from_blob(r.try_get("pubkey")?)?)),
         }
     }
 
@@ -484,6 +495,8 @@ impl Store {
             }
         }
 
+        // `AND used_by IS NULL` makes the claim atomic: if a second device raced in between the
+        // SELECT above and here, only the first UPDATE binds the key.
         sqlx::query("UPDATE enrollment_keys SET used_by = ? WHERE key = ? AND used_by IS NULL")
             .bind(pubkey.as_slice())
             .bind(key)

@@ -11,11 +11,12 @@
 //! the binary — the `wireguard-nt` crate loads it by name at load time.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::Ipv4Addr;
+
+use crate::util::hex8;
 use std::sync::Mutex;
 
 use defguard_wireguard_rs::key::Key;
-use defguard_wireguard_rs::net::IpAddrMask;
 use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::{InterfaceConfiguration, Kernel, WGApi, WireguardInterfaceApi};
 
@@ -71,14 +72,18 @@ impl KernelBackend {
                     );
                     None
                 } else {
-                    Some(to_peer(p))
+                    Some(super::to_peer(p))
                 }
             })
             .collect();
         let config = InterfaceConfiguration {
             name: self.name.clone(),
             prvkey: Key::new(sc.private_key).to_string(), // defguard wants base64
-            addresses: sc.addresses.iter().map(|(a, c)| mask(*a, *c)).collect(),
+            addresses: sc
+                .addresses
+                .iter()
+                .map(|(a, c)| super::mask(*a, *c))
+                .collect(),
             port: sc.listen_port,
             peers,
             mtu: None,
@@ -121,21 +126,7 @@ impl WgBackend for KernelBackend {
 
     fn peer_stats(&self) -> anyhow::Result<HashMap<[u8; 32], PeerStat>> {
         let host = self.api.lock().unwrap().read_interface_data()?;
-        Ok(host
-            .peers
-            .iter()
-            .map(|(k, p)| {
-                (
-                    k.as_array(),
-                    PeerStat {
-                        endpoint: p.endpoint,
-                        last_handshake: p.last_handshake,
-                        rx_bytes: p.rx_bytes,
-                        tx_bytes: p.tx_bytes,
-                    },
-                )
-            })
-            .collect())
+        Ok(super::peer_stats_from_host(&host))
     }
 
     fn down(&self) -> anyhow::Result<()> {
@@ -152,20 +143,4 @@ impl WgBackend for KernelBackend {
     fn is_userspace(&self) -> bool {
         false // wireguard-nt owns the UDP socket — no side-socket ICE; keeps M5.2 punch + M5.4 relay
     }
-}
-
-fn mask(ip: Ipv4Addr, cidr: u8) -> IpAddrMask {
-    IpAddrMask::new(IpAddr::V4(ip), cidr)
-}
-
-fn to_peer(p: &PeerConfig) -> Peer {
-    let mut peer = Peer::new(Key::new(p.public_key));
-    peer.allowed_ips = p.allowed_ips.iter().map(|(a, c)| mask(*a, *c)).collect();
-    peer.endpoint = p.endpoint;
-    peer.persistent_keepalive_interval = p.keepalive;
-    peer
-}
-
-fn hex8(b: &[u8; 32]) -> String {
-    b[..4].iter().map(|x| format!("{x:02x}")).collect()
 }

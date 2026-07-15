@@ -10,6 +10,20 @@ use std::sync::Mutex;
 use common::api::NetworkRef;
 use tokio::sync::Notify;
 
+/// JSON-decode `path` as `T`, falling back to `default` if it's missing, unreadable, or corrupt.
+fn read_json_or<T: serde::de::DeserializeOwned>(path: &Path, default: T) -> T {
+    std::fs::read(path)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<T>(&b).ok())
+        .unwrap_or(default)
+}
+
+/// JSON-encode `value` to `path`.
+fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+    std::fs::write(path, serde_json::to_vec(value)?)?;
+    Ok(())
+}
+
 pub struct LocalNet {
     disabled: Mutex<HashSet<(u64, u64)>>,
     /// Global "disconnected" (paused) flag, layered *on top of* the per-network opt-out so a
@@ -46,34 +60,19 @@ impl LocalNet {
     /// on first run, so config sets the initial posture and the GUI toggle overrides it thereafter.
     pub fn load(state_dir: &Path, disable_new_default: bool) -> Self {
         let path = state_dir.join("network_optout.json");
-        let disabled = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<(u64, u64)>>(&b).ok())
-            .unwrap_or_default()
+        let disabled = read_json_or(&path, Vec::<(u64, u64)>::new())
             .into_iter()
             .collect();
         let paused_path = state_dir.join("paused.json");
-        let paused = std::fs::read(&paused_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<bool>(&b).ok())
-            .unwrap_or(false);
+        let paused = read_json_or(&paused_path, false);
         let known_path = state_dir.join("known_networks.json");
-        let known = std::fs::read(&known_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<(u64, u64)>>(&b).ok())
-            .unwrap_or_default()
+        let known = read_json_or(&known_path, Vec::<(u64, u64)>::new())
             .into_iter()
             .collect();
         let disable_new_path = state_dir.join("disable_new_networks.json");
-        let disable_new = std::fs::read(&disable_new_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<bool>(&b).ok())
-            .unwrap_or(disable_new_default);
+        let disable_new = read_json_or(&disable_new_path, disable_new_default);
         let blocked_path = state_dir.join("blocked_users.json");
-        let blocked = std::fs::read(&blocked_path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<(u64, String)>>(&b).ok())
-            .unwrap_or_default()
+        let blocked = read_json_or(&blocked_path, Vec::<(u64, String)>::new())
             .into_iter()
             .collect();
         Self {
@@ -100,7 +99,7 @@ impl LocalNet {
             changed
         };
         if changed {
-            std::fs::write(&self.paused_path, serde_json::to_vec(&paused)?)?;
+            write_json(&self.paused_path, &paused)?;
             self.wake.notify_one();
         }
         Ok(changed)
@@ -126,7 +125,7 @@ impl LocalNet {
             changed
         };
         if changed {
-            std::fs::write(&self.disable_new_path, serde_json::to_vec(&disable)?)?;
+            write_json(&self.disable_new_path, &disable)?;
         }
         Ok(changed)
     }
@@ -167,7 +166,7 @@ impl LocalNet {
             .iter()
             .map(|(&id, name)| (id, name.clone()))
             .collect();
-        std::fs::write(&self.blocked_path, serde_json::to_vec(&v)?)?;
+        write_json(&self.blocked_path, &v)?;
         Ok(())
     }
 
@@ -198,11 +197,11 @@ impl LocalNet {
         }
         if known_changed {
             let v: Vec<(u64, u64)> = known.iter().copied().collect();
-            std::fs::write(&self.known_path, serde_json::to_vec(&v)?)?;
+            write_json(&self.known_path, &v)?;
         }
         if disabled_changed {
             let v: Vec<(u64, u64)> = disabled.iter().copied().collect();
-            std::fs::write(&self.path, serde_json::to_vec(&v)?)?;
+            write_json(&self.path, &v)?;
         }
         Ok(disabled_changed)
     }
@@ -240,7 +239,7 @@ impl LocalNet {
 
     fn persist(&self) -> anyhow::Result<()> {
         let v: Vec<(u64, u64)> = self.disabled.lock().unwrap().iter().copied().collect();
-        std::fs::write(&self.path, serde_json::to_vec(&v)?)?;
+        write_json(&self.path, &v)?;
         Ok(())
     }
 }

@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use common::api::{IceEndpoint, IceParams, RelayInfo};
+
+use crate::util::hex8;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -307,11 +309,6 @@ impl IceSession {
             tasks: vec![adder, connect],
         })
     }
-}
-
-/// Short pubkey prefix for logs.
-fn hex8(pk: &[u8; 32]) -> String {
-    pk[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 #[cfg(test)]

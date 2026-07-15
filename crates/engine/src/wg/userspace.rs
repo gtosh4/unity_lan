@@ -1,10 +1,7 @@
 //! Userspace WireGuard backend (boringtun via defguard). Portable across Linux/Windows/macOS;
 //! requires CAP_NET_ADMIN (or equivalent) to create the TUN interface.
 
-use std::net::IpAddr;
-
 use defguard_wireguard_rs::key::Key;
-use defguard_wireguard_rs::net::IpAddrMask;
 use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::{InterfaceConfiguration, Userspace, WGApi, WireguardInterfaceApi};
 
@@ -25,23 +22,7 @@ pub fn read_peer_stats(
     let mut last_err = None;
     for _ in 0..5 {
         match api.read_interface_data() {
-            Ok(host) => {
-                return Ok(host
-                    .peers
-                    .iter()
-                    .map(|(k, p)| {
-                        (
-                            k.as_array(),
-                            super::PeerStat {
-                                endpoint: p.endpoint,
-                                last_handshake: p.last_handshake,
-                                rx_bytes: p.rx_bytes,
-                                tx_bytes: p.tx_bytes,
-                            },
-                        )
-                    })
-                    .collect())
-            }
+            Ok(host) => return Ok(super::peer_stats_from_host(&host)),
             Err(e) => {
                 last_err = Some(e);
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -59,10 +40,6 @@ impl UserspaceBackend {
             name: ifname.to_string(),
         })
     }
-}
-
-fn mask(ip: std::net::Ipv4Addr, cidr: u8) -> IpAddrMask {
-    IpAddrMask::new(IpAddr::V4(ip), cidr)
 }
 
 /// Set the link's admin state. defguard's userspace backend creates the TUN but leaves the link
@@ -87,21 +64,17 @@ fn set_link_state(_name: &str, _up: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn to_peer(p: &PeerConfig) -> Peer {
-    let mut peer = Peer::new(Key::new(p.public_key));
-    peer.allowed_ips = p.allowed_ips.iter().map(|(a, c)| mask(*a, *c)).collect();
-    peer.endpoint = p.endpoint;
-    peer.persistent_keepalive_interval = p.keepalive;
-    peer
-}
-
 impl WgBackend for UserspaceBackend {
     fn up(&mut self, cfg: &IfaceConfig) -> anyhow::Result<()> {
         self.api.create_interface()?;
         let config = InterfaceConfiguration {
             name: self.name.clone(),
             prvkey: Key::new(cfg.private_key).to_string(), // defguard wants base64
-            addresses: cfg.addresses.iter().map(|(a, c)| mask(*a, *c)).collect(),
+            addresses: cfg
+                .addresses
+                .iter()
+                .map(|(a, c)| super::mask(*a, *c))
+                .collect(),
             port: cfg.listen_port,
             peers: Vec::new(),
             mtu: None,
@@ -113,12 +86,12 @@ impl WgBackend for UserspaceBackend {
     }
 
     fn set_peer(&self, peer: &PeerConfig) -> anyhow::Result<()> {
-        self.api.configure_peer(&to_peer(peer))?;
+        self.api.configure_peer(&super::to_peer(peer))?;
         Ok(())
     }
 
     fn configure_routing(&self, peers: &[PeerConfig]) -> anyhow::Result<()> {
-        let peers: Vec<Peer> = peers.iter().map(to_peer).collect();
+        let peers: Vec<Peer> = peers.iter().map(super::to_peer).collect();
         self.api.configure_peer_routing(&peers)?;
         Ok(())
     }

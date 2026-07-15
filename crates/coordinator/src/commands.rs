@@ -24,7 +24,7 @@ use twilight_util::builder::command::{
 use twilight_util::builder::InteractionResponseDataBuilder;
 
 use crate::presence::Presence;
-use crate::store::Store;
+use crate::store::{match_device_by_name, DeviceMatch, Store};
 
 /// Connect the gateway and handle `/unitylan` interactions + role-revocation events until the
 /// process exits. `presence`/`version` let member-role changes evict presence immediately (and
@@ -289,18 +289,17 @@ async fn handle_primary(
             let Some(want) = want else {
                 return "Missing device name.".to_string();
             };
-            let matches: Vec<&[u8; 32]> = devices
-                .iter()
-                .filter(|(_, name)| *name == want)
-                .map(|(pk, _)| pk)
-                .collect();
-            match matches.as_slice() {
-                [] => format!("No device named **{want}**. Use `/unitylan primary list`."),
-                [pk] => match store.set_primary(user_id, pk).await {
+            match match_device_by_name(&devices, &want) {
+                DeviceMatch::None => {
+                    format!("No device named **{want}**. Use `/unitylan primary list`.")
+                }
+                DeviceMatch::One(pk) => match store.set_primary(user_id, &pk).await {
                     Ok(()) => format!("Primary device set to **{want}**."),
                     Err(e) => format!("Error: {e}"),
                 },
-                _ => format!("Multiple devices named **{want}**; rename one first."),
+                DeviceMatch::Many => {
+                    format!("Multiple devices named **{want}**; rename one first.")
+                }
             }
         }
         _ => "Unknown subcommand.".to_string(),
@@ -331,14 +330,16 @@ async fn handle_network(
     let CommandOptionValue::SubCommand(opts) = &sub.value else {
         return "Unknown subcommand.".to_string();
     };
+    let role_opt = || {
+        opts.iter().find_map(|o| match o.value {
+            CommandOptionValue::Role(id) => Some(id),
+            _ => None,
+        })
+    };
 
     match sub.name.as_str() {
         "add" => {
-            let role = opts.iter().find_map(|o| match o.value {
-                CommandOptionValue::Role(id) => Some(id),
-                _ => None,
-            });
-            let Some(role) = role else {
+            let Some(role) = role_opt() else {
                 return "Missing role.".to_string();
             };
             // `@everyone` has role id == guild id; it's every member, not an ACL group.
@@ -368,11 +369,7 @@ async fn handle_network(
             }
         }
         "remove" => {
-            let role = opts.iter().find_map(|o| match o.value {
-                CommandOptionValue::Role(id) => Some(id),
-                _ => None,
-            });
-            let Some(role) = role else {
+            let Some(role) = role_opt() else {
                 return "Missing role.".to_string();
             };
             match store.remove_network(guild_id, role.get()).await {

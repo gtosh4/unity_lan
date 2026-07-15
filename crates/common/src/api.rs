@@ -192,6 +192,7 @@ pub struct RegisterResp {
 pub struct NetworkStatus {
     pub guild_id: u64,
     pub role_id: u64,
+    /// The network's Discord role display name.
     pub name: String,
     /// The guild's community label (admin-set slug, else guild name) for display, e.g. `<role> @ <guild>`.
     #[serde(default)]

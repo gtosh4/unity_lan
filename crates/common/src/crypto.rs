@@ -71,15 +71,21 @@ pub fn wg_public_from_private(private: &WgPrivateKey) -> WgPublicKey {
     PublicKey::from(&secret).to_bytes()
 }
 
+/// Lowercase hex-encode `bytes` into `s` (no per-byte allocation).
+fn push_hex(s: &mut String, bytes: &[u8]) {
+    use std::fmt::Write;
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+}
+
 /// Mint a one-time enrollment key: `unl_` + 32 hex chars (128 bits from the OS CSPRNG).
 pub fn gen_enrollment_key() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     let mut s = String::with_capacity(4 + 32);
     s.push_str("unl_");
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
+    push_hex(&mut s, &bytes);
     s
 }
 
@@ -89,9 +95,7 @@ pub fn gen_pkce_verifier() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let mut s = String::with_capacity(64);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
+    push_hex(&mut s, &bytes);
     s
 }
 

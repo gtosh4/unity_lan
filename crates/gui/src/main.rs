@@ -92,6 +92,39 @@ fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         .into()
 }
 
+/// Inline confirm/cancel controls for a destructive action. When `armed`, returns a danger
+/// "confirm" button (running `run_msg`) plus a cancel button; otherwise a single arming button
+/// (`arm_label`, danger vs. secondary per `arm_danger`) that sends `arm_msg`. The caller pushes
+/// the returned elements onto its row.
+fn confirm_controls<'a>(
+    armed: bool,
+    arm_label: &str,
+    arm_danger: bool,
+    arm_msg: Message,
+    confirm_label: &str,
+    run_msg: Message,
+) -> Vec<Element<'a, Message>> {
+    if armed {
+        vec![
+            button(text(confirm_label.to_owned()).size(13))
+                .style(button::danger)
+                .on_press(run_msg)
+                .into(),
+            button(text("cancel").size(13))
+                .on_press(Message::CancelConfirm)
+                .into(),
+        ]
+    } else {
+        let b = button(text(arm_label.to_owned()).size(13)).on_press(arm_msg);
+        let b = if arm_danger {
+            b.style(button::danger)
+        } else {
+            b.style(button::secondary)
+        };
+        vec![b.into()]
+    }
+}
+
 /// The main window's settings. `exit_on_close_request(false)` so the close button hits our
 /// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
 fn window_settings() -> window::Settings {
@@ -133,8 +166,11 @@ struct App {
     status: Option<StatusReport>,
     devices: Vec<DeviceInfo>,
     exposed: Vec<ExposedPort>,
+    /// Draft text for the device-rename field.
     rename_input: String,
+    /// Draft text for the expose port field.
     expose_port_input: String,
+    /// Draft text for the expose network-scope field.
     expose_net_input: String,
     /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
     login_url: Option<String>,
@@ -144,6 +180,7 @@ struct App {
     confirm: Option<Confirm>,
     /// Which content tab is showing (below the always-visible connection header).
     tab: Tab,
+    /// The last action error, shown as a banner until the next action clears it.
     error: Option<String>,
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
     /// there's no tray on this platform / system).
@@ -624,20 +661,15 @@ impl App {
                 .width(Length::Fill)]
             .spacing(8)
             .align_y(Vertical::Center);
-            if logging_out {
-                r = r
-                    .push(
-                        button(text("confirm log out").size(13))
-                            .style(button::danger)
-                            .on_press(Message::Logout),
-                    )
-                    .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
-            } else {
-                r = r.push(
-                    button(text("log out").size(13))
-                        .style(button::danger)
-                        .on_press(Message::AskConfirm(Confirm::Logout)),
-                );
+            for e in confirm_controls(
+                logging_out,
+                "log out",
+                true,
+                Message::AskConfirm(Confirm::Logout),
+                "confirm log out",
+                Message::Logout,
+            ) {
+                r = r.push(e);
             }
             r
         });
@@ -718,23 +750,19 @@ impl App {
                 .align_y(Vertical::Center);
                 // Block is destructive → arm an inline confirm first (one misclick otherwise drops
                 // the peer). Keyed by the owner's user_id, so it blocks the person, not one device.
-                if self.confirm == Some(Confirm::BlockPeer(p.user_id)) {
-                    top = top
-                        .push(
-                            button(text("confirm block").size(13))
-                                .style(button::danger)
-                                .on_press(Message::BlockPeer {
-                                    user_id: p.user_id,
-                                    username: p.username.clone(),
-                                }),
-                        )
-                        .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
-                } else {
-                    top = top.push(
-                        button(text("block").size(13))
-                            .style(button::secondary)
-                            .on_press(Message::AskConfirm(Confirm::BlockPeer(p.user_id))),
-                    );
+                let arming_block = self.confirm == Some(Confirm::BlockPeer(p.user_id));
+                for e in confirm_controls(
+                    arming_block,
+                    "block",
+                    false,
+                    Message::AskConfirm(Confirm::BlockPeer(p.user_id)),
+                    "confirm block",
+                    Message::BlockPeer {
+                        user_id: p.user_id,
+                        username: p.username.clone(),
+                    },
+                ) {
+                    top = top.push(e);
                 }
                 // Live telemetry line: up/down (WG handshake liveness, distinct from the reach path
                 // type), latency (last ICMP RTT, only meaningful while up), and cumulative transfer.
@@ -826,22 +854,15 @@ impl App {
                     // drops the device).
                     let removing =
                         self.confirm == Some(Confirm::RemoveDevice(d.device_name.clone()));
-                    if removing {
-                        r = r
-                            .push(
-                                button(text("confirm remove").size(13))
-                                    .style(button::danger)
-                                    .on_press(Message::Remove(d.device_name.clone())),
-                            )
-                            .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
-                    } else {
-                        r = r.push(
-                            button(text("remove").size(13))
-                                .style(button::danger)
-                                .on_press(Message::AskConfirm(Confirm::RemoveDevice(
-                                    d.device_name.clone(),
-                                ))),
-                        );
+                    for e in confirm_controls(
+                        removing,
+                        "remove",
+                        true,
+                        Message::AskConfirm(Confirm::RemoveDevice(d.device_name.clone())),
+                        "confirm remove",
+                        Message::Remove(d.device_name.clone()),
+                    ) {
+                        r = r.push(e);
                     }
                 }
                 list = list.push(r);

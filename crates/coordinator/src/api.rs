@@ -19,7 +19,7 @@ use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
 use crate::signer::Signer;
-use crate::store::Store;
+use crate::store::{match_device_by_name, DeviceMatch, Store};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -427,7 +427,6 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let need_relay: std::collections::HashSet<[u8; 32]> = req.need_relay.iter().copied().collect();
     let relay_allocs = st.relay_allocs.lock().unwrap().clone();
     let ice_exchange = st.ice.lock().unwrap().clone();
-    let now = common::now_unix();
 
     // Whether the caller itself is directly dialable (self-reported endpoint: UPnP / manual
     // forward). If so, a NAT'd peer just dials us and no punch is needed on either side.
@@ -581,22 +580,14 @@ async fn manage(
 /// Resolve one of a user's devices by (sanitized) name to its pubkey; error if 0 or >1 match.
 async fn find_device(st: &AppState, user_id: u64, name: &str) -> Result<[u8; 32], ApiError> {
     let want = sanitize_label(name);
-    let matches: Vec<[u8; 32]> = st
-        .store
-        .user_devices(user_id)
-        .await
-        .map_err(internal)?
-        .into_iter()
-        .filter(|(_, n)| *n == want)
-        .map(|(pk, _)| pk)
-        .collect();
-    match matches.as_slice() {
-        [pk] => Ok(*pk),
-        [] => Err(ApiError::new(
+    let devices = st.store.user_devices(user_id).await.map_err(internal)?;
+    match match_device_by_name(&devices, &want) {
+        DeviceMatch::One(pk) => Ok(pk),
+        DeviceMatch::None => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             format!("no device named '{want}'"),
         )),
-        _ => Err(ApiError::new(
+        DeviceMatch::Many => Err(ApiError::new(
             StatusCode::CONFLICT,
             format!("multiple devices named '{want}'; rename one first"),
         )),

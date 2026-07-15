@@ -45,6 +45,7 @@ fn to_name(endpoint: &str) -> std::io::Result<Name<'_>> {
 /// What the control server needs to serve status + forward mutations to the coordinator.
 #[derive(Clone)]
 pub struct Ctx {
+    /// The live device status snapshot, served to any authorized frontend on `Status`.
     pub status: Shared,
     pub coordinator: String,
     /// The device token, set once the daemon has registered.
@@ -463,22 +464,32 @@ async fn request(endpoint: &str, req: &ControlRequest) -> anyhow::Result<Control
     Ok(serde_json::from_str(line.trim())?)
 }
 
+/// Unwrap the expected `ControlResponse` variant, mapping an `Error` reply or any other variant
+/// to a bail. Used by every `client_*` wrapper below.
+macro_rules! expect_resp {
+    ($resp:expr, $variant:path) => {
+        match $resp {
+            $variant(r) => Ok(r),
+            ControlResponse::Error(e) => anyhow::bail!("{e}"),
+            _ => anyhow::bail!("unexpected response"),
+        }
+    };
+}
+
 /// Client: fetch the daemon's status snapshot.
 pub async fn client_status(endpoint: &str) -> anyhow::Result<StatusReport> {
-    match request(endpoint, &ControlRequest::Status).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(
+        request(endpoint, &ControlRequest::Status).await?,
+        ControlResponse::Status
+    )
 }
 
 /// Client: run a device-management op via the daemon (which forwards it to the coordinator).
 pub async fn client_manage(endpoint: &str, op: ManageOp) -> anyhow::Result<ManageResp> {
-    match request(endpoint, &ControlRequest::Manage(op)).await? {
-        ControlResponse::Manage(r) => Ok(r),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(
+        request(endpoint, &ControlRequest::Manage(op)).await?,
+        ControlResponse::Manage
+    )
 }
 
 /// Apply an expose op to the local firewall and report the resulting exposed set. A `--net` scope
@@ -514,20 +525,18 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
 
 /// Client: expose/unexpose/list ports via the daemon's local firewall.
 pub async fn client_expose(endpoint: &str, op: ExposeOp) -> anyhow::Result<ExposeResp> {
-    match request(endpoint, &ControlRequest::Expose(op)).await? {
-        ControlResponse::Expose(r) => Ok(r),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(
+        request(endpoint, &ControlRequest::Expose(op)).await?,
+        ControlResponse::Expose
+    )
 }
 
 /// Client: start interactive login via the daemon; returns the authorize URL to open.
 pub async fn client_login(endpoint: &str) -> anyhow::Result<LoginResp> {
-    match request(endpoint, &ControlRequest::Login).await? {
-        ControlResponse::Login(r) => Ok(r),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(
+        request(endpoint, &ControlRequest::Login).await?,
+        ControlResponse::Login
+    )
 }
 
 /// Client: connect (`true`) or disconnect (`false`) the mesh.
@@ -535,11 +544,10 @@ pub async fn client_set_connected(
     endpoint: &str,
     connected: bool,
 ) -> anyhow::Result<common::control::ConnectedResp> {
-    match request(endpoint, &ControlRequest::SetConnected { connected }).await? {
-        ControlResponse::Connected(r) => Ok(r),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(
+        request(endpoint, &ControlRequest::SetConnected { connected }).await?,
+        ControlResponse::Connected
+    )
 }
 
 /// Client: toggle this device's peering on a network (role@guild).
@@ -549,20 +557,18 @@ pub async fn client_set_network(
     role_id: u64,
     enabled: bool,
 ) -> anyhow::Result<NetworkResp> {
-    match request(
-        endpoint,
-        &ControlRequest::SetNetwork {
-            guild_id,
-            role_id,
-            enabled,
-        },
+    expect_resp!(
+        request(
+            endpoint,
+            &ControlRequest::SetNetwork {
+                guild_id,
+                role_id,
+                enabled,
+            },
+        )
+        .await?,
+        ControlResponse::Network
     )
-    .await?
-    {
-        ControlResponse::Network(r) => Ok(r),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
 }
 
 /// Client: locally block (`Some(username)`) or un-block (`None`) a user by `user_id`. Returns the
@@ -576,9 +582,5 @@ pub async fn client_set_blocked(
         Some(username) => ControlRequest::BlockPeer { user_id, username },
         None => ControlRequest::UnblockPeer { user_id },
     };
-    match request(endpoint, &req).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => anyhow::bail!("{e}"),
-        _ => anyhow::bail!("unexpected response"),
-    }
+    expect_resp!(request(endpoint, &req).await?, ControlResponse::Status)
 }

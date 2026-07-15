@@ -19,6 +19,7 @@ use crate::DNS_SUFFIX;
 /// sanitized to DNS labels by the coordinator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
+    /// Owner's Discord user id (snowflake).
     pub user_id: u64,
     /// Owner's global handle, sanitized to a DNS label (the `<user>` in a hostname).
     pub username: String,
@@ -30,7 +31,9 @@ pub struct Attestation {
     pub wg_ip: Ipv4Addr,
     /// Curve25519 WireGuard public key — the device identity.
     pub wg_pubkey: [u8; 32],
+    /// When the coordinator signed this, in unix epoch seconds.
     pub issued_at: u64,
+    /// When this attestation stops verifying, in unix epoch seconds (drives all TTL math).
     pub expires_at: u64,
 }
 

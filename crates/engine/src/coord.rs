@@ -9,6 +9,17 @@ use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
 use common::wire::Signed;
 
+/// Return the response if it's a success status, else read the body and bail with the
+/// coordinator's error. `what` names the route for the error message.
+async fn ensure_ok(resp: reqwest::Response, what: &str) -> anyhow::Result<reqwest::Response> {
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("coordinator rejected {what}: {status}: {body}");
+    }
+    Ok(resp)
+}
+
 /// Our own verified device: its `/32`, hostname, and the networks it belongs to.
 pub struct SelfDevice {
     pub community_name: String,
@@ -176,11 +187,7 @@ async fn post(
         .send()
         .await
         .with_context(|| format!("sending /{path}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("coordinator rejected {path}: {status}: {body}");
-    }
+    let resp = ensure_ok(resp, path).await?;
     let resp: RegisterResp = resp.json().await.context("decoding RegisterResp")?;
 
     let anchor =
@@ -217,11 +224,7 @@ pub async fn pkce_config(base_url: &str) -> anyhow::Result<common::api::PkceConf
         .send()
         .await
         .context("sending /oauth/pkce-config")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("coordinator rejected oauth/pkce-config: {status}: {body}");
-    }
+    let resp = ensure_ok(resp, "oauth/pkce-config").await?;
     resp.json().await.context("decoding PkceConfigResp")
 }
 
@@ -241,11 +244,7 @@ pub async fn oauth_complete(
         .send()
         .await
         .context("sending /oauth/complete")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("coordinator rejected oauth/complete: {status}: {body}");
-    }
+    ensure_ok(resp, "oauth/complete").await?;
     Ok(())
 }
 
@@ -262,11 +261,7 @@ pub async fn manage(
         .send()
         .await
         .context("sending /devices/manage")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        bail!("coordinator rejected manage: {status}: {body}");
-    }
+    let resp = ensure_ok(resp, "manage").await?;
     resp.json().await.context("decoding ManageResp")
 }
 

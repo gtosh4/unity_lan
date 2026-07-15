@@ -58,28 +58,28 @@ async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, 
     serde_json::from_str(line.trim()).map_err(|e| e.to_string())
 }
 
+/// Send `req` and unwrap the expected `ControlResponse` variant, mapping an `Error` reply or any
+/// other variant to the display string. Used by the wrappers below.
+macro_rules! expect {
+    ($path:expr, $req:expr, $variant:path) => {
+        match request($path, $req).await? {
+            $variant(r) => Ok(r),
+            ControlResponse::Error(e) => Err(e),
+            _ => Err("unexpected response".into()),
+        }
+    };
+}
+
 pub async fn fetch_status(path: PathBuf) -> Result<StatusReport, String> {
-    match request(path, ControlRequest::Status).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(path, ControlRequest::Status, ControlResponse::Status)
 }
 
 pub async fn manage(path: PathBuf, op: ManageOp) -> Result<ManageResp, String> {
-    match request(path, ControlRequest::Manage(op)).await? {
-        ControlResponse::Manage(r) => Ok(r),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(path, ControlRequest::Manage(op), ControlResponse::Manage)
 }
 
 pub async fn expose(path: PathBuf, op: ExposeOp) -> Result<ExposeResp, String> {
-    match request(path, ControlRequest::Expose(op)).await? {
-        ControlResponse::Expose(r) => Ok(r),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(path, ControlRequest::Expose(op), ControlResponse::Expose)
 }
 
 pub async fn set_network(
@@ -88,28 +88,19 @@ pub async fn set_network(
     role_id: u64,
     enabled: bool,
 ) -> Result<NetworkResp, String> {
-    match request(
+    expect!(
         path,
         ControlRequest::SetNetwork {
             guild_id,
             role_id,
             enabled,
         },
+        ControlResponse::Network
     )
-    .await?
-    {
-        ControlResponse::Network(r) => Ok(r),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
 }
 
 pub async fn login(path: PathBuf) -> Result<LoginResp, String> {
-    match request(path, ControlRequest::Login).await? {
-        ControlResponse::Login(r) => Ok(r),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(path, ControlRequest::Login, ControlResponse::Login)
 }
 
 pub async fn logout(path: PathBuf) -> Result<String, String> {
@@ -121,20 +112,20 @@ pub async fn logout(path: PathBuf) -> Result<String, String> {
 }
 
 pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedResp, String> {
-    match request(path, ControlRequest::SetConnected { connected }).await? {
-        ControlResponse::Connected(r) => Ok(r),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(
+        path,
+        ControlRequest::SetConnected { connected },
+        ControlResponse::Connected
+    )
 }
 
 /// Set the new-network default (secure default: disable on discovery). Returns the updated status.
 pub async fn set_new_network_default(path: PathBuf, disable: bool) -> Result<StatusReport, String> {
-    match request(path, ControlRequest::SetNewNetworkDefault { disable }).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(
+        path,
+        ControlRequest::SetNewNetworkDefault { disable },
+        ControlResponse::Status
+    )
 }
 
 /// Locally block a user (by Discord `user_id`) — drop all their peers from the mesh. Returns the
@@ -144,18 +135,18 @@ pub async fn block_peer(
     user_id: u64,
     username: String,
 ) -> Result<StatusReport, String> {
-    match request(path, ControlRequest::BlockPeer { user_id, username }).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(
+        path,
+        ControlRequest::BlockPeer { user_id, username },
+        ControlResponse::Status
+    )
 }
 
 /// Un-block a previously-blocked user. Returns the updated status.
 pub async fn unblock_peer(path: PathBuf, user_id: u64) -> Result<StatusReport, String> {
-    match request(path, ControlRequest::UnblockPeer { user_id }).await? {
-        ControlResponse::Status(s) => Ok(s),
-        ControlResponse::Error(e) => Err(e),
-        _ => Err("unexpected response".into()),
-    }
+    expect!(
+        path,
+        ControlRequest::UnblockPeer { user_id },
+        ControlResponse::Status
+    )
 }

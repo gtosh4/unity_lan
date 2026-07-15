@@ -19,7 +19,13 @@ use crate::netcfg::LocalNet;
 use crate::ping;
 use crate::resolver::ResolverHook;
 use crate::shutdown::Shutdown;
+use crate::util::hex8;
 use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
+
+/// A peer counts as reachable if its last WireGuard handshake is younger than this. It sits well
+/// above the 25s keepalive, so a live tunnel always refreshes inside the window; a peer that goes
+/// this long without a handshake is treated as down (and drives relay/ICE fallback + status).
+const HANDSHAKE_FRESH: Duration = Duration::from_secs(180);
 
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
@@ -27,13 +33,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // coordinator is unreachable.
     let localnet = Arc::new(LocalNet::load(&cfg.state_dir, cfg.disable_new_networks));
 
-    let token = std::sync::Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
+    let token = Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
     // This device's WG public key, shared with the control socket so interactive login binds the
     // *current* key. A logout re-keys the device; the enrollment loop below refreshes this each
     // iteration.
-    let pubkey = std::sync::Arc::new(tokio::sync::RwLock::new([0u8; 32]));
+    let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
-    let logout = std::sync::Arc::new(tokio::sync::Notify::new());
+    let logout = Arc::new(tokio::sync::Notify::new());
 
     // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
     let zone = dns::empty_zone();
@@ -126,7 +132,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         (true, Some(ep)) => {
             let secret = keys::load_or_create_relay_secret(&cfg.state_dir)?;
             let relay_addr = SocketAddr::new(ep.ip(), cfg.relay_port);
-            let bind = SocketAddr::new(std::net::Ipv4Addr::UNSPECIFIED.into(), cfg.relay_port);
+            let bind = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), cfg.relay_port);
             match crate::relay::RelayServer::start(
                 bind,
                 ep.ip(),
@@ -322,7 +328,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // (no dialable endpoint); "connected" if WG has a recent handshake for it.
             let now = std::time::Instant::now();
             // Latency probe: one concurrent ICMP echo per peer's wg IP (peers answer ping by default).
-            let peer_ips: Vec<std::net::Ipv4Addr> = peers
+            let peer_ips: Vec<Ipv4Addr> = peers
                 .values()
                 .filter_map(|c| c.allowed_ips.first().map(|(ip, _)| *ip))
                 .collect();
@@ -330,7 +336,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 Some(pc) => ping::probe(pc, &peer_ips).await,
                 None => HashMap::new(),
             };
-            let mut live: HashMap<std::net::Ipv4Addr, control::PeerLive> = HashMap::new();
+            let mut live: HashMap<Ipv4Addr, control::PeerLive> = HashMap::new();
             // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`)
             // *plus* those we're already relaying — a working relay tunnel reads as connected, so
             // without this it would drop out of `need_relay` and the coordinator would withdraw the
@@ -349,7 +355,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     .as_ref()
                     .and_then(|m| m.get(pk))
                     .and_then(|s| s.last_handshake)
-                    .is_some_and(|t| t.elapsed().map_or(true, |d| d < Duration::from_secs(180)));
+                    .is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
                 let age = punch_since
                     .get(pk)
                     .map_or(0, |t| now.duration_since(*t).as_secs());
@@ -927,23 +933,11 @@ fn apply_seeds(
     }
 
     if changed {
-        let all: Vec<PeerConfig> = peers
-            .values()
-            .map(|p| PeerConfig {
-                public_key: p.public_key,
-                allowed_ips: p.allowed_ips.clone(),
-                endpoint: p.endpoint,
-                keepalive: p.keepalive,
-            })
-            .collect();
+        let all: Vec<PeerConfig> = peers.values().cloned().collect();
         if let Err(e) = backend.configure_routing(&all) {
             tracing::warn!("routing not applied (needs iface up): {e:#}");
         }
         tracing::info!(peers = all.len(), "mesh updated");
     }
     Ok(())
-}
-
-fn hex8(b: &[u8; 32]) -> String {
-    b[..4].iter().map(|x| format!("{x:02x}")).collect()
 }
