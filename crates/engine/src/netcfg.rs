@@ -3,7 +3,7 @@
 //! when the coordinator is unreachable. The set rides along to the coordinator on the next
 //! register/refresh, which mirrors it (dropping the device from those networks both ways).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,10 +23,16 @@ pub struct LocalNet {
     /// Whether newly-discovered networks default to disabled (opted out). Seeded from config on
     /// first run, then GUI-settable; persisted to `disable_new_networks.json`.
     disable_new: Mutex<bool>,
+    /// Users this device has locally blocked, `user_id -> username` (the handle kept only for
+    /// display). A blocked user's peers are filtered out of the mesh regardless of shared networks.
+    /// Client is the source of truth (never sent to the coordinator); persisted to
+    /// `blocked_users.json`. Keyed by user so a blocked owner can't evade by re-keying a device.
+    blocked: Mutex<HashMap<u64, String>>,
     path: PathBuf,
     paused_path: PathBuf,
     known_path: PathBuf,
     disable_new_path: PathBuf,
+    blocked_path: PathBuf,
     /// Notified whenever the disabled set *or* the paused flag changes, so the daemon re-meshes
     /// (or tears the mesh down) at once.
     pub wake: Notify,
@@ -63,15 +69,24 @@ impl LocalNet {
             .ok()
             .and_then(|b| serde_json::from_slice::<bool>(&b).ok())
             .unwrap_or(disable_new_default);
+        let blocked_path = state_dir.join("blocked_users.json");
+        let blocked = std::fs::read(&blocked_path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Vec<(u64, String)>>(&b).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
         Self {
             disabled: Mutex::new(disabled),
             paused: Mutex::new(paused),
             known: Mutex::new(known),
             disable_new: Mutex::new(disable_new),
+            blocked: Mutex::new(blocked),
             path,
             paused_path,
             known_path,
             disable_new_path,
+            blocked_path,
             wake: Notify::new(),
         }
     }
@@ -114,6 +129,46 @@ impl LocalNet {
             std::fs::write(&self.disable_new_path, serde_json::to_vec(&disable)?)?;
         }
         Ok(changed)
+    }
+
+    /// Block (`true`) or un-block (`false`) a user by `user_id`. On block the handle is stored for
+    /// display. Persists + wakes the daemon (re-mesh drops/re-admits the user's peers) if it changed.
+    pub fn set_blocked(
+        &self,
+        user_id: u64,
+        username: String,
+        blocked: bool,
+    ) -> anyhow::Result<bool> {
+        let changed = {
+            let mut b = self.blocked.lock().unwrap();
+            if blocked {
+                b.insert(user_id, username).is_none()
+            } else {
+                b.remove(&user_id).is_some()
+            }
+        };
+        if changed {
+            self.persist_blocked()?;
+            self.wake.notify_one();
+        }
+        Ok(changed)
+    }
+
+    /// The blocked set, `user_id -> username`. The keys are the filter; the handles feed the status.
+    pub fn blocked_snapshot(&self) -> HashMap<u64, String> {
+        self.blocked.lock().unwrap().clone()
+    }
+
+    fn persist_blocked(&self) -> anyhow::Result<()> {
+        let v: Vec<(u64, String)> = self
+            .blocked
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(&id, name)| (id, name.clone()))
+            .collect();
+        std::fs::write(&self.blocked_path, serde_json::to_vec(&v)?)?;
+        Ok(())
     }
 
     /// Reconcile the coordinator's current network list against what we've seen before. Any network
@@ -245,6 +300,38 @@ mod tests {
         // Policy off: a new network is recorded but left enabled.
         assert!(!reloaded.reconcile_new(&[(2, 20)]).unwrap());
         assert!(!reloaded.snapshot().contains(&(2, 20)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn blocked_users_persist_and_reload() {
+        let dir =
+            std::env::temp_dir().join(format!("unitylan-netcfg-block-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ln = LocalNet::load(&dir, true);
+        assert!(ln.blocked_snapshot().is_empty(), "defaults to none blocked");
+
+        // First block changes; blocking the same user again does not.
+        assert!(ln.set_blocked(333, "alice".into(), true).unwrap());
+        assert!(!ln.set_blocked(333, "alice".into(), true).unwrap());
+        assert_eq!(
+            ln.blocked_snapshot().get(&333).map(String::as_str),
+            Some("alice")
+        );
+
+        // The block survives a reload (keyed by user_id, handle kept for display).
+        let reloaded = LocalNet::load(&dir, true);
+        assert_eq!(
+            reloaded.blocked_snapshot().get(&333).map(String::as_str),
+            Some("alice")
+        );
+
+        // Un-blocking changes once, then is a no-op; the persisted set empties.
+        assert!(reloaded.set_blocked(333, String::new(), false).unwrap());
+        assert!(!reloaded.set_blocked(333, String::new(), false).unwrap());
+        assert!(LocalNet::load(&dir, true).blocked_snapshot().is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -5,14 +5,14 @@
 //! named pipe on Windows — so the same newline-JSON protocol works on both. The endpoint is named
 //! by [`crate::config::Config::control_name`] (a filesystem path on unix, a pipe name on Windows).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
 use common::api::{ManageOp, ManageResp, NetworkStatus};
 use common::control::{
-    ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp, ExposeResp, LoginResp,
-    LogoutResp, NetworkResp, PeerStatus, StatusReport,
+    BlockedUser, ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp,
+    ExposeResp, LoginResp, LogoutResp, NetworkResp, PeerStatus, StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -102,11 +102,13 @@ pub fn shared() -> Shared {
 /// Rebuild the status snapshot from the current device + seed peers. `disabled` is the local
 /// opt-out set, so the reported per-network `enabled` reflects the local toggle immediately (even
 /// before the coordinator has mirrored it).
+#[allow(clippy::too_many_arguments)]
 pub async fn update(
     shared: &Shared,
     device: &SelfDevice,
     seeds: &[SeedPeer],
     disabled: &HashSet<(u64, u64)>,
+    blocked: &HashMap<u64, String>,
     connected: bool,
     disable_new_networks: bool,
     coordinator_online: bool,
@@ -125,6 +127,8 @@ pub async fn update(
                 wg_ip: s.ip,
                 endpoint: s.endpoint,
                 reach: common::control::PeerReach::Direct, // overlaid by `set_reach`
+                user_id: s.user_id,
+                username: s.username.clone(),
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
@@ -133,8 +137,31 @@ pub async fn update(
         disable_new_networks,
         identity: Some(device.username.clone()),
         coordinator_online,
+        blocked: blocked_list(blocked),
     };
     *shared.write().await = report;
+}
+
+/// The blocked map as a sorted (stable order) list of [`BlockedUser`] for the status report.
+fn blocked_list(blocked: &HashMap<u64, String>) -> Vec<BlockedUser> {
+    let mut v: Vec<BlockedUser> = blocked
+        .iter()
+        .map(|(&user_id, username)| BlockedUser {
+            user_id,
+            username: username.clone(),
+        })
+        .collect();
+    v.sort_by(|a, b| a.username.cmp(&b.username).then(a.user_id.cmp(&b.user_id)));
+    v
+}
+
+/// Mirror a block/un-block into the live status without waiting for the daemon's next re-mesh:
+/// rewrite the blocked list and drop any now-blocked user's peers so the GUI updates at once. The
+/// daemon's `wake`-triggered re-mesh follows and settles the peer set (adds them back on un-block).
+pub async fn set_blocked(shared: &Shared, blocked: &HashMap<u64, String>) {
+    let mut report = shared.write().await;
+    report.peers.retain(|p| !blocked.contains_key(&p.user_id));
+    report.blocked = blocked_list(blocked);
 }
 
 /// Overlay per-peer reachability onto the current status without rebuilding it (cheap — no DNS or
@@ -355,6 +382,28 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 message: "logging out — tearing down the mesh and un-enrolling".into(),
             })
         }
+        // Locally block / un-block a user (persist + wake the daemon to re-mesh, dropping or
+        // re-admitting their peers). Purely local — never forwarded to the coordinator. Mirror the
+        // change into the live status so the GUI reflects it before the re-mesh lands, then return
+        // the updated snapshot.
+        ControlRequest::BlockPeer { user_id, username } => {
+            match ctx.localnet.set_blocked(user_id, username, true) {
+                Ok(_) => {
+                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot()).await;
+                    ControlResponse::Status(ctx.status.read().await.clone())
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
+        ControlRequest::UnblockPeer { user_id } => {
+            match ctx.localnet.set_blocked(user_id, String::new(), false) {
+                Ok(_) => {
+                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot()).await;
+                    ControlResponse::Status(ctx.status.read().await.clone())
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
         // Set the local default for networks discovered from now on (persisted, source of truth).
         // Doesn't touch already-known networks, so no re-mesh; mirror it into the live status so the
         // GUI reflects it at once, then return the updated snapshot.
@@ -489,6 +538,24 @@ pub async fn client_set_network(
     .await?
     {
         ControlResponse::Network(r) => Ok(r),
+        ControlResponse::Error(e) => anyhow::bail!("{e}"),
+        _ => anyhow::bail!("unexpected response"),
+    }
+}
+
+/// Client: locally block (`Some(username)`) or un-block (`None`) a user by `user_id`. Returns the
+/// updated status.
+pub async fn client_set_blocked(
+    endpoint: &str,
+    user_id: u64,
+    username: Option<String>,
+) -> anyhow::Result<StatusReport> {
+    let req = match username {
+        Some(username) => ControlRequest::BlockPeer { user_id, username },
+        None => ControlRequest::UnblockPeer { user_id },
+    };
+    match request(endpoint, &req).await? {
+        ControlResponse::Status(s) => Ok(s),
         ControlResponse::Error(e) => anyhow::bail!("{e}"),
         _ => anyhow::bail!("unexpected response"),
     }

@@ -147,6 +147,8 @@ enum Tab {
 enum Confirm {
     RemoveDevice(String),
     Logout,
+    /// Block a peer's owner, armed by the peer's `user_id`.
+    BlockPeer(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -200,6 +202,17 @@ enum Message {
     SetNewNetworkDefault(bool),
     /// The new-network default was set → the daemon returns the updated status.
     NewNetworkDefaultSet(Result<StatusReport, String>),
+    /// Locally block a peer's owner (all their devices) by Discord `user_id`.
+    BlockPeer {
+        user_id: u64,
+        username: String,
+    },
+    /// Un-block a previously-blocked user.
+    UnblockPeer {
+        user_id: u64,
+    },
+    /// A block/un-block finished → the daemon returns the updated status.
+    BlockDone(Result<StatusReport, String>),
     /// Arm a destructive action: show its inline confirm/cancel controls.
     AskConfirm(Confirm),
     /// Dismiss the armed destructive action without running it.
@@ -375,6 +388,25 @@ impl App {
                 self.error = None;
             }
             Message::NewNetworkDefaultSet(Err(e)) => self.error = Some(e),
+            Message::BlockPeer { user_id, username } => {
+                self.confirm = None; // consume the armed confirmation
+                return Task::perform(
+                    ctl::block_peer(self.socket.clone(), user_id, username),
+                    Message::BlockDone,
+                );
+            }
+            Message::UnblockPeer { user_id } => {
+                return Task::perform(
+                    ctl::unblock_peer(self.socket.clone(), user_id),
+                    Message::BlockDone,
+                )
+            }
+            Message::BlockDone(Ok(s)) => {
+                self.status = Some(s);
+                self.error = None;
+                return self.reload(); // pull the settled peer set once the re-mesh lands
+            }
+            Message::BlockDone(Err(e)) => self.error = Some(e),
             Message::Tray(TrayMsg::ToggleWindow) => {
                 self.hidden = !self.hidden;
                 let show = !self.hidden;
@@ -717,21 +749,36 @@ impl App {
                     .map(|e| e.to_string())
                     .unwrap_or_else(|| "—".to_string());
                 let (rc, rlabel) = reach_style(p.reach);
-                // Per peer: hostname + reachability on one line, then a muted IP · endpoint line
-                // below — keeps long hostnames readable in the narrow window.
-                col = col.push(
-                    column![
-                        row![
-                            dot(rc),
-                            text(p.hostname.clone()).size(14).width(Length::Fill),
-                            muted(rlabel),
-                        ]
-                        .spacing(8)
-                        .align_y(Vertical::Center),
-                        muted(format!("{}   {}", p.wg_ip, ep)),
-                    ]
-                    .spacing(2),
-                );
+                // Per peer: hostname + reachability + a block control on one line, then a muted
+                // IP · endpoint line below — keeps long hostnames readable in the narrow window.
+                let mut top = row![
+                    dot(rc),
+                    text(p.hostname.clone()).size(14).width(Length::Fill),
+                    muted(rlabel),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                // Block is destructive → arm an inline confirm first (one misclick otherwise drops
+                // the peer). Keyed by the owner's user_id, so it blocks the person, not one device.
+                if self.confirm == Some(Confirm::BlockPeer(p.user_id)) {
+                    top = top
+                        .push(
+                            button(text("confirm block").size(13))
+                                .style(button::danger)
+                                .on_press(Message::BlockPeer {
+                                    user_id: p.user_id,
+                                    username: p.username.clone(),
+                                }),
+                        )
+                        .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
+                } else {
+                    top = top.push(
+                        button(text("block").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::AskConfirm(Confirm::BlockPeer(p.user_id))),
+                    );
+                }
+                col = col.push(column![top, muted(format!("{}   {}", p.wg_ip, ep))].spacing(2));
             }
             // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
             // push everything else off-screen. Small meshes render at natural height (no scrollbar).
@@ -741,7 +788,38 @@ impl App {
                 col.into()
             }
         };
+        // Blocked users: shown as a separate list (a blocked owner never appears as a peer) so they
+        // can be un-blocked even while filtered out of the mesh.
+        let blocked = self
+            .status
+            .as_ref()
+            .map(|s| s.blocked.as_slice())
+            .unwrap_or(&[]);
+        let blocked_section: Option<Element<'_, Message>> = if blocked.is_empty() {
+            None
+        } else {
+            let mut list = Column::new().spacing(6);
+            for b in blocked {
+                list = list.push(
+                    row![
+                        text(b.username.clone()).size(14).width(Length::Fill),
+                        button(text("unblock").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::UnblockPeer { user_id: b.user_id }),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center),
+                );
+            }
+            Some(
+                column![header(format!("blocked ({})", blocked.len())), list]
+                    .spacing(8)
+                    .into(),
+            )
+        };
+
         column![header(format!("peers ({})", peers.len())), inner]
+            .push_maybe(blocked_section)
             .spacing(8)
             .into()
     }
@@ -1016,6 +1094,8 @@ mod tests {
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
                 reach: common::control::PeerReach::Direct,
+                user_id: 42,
+                username: "bob".into(),
             }],
             networks: vec![],
             needs_login: false,
@@ -1023,6 +1103,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -1126,6 +1207,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1177,6 +1259,7 @@ mod tests {
             disable_new_networks: true,
             identity: None,
             coordinator_online: true,
+            blocked: vec![],
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

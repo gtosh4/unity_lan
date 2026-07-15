@@ -50,6 +50,20 @@ pub enum ControlRequest {
     /// device at the coordinator, and discard the local key + token so the next enrollment uses a
     /// fresh key. The daemon stays resident and returns to the not-logged-in state (`needs_login`).
     Logout,
+    /// Locally block a peer's owner (by Discord `user_id`): drop every one of their devices from
+    /// the mesh and refuse to peer with them, without leaving any shared network. Purely local (the
+    /// client is the source of truth) — the coordinator is never told. Keyed by user, not device
+    /// key, so it survives the blocked user re-keying or renaming a device. `username` is stored for
+    /// display in the blocked list. Returns the updated [`StatusReport`].
+    BlockPeer {
+        user_id: u64,
+        username: String,
+    },
+    /// Un-block a previously-blocked user (by `user_id`): they re-mesh on the next refresh. Returns
+    /// the updated [`StatusReport`].
+    UnblockPeer {
+        user_id: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -164,6 +178,18 @@ pub struct StatusReport {
     /// to `true` (an older daemon with no field reads as reachable).
     #[serde(default = "default_true")]
     pub coordinator_online: bool,
+    /// Users this device has locally blocked (by `user_id`): their peers are dropped from the mesh.
+    /// Reported separately from `peers` (a blocked user never appears there) so the GUI can list and
+    /// un-block them even while they're filtered out.
+    #[serde(default)]
+    pub blocked: Vec<BlockedUser>,
+}
+
+/// A locally-blocked user: their Discord `user_id` plus a display handle for the blocked list.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockedUser {
+    pub user_id: u64,
+    pub username: String,
 }
 
 fn default_true() -> bool {
@@ -186,6 +212,11 @@ pub struct PeerStatus {
     /// How this peer is (or isn't) reachable — surfaces a stuck hole punch. Defaults to `Direct`.
     #[serde(default)]
     pub reach: PeerReach,
+    /// The peer owner's Discord id + handle — the identity a local block acts on (`BlockPeer`).
+    #[serde(default)]
+    pub user_id: u64,
+    #[serde(default)]
+    pub username: String,
 }
 
 /// A peer's data-plane reachability, for status display (§7.2 diagnostics).

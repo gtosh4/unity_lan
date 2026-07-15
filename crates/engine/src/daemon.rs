@@ -595,6 +595,7 @@ async fn apply_state(
         }
     }
     let disabled = localnet.snapshot();
+    let blocked = localnet.blocked_snapshot();
     let paused = localnet.is_paused();
     if let Some(dev) = device {
         tracing::debug!(
@@ -615,7 +616,7 @@ async fn apply_state(
     // The coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
     backend.set_link_up(!paused)?;
     let active: Vec<SeedPeer> = match device {
-        Some(dev) if !paused => filter_active(seeds, &disabled, &dev.networks_status),
+        Some(dev) if !paused => filter_active(seeds, &disabled, &blocked, &dev.networks_status),
         _ => Vec::new(),
     };
     if let Some(dev) = device {
@@ -625,6 +626,7 @@ async fn apply_state(
             dev,
             &active,
             &disabled,
+            &blocked,
             !paused,
             localnet.disable_new(),
             coord_online,
@@ -703,12 +705,15 @@ async fn sync_ice(
     eps
 }
 
-/// Keep peers that share at least one network we haven't locally disabled. Shared networks arrive
-/// as names; we resolve them to (guild, role) via our own `networks_status` to compare against the
-/// opt-out set. A peer with no known shared network (older coordinator) is kept.
+/// Keep peers that share at least one network we haven't locally disabled and whose owner we
+/// haven't locally blocked. Shared networks arrive as names; we resolve them to (guild, role) via
+/// our own `networks_status` to compare against the opt-out set. A peer with no known shared network
+/// (older coordinator) is kept. A blocked owner's peers are always dropped (a block outranks any
+/// shared network), which prunes their tunnels on the next `apply_seeds`.
 fn filter_active(
     seeds: &[SeedPeer],
     disabled: &HashSet<(u64, u64)>,
+    blocked: &HashMap<u64, String>,
     networks_status: &[common::api::NetworkStatus],
 ) -> Vec<SeedPeer> {
     let name_to_id: HashMap<&str, (u64, u64)> = networks_status
@@ -717,6 +722,7 @@ fn filter_active(
         .collect();
     seeds
         .iter()
+        .filter(|s| !blocked.contains_key(&s.user_id))
         .filter(|s| {
             s.networks.is_empty()
                 || s.networks
