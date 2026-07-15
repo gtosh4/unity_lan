@@ -1,7 +1,7 @@
 //! System-tray integration, platform-split behind a thin `spawn()` entry (mirroring the engine's
 //! `fw`/`resolver` per-OS modules). Linux uses **ksni** — StatusNotifierItem over D-Bus, native on
-//! KDE/GNOME/wayland with no gtk dependency; Windows is a documented stub for now (the `tray-icon`
-//! crate needs a Win32 message-pump integration that can't be built/verified from a Linux host).
+//! KDE/GNOME/wayland with no gtk dependency; Windows uses **tray-icon** (a Shell_NotifyIcon window
+//! we pump ourselves). Other platforms fall to a no-op stub.
 //!
 //! The tray runs on its **own thread with its own tokio runtime**: it polls the engine control
 //! socket to reflect the mesh's connected state on the icon, and drives connect/disconnect over
@@ -14,12 +14,12 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 mod stub;
+#[cfg(windows)]
+mod windows;
 
 /// Actions the tray asks the iced app to perform (everything else it does itself over the socket).
-// Windows has no tray backend yet (uses `stub.rs`), so nothing constructs these there.
-#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 pub enum TrayMsg {
     /// Toggle the main window between shown and hidden (minimize-to-tray / restore).
@@ -35,7 +35,11 @@ pub fn spawn(socket: PathBuf) -> Option<UnboundedReceiver<TrayMsg>> {
     {
         linux::spawn(socket)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(windows)]
+    {
+        windows::spawn(socket)
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
     {
         stub::spawn(socket)
     }
@@ -43,7 +47,7 @@ pub fn spawn(socket: PathBuf) -> Option<UnboundedReceiver<TrayMsg>> {
 
 /// A 22×22 RGBA dot for the tray icon — green when the mesh is connected, grey when not. Backends
 /// convert to their native pixel order. A filled circle with a 1px feathered edge (no asset files).
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub(crate) fn dot_rgba(connected: bool) -> (u32, Vec<u8>) {
     const N: i32 = 22;
     let (r, g, b) = if connected {

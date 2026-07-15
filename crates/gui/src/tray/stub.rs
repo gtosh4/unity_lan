@@ -1,6 +1,6 @@
-//! Tray backend stub for non-Linux platforms. The module split is in place so a real backend drops
-//! in here; Windows will use the `tray-icon` crate (needs a Win32 message-pump integration that
-//! can't be built or verified from a Linux host — hence deferred to when Windows is worked).
+//! Tray backend stub for platforms with no tray implementation yet (i.e. not Linux or Windows —
+//! macOS/BSD). The module split is in place so a real backend drops in here; Linux uses `linux.rs`
+//! (ksni) and Windows uses `windows.rs` (tray-icon).
 
 use std::path::PathBuf;
 
