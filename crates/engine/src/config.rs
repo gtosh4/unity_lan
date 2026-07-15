@@ -180,10 +180,13 @@ impl Config {
     }
 
     /// This device's name: the configured value, else the system hostname, else `"device"`.
+    /// `HOSTNAME` is the unix convention; `COMPUTERNAME` is where Windows keeps the machine name
+    /// (`HOSTNAME` is unset there), so check both to avoid falling back to the bare `"device"`.
     pub fn device_name(&self) -> String {
         self.device_name
             .clone()
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
+            .or_else(|| std::env::var("COMPUTERNAME").ok().filter(|h| !h.is_empty()))
             .unwrap_or_else(|| "device".to_string())
     }
 }
