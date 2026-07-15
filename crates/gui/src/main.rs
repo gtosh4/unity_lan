@@ -25,7 +25,7 @@ use iced::font::Weight;
 use iced::widget::{
     button, checkbox, column, container, row, scrollable, text, text_input, toggler, Column, Text,
 };
-use iced::window::{self, Mode};
+use iced::window;
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
 use tokio::sync::mpsc::UnboundedReceiver;
 use tray::TrayMsg;
@@ -93,6 +93,17 @@ fn card<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         .into()
 }
 
+/// The main window's settings. `exit_on_close_request(false)` so the close button hits our
+/// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
+fn window_settings() -> window::Settings {
+    window::Settings {
+        size: iced::Size::new(440.0, 640.0),
+        position: window::Position::Centered,
+        exit_on_close_request: false,
+        ..Default::default()
+    }
+}
+
 fn main() -> iced::Result {
     let socket = PathBuf::from(
         std::env::args()
@@ -103,18 +114,17 @@ fn main() -> iced::Result {
     // connect/disconnect + reflects status over the socket itself, and hands window/quit requests
     // back to us over this channel.
     let tray_rx = tray::spawn(socket.clone());
-    iced::application("UnityLAN", App::update, App::view)
+    // `daemon` (not `application`) so the process survives with zero windows: hide-to-tray destroys
+    // the window and show reopens a fresh one — the only way to truly leave the taskbar on Wayland,
+    // where winit can't unmap a surface. Quit (from the tray) is the real exit.
+    iced::daemon("UnityLAN", App::update, App::view)
         .subscription(App::subscription)
-        .theme(|_| Theme::Dark)
-        .window_size((440.0, 640.0))
-        .centered()
-        // The window's close button minimizes to the tray instead of exiting (we intercept
-        // CloseRequested); the tray's Quit is the real exit.
-        .exit_on_close_request(false)
+        .theme(|_, _| Theme::Dark)
         .run_with(move || {
-            let app = App::new(socket);
+            let mut app = App::new(socket);
             *app.tray_rx.lock().unwrap() = tray_rx;
-            let init = app.reload();
+            let open = app.open_window();
+            let init = Task::batch([open, app.reload()]);
             (app, init)
         })
 }
@@ -140,11 +150,12 @@ struct App {
     /// Which content tab is showing (below the always-visible connection header).
     tab: Tab,
     error: Option<String>,
-    /// Whether the main window is hidden (minimized to the tray). Toggled from the tray.
-    hidden: bool,
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
     /// there's no tray on this platform / system).
     tray_rx: Arc<Mutex<Option<UnboundedReceiver<TrayMsg>>>>,
+    /// The main window's id while it's open; `None` while hidden to the tray (the window is
+    /// destroyed, not just hidden — see [`window_settings`]). Show reopens a fresh one.
+    window: Option<window::Id>,
 }
 
 /// Content tabs shown under the persistent connection header. Networks = the ACL groups this
@@ -239,7 +250,9 @@ enum Message {
     /// A window/quit request from the system tray.
     Tray(TrayMsg),
     /// The window's close button was pressed → hide to the tray instead of exiting.
-    CloseRequested(window::Id),
+    CloseRequested,
+    /// A freshly-opened window finished opening → focus it.
+    WindowOpened(window::Id),
 }
 
 impl App {
@@ -259,8 +272,24 @@ impl App {
             confirm: None,
             tab: Tab::default(),
             error: None,
-            hidden: false,
             tray_rx: Arc::new(Mutex::new(None)),
+            window: None,
+        }
+    }
+
+    /// Open the main window, recording its id. Used at boot and to restore from the tray.
+    fn open_window(&mut self) -> Task<Message> {
+        let (id, task) = window::open(window_settings());
+        self.window = Some(id);
+        task.map(Message::WindowOpened)
+    }
+
+    /// Hide to the tray by destroying the window (the only way off the taskbar on Wayland). The
+    /// process stays alive because we run as an iced `daemon`. No-op if already hidden.
+    fn hide_window(&mut self) -> Task<Message> {
+        match self.window.take() {
+            Some(id) => window::close(id),
+            None => Task::none(),
         }
     }
 
@@ -423,24 +452,16 @@ impl App {
             }
             Message::BlockDone(Err(e)) => self.error = Some(e),
             Message::Tray(TrayMsg::ToggleWindow) => {
-                self.hidden = !self.hidden;
-                let show = !self.hidden;
-                let mode = if show { Mode::Windowed } else { Mode::Hidden };
-                // Resolve the window id at action time (single-window app) rather than caching it.
-                return window::get_latest().and_then(move |id| {
-                    let change = window::change_mode(id, mode);
-                    if show {
-                        Task::batch([change, window::gain_focus(id)])
-                    } else {
-                        change
-                    }
-                });
+                // Toggle: destroy the window if shown, reopen it if hidden to the tray.
+                return if self.window.is_some() {
+                    self.hide_window()
+                } else {
+                    self.open_window()
+                };
             }
             Message::Tray(TrayMsg::Quit) => return iced::exit(),
-            Message::CloseRequested(id) => {
-                self.hidden = true;
-                return window::change_mode(id, Mode::Hidden);
-            }
+            Message::CloseRequested => return self.hide_window(),
+            Message::WindowOpened(id) => return window::gain_focus(id),
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -476,7 +497,7 @@ impl App {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
             iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
-            window::close_requests().map(Message::CloseRequested),
+            window::close_requests().map(|_| Message::CloseRequested),
             self.tray_subscription(),
         ])
     }
@@ -497,7 +518,7 @@ impl App {
         Subscription::run_with_id("unitylan-tray", stream)
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    fn view(&self, _window: window::Id) -> Element<'_, Message> {
         let service = self.service_section();
         let sections = match self.status.as_ref() {
             // Engine reachable — it told us its state. Only offer login when the engine itself says
@@ -1157,13 +1178,22 @@ mod tests {
     }
 
     #[test]
-    fn tray_toggle_flips_hidden() {
+    fn tray_toggle_destroys_and_reopens_window() {
         let mut a = app();
-        assert!(!a.hidden);
+        let _ = a.open_window(); // boot opens the window
+        assert!(a.window.is_some());
         let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
-        assert!(a.hidden); // first click hides to tray
+        assert!(a.window.is_none()); // first click hides to tray (window destroyed)
         let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
-        assert!(!a.hidden); // second click restores
+        assert!(a.window.is_some()); // second click reopens
+    }
+
+    #[test]
+    fn close_request_hides_to_tray() {
+        let mut a = app();
+        let _ = a.open_window();
+        let _ = a.update(Message::CloseRequested);
+        assert!(a.window.is_none()); // the X button hides, doesn't exit
     }
 
     #[test]
