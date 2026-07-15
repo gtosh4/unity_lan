@@ -273,8 +273,11 @@ impl Store {
 
     // ---- device IP allocation (one /32 per device, keyed by WG pubkey) ----
 
-    /// Return the device's stable `/32`, allocating on first sight. The device_name is upserted
-    /// so a rename is reflected on the next register.
+    /// Return the device's stable `/32`, allocating on first sight. The `device_name` argument
+    /// only *seeds* the name on first enrollment — a known device keeps its stored name so that a
+    /// `/manage` rename sticks. (Register re-asserts the engine's config-derived name on every
+    /// refresh; overwriting here would clobber the rename within one refresh interval.) After
+    /// enrollment, `rename_device` is the authoritative way to change the name.
     pub async fn allocate_device_ip(
         &self,
         pubkey: &[u8; 32],
@@ -286,11 +289,6 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
         {
-            sqlx::query("UPDATE devices SET device_name = ? WHERE pubkey = ?")
-                .bind(device_name)
-                .bind(pubkey.as_slice())
-                .execute(&self.pool)
-                .await?;
             return Ok(addr_from_index(row.get::<i64, _>("idx") as u32));
         }
 
@@ -606,6 +604,22 @@ mod tests {
             .map(|(_, n)| n)
             .collect();
         assert!(names.contains(&"workstation".to_string()));
+
+        // A subsequent register (which re-sends the engine's config-derived name) must NOT clobber
+        // the rename — otherwise the GUI rename reverts within one refresh interval.
+        st.allocate_device_ip(&a, 5, "device").await.unwrap();
+        let name = st
+            .user_devices(5)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|(pk, _)| *pk == a)
+            .map(|(_, n)| n);
+        assert_eq!(
+            name.as_deref(),
+            Some("workstation"),
+            "rename must survive re-register"
+        );
 
         // Removing the primary auto-promotes the remaining device.
         st.remove_device(5, &a).await.unwrap();
