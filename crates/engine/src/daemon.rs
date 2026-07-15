@@ -674,7 +674,11 @@ async fn sync_ice(
     let mut eps = HashMap::new();
     let mut keep = HashSet::new();
     for s in seeds {
-        if !want.contains(&s.pubkey) {
+        // Start ICE for a peer in the stuck set; keep an already-started session alive as long as
+        // the peer is still a seed, even if `want` (computed before the ~TTL/2 long-poll hold) no
+        // longer lists it — the age classifier flips Punching→Unreachable *during* the hold, so a
+        // stale `want` would otherwise tear a mid-negotiation session down and restart it each cycle.
+        if !want.contains(&s.pubkey) && !ice.has_session(&s.pubkey) {
             continue;
         }
         keep.insert(s.pubkey);

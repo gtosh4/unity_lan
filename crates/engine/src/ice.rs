@@ -107,6 +107,13 @@ impl IceManager {
         self.sessions.retain(|pk, _| keep.contains(pk));
     }
 
+    /// Whether we already hold a session for `peer` (connected or still negotiating). Used to keep a
+    /// live session alive across a long-poll cycle even when the (stale) stuck-set momentarily drops
+    /// the peer — otherwise a mid-negotiation session is torn down and restarted every cycle.
+    pub fn has_session(&self, peer: &[u8; 32]) -> bool {
+        self.sessions.contains_key(peer)
+    }
+
     /// True once ICE has selected a working pair for `peer` (its WG endpoint should point at the
     /// shim). Used to keep the peer in the ICE set and mark it `Ice` in status.
     pub fn is_connected(&self, peer: &[u8; 32]) -> bool {

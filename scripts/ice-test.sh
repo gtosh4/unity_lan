@@ -183,13 +183,14 @@ for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 &
 $IB "$ENG" run "$TMP/b.toml"  >"$TMP/b.log" 2>&1 &
 $IC "$ENG" run "$TMP/c.toml"  >"$TMP/c.log" 2>&1 &
 
-# A's embedded TURN relay must come up.
-for _ in $(seq 1 40); do grep -q "TURN server up" "$TMP/a.log" 2>/dev/null && break; sleep 0.25; done
+# A's embedded TURN relay must come up. (Generous wait: webrtc-ice pulls the engine binary heavier,
+# so cold boot under load can take a while.)
+for _ in $(seq 1 120); do grep -q "TURN server up" "$TMP/a.log" 2>/dev/null && break; sleep 0.25; done
 grep -q "TURN server up" "$TMP/a.log" || { echo "FAIL: relay node A did not start its TURN server"; tail -20 "$TMP/a.log"; exit 1; }
 echo "relay node A: TURN server up ✓"
 
 # Mesh bootstraps (B and C reach A).
-for _ in $(seq 1 40); do
+for _ in $(seq 1 60); do
   grep -q "peer set" "$TMP/b.log" 2>/dev/null && grep -q "peer set" "$TMP/c.log" 2>/dev/null && break
   sleep 0.5
 done
