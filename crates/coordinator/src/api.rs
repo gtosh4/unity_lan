@@ -132,12 +132,13 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let user_id = resolve_user(st, req).await?;
     let now = common::now_unix();
     let networks = st.store.all_networks().await.map_err(internal)?;
-    let device_name = sanitize_label(&req.device_name);
-
-    // One IP per device (keyed by pubkey), reused across every network it holds.
-    let ip = st
+    // One IP + one name per device (keyed by pubkey), reused across every network it holds. The
+    // request name only seeds these on first enrollment; thereafter `allocate_device` returns the
+    // stored (possibly renamed / auto-suffixed) name, and we build the attestation/hostname from
+    // *that* so DNS tracks renames and never advertises a duplicate label.
+    let (ip, device_name) = st
         .store
-        .allocate_device_ip(&req.wg_pubkey, user_id, &device_name)
+        .allocate_device(&req.wg_pubkey, user_id, &sanitize_label(&req.device_name))
         .await
         .map_err(internal)?;
 
@@ -527,9 +528,9 @@ async fn manage(
     let message = match req.op {
         ManageOp::List => "ok".to_string(),
         ManageOp::Rename { new_name } => {
-            let name = sanitize_label(&new_name);
-            st.store
-                .rename_device(&self_pubkey, &name)
+            let name = st
+                .store
+                .rename_device(user_id, &self_pubkey, &sanitize_label(&new_name))
                 .await
                 .map_err(internal)?;
             format!("renamed this device to {name}")

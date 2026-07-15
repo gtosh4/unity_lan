@@ -273,23 +273,27 @@ impl Store {
 
     // ---- device IP allocation (one /32 per device, keyed by WG pubkey) ----
 
-    /// Return the device's stable `/32`, allocating on first sight. The `device_name` argument
-    /// only *seeds* the name on first enrollment — a known device keeps its stored name so that a
-    /// `/manage` rename sticks. (Register re-asserts the engine's config-derived name on every
-    /// refresh; overwriting here would clobber the rename within one refresh interval.) After
-    /// enrollment, `rename_device` is the authoritative way to change the name.
-    pub async fn allocate_device_ip(
+    /// Return the device's stable `/32` **and its authoritative name**, allocating both on first
+    /// sight. The `device_name` argument only *seeds* the name on first enrollment (deduplicated
+    /// against the owner's other devices, see [`Store::unique_device_name`]); a known device keeps
+    /// its stored name so a `/manage` rename sticks. (Register re-asserts the engine's
+    /// config-derived name on every refresh; honoring it here would clobber the rename within one
+    /// refresh interval.) Callers should build the attestation/DNS hostname from the returned name,
+    /// not the request's, so the two never diverge. After enrollment, `rename_device` is the
+    /// authoritative way to change the name.
+    pub async fn allocate_device(
         &self,
         pubkey: &[u8; 32],
         user_id: u64,
         device_name: &str,
-    ) -> anyhow::Result<Ipv4Addr> {
-        if let Some(row) = sqlx::query("SELECT idx FROM devices WHERE pubkey = ?")
+    ) -> anyhow::Result<(Ipv4Addr, String)> {
+        if let Some(row) = sqlx::query("SELECT idx, device_name FROM devices WHERE pubkey = ?")
             .bind(pubkey.as_slice())
             .fetch_optional(&self.pool)
             .await?
         {
-            return Ok(addr_from_index(row.get::<i64, _>("idx") as u32));
+            let ip = addr_from_index(row.get::<i64, _>("idx") as u32);
+            return Ok((ip, row.get::<String, _>("device_name")));
         }
 
         let taken: BTreeSet<u32> = sqlx::query("SELECT idx FROM devices")
@@ -301,6 +305,8 @@ impl Store {
 
         let idx = pick_free_index(&taken, device_hint(pubkey))
             .ok_or_else(|| anyhow::anyhow!("address space 100.64.0.0/10 exhausted"))?;
+        // No existing row for this pubkey yet, so nothing to exclude from the dedup.
+        let name = self.unique_device_name(user_id, device_name, None).await?;
 
         sqlx::query(
             "INSERT INTO devices (pubkey, idx, user_id, device_name, token) VALUES (?, ?, ?, ?, ?)",
@@ -308,11 +314,52 @@ impl Store {
         .bind(pubkey.as_slice())
         .bind(idx as i64)
         .bind(user_id as i64)
-        .bind(device_name)
+        .bind(&name)
         .bind(common::crypto::gen_enrollment_key())
         .execute(&self.pool)
         .await?;
-        Ok(addr_from_index(idx))
+        Ok((addr_from_index(idx), name))
+    }
+
+    /// Disambiguate `desired` against the owner's *other* devices: return it unchanged if free,
+    /// else the first available `desired-2`, `desired-3`, … suffix (kept within the 63-char DNS
+    /// label cap by trimming the stem). `exclude` is the device being (re)named — its own current
+    /// name never counts as a collision. Keeps names unique per owner so DNS
+    /// (`<device>.<user>.<community>`) resolves unambiguously and name-based management never hits
+    /// the "multiple devices named …" path. Assumes `desired` is already `sanitize_label`-normalized
+    /// (ASCII `[a-z0-9-]`), so byte-slicing the stem is char-boundary safe.
+    async fn unique_device_name(
+        &self,
+        user_id: u64,
+        desired: &str,
+        exclude: Option<&[u8; 32]>,
+    ) -> anyhow::Result<String> {
+        let taken: std::collections::HashSet<String> =
+            sqlx::query("SELECT pubkey, device_name FROM devices WHERE user_id = ?")
+                .bind(user_id as i64)
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .filter(|r| match exclude {
+                    Some(ex) => r.get::<Vec<u8>, _>("pubkey").as_slice() != ex.as_slice(),
+                    None => true,
+                })
+                .map(|r| r.get::<String, _>("device_name"))
+                .collect();
+
+        if !taken.contains(desired) {
+            return Ok(desired.to_string());
+        }
+        // At most `taken.len()` names are in the way, so a free suffix exists within that many tries.
+        for n in 2..=taken.len() + 2 {
+            let suffix = format!("-{n}");
+            let stem = &desired[..desired.len().min(63 - suffix.len())];
+            let candidate = format!("{stem}{suffix}");
+            if !taken.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        unreachable!("a free suffix always exists within taken.len()+1 candidates")
     }
 
     /// The device's bearer token (minting one for a legacy row that predates the column).
@@ -346,14 +393,22 @@ impl Store {
         Ok(Some((user_id, pk)))
     }
 
-    /// Rename a device (by pubkey).
-    pub async fn rename_device(&self, pubkey: &[u8; 32], name: &str) -> anyhow::Result<()> {
+    /// Rename a device (by pubkey), deduplicating against the owner's other devices. Returns the
+    /// name actually stored — `name` as given if free, else an auto-suffixed `name-2`/`name-3`/…
+    /// (see [`Store::unique_device_name`]). `user_id` scopes the dedup to this owner.
+    pub async fn rename_device(
+        &self,
+        user_id: u64,
+        pubkey: &[u8; 32],
+        name: &str,
+    ) -> anyhow::Result<String> {
+        let name = self.unique_device_name(user_id, name, Some(pubkey)).await?;
         sqlx::query("UPDATE devices SET device_name = ? WHERE pubkey = ?")
-            .bind(name)
+            .bind(&name)
             .bind(pubkey.as_slice())
             .execute(&self.pool)
             .await?;
-        Ok(())
+        Ok(name)
     }
 
     /// Remove a device. If it was the owner's primary, auto-promote another of their devices.
@@ -558,8 +613,8 @@ mod tests {
         let st = mem_store().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
-        st.allocate_device_ip(&a, 9, "laptop").await.unwrap();
-        st.allocate_device_ip(&b, 9, "phone").await.unwrap();
+        st.allocate_device(&a, 9, "laptop").await.unwrap();
+        st.allocate_device(&b, 9, "phone").await.unwrap();
 
         // First device auto-becomes primary; enrolling a second doesn't steal it.
         st.ensure_primary(9, &a).await.unwrap();
@@ -585,8 +640,8 @@ mod tests {
         let st = mem_store().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
-        st.allocate_device_ip(&a, 5, "laptop").await.unwrap();
-        st.allocate_device_ip(&b, 5, "phone").await.unwrap();
+        st.allocate_device(&a, 5, "laptop").await.unwrap();
+        st.allocate_device(&b, 5, "phone").await.unwrap();
         st.ensure_primary(5, &a).await.unwrap();
 
         // Token resolves back to (user, device); unknown token → None.
@@ -595,7 +650,7 @@ mod tests {
         assert_eq!(st.device_by_token("bogus").await.unwrap(), None);
 
         // Rename the requesting device.
-        st.rename_device(&a, "workstation").await.unwrap();
+        st.rename_device(5, &a, "workstation").await.unwrap();
         let names: Vec<String> = st
             .user_devices(5)
             .await
@@ -607,7 +662,7 @@ mod tests {
 
         // A subsequent register (which re-sends the engine's config-derived name) must NOT clobber
         // the rename — otherwise the GUI rename reverts within one refresh interval.
-        st.allocate_device_ip(&a, 5, "device").await.unwrap();
+        st.allocate_device(&a, 5, "device").await.unwrap();
         let name = st
             .user_devices(5)
             .await
@@ -634,17 +689,48 @@ mod tests {
     #[tokio::test]
     async fn device_ip_is_stable_per_pubkey() {
         let st = mem_store().await;
-        let a = st
-            .allocate_device_ip(&[1u8; 32], 1, "laptop")
+        let (a, _) = st
+            .allocate_device(&[1u8; 32], 1, "laptop")
             .await
             .unwrap();
-        let a2 = st
-            .allocate_device_ip(&[1u8; 32], 1, "laptop")
+        let (a2, _) = st
+            .allocate_device(&[1u8; 32], 1, "laptop")
             .await
             .unwrap();
-        let b = st.allocate_device_ip(&[2u8; 32], 1, "phone").await.unwrap();
+        let (b, _) = st.allocate_device(&[2u8; 32], 1, "phone").await.unwrap();
         assert_eq!(a, a2, "same device pubkey → same IP");
         assert_ne!(a, b, "same user's two devices → distinct IPs");
         assert_eq!(st.device_owner(&[1u8; 32]).await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn duplicate_device_names_are_auto_suffixed() {
+        let st = mem_store().await;
+        let a = [1u8; 32];
+        let b = [2u8; 32];
+        let c = [3u8; 32];
+
+        // Two devices of one user asking for the same name: the first keeps it, the rest get a
+        // per-owner-unique suffix — so DNS `<device>.<user>…` never collapses two devices to one A.
+        let (_, na) = st.allocate_device(&a, 7, "device").await.unwrap();
+        let (_, nb) = st.allocate_device(&b, 7, "device").await.unwrap();
+        let (_, nc) = st.allocate_device(&c, 7, "device").await.unwrap();
+        assert_eq!(na, "device");
+        assert_eq!(nb, "device-2");
+        assert_eq!(nc, "device-3");
+
+        // A different owner is a separate namespace — no suffix.
+        let (_, other) = st.allocate_device(&[4u8; 32], 8, "device").await.unwrap();
+        assert_eq!(other, "device");
+
+        // Re-registering an existing device returns its stored name, never re-suffixing.
+        let (_, na2) = st.allocate_device(&a, 7, "device").await.unwrap();
+        assert_eq!(na2, "device");
+
+        // Renaming onto a taken name suffixes; renaming a device to its own name is a no-op (its
+        // current name is excluded from the collision check, so no runaway `-2`).
+        assert_eq!(st.rename_device(7, &c, "device").await.unwrap(), "device-3");
+        assert_eq!(st.rename_device(7, &b, "laptop").await.unwrap(), "laptop");
+        assert_eq!(st.rename_device(7, &c, "laptop").await.unwrap(), "laptop-2");
     }
 }
