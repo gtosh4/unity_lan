@@ -217,6 +217,19 @@ pub struct PeerStatus {
     pub user_id: u64,
     #[serde(default)]
     pub username: String,
+    /// Whether WG has a recent handshake for this peer (data plane is live) — distinct from `reach`,
+    /// which reports the *path type* and stays `Direct` even for a peer that has gone silent.
+    #[serde(default)]
+    pub up: bool,
+    /// Round-trip latency to the peer's WG IP from the last ICMP echo, in ms. `None` when no reply
+    /// (unreachable / probe disabled).
+    #[serde(default)]
+    pub latency_ms: Option<u32>,
+    /// Cumulative bytes received from / sent to this peer, as counted by the WG backend.
+    #[serde(default)]
+    pub rx_bytes: u64,
+    #[serde(default)]
+    pub tx_bytes: u64,
 }
 
 /// A peer's data-plane reachability, for status display (§7.2 diagnostics).

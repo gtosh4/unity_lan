@@ -126,9 +126,14 @@ pub async fn update(
                 hostname: s.hostname.clone(),
                 wg_ip: s.ip,
                 endpoint: s.endpoint,
-                reach: common::control::PeerReach::Direct, // overlaid by `set_reach`
+                reach: common::control::PeerReach::Direct, // overlaid by `set_live`
                 user_id: s.user_id,
                 username: s.username.clone(),
+                // Live telemetry — all overlaid by `set_live` on the next refresh loop.
+                up: false,
+                latency_ms: None,
+                rx_bytes: 0,
+                tx_bytes: 0,
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
@@ -164,17 +169,31 @@ pub async fn set_blocked(shared: &Shared, blocked: &HashMap<u64, String>) {
     report.blocked = blocked_list(blocked);
 }
 
-/// Overlay per-peer reachability onto the current status without rebuilding it (cheap — no DNS or
-/// firewall work), so a stuck hole punch surfaces promptly even when nothing else changed. Keyed
-/// by the peer's wg IP.
-pub async fn set_reach(
+/// Live per-peer telemetry overlaid onto the status each refresh loop: reachability, liveness, the
+/// last measured latency, and the WG byte counters. Keyed by the peer's wg IP in [`set_live`].
+pub struct PeerLive {
+    pub reach: common::control::PeerReach,
+    pub up: bool,
+    pub latency_ms: Option<u32>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
+/// Overlay per-peer live telemetry onto the current status without rebuilding it (cheap — no DNS or
+/// firewall work), so a stuck hole punch, byte counters, and latency all surface promptly even when
+/// nothing else changed. Keyed by the peer's wg IP.
+pub async fn set_live(
     shared: &Shared,
-    reach: &std::collections::HashMap<std::net::Ipv4Addr, common::control::PeerReach>,
+    live: &std::collections::HashMap<std::net::Ipv4Addr, PeerLive>,
 ) {
     let mut report = shared.write().await;
     for p in &mut report.peers {
-        if let Some(r) = reach.get(&p.wg_ip) {
-            p.reach = *r;
+        if let Some(l) = live.get(&p.wg_ip) {
+            p.reach = l.reach;
+            p.up = l.up;
+            p.latency_ms = l.latency_ms;
+            p.rx_bytes = l.rx_bytes;
+            p.tx_bytes = l.tx_bytes;
         }
     }
 }

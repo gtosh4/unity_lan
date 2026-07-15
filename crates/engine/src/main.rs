@@ -12,6 +12,7 @@ mod keys;
 mod nat;
 mod netcfg;
 mod oauth;
+mod ping;
 mod relay;
 mod resolver;
 #[cfg(windows)]

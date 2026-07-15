@@ -130,6 +130,8 @@ impl WgBackend for KernelBackend {
                     PeerStat {
                         endpoint: p.endpoint,
                         last_handshake: p.last_handshake,
+                        rx_bytes: p.rx_bytes,
+                        tx_bytes: p.tx_bytes,
                     },
                 )
             })

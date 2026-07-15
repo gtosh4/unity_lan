@@ -51,6 +51,21 @@ fn muted<'a>(s: impl Into<String>) -> Text<'a> {
     text(s.into()).size(13).color(MUTED)
 }
 
+/// Human-readable byte count for the per-peer transfer counters (e.g. `1.2 MB`, `340 KB`).
+fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    let n = n as f64;
+    if n < KB {
+        format!("{} B", n as u64)
+    } else if n < KB * KB {
+        format!("{:.0} KB", n / KB)
+    } else if n < KB * KB * KB {
+        format!("{:.1} MB", n / (KB * KB))
+    } else {
+        format!("{:.1} GB", n / (KB * KB * KB))
+    }
+}
+
 /// A colored status dot to prefix a state line — reads faster than the word alone. Drawn as a
 /// small rounded quad rather than a `●` glyph, which the default font (Fira Sans) renders as tofu.
 fn dot<'a>(color: Color) -> Element<'a, Message> {
@@ -778,7 +793,26 @@ impl App {
                             .on_press(Message::AskConfirm(Confirm::BlockPeer(p.user_id))),
                     );
                 }
-                col = col.push(column![top, muted(format!("{}   {}", p.wg_ip, ep))].spacing(2));
+                // Live telemetry line: up/down (WG handshake liveness, distinct from the reach path
+                // type), latency (last ICMP RTT, only meaningful while up), and cumulative transfer.
+                let updown = if p.up {
+                    text("up").size(13).color(GREEN)
+                } else {
+                    text("down").size(13).color(RED)
+                };
+                let mut metrics = row![updown].spacing(10).align_y(Vertical::Center);
+                if p.up {
+                    if let Some(ms) = p.latency_ms {
+                        metrics = metrics.push(muted(format!("{ms} ms")));
+                    }
+                }
+                metrics = metrics.push(muted(format!(
+                    "rx {}  tx {}",
+                    fmt_bytes(p.rx_bytes),
+                    fmt_bytes(p.tx_bytes)
+                )));
+                col = col
+                    .push(column![top, muted(format!("{}   {}", p.wg_ip, ep)), metrics].spacing(2));
             }
             // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
             // push everything else off-screen. Small meshes render at natural height (no scrollbar).
@@ -1096,6 +1130,10 @@ mod tests {
                 reach: common::control::PeerReach::Direct,
                 user_id: 42,
                 username: "bob".into(),
+                up: true,
+                latency_ms: Some(12),
+                rx_bytes: 2048,
+                tx_bytes: 512,
             }],
             networks: vec![],
             needs_login: false,
@@ -1108,6 +1146,14 @@ mod tests {
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
         assert_eq!(a.status.unwrap().peers.len(), 1);
+    }
+
+    #[test]
+    fn fmt_bytes_scales_units() {
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(2048), "2 KB");
+        assert_eq!(fmt_bytes(1024 * 1024 + 200 * 1024), "1.2 MB");
+        assert_eq!(fmt_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
     }
 
     #[test]
