@@ -9,8 +9,10 @@
 
 mod ctl;
 mod svc;
+mod tray;
 
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
@@ -18,7 +20,10 @@ use common::control::{
     ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
 };
 use iced::widget::{button, checkbox, column, row, scrollable, text, text_input, toggler, Column};
+use iced::window::{self, Mode};
 use iced::{Element, Length, Subscription, Task};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tray::TrayMsg;
 
 fn main() -> iced::Result {
     let socket = PathBuf::from(
@@ -26,10 +31,18 @@ fn main() -> iced::Result {
             .nth(1)
             .unwrap_or_else(|| "control.sock".to_string()),
     );
+    // Spawn the system tray on its own thread before iced takes over the main event loop; it drives
+    // connect/disconnect + reflects status over the socket itself, and hands window/quit requests
+    // back to us over this channel.
+    let tray_rx = tray::spawn(socket.clone());
     iced::application("UnityLAN", App::update, App::view)
         .subscription(App::subscription)
+        // The window's close button minimizes to the tray instead of exiting (we intercept
+        // CloseRequested); the tray's Quit is the real exit.
+        .exit_on_close_request(false)
         .run_with(move || {
             let app = App::new(socket);
+            *app.tray_rx.lock().unwrap() = tray_rx;
             let init = app.reload();
             (app, init)
         })
@@ -52,6 +65,11 @@ struct App {
     /// A mesh connect/disconnect is in flight — disables the button meanwhile.
     connect_busy: bool,
     error: Option<String>,
+    /// Whether the main window is hidden (minimized to the tray). Toggled from the tray.
+    hidden: bool,
+    /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
+    /// there's no tray on this platform / system).
+    tray_rx: Arc<Mutex<Option<UnboundedReceiver<TrayMsg>>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +123,10 @@ enum Message {
     SetNewNetworkDefault(bool),
     /// The new-network default was set → the daemon returns the updated status.
     NewNetworkDefaultSet(Result<StatusReport, String>),
+    /// A window/quit request from the system tray.
+    Tray(TrayMsg),
+    /// The window's close button was pressed → hide to the tray instead of exiting.
+    CloseRequested(window::Id),
 }
 
 impl App {
@@ -122,6 +144,8 @@ impl App {
             service_busy: false,
             connect_busy: false,
             error: None,
+            hidden: false,
+            tray_rx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -263,6 +287,25 @@ impl App {
                 self.error = None;
             }
             Message::NewNetworkDefaultSet(Err(e)) => self.error = Some(e),
+            Message::Tray(TrayMsg::ToggleWindow) => {
+                self.hidden = !self.hidden;
+                let show = !self.hidden;
+                let mode = if show { Mode::Windowed } else { Mode::Hidden };
+                // Resolve the window id at action time (single-window app) rather than caching it.
+                return window::get_latest().and_then(move |id| {
+                    let change = window::change_mode(id, mode);
+                    if show {
+                        Task::batch([change, window::gain_focus(id)])
+                    } else {
+                        change
+                    }
+                });
+            }
+            Message::Tray(TrayMsg::Quit) => return iced::exit(),
+            Message::CloseRequested(id) => {
+                self.hidden = true;
+                return window::change_mode(id, Mode::Hidden);
+            }
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
@@ -291,7 +334,27 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick)
+        Subscription::batch([
+            iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
+            window::close_requests().map(Message::CloseRequested),
+            self.tray_subscription(),
+        ])
+    }
+
+    /// Bridge the tray thread's channel into the iced runtime. The receiver is taken once (on the
+    /// first call); later calls return an empty stream with the same id, so iced keeps the original
+    /// running instead of restarting it.
+    fn tray_subscription(&self) -> Subscription<Message> {
+        use iced::futures::stream::{self, BoxStream, StreamExt};
+        let taken = self.tray_rx.lock().unwrap().take();
+        let stream: BoxStream<'static, Message> = match taken {
+            Some(rx) => stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|m| (Message::Tray(m), rx))
+            })
+            .boxed(),
+            None => stream::empty().boxed(),
+        };
+        Subscription::run_with_id("unitylan-tray", stream)
     }
 
     fn view(&self) -> Element<'_, Message> {
@@ -651,6 +714,16 @@ mod tests {
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
         assert_eq!(a.status.unwrap().peers.len(), 1);
+    }
+
+    #[test]
+    fn tray_toggle_flips_hidden() {
+        let mut a = app();
+        assert!(!a.hidden);
+        let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
+        assert!(a.hidden); // first click hides to tray
+        let _ = a.update(Message::Tray(TrayMsg::ToggleWindow));
+        assert!(!a.hidden); // second click restores
     }
 
     #[test]

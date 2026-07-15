@@ -206,7 +206,19 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
       browser hits the loopback. Verified: `scripts/oauth-test.sh` (direct: no-key refused → login →
       fake loopback redirect → register succeeds) and `scripts/gui-login-test.sh` (daemon-mediated:
       needs_login → `ctl login` → fake loopback redirect → daemon meshes).
-- [ ] Tray — deferred: the engine doesn't yet back it over the socket (post-M5).
+- [x] **System tray** ✅ — platform-split behind `gui/src/tray/` (mirrors engine `fw`/`resolver`).
+      **Linux = ksni** (StatusNotifierItem over D-Bus — native on KDE/GNOME/wayland, no gtk dep); the
+      tray runs on its own thread + tokio runtime, polls the control socket to reflect connected
+      state on a green/grey dot icon, and drives connect/disconnect over the socket directly — only
+      show/hide-window + quit cross back into iced (over an `UnboundedReceiver<TrayMsg>` bridged via
+      `Subscription::run_with_id`). Close button minimizes to tray (`exit_on_close_request(false)` +
+      `close_requests()` → `change_mode(Hidden)`); tray Quit is the real exit (engine keeps running).
+      **Windows = `tray-icon`** left as a documented stub (`tray/stub.rs`): it needs a Win32
+      message-pump integration that can't be built/verified from the Linux host — filled in when
+      Windows is worked (like macOS, deferred). **Verify:** ✅ 1 reducer test (window toggle flips
+      hidden) + live D-Bus check on this KDE host — the running GUI registers on
+      `org.kde.StatusNotifierWatcher` with `Id=unitylan`, connected-state title, and a menu exporting
+      `Show / hide window` · `Disconnect mesh` · `Quit`.
 
 **Verify:** 4 reducer unit tests (status/devices/error/rename paths); launch smoke (window +
 wgpu/tiny-skia renderer + timer subscription + async socket task boot clean). The socket
