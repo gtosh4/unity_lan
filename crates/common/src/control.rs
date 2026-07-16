@@ -183,6 +183,15 @@ pub struct StatusReport {
     /// un-block them even while they're filtered out.
     #[serde(default)]
     pub blocked: Vec<BlockedUser>,
+    /// The engine daemon's own release version (semver, [`crate::VERSION`]) — shown in the GUI's
+    /// status/about. Empty from a pre-versioning daemon.
+    #[serde(default)]
+    pub engine_version: String,
+    /// A newer release the coordinator advertises, iff it's a newer semver than `engine_version` —
+    /// the GUI shows an "update available" affordance. `None` when up to date or the coordinator is
+    /// silent about its version.
+    #[serde(default)]
+    pub update_available: Option<String>,
 }
 
 /// A locally-blocked user: their Discord `user_id` plus a display handle for the blocked list.

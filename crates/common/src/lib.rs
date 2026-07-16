@@ -13,6 +13,17 @@ pub mod wire;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Wire protocol version. Bump on a **breaking** change to the coordinator API or engine control
+/// protocol — one that additive `#[serde(default)]` fields alone can't keep compatible. Advertised
+/// in `RegisterReq`/`RegisterResp` so a coordinator and engine can detect a hard incompatibility and
+/// log it, rather than silently misbehaving. A peer sending `0` is pre-versioning (defaulted field).
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// This build's release version (the shared workspace version, from Cargo). All crates ship from one
+/// monorepo tag, so this is simultaneously the coordinator's, engine's, and GUI's version — which is
+/// why the coordinator can advertise it as "the latest release the mesh should run".
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Attestation lifetime (design.md §5): bounds outage-tolerance and revocation latency.
 pub const ATTESTATION_TTL_SECS: u64 = 30 * 60;
 

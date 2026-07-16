@@ -1,6 +1,6 @@
 [package]
 name = "unitylan-engine"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -33,6 +33,7 @@ webrtc-ice = "0.17"
 async-trait = "0.1"
 surge-ping = "0.8"
 futures = "0.3"
+semver = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.

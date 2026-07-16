@@ -85,6 +85,15 @@ pub struct RegisterReq {
     /// userspace ICE path is active for some peer.
     #[serde(default)]
     pub ice: Vec<IceEndpoint>,
+    /// Wire protocol version this client speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
+    /// pre-versioning client. The coordinator logs a warning on a mismatch (negotiate, don't crash).
+    #[serde(default)]
+    pub proto: u32,
+    /// This client's release version (semver, [`crate::VERSION`]). The coordinator ignores it today;
+    /// it's here so a future coordinator could tailor the update offer per client version. Empty from
+    /// a pre-versioning client.
+    #[serde(default)]
+    pub client_version: String,
 }
 
 /// ICE session parameters for one (owner → peer) pair (§7.2, M5.5): the owner's short ICE
@@ -185,6 +194,16 @@ pub struct RegisterResp {
     /// disables the fallback (clients rely on relay-node STUN only).
     #[serde(default)]
     pub stun_addr: Option<SocketAddr>,
+    /// Wire protocol version the coordinator speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
+    /// pre-versioning coordinator.
+    #[serde(default)]
+    pub proto: u32,
+    /// The coordinator's own release version (semver, [`crate::VERSION`]) — the latest release the
+    /// mesh should run, since coordinator and engine ship from one monorepo tag. The client compares
+    /// it against its own [`crate::VERSION`] and surfaces "update available" to the GUI. Empty from a
+    /// pre-versioning coordinator.
+    #[serde(default)]
+    pub server_version: String,
 }
 
 /// One of a device's networks (a role@guild) and whether this device peers on it.
@@ -293,4 +312,49 @@ pub struct Seed {
     /// peer offers ICE for us. The client feeds these into its ICE agent to run connectivity checks.
     #[serde(default)]
     pub ice: Option<IceParams>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A pre-versioning peer's JSON omits the version fields; they must default (proto=0, empty
+    // string) rather than fail to decode — the whole compatibility story rests on this.
+    #[test]
+    fn register_resp_decodes_without_version_fields() {
+        let old =
+            r#"{"coord_pubkey":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let resp: RegisterResp = serde_json::from_str(old).unwrap();
+        assert_eq!(resp.proto, 0);
+        assert_eq!(resp.server_version, "");
+    }
+
+    #[test]
+    fn register_req_decodes_without_version_fields() {
+        let old =
+            r#"{"wg_pubkey":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        let req: RegisterReq = serde_json::from_str(old).unwrap();
+        assert_eq!(req.proto, 0);
+        assert_eq!(req.client_version, "");
+    }
+
+    #[test]
+    fn register_resp_roundtrips_version_fields() {
+        let resp = RegisterResp {
+            coord_pubkey: [0u8; 32],
+            rotation_chain: vec![],
+            grant: None,
+            device_token: None,
+            seeds: vec![],
+            version: 7,
+            networks: vec![],
+            stun_addr: None,
+            proto: crate::PROTOCOL_VERSION,
+            server_version: crate::VERSION.to_string(),
+        };
+        let round: RegisterResp =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        assert_eq!(round.proto, crate::PROTOCOL_VERSION);
+        assert_eq!(round.server_version, crate::VERSION);
+    }
 }

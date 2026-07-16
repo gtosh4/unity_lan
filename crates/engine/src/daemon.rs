@@ -518,6 +518,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             match refreshed {
                 Ok((resp, dev)) => {
                     coord_online = true;
+                    control::set_update_available(&status, &resp.server_version).await;
                     since = Some(resp.version);
                     last_reported = observed; // the coordinator now has this reflexive set
                     last_relay_need = this_relay_need; // …and this relay need/allocation set

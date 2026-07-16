@@ -1,6 +1,6 @@
 [package]
 name = "unitylan-common"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -22,3 +22,6 @@ ipnet = "2"
 siphasher = "1"
 hmac = "0.12"
 sha1 = "0.10"
+
+[dev-dependencies]
+serde_json.workspace = true

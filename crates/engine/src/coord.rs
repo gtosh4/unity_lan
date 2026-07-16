@@ -191,6 +191,8 @@ async fn post(
             need_relay: relay.need_relay,
             relay_allocated: relay.allocated,
             ice,
+            proto: common::PROTOCOL_VERSION,
+            client_version: common::VERSION.to_string(),
         })
         .send()
         .await

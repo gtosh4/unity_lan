@@ -146,8 +146,34 @@ pub async fn update(
         identity: Some(device.username.clone()),
         coordinator_online,
         blocked: blocked_list(blocked),
+        engine_version: common::VERSION.to_string(),
+        // Preserved across the rebuild — it's overlaid from the coordinator's advertised version by
+        // `set_update_available` on each refresh, independent of this snapshot's inputs.
+        update_available: shared.read().await.update_available.clone(),
     };
     *shared.write().await = report;
+}
+
+/// Overlay the coordinator-advertised latest release: set `update_available` iff `latest` is a newer
+/// semver than what this engine is running, else clear it. Kept out of [`update`] so the check runs
+/// each refresh without rebuilding the snapshot; the empty string (a pre-versioning coordinator)
+/// never parses, so it reads as "no update".
+pub async fn set_update_available(shared: &Shared, latest: &str) {
+    let newer = is_newer(latest, common::VERSION);
+    shared.write().await.update_available = newer.then(|| latest.to_string());
+}
+
+/// True iff `candidate` is a strictly newer semver than `current`. Unparseable input (e.g. an empty
+/// version from an old coordinator) is treated as "not newer" — never prompt an update we can't
+/// order.
+fn is_newer(candidate: &str, current: &str) -> bool {
+    match (
+        semver::Version::parse(candidate),
+        semver::Version::parse(current),
+    ) {
+        (Ok(c), Ok(cur)) => c > cur,
+        _ => false,
+    }
 }
 
 /// The blocked map as a sorted (stable order) list of [`BlockedUser`] for the status report.
@@ -600,4 +626,26 @@ pub async fn client_set_blocked(
         None => ControlRequest::UnblockPeer { user_id },
     };
     expect_resp!(request(endpoint, &req).await?, ControlResponse::Status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_newer;
+
+    #[test]
+    fn is_newer_only_for_strictly_greater() {
+        assert!(is_newer("0.2.0", "0.1.0"));
+        assert!(is_newer("1.0.0", "0.9.9"));
+        // Equal or older must never prompt an update (no self-loop, no downgrade).
+        assert!(!is_newer("0.1.0", "0.1.0"));
+        assert!(!is_newer("0.1.0", "0.2.0"));
+    }
+
+    #[test]
+    fn is_newer_treats_unparseable_as_not_newer() {
+        // Empty = a pre-versioning coordinator; garbage = a version we can't order. Never prompt.
+        assert!(!is_newer("", "0.1.0"));
+        assert!(!is_newer("not-a-version", "0.1.0"));
+        assert!(!is_newer("0.2.0", ""));
+    }
 }

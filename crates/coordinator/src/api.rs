@@ -181,6 +181,13 @@ async fn register(
     State(st): State<AppState>,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
+    if req.proto != 0 && req.proto != common::PROTOCOL_VERSION {
+        tracing::warn!(
+            client_proto = req.proto,
+            server_proto = common::PROTOCOL_VERSION,
+            "protocol version mismatch; relying on additive-field compatibility"
+        );
+    }
     let resp = build_snapshot(&st, &req).await?;
     if req.since == Some(resp.version) {
         wait_for_change(&st, resp.version).await;
@@ -606,6 +613,8 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         version: *st.version.borrow(),
         networks: networks_status,
         stun_addr: st.stun_addr,
+        proto: common::PROTOCOL_VERSION,
+        server_version: common::VERSION.to_string(),
     })
 }
 

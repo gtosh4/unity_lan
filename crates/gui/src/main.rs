@@ -774,11 +774,30 @@ impl App {
         let coord_line = row![dot(coord_color), text(coord).size(14)]
             .spacing(8)
             .align_y(Vertical::Center);
+        // Update-available signal (phase 2): the coordinator advertised a newer release than we're
+        // running. Notice only for now — applying it lands with the signed auto-update path.
+        let update_line = status.update_available.as_deref().map(|v| {
+            row![
+                dot(AMBER),
+                text(format!(
+                    "update available: v{v} (running v{})",
+                    status.engine_version
+                ))
+                .size(14)
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center)
+        });
+        // Running engine version, muted footer — always shown once enrolled.
+        let version_line = (!status.engine_version.is_empty())
+            .then(|| muted(format!("UnityLAN v{}", status.engine_version)));
         Some(
             column![header("connection")]
                 .push_maybe(identity)
                 .push(coord_line)
+                .push_maybe(update_line)
                 .push(controls)
+                .push_maybe(version_line)
                 .spacing(8)
                 .into(),
         )
@@ -1239,6 +1258,8 @@ mod tests {
             identity: None,
             coordinator_online: true,
             blocked: vec![],
+            engine_version: String::new(),
+            update_available: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -1360,6 +1381,8 @@ mod tests {
             identity: None,
             coordinator_online: true,
             blocked: vec![],
+            engine_version: String::new(),
+            update_available: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1392,6 +1415,8 @@ mod tests {
             identity: None,
             coordinator_online: true,
             blocked: vec![],
+            engine_version: String::new(),
+            update_available: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);
