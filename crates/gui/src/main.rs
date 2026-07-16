@@ -314,6 +314,10 @@ enum Message {
     /// Log out: tear down the mesh, un-enroll, and re-key. The daemon returns to not-logged-in.
     Logout,
     LoggedOut(Result<String, String>),
+    /// Apply the staged auto-update: the engine downloads + verifies + swaps + restarts.
+    ApplyUpdate,
+    /// The apply request was acked (or failed) — the engine restarts shortly after on success.
+    UpdateStarted(Result<String, String>),
     /// Open a URL in the default browser (re-open the authorize link on demand).
     OpenUrl(String),
     /// Copy arbitrary text to the clipboard (an authorize link, a peer's hostname + IP).
@@ -487,6 +491,18 @@ impl App {
             Message::LoggedOut(res) => {
                 self.error = res.err();
                 return self.reload(); // pull the settled (logged-out) state once teardown lands
+            }
+            Message::ApplyUpdate => {
+                self.confirm = None; // consume the armed confirmation
+                return Task::perform(
+                    ctl::apply_update(self.socket.clone()),
+                    Message::UpdateStarted,
+                );
+            }
+            Message::UpdateStarted(res) => {
+                // On success the engine restarts shortly (socket drops → the poll reconnects onto the
+                // new version). Surface only a failure; success needs no banner.
+                self.error = res.err();
             }
             Message::OpenUrl(url) => {
                 if !cfg!(test) {
@@ -774,19 +790,26 @@ impl App {
         let coord_line = row![dot(coord_color), text(coord).size(14)]
             .spacing(8)
             .align_y(Vertical::Center);
-        // Update-available signal (phase 2): the coordinator advertised a newer release than we're
-        // running. Notice only for now — applying it lands with the signed auto-update path.
+        // Update-available signal: the coordinator advertised a newer release than we're running.
+        // When the daemon has a verified, platform-matching artifact staged (`update_ready`), offer
+        // an Update button that applies it (download → verify → swap → restart); otherwise it's a
+        // notice only (no `[release]` configured, or no artifact for this platform).
         let update_line = status.update_available.as_deref().map(|v| {
-            row![
+            let mut r = row![
                 dot(AMBER),
                 text(format!(
                     "update available: v{v} (running v{})",
                     status.engine_version
                 ))
                 .size(14)
+                .width(Length::Fill),
             ]
             .spacing(8)
-            .align_y(Vertical::Center)
+            .align_y(Vertical::Center);
+            if status.update_ready {
+                r = r.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
+            }
+            r
         });
         // Running engine version, muted footer — always shown once enrolled.
         let version_line = (!status.engine_version.is_empty())
@@ -1260,6 +1283,7 @@ mod tests {
             blocked: vec![],
             engine_version: String::new(),
             update_available: None,
+            update_ready: false,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -1383,6 +1407,7 @@ mod tests {
             blocked: vec![],
             engine_version: String::new(),
             update_available: None,
+            update_ready: false,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1417,6 +1442,7 @@ mod tests {
             blocked: vec![],
             engine_version: String::new(),
             update_available: None,
+            update_ready: false,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

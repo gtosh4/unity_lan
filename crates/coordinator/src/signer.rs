@@ -44,4 +44,10 @@ impl Signer {
         };
         Ok(Signed::sign(&self.key, &att)?)
     }
+
+    /// Sign an arbitrary value with the coordinator key, returning the base64 transport form. Used
+    /// for the release manifest (auto-update) — verified client-side against the same pinned anchor.
+    pub fn sign_to_base64<T: serde::Serialize>(&self, value: &T) -> anyhow::Result<String> {
+        Ok(Signed::sign(&self.key, value)?.to_base64())
+    }
 }

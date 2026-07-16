@@ -86,6 +86,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let status = control::shared();
     // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
     control::set_connected(&status, !localnet.is_paused()).await;
+    // Verified auto-update staged by the refresh loop; consumed by the control socket's ApplyUpdate.
+    let pending_update = crate::selfupdate::pending_slot();
     {
         let name = cfg.control_name();
         let control_group = cfg.control_group.clone();
@@ -98,6 +100,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             pubkey: pubkey.clone(),
             oauth_redirect: cfg.oauth_redirect.clone(),
             logout: logout.clone(),
+            state_dir: cfg.state_dir.clone(),
+            pending_update: pending_update.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&name, control_group, ctx).await {
@@ -519,6 +523,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 Ok((resp, dev)) => {
                     coord_online = true;
                     control::set_update_available(&status, &resp.server_version).await;
+                    // Verify the signed release manifest against the pinned anchor and stage a
+                    // platform-matching, strictly-newer artifact for the GUI's Update button.
+                    let staged = crate::selfupdate::stage(&resp, &cfg.state_dir);
+                    control::set_update_ready(&status, staged.is_some()).await;
+                    *pending_update.lock().unwrap() = staged;
                     since = Some(resp.version);
                     last_reported = observed; // the coordinator now has this reflexive set
                     last_relay_need = this_relay_need; // …and this relay need/allocation set

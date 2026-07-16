@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod netid;
 pub mod relay;
 pub mod rotation;
+pub mod update;
 pub mod wire;
 
 use std::time::{SystemTime, UNIX_EPOCH};

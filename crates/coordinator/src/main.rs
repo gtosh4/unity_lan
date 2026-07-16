@@ -146,6 +146,17 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Sign the auto-update manifest once at startup — it's static, so every RegisterResp serves the
+    // cached string with no per-request work. Fails closed: a malformed `[release]` aborts boot.
+    let release = match &cfg.release {
+        Some(rc) => {
+            let signed = signer.sign_to_base64(&rc.to_manifest()?)?;
+            tracing::info!(version = %rc.version, artifacts = rc.artifacts.len(), "serving signed auto-update manifest");
+            Some(signed)
+        }
+        None => None,
+    };
+
     let state = AppState {
         signer,
         roles,
@@ -159,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         stun_addr,
         rotation_chain,
+        release,
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

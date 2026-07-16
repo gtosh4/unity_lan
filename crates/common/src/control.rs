@@ -64,6 +64,10 @@ pub enum ControlRequest {
     UnblockPeer {
         user_id: u64,
     },
+    /// Apply the staged auto-update: download the artifact the coordinator's signed manifest named,
+    /// re-verify its SHA-256, swap the engine binary (Linux) / launch the MSI upgrade (Windows), and
+    /// restart. Only acts when the daemon has a verified update staged (see [`StatusReport::update_ready`]).
+    ApplyUpdate,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -75,7 +79,15 @@ pub enum ControlResponse {
     Login(LoginResp),
     Connected(ConnectedResp),
     Logout(LogoutResp),
+    Update(UpdateResp),
     Error(String),
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct UpdateResp {
+    /// The version being applied.
+    pub version: String,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -192,6 +204,12 @@ pub struct StatusReport {
     /// silent about its version.
     #[serde(default)]
     pub update_available: Option<String>,
+    /// A verified, platform-matching, strictly-newer update is staged: the daemon checked the
+    /// coordinator's signed manifest against its pinned anchor and can apply it on `ApplyUpdate`. The
+    /// GUI shows an Update button only when this is set. `false` when the deployment configured no
+    /// `[release]`, the artifact isn't for this platform, or verification failed (notice-only).
+    #[serde(default)]
+    pub update_ready: bool,
 }
 
 /// A locally-blocked user: their Discord `user_id` plus a display handle for the blocked list.

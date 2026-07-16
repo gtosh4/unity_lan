@@ -111,6 +111,16 @@ pub async fn logout(path: PathBuf) -> Result<String, String> {
     }
 }
 
+/// Ask the engine to apply the staged auto-update. The engine acks, then downloads + applies and
+/// restarts (dropping the socket), so the reply is just the ack message; the GUI reconnects after.
+pub async fn apply_update(path: PathBuf) -> Result<String, String> {
+    match request(path, ControlRequest::ApplyUpdate).await? {
+        ControlResponse::Update(r) => Ok(r.message),
+        ControlResponse::Error(e) => Err(e),
+        _ => Err("unexpected response".into()),
+    }
+}
+
 pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedResp, String> {
     expect!(
         path,

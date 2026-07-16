@@ -43,10 +43,18 @@ jobs:
       - name: Build MSI
         shell: pwsh
         run: packaging/windows/build.ps1 -Version ($env:GITHUB_REF_NAME -replace '^v', '')
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem packaging/dist/*.msi | ForEach-Object {
+            "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
+          } | Set-Content packaging/dist/SHA256SUMS-windows.txt
       - name: Attach to release
         uses: softprops/action-gh-release@v2
         with:
-          files: packaging/dist/*.msi
+          files: |
+            packaging/dist/*.msi
+            packaging/dist/SHA256SUMS-windows.txt
 
   # coordinator Docker image -> ghcr.io/<owner>/unitylan-coordinator
   image:

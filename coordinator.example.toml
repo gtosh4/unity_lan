@@ -18,3 +18,26 @@ role_ids = [222, 223]
 guild_id = 111
 role_id = 222
 name = "Minecraft SMP"
+
+# --- Signed auto-update (optional, opt-in) ---
+# When present, the coordinator signs this manifest with its trust anchor and advertises it to
+# clients on the long-poll. A client verifies it against its pinned anchor, and if `version` is
+# newer than what it runs and there's an artifact for its platform, offers an in-GUI Update button
+# that downloads the artifact, re-checks the SHA-256, swaps the binary / runs the MSI, and restarts.
+# Fill this in per release from the GitHub Release assets + their SHA256SUMS. Omit it entirely to
+# disable auto-update (clients then only see a "newer version exists" notice, no button).
+#
+# [release]
+# version = "0.2.0"
+#
+# [[release.artifact]]
+# platform = "linux-amd64"                       # raw `unitylan-engine` binary (self-replaced in place)
+# url = "https://github.com/gtosh4/unity_lan/releases/download/v0.2.0/unitylan-engine-linux-amd64"
+# sha256 = "<64-hex from SHA256SUMS>"
+# size = 12345678
+#
+# [[release.artifact]]
+# platform = "windows-amd64"                     # the .msi (MSI MajorUpgrade replaces engine+gui+dll)
+# url = "https://github.com/gtosh4/unity_lan/releases/download/v0.2.0/unitylan-0.2.0-x64.msi"
+# sha256 = "<64-hex from SHA256SUMS-windows.txt>"
+# size = 23456789

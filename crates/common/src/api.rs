@@ -204,6 +204,12 @@ pub struct RegisterResp {
     /// pre-versioning coordinator.
     #[serde(default)]
     pub server_version: String,
+    /// A base64 [`crate::wire::Signed`]`<`[`crate::update::ReleaseManifest`]`>` — the signed
+    /// auto-update manifest, iff the deployment configured one (opt-in). The client verifies it
+    /// against its pinned anchor and offers the update when it names a strictly-newer version with an
+    /// artifact for the client's platform. `None` when the deployment has no `[release]` configured.
+    #[serde(default)]
+    pub release: Option<String>,
 }
 
 /// One of a device's networks (a role@guild) and whether this device peers on it.
@@ -351,6 +357,7 @@ mod tests {
             stun_addr: None,
             proto: crate::PROTOCOL_VERSION,
             server_version: crate::VERSION.to_string(),
+            release: None,
         };
         let round: RegisterResp =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();

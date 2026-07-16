@@ -8,7 +8,9 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/bin/unitylan-engine run /etc/unitylan/engine.toml
-Restart=on-failure
+# `always` (not `on-failure`) so the signed auto-update path can exit(0) after swapping the binary
+# and be relaunched onto the new version. An explicit `systemctl stop` still stops (not a restart).
+Restart=always
 RestartSec=5
 
 # /var/lib/unitylan (0700 root) — WG private key + pinned trust anchor. State survives restarts.
@@ -27,6 +29,9 @@ DeviceAllow=/dev/net/tun rw
 # Hardening — kept compatible with netlink (WG), the nft pipe, and the resolved D-Bus call.
 NoNewPrivileges=yes
 ProtectSystem=strict
+# The signed auto-update swaps /usr/bin/unitylan-engine in place, so this one path must stay
+# writable despite ProtectSystem=strict (which otherwise makes /usr read-only). Narrow to /usr/bin.
+ReadWritePaths=/usr/bin
 ProtectHome=yes
 PrivateTmp=yes
 ProtectControlGroups=yes

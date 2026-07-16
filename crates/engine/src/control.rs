@@ -61,6 +61,10 @@ pub struct Ctx {
     pub oauth_redirect: String,
     /// Signalled on `Logout` to wake the daemon's mesh loop into its teardown + re-key path.
     pub logout: Arc<Notify>,
+    /// The engine state dir — where a staged update artifact is written before it's applied.
+    pub state_dir: std::path::PathBuf,
+    /// The verified auto-update the daemon has staged (if any), consumed by `ApplyUpdate`.
+    pub pending_update: crate::selfupdate::PendingSlot,
 }
 
 /// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
@@ -114,6 +118,11 @@ pub async fn update(
     disable_new_networks: bool,
     coordinator_online: bool,
 ) {
+    // Capture the update overlay before rebuilding, dropping the read guard before the write below.
+    let (prev_update_available, prev_update_ready) = {
+        let prev = shared.read().await;
+        (prev.update_available.clone(), prev.update_ready)
+    };
     let report = StatusReport {
         device: Some(DeviceStatus {
             wg_ip: device.wg_ip,
@@ -147,9 +156,10 @@ pub async fn update(
         coordinator_online,
         blocked: blocked_list(blocked),
         engine_version: common::VERSION.to_string(),
-        // Preserved across the rebuild — it's overlaid from the coordinator's advertised version by
-        // `set_update_available` on each refresh, independent of this snapshot's inputs.
-        update_available: shared.read().await.update_available.clone(),
+        // Both preserved across the rebuild — overlaid from the coordinator's advertised version /
+        // verified manifest each refresh, independent of this snapshot's inputs.
+        update_available: prev_update_available,
+        update_ready: prev_update_ready,
     };
     *shared.write().await = report;
 }
@@ -157,23 +167,17 @@ pub async fn update(
 /// Overlay the coordinator-advertised latest release: set `update_available` iff `latest` is a newer
 /// semver than what this engine is running, else clear it. Kept out of [`update`] so the check runs
 /// each refresh without rebuilding the snapshot; the empty string (a pre-versioning coordinator)
-/// never parses, so it reads as "no update".
+/// never parses, so it reads as "no update". This is the notice-only signal (phase 2); an actually
+/// applyable update is gated by [`set_update_ready`].
 pub async fn set_update_available(shared: &Shared, latest: &str) {
-    let newer = is_newer(latest, common::VERSION);
+    let newer = crate::selfupdate::is_newer(latest, common::VERSION);
     shared.write().await.update_available = newer.then(|| latest.to_string());
 }
 
-/// True iff `candidate` is a strictly newer semver than `current`. Unparseable input (e.g. an empty
-/// version from an old coordinator) is treated as "not newer" — never prompt an update we can't
-/// order.
-fn is_newer(candidate: &str, current: &str) -> bool {
-    match (
-        semver::Version::parse(candidate),
-        semver::Version::parse(current),
-    ) {
-        (Ok(c), Ok(cur)) => c > cur,
-        _ => false,
-    }
+/// Overlay whether a verified, applyable update is staged (the daemon verified the signed manifest
+/// and matched an artifact for this platform). Drives whether the GUI shows an Update button.
+pub async fn set_update_ready(shared: &Shared, ready: bool) {
+    shared.write().await.update_ready = ready;
 }
 
 /// The blocked map as a sorted (stable order) list of [`BlockedUser`] for the status report.
@@ -482,6 +486,29 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
         }
+        // Apply the staged auto-update. The daemon verified the coordinator's signed manifest against
+        // the pinned anchor and staged a platform-matching artifact; here we ack immediately, then a
+        // background task downloads + re-verifies (SHA-256) + applies, after which the engine restarts
+        // (dropping this socket — the GUI reconnects onto the new version).
+        ControlRequest::ApplyUpdate => {
+            let pending = ctx.pending_update.lock().unwrap().clone();
+            match pending {
+                None => ControlResponse::Error("no verified update is staged".into()),
+                Some(pu) => {
+                    let state_dir = ctx.state_dir.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::selfupdate::apply(&pu.artifact, &state_dir).await {
+                            tracing::error!("auto-update failed: {e:#}");
+                        }
+                    });
+                    ControlResponse::Update(common::control::UpdateResp {
+                        version: pu.version,
+                        message: "downloading and applying the update; the engine will restart"
+                            .into(),
+                    })
+                }
+            }
+        }
     };
     let mut out = serde_json::to_vec(&resp)?;
     out.push(b'\n');
@@ -626,26 +653,4 @@ pub async fn client_set_blocked(
         None => ControlRequest::UnblockPeer { user_id },
     };
     expect_resp!(request(endpoint, &req).await?, ControlResponse::Status)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_newer;
-
-    #[test]
-    fn is_newer_only_for_strictly_greater() {
-        assert!(is_newer("0.2.0", "0.1.0"));
-        assert!(is_newer("1.0.0", "0.9.9"));
-        // Equal or older must never prompt an update (no self-loop, no downgrade).
-        assert!(!is_newer("0.1.0", "0.1.0"));
-        assert!(!is_newer("0.1.0", "0.2.0"));
-    }
-
-    #[test]
-    fn is_newer_treats_unparseable_as_not_newer() {
-        // Empty = a pre-versioning coordinator; garbage = a version we can't order. Never prompt.
-        assert!(!is_newer("", "0.1.0"));
-        assert!(!is_newer("not-a-version", "0.1.0"));
-        assert!(!is_newer("0.2.0", ""));
-    }
 }

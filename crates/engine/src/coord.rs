@@ -371,6 +371,9 @@ mod tests {
             version: 1,
             networks: Vec::new(),
             stun_addr: None,
+            proto: common::PROTOCOL_VERSION,
+            server_version: common::VERSION.to_string(),
+            release: None,
         };
         assert!(
             verified_seeds(&forged, &dir).is_err(),

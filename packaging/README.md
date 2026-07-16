@@ -58,6 +58,33 @@ git tag v0.1.0 && git push origin v0.1.0
 The package version comes from the tag (`VERSION=<tag without v> build.sh`). For arm64, add a
 matrix leg that builds via [`cross`](https://github.com/cross-rs/cross).
 
+Alongside the packages, the Linux job attaches the raw `unitylan-engine-linux-amd64` binary and a
+`SHA256SUMS`; the Windows job attaches `SHA256SUMS-windows.txt`. These feed the auto-update below.
+
+## Signed auto-update
+
+All crates share one version (`[workspace.package] version` in the root `Cargo.toml`), and the wire
+protocol has a `PROTOCOL_VERSION` (`common`) advertised on every register/refresh so a mixed-version
+mesh degrades to a warning, never a crash.
+
+Updates are **opt-in per deployment** and reuse the coordinator's existing Ed25519 trust anchor — no
+new signing key. Add a `[release]` block to the coordinator config (see `coordinator.example.toml`)
+naming the version and, per platform, the artifact URL + its SHA-256 (from the `SHA256SUMS` files
+above) + size. The coordinator signs this manifest with its anchor at startup and serves it on the
+long-poll. Each engine verifies it against its **pinned** anchor and, if the version is newer and an
+artifact matches its platform, the GUI shows an **Update** button. Applying it downloads the
+artifact, re-checks the SHA-256 against the signed manifest, then:
+
+- **Linux** — self-replaces `/usr/bin/unitylan-engine` in place and exits; systemd (`Restart=always`,
+  with `ReadWritePaths=/usr/bin`) relaunches onto the new binary. The GUI is updated via the package
+  manager as usual (the engine self-update keeps the resident daemon current).
+- **Windows** — runs the signed `.msi`; its `MajorUpgrade` stops the service, replaces engine + GUI +
+  DLL, and restarts.
+
+The coordinator only advertises a signed string (never the bytes), so this adds no data-plane load
+and keeps it off the hot path. Omit `[release]` to disable auto-update — clients then just show a
+"newer version available" notice with no button.
+
 ## One release covers every configuration — the two fork axes
 
 The design goal is a **single package/release regardless of the node's environment**. Two things

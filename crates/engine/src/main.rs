@@ -15,6 +15,7 @@ mod oauth;
 mod ping;
 mod relay;
 mod resolver;
+mod selfupdate;
 #[cfg(windows)]
 mod service;
 mod shutdown;
