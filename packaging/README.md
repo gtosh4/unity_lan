@@ -82,8 +82,15 @@ artifact, re-checks the SHA-256 against the signed manifest, then:
   DLL, and restarts.
 
 The coordinator only advertises a signed string (never the bytes), so this adds no data-plane load
-and keeps it off the hot path. Omit `[release]` to disable auto-update — clients then just show a
-"newer version available" notice with no button.
+and keeps it off the hot path — and the artifact download itself fans out to the URL host (GitHub
+Releases / a CDN), never through the coordinator. Omit `[release]` to disable auto-update — clients
+then just show a "newer version available" notice with no button.
+
+Publishing a new release is an **admin action** (the coordinator does not poll or auto-discover):
+edit the `[release]` block and `kill -HUP <coordinator-pid>` — it re-signs and serves the new
+manifest with no restart and no dropped connections. A malformed edit is logged and the previous
+manifest is kept serving. This keeps a human in the loop on what the mesh updates to. (SIGHUP is
+unix-only; on Windows, restart the service.)
 
 ## One release covers every configuration — the two fork axes
 

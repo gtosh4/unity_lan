@@ -27,6 +27,10 @@ name = "Minecraft SMP"
 # Fill this in per release from the GitHub Release assets + their SHA256SUMS. Omit it entirely to
 # disable auto-update (clients then only see a "newer version exists" notice, no button).
 #
+# To publish a new release without a restart, edit this block and send SIGHUP: `kill -HUP <pid>`
+# (Docker: `docker kill -s HUP <container>`). The coordinator re-signs and serves it immediately;
+# a malformed edit is logged and the previous manifest is kept. (Other config still needs a restart.)
+#
 # [release]
 # version = "0.2.0"
 #

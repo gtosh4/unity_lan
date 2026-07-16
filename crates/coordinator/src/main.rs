@@ -146,16 +146,47 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Sign the auto-update manifest once at startup — it's static, so every RegisterResp serves the
-    // cached string with no per-request work. Fails closed: a malformed `[release]` aborts boot.
-    let release = match &cfg.release {
-        Some(rc) => {
-            let signed = signer.sign_to_base64(&rc.to_manifest()?)?;
-            tracing::info!(version = %rc.version, artifacts = rc.artifacts.len(), "serving signed auto-update manifest");
-            Some(signed)
-        }
-        None => None,
-    };
+    // Sign the auto-update manifest from `[release]` — it's static, so every RegisterResp serves the
+    // cached string with no per-request work. Fails closed at startup: a malformed `[release]` aborts
+    // boot. Held behind a RwLock so SIGHUP can re-sign it without a restart (see below).
+    let release = Arc::new(std::sync::RwLock::new(build_release(
+        cfg.release.as_ref(),
+        &signer,
+    )?));
+
+    // Reload the release manifest on SIGHUP (unix): re-read the config, re-sign `[release]`, and swap
+    // it in — so an admin publishes a new release with `kill -HUP`, no restart. Only the release
+    // manifest is reloaded (other config is seeded to the DB at startup and still needs a restart).
+    // Unlike boot, a bad config here is non-fatal: log and keep serving the previous manifest.
+    #[cfg(unix)]
+    {
+        let release = release.clone();
+        let signer = signer.clone();
+        let config_path = config_path.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut hup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("SIGHUP handler unavailable; release reload disabled: {e}");
+                    return;
+                }
+            };
+            while hup.recv().await.is_some() {
+                match Config::load(std::path::Path::new(&config_path))
+                    .and_then(|cfg| build_release(cfg.release.as_ref(), &signer))
+                {
+                    Ok(new) => {
+                        *release.write().unwrap() = new;
+                        tracing::info!("reloaded [release] manifest on SIGHUP");
+                    }
+                    Err(e) => {
+                        tracing::error!("SIGHUP reload failed; keeping previous manifest: {e:#}")
+                    }
+                }
+            }
+        });
+    }
 
     let state = AppState {
         signer,
@@ -184,4 +215,26 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
     Ok(())
+}
+
+/// Build the signed auto-update manifest from the `[release]` config, or `None` if unconfigured.
+/// Signs with the coordinator anchor so clients verify it against their pinned key. Shared by the
+/// startup path and the SIGHUP reload. Takes just the release block (not `&Config`) because the rest
+/// of `cfg` is partially moved into the role/oauth sources by the time this runs at startup.
+fn build_release(
+    release: Option<&crate::config::ReleaseConfig>,
+    signer: &Signer,
+) -> anyhow::Result<Option<String>> {
+    match release {
+        Some(rc) => {
+            let signed = signer.sign_to_base64(&rc.to_manifest()?)?;
+            tracing::info!(
+                version = %rc.version,
+                artifacts = rc.artifacts.len(),
+                "serving signed auto-update manifest"
+            );
+            Ok(Some(signed))
+        }
+        None => Ok(None),
+    }
 }

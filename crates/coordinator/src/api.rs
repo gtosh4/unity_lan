@@ -63,9 +63,11 @@ pub struct AppState {
     /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
     pub rotation_chain: Vec<String>,
     /// The signed auto-update manifest (base64 `Signed<ReleaseManifest>`), served in every
-    /// `RegisterResp.release`. Signed once at startup from the `[release]` config; `None` when the
-    /// deployment configured no release (auto-update disabled). Static — no per-request work.
-    pub release: Option<String>,
+    /// `RegisterResp.release`. Signed from the `[release]` config at startup and re-signed on SIGHUP
+    /// (unix) so an admin can publish a new release without a restart; `None` when the deployment
+    /// configured no release (auto-update disabled). A `RwLock` because reads are per-request but
+    /// writes are rare (only on reload); reads clone the small string and never hold across an await.
+    pub release: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 /// `(owner, peer)` → the relayed address `owner` allocated to reach `peer` (the relayed-candidate
@@ -619,7 +621,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         stun_addr: st.stun_addr,
         proto: common::PROTOCOL_VERSION,
         server_version: common::VERSION.to_string(),
-        release: st.release.clone(),
+        release: st.release.read().unwrap().clone(),
     })
 }
 
