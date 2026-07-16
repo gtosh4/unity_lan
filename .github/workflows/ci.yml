@@ -23,3 +23,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  # Dev happens mostly on Linux, so the Windows-only modules (wg/fw/resolver/windows.rs,
+  # service.rs) never compile in the `check` job. Build + test them here so drift surfaces on
+  # every PR instead of only at release time.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: cargo test --workspace

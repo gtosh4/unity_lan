@@ -7,8 +7,10 @@
 //! lacks an endpoint. So this backend keeps the desired interface + peer state and re-applies the
 //! entire configuration on every mutation, rather than mutating peers incrementally.
 //!
-//! Runtime prerequisites: run elevated, and ship `wireguard.dll` (the wireguard-nt runtime) next to
-//! the binary — the `wireguard-nt` crate loads it by name at load time.
+//! Runtime prerequisites: run elevated, and ship the wireguard-nt runtime DLL at
+//! `resources-windows\binaries\wireguard-amd64.dll` under the engine's install dir — defguard loads
+//! it by that *relative* path (resolved against the process CWD), so the service pins its CWD to the
+//! exe folder (see `service.rs`) for the load to resolve.
 
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
