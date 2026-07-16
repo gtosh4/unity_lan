@@ -1,0 +1,88 @@
+<#
+.SYNOPSIS
+  Build the UnityLAN Windows installer (.msi).
+
+.DESCRIPTION
+  Compiles the release engine + GUI exes, fetches the pinned wireguard-nt runtime DLL (not
+  committed — see .gitignore), stages it where the .wxs expects it, and runs `wix build`.
+
+  Prerequisites:
+    - Rust (stable) with the x86_64-pc-windows-msvc toolchain.
+    - WiX v4/v5 CLI:  dotnet tool install --global wix
+
+.PARAMETER Version
+  MSI ProductVersion (x.y.z). Defaults to the engine crate version.
+
+.PARAMETER Output
+  Output .msi path. Defaults to packaging/dist/unitylan-<Version>-x64.msi.
+
+.EXAMPLE
+  packaging\windows\build.ps1
+  packaging\windows\build.ps1 -Version 0.1.0
+#>
+[CmdletBinding()]
+param(
+    [string]$Version,
+    [string]$Output
+)
+
+$ErrorActionPreference = 'Stop'
+$Here = $PSScriptRoot
+$Root = (Resolve-Path (Join-Path $Here '..\..')).Path
+
+# wireguard-nt: pinned upstream release. Its zip holds bin\amd64\wireguard.dll.
+$WgNtVersion = '0.10.1'
+$WgNtUrl = "https://download.wireguard.com/wireguard-nt/wireguard-nt-$WgNtVersion.zip"
+
+if (-not $Version) {
+    $cargo = Get-Content (Join-Path $Root 'crates\engine\Cargo.toml')
+    $Version = ($cargo | Select-String '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+}
+if (-not $Output) {
+    $dist = Join-Path $Root 'packaging\dist'
+    New-Item -ItemType Directory -Force -Path $dist | Out-Null
+    $Output = Join-Path $dist "unitylan-$Version-x64.msi"
+}
+
+Write-Host ">> building release exes (v$Version)" -ForegroundColor Cyan
+Push-Location $Root
+try {
+    cargo build --release -p unitylan-engine -p unitylan-gui
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+}
+finally { Pop-Location }
+
+$bin = Join-Path $Root 'target\release'
+$engineExe = Join-Path $bin 'unitylan-engine.exe'
+$guiExe = Join-Path $bin 'unitylan-gui.exe'
+$engineToml = Join-Path $Here 'engine.toml'
+
+# --- fetch + stage the wireguard-nt DLL ---
+$wgDll = Join-Path $Root 'resources-windows\binaries\wireguard-amd64.dll'
+if (-not (Test-Path $wgDll)) {
+    Write-Host ">> fetching wireguard-nt $WgNtVersion" -ForegroundColor Cyan
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "wireguard-nt-$WgNtVersion.zip"
+    $extract = Join-Path ([IO.Path]::GetTempPath()) "wireguard-nt-$WgNtVersion"
+    Invoke-WebRequest -Uri $WgNtUrl -OutFile $tmp
+    if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
+    Expand-Archive -Path $tmp -DestinationPath $extract
+    New-Item -ItemType Directory -Force -Path (Split-Path $wgDll) | Out-Null
+    Copy-Item (Join-Path $extract 'wireguard-nt\bin\amd64\wireguard.dll') $wgDll
+    Write-Host "   staged -> $wgDll" -ForegroundColor DarkGray
+}
+
+# --- WiX ---
+foreach ($f in @($engineExe, $guiExe, $engineToml, $wgDll)) {
+    if (-not (Test-Path $f)) { throw "missing input: $f" }
+}
+Write-Host ">> wix build -> $Output" -ForegroundColor Cyan
+wix build (Join-Path $Here 'unitylan.wxs') `
+    -d "Version=$Version" `
+    -d "EngineExe=$engineExe" `
+    -d "GuiExe=$guiExe" `
+    -d "WgDll=$wgDll" `
+    -d "EngineToml=$engineToml" `
+    -o $Output
+if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
+
+Write-Host ">> built $Output" -ForegroundColor Green

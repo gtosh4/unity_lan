@@ -9,7 +9,9 @@
 //! - `run [config.toml]` — the SCM-invoked entry point; not for interactive use. The config path is
 //!   baked into the service's command line at install time, so users never pass it themselves.
 //!
-//! Runtime prerequisite (as for any Windows engine run): `wireguard.dll` sits next to the binary.
+//! Runtime prerequisite (as for any Windows engine run): the wireguard-nt DLL sits at
+//! `resources-windows\binaries\wireguard-amd64.dll` under the engine's install dir (defguard loads
+//! it by that relative path; `run` pins the service's working dir to the exe folder so it resolves).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -111,7 +113,9 @@ fn install(config: Option<String>) -> Result<()> {
     println!("  config: {}", config.display());
     println!("  perms:  {acl}");
     println!("  start now:  sc.exe start {SERVICE_NAME}    (or reboot)");
-    println!("  ensure wireguard.dll sits next to the engine executable.");
+    println!(
+        "  ensure the wireguard-nt DLL is at resources-windows\\binaries\\wireguard-amd64.dll next to the engine executable."
+    );
     Ok(())
 }
 
@@ -187,6 +191,17 @@ fn run_service() -> Result<()> {
 
     init_service_logging();
     tracing::info!(config = %cfg_path, "unitylan service starting");
+
+    // The SCM launches services with CWD = System32, but defguard loads wireguard-nt by the
+    // *relative* path `resources-windows/binaries/wireguard-amd64.dll` (resolved against CWD). Pin
+    // CWD to the install dir (the exe's folder) so that DLL — shipped there by the installer —
+    // resolves. The config path was made absolute at install time, so this is safe.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            std::env::set_current_dir(dir)
+                .with_context(|| format!("pinning working dir to {}", dir.display()))?;
+        }
+    }
 
     let cfg =
         Config::load(Path::new(&cfg_path)).with_context(|| format!("loading config {cfg_path}"))?;

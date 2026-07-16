@@ -7,6 +7,10 @@
 //! Scope note: network toggles / expose / OAuth login are deferred until the engine exposes
 //! them over the control socket.
 
+// Release Windows builds detach from the console so launching the GUI (shortcut/Explorer) doesn't
+// flash a terminal. Debug keeps the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod ctl;
 mod tray;
 

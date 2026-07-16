@@ -1,0 +1,31 @@
+# Build context for packaging/docker/coordinator.Dockerfile (context = repo root).
+# Keep the context tiny and, critically, never ship local secrets/state into a build layer.
+
+# Rust build output — multi-GB, rebuilt in-image anyway.
+/target
+**/*.rs.bk
+*.pdb
+
+# Git metadata.
+/.git
+/.github
+/.githooks
+
+# Local secrets & state — the coordinator sqlite DB holds the Ed25519 signing key (the trust
+# anchor). It must never enter the image or its build cache.
+*.db
+*.db-*
+/secrets
+*.key
+coordinator.toml
+/engine-state
+/engine.toml
+
+# Windows WG runtime DLL, staged per-machine.
+/resources-windows
+
+# Packaging outputs & host-only tooling irrelevant to the coordinator build.
+/packaging/dist
+/scripts
+/docs
+/.claude

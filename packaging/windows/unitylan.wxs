@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  UnityLAN Windows installer (WiX v4/v5). Builds an .msi that:
+    - installs unitylan-engine.exe + unitylan-gui.exe under Program Files\UnityLAN,
+    - stages the wireguard-nt DLL where defguard loads it (resources-windows\binaries\, relative to
+      the engine exe — the service pins its CWD there so the relative load resolves),
+    - drops a Start-menu shortcut to the GUI,
+    - installs a default engine.toml (never overwritten on upgrade so edits survive),
+    - registers + removes the LocalSystem service by calling the engine's own `service install`/
+      `service uninstall`, which also relaxes the DACL so the unprivileged GUI can start it.
+
+  Build (see build.ps1) supplies these preprocessor vars via `wix build -d`:
+    Version, EngineExe, GuiExe, WgDll, EngineToml
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="UnityLAN"
+           Manufacturer="gtosh4"
+           Version="$(Version)"
+           UpgradeCode="7E6B2C1A-9F84-4D3B-B2A7-1C5E8A0F4D22"
+           Scope="perMachine"
+           Compression="high">
+
+    <!-- Remove the old version wholesale before laying down the new one, so the service is torn
+         down and re-registered cleanly rather than double-installed. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  DowngradeErrorMessage="A newer version of UnityLAN is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Add/Remove Programs metadata. -->
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/gtosh4/unity_lan" />
+
+    <!-- Directory tree: Program Files\UnityLAN\resources-windows\binaries\ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="UnityLAN">
+        <Directory Id="ResourcesWindowsDir" Name="resources-windows">
+          <Directory Id="BinariesDir" Name="binaries" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <ComponentGroup Id="EngineFiles" Directory="INSTALLFOLDER">
+      <Component>
+        <File Id="EngineExe" Name="unitylan-engine.exe" Source="$(EngineExe)" KeyPath="yes" />
+      </Component>
+      <Component>
+        <File Id="GuiExe" Name="unitylan-gui.exe" Source="$(GuiExe)" KeyPath="yes">
+          <!-- Non-advertised shortcut targeting the installed GUI exe. Bare launch => the GUI
+               connects to \\.\pipe\unitylan-control, the same pipe the engine serves by default. -->
+          <Shortcut Id="GuiShortcut" Directory="ProgramMenuFolder" Name="UnityLAN"
+                    Description="Mesh status and device management" Advertise="no" />
+        </File>
+      </Component>
+      <!-- Default config. NeverOverwrite keeps a user's edited coordinator/enrollment_key across
+           upgrades. Removed on uninstall (not Permanent). -->
+      <Component NeverOverwrite="yes">
+        <File Id="EngineToml" Name="engine.toml" Source="$(EngineToml)" KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <Component Id="WgDllComponent" Directory="BinariesDir">
+      <File Id="WgDll" Name="wireguard-amd64.dll" Source="$(WgDll)" KeyPath="yes" />
+    </Component>
+
+    <Feature Id="Main" Title="UnityLAN" Level="1">
+      <ComponentGroupRef Id="EngineFiles" />
+      <ComponentRef Id="WgDllComponent" />
+    </Feature>
+
+    <!-- Register/unregister the service via the engine's own installer path. Deferred + no
+         impersonation => runs as LocalSystem, which the service create + `sc sdset` (DACL relax)
+         need. `service install` with no config arg uses engine.toml next to the exe (which we just
+         installed); it canonicalizes that path, so CWD does not matter. -->
+    <CustomAction Id="InstallService" FileRef="EngineExe" ExeCommand="service install"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="UninstallService" FileRef="EngineExe" ExeCommand="service uninstall"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Remove the service while the exe is still on disk. -->
+      <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <!-- Create it once the files are in place. -->
+      <Custom Action="InstallService" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

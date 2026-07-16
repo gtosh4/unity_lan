@@ -1,0 +1,35 @@
+# UnityLAN engine config (Windows; installed next to unitylan-engine.exe under Program Files).
+# Edit `coordinator` and `enrollment_key`, then start the service:  sc.exe start UnityLANEngine
+# (the installer registers + starts it for you; this is here for edits and reinstalls).
+
+# Coordinator base URL.
+coordinator = "http://127.0.0.1:8080"
+
+# Engine state (WG private key + pinned trust anchor). LocalSystem creates this on first run.
+state_dir = 'C:\ProgramData\UnityLAN'
+
+# One-time enrollment key that binds this device to its owner on first register.
+# enrollment_key = "..."
+
+# Device name (the <device> DNS label). Defaults to COMPUTERNAME.
+# device_name = "my-host"
+
+# The GUI reaches the engine over the named pipe \\.\pipe\unitylan-control. That name derives from
+# control_socket's file stem; leaving it unset yields `control` -> `unitylan-control`, which the GUI
+# also defaults to. Only set this if you run multiple engines side by side.
+# control_socket = "control"
+
+# --- mesh ---
+# iface = "unl0"
+# listen_port = 51820
+# endpoint = "203.0.113.5:51820"   # set for a manual port-forward; disables UPnP
+# upnp = true
+
+# --- DNS ---
+# Serve the `.internal` resolver on this address to enable name resolution (NRPT hook is automatic).
+# dns_bind = "127.0.0.1:5353"
+# resolver_hook = true
+
+# --- firewall (default-deny inbound on the wg iface; secure by default) ---
+# firewall = true
+# expose = [ { port = 25565, proto = "tcp" } ]

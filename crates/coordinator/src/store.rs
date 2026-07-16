@@ -689,14 +689,8 @@ mod tests {
     #[tokio::test]
     async fn device_ip_is_stable_per_pubkey() {
         let st = mem_store().await;
-        let (a, _) = st
-            .allocate_device(&[1u8; 32], 1, "laptop")
-            .await
-            .unwrap();
-        let (a2, _) = st
-            .allocate_device(&[1u8; 32], 1, "laptop")
-            .await
-            .unwrap();
+        let (a, _) = st.allocate_device(&[1u8; 32], 1, "laptop").await.unwrap();
+        let (a2, _) = st.allocate_device(&[1u8; 32], 1, "laptop").await.unwrap();
         let (b, _) = st.allocate_device(&[2u8; 32], 1, "phone").await.unwrap();
         assert_eq!(a, a2, "same device pubkey → same IP");
         assert_ne!(a, b, "same user's two devices → distinct IPs");
