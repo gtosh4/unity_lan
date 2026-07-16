@@ -612,3 +612,12 @@ elevated box. macOS `/etc/resolver` still deferred.
 - [ ] **Tailnet-lock-style co-signature** (prior-art §7) — optional admin/peer co-signature on a
       new device's attestation so a compromised coordinator alone can't inject a peer. Hardens the
       single-anchor trust root; fail-closed. Secure-by-default aligned.
+- [ ] **Coordinator release auto-poll (opt-in)** — the coordinator periodically polls GitHub
+      Releases for the latest tag + `SHA256SUMS`, auto-builds and signs the release manifest, and
+      hot-swaps it (the SIGHUP reload path already does the swap). Replaces the admin's manual
+      `[release]` edit + SIGHUP. Cheap on the north-star: **one** outbound poll per interval,
+      independent of client count — no fan-out, off the data plane. The tradeoff is **trust, not
+      traffic**: auto-poll signs (with the deployment anchor) whatever GitHub's latest release
+      advertises, so no human vets each one — a compromised GitHub release/tag would auto-propagate
+      to the whole mesh. Therefore **off by default, behind a config flag**; the shipped manual +
+      SIGHUP flow keeps a human in the loop (see `packaging/README.md` "Signed auto-update").
