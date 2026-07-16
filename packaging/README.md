@@ -45,6 +45,63 @@ The image runs as a non-root `unitylan` user and carries a `HEALTHCHECK` against
 build context is trimmed by the repo-root `.dockerignore` — critically, the coordinator's sqlite DB
 (which holds the Ed25519 signing key) is excluded so it never lands in a build layer.
 
+## Host the coordinator (server)
+
+The release workflow pushes `ghcr.io/<owner>/unitylan-coordinator:<tag>` (and `:latest`) on every
+`v*` tag, so a host just pulls the released image — no local build. Make the GHCR package **public**
+once (GitHub → your profile → Packages → `unitylan-coordinator` → Package settings → Danger Zone →
+Change visibility → Public) and the pull needs no auth:
+
+```sh
+docker pull ghcr.io/<owner>/unitylan-coordinator:v0.1.0
+```
+
+**1. Discord app prerequisites.** In the [Discord Developer Portal](https://discord.com/developers):
+create an app, add a **bot** and copy its token, and note the app's **client ID**. Enable the
+**Server Members Intent** (the coordinator reads member roles) and, under OAuth2, enable the
+**Public Client** flag and register the loopback redirect `http://127.0.0.1:8765/callback` (the
+engine runs PKCE as a public client — no client secret lives on the coordinator). Invite the bot to
+each guild with the `applications.commands` + `bot` scopes so the `/unitylan` slash commands land.
+
+**2. Write `coordinator.toml`** (real creds — keep it off disk-in-git; the repo's is gitignored):
+
+```toml
+bind     = "0.0.0.0:8080"          # bind all interfaces inside the container
+database = "/data/coordinator.db"  # on the mounted volume — holds the Ed25519 signing key
+
+[discord]
+bot_token = "<your bot token>"
+
+[oauth]
+client_id = "<your app client id>"  # public client_id only; no secret/redirect here
+```
+
+Networks are added at runtime via the `/unitylan network add` slash command, so no `[[network]]`
+seeds are needed in production. Omit the `[fake]` block entirely (that's offline-dev only), and do
+**not** set `dev_auth = true` on a real deployment.
+
+**3. Run it:**
+
+```sh
+docker run -d --name unitylan-coordinator --restart unless-stopped \
+  -p 8080:8080 \
+  -v $PWD/coordinator.toml:/etc/unitylan/coordinator.toml:ro \
+  -v unitylan-data:/data \
+  ghcr.io/<owner>/unitylan-coordinator:v0.1.0
+```
+
+The container runs unprivileged and carries no traffic (control plane only). The `unitylan-data`
+named volume persists `/data/coordinator.db` — **this holds the deployment's Ed25519 trust anchor
+(signing key); back it up and never rebuild it**, or every enrolled peer's pinned anchor breaks.
+
+**4. TLS / reverse proxy.** The coordinator speaks plain HTTP; front it with a reverse proxy
+(Caddy / nginx / Traefik) terminating TLS on 443 and proxying to `:8080`. Engines pin the anchor,
+but clients still reach the control API over the network — run it behind HTTPS in production.
+
+**5. Publish an auto-update release** (optional): fill the `[release]` block (see
+[Signed auto-update](#signed-auto-update)) and hot-reload without downtime —
+`docker kill -s HUP unitylan-coordinator` re-signs and serves the new manifest.
+
 ## Automated releases
 
 `.github/workflows/release.yml` runs on a `v*` tag: it builds the `.deb`/`.rpm` (amd64) and the
