@@ -76,12 +76,23 @@
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="UninstallService" FileRef="EngineExe" ExeCommand="service uninstall"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- Start the freshly-installed service, but ONLY when this install is a major upgrade
+         (WIX_UPGRADE_DETECTED is set by MajorUpgrade when it finds an older version). That is the
+         auto-update path: the running engine launched msiexec and exited, so without this the new
+         service is registered auto-start but stays stopped until reboot, leaving the mesh down. A
+         first-time install deliberately does NOT auto-start — engine.toml is unconfigured, so we
+         leave the "start now / reboot" hint from `service install` instead of launching a daemon
+         that would just fail. Return=ignore so a start hiccup never fails/rolls back the upgrade. -->
+    <CustomAction Id="StartService" FileRef="EngineExe" ExeCommand="service start"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
 
     <InstallExecuteSequence>
       <!-- Remove the service while the exe is still on disk. -->
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
       <!-- Create it once the files are in place. -->
       <Custom Action="InstallService" After="InstallFiles" Condition="NOT Installed" />
+      <!-- On upgrade, relaunch it so the auto-update comes back up without a reboot. -->
+      <Custom Action="StartService" After="InstallService" Condition="WIX_UPGRADE_DETECTED" />
     </InstallExecuteSequence>
   </Package>
 </Wix>

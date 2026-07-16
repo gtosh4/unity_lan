@@ -5,6 +5,8 @@
 //!
 //! Subcommands (all under `unitylan-engine service …`):
 //! - `install [config.toml]` — register an auto-start service (needs an elevated shell).
+//! - `start` — start the (already-registered) service now; used by the MSI after a major upgrade so
+//!   an auto-update relaunches the engine without waiting for a reboot. Idempotent.
 //! - `uninstall` — stop and remove it (needs an elevated shell).
 //! - `run [config.toml]` — the SCM-invoked entry point; not for interactive use. The config path is
 //!   baked into the service's command line at install time, so users never pass it themselves.
@@ -53,10 +55,11 @@ const RELAXED_DACL: &str = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)\
 pub fn main() -> Result<()> {
     match std::env::args().nth(2).unwrap_or_default().as_str() {
         "install" => install(std::env::args().nth(3)),
+        "start" => start(),
         "uninstall" => uninstall(),
         "run" => run_dispatch(),
         other => anyhow::bail!(
-            "unknown `service` subcommand '{other}' (use: install [config.toml], uninstall, run)"
+            "unknown `service` subcommand '{other}' (use: install [config.toml], start, uninstall, run)"
         ),
     }
 }
@@ -162,6 +165,32 @@ fn uninstall() -> Result<()> {
 
     service.delete().context("deleting the service")?;
     println!("Uninstalled service '{SERVICE_NAME}'.");
+    Ok(())
+}
+
+/// Start the service now. `install` only *registers* an auto-start service (which the SCM would
+/// otherwise launch at the next boot), so the MSI runs this after a major upgrade to relaunch the
+/// engine immediately — otherwise an auto-update would leave the engine down until reboot. Idempotent
+/// and best-effort: a service that is already running (or is mid-start) is a success, not an error.
+fn start() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager (run this from an elevated/Administrator shell)")?;
+    let service = manager
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::START,
+        )
+        .context("opening the service (is it installed?)")?;
+
+    match service.query_status()?.current_state {
+        ServiceState::Stopped => {
+            service
+                .start::<OsString>(&[])
+                .context("starting the service")?;
+            println!("Started service '{SERVICE_NAME}'.");
+        }
+        other => println!("Service '{SERVICE_NAME}' is already {other:?}; nothing to do."),
+    }
     Ok(())
 }
 

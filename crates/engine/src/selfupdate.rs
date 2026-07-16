@@ -144,8 +144,11 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Windows: the artifact is the signed MSI. Write it out and launch `msiexec`; the MSI's
-/// `MajorUpgrade` stops the service, replaces the files (engine + GUI + DLL), and restarts it. We
-/// exit so the service can be stopped cleanly by the upgrade.
+/// `MajorUpgrade` tears down the old service, replaces the files (engine + GUI + DLL), re-registers
+/// the service, and — because this install is a detected upgrade — starts it again (the `StartService`
+/// custom action, gated on `WIX_UPGRADE_DETECTED`). We `exit(0)` first so the running engine releases
+/// the service and its files before the upgrade removes them. `msiexec` is a detached child, so it
+/// survives our exit and completes the swap + relaunch on its own.
 #[cfg(windows)]
 fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     let msi = state_dir.join("unitylan-update.msi");
