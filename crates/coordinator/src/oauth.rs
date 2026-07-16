@@ -1,9 +1,15 @@
 //! Discord OAuth2 for interactive login. The engine is a **public** client — it runs the
 //! authorization-code + PKCE flow itself (loopback redirect, `code_verifier` in place of a secret)
 //! and hands the coordinator only the resulting access token. The coordinator's job is to *verify*
-//! that token against Discord (`GET /users/@me`) and bind the identity to the device pubkey; it
+//! that token against Discord (`GET /oauth2/@me`) and bind the identity to the device pubkey; it
 //! holds no client secret. It exposes its `client_id` (public) so the engine can build the
 //! authorize URL and do the exchange.
+//!
+//! Verification uses `/oauth2/@me` (not `/users/@me`) specifically so we can check the token's
+//! **audience**: `/oauth2/@me` returns the `application` the token was minted for and its `scopes`.
+//! We reject any token not issued for *our* `client_id`, which closes a token-confusion takeover —
+//! an `identify` token a victim granted to some *other* "log in with Discord" app must not be
+//! replayable here to bind the attacker's device to the victim's identity.
 //!
 //! A [`FakeOauth`] provider (treats the access token as `user:<id>`) backs offline tests, mirroring
 //! the fake role source.
@@ -43,6 +49,21 @@ struct DiscordUser {
     id: String,
 }
 
+/// `GET /oauth2/@me` response: the authorization info for the bearer token. Unlike `/users/@me`,
+/// it names the `application` (audience) and `scopes` the token was granted, so we can reject a
+/// token minted for a different app.
+#[derive(serde::Deserialize)]
+struct AuthInfo {
+    application: AuthApplication,
+    scopes: Vec<String>,
+    user: DiscordUser,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthApplication {
+    id: String,
+}
+
 #[async_trait::async_trait]
 impl OauthProvider for DiscordOauth {
     fn client_id(&self) -> &str {
@@ -50,20 +71,37 @@ impl OauthProvider for DiscordOauth {
     }
 
     async fn verify(&self, access_token: &str) -> anyhow::Result<u64> {
-        let user: DiscordUser = self
+        // `/oauth2/@me` returns the token's audience + scopes (and 401s an expired/invalid token,
+        // caught by `error_for_status`).
+        let info: AuthInfo = self
             .http
-            .get("https://discord.com/api/users/@me")
+            .get("https://discord.com/api/oauth2/@me")
             .bearer_auth(access_token)
             .send()
             .await
-            .context("fetching identify")?
+            .context("fetching authorization info")?
             .error_for_status()
-            .context("identify request failed")?
+            .context("authorization-info request failed")?
             .json()
             .await
-            .context("decoding identify response")?;
+            .context("decoding authorization info")?;
 
-        user.id.parse().context("Discord user id was not numeric")
+        // Audience check: the token must have been issued for *this* coordinator's Discord app.
+        // Without this, an `identify` token granted to any other app would be accepted here.
+        if info.application.id != self.client_id {
+            return Err(anyhow!(
+                "access token was issued for a different Discord application (audience mismatch)"
+            ));
+        }
+        // Must carry the `identify` scope so `user.id` is present and meaningful.
+        if !info.scopes.iter().any(|s| s == "identify") {
+            return Err(anyhow!("access token is missing the `identify` scope"));
+        }
+
+        info.user
+            .id
+            .parse()
+            .context("Discord user id was not numeric")
     }
 }
 

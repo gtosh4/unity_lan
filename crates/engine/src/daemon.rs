@@ -138,6 +138,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 ep.ip(),
                 secret.clone(),
                 cfg.relay_max_allocations,
+                cfg.relay_allow_private_dst,
             )
             .await
             {
@@ -194,7 +195,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         else {
             return Ok(()); // interrupted before login
         };
-        keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
+        // `register` already pinned/verified the anchor (via `coord::post`); no separate pin here.
         if let Some(tok) = &resp.device_token {
             keys::save_token(&cfg.state_dir, tok)?;
             *token.write().await = Some(tok.clone());
@@ -236,7 +237,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
         // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
         let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
-        let mut last_seeds = coord::verified_seeds(&resp)?;
+        let mut last_seeds = coord::verified_seeds(&resp, &cfg.state_dir)?;
         let mut last_device = Some(device);
         // Whether the last coordinator refresh succeeded. We just registered, so start `true`; a failed
         // refresh flips it (the mesh keeps running from cache), a successful one flips it back.
@@ -501,6 +502,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 }
                 r = coord::refresh(
                     &cfg.coordinator,
+                    &cfg.state_dir,
                     wg_pub,
                     cfg.device_name(),
                     endpoint,
@@ -522,7 +524,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     last_relay_alloc = this_relay_alloc;
                     last_ice_offers = ice_offers; // …and this ICE offer set
                     coord_stun = resp.stun_addr; // the STUN fallback may have (dis)appeared
-                    match coord::verified_seeds(&resp) {
+                    match coord::verified_seeds(&resp, &cfg.state_dir) {
                         Ok(seeds) => {
                             last_seeds = seeds;
                             // A grant of `None` means we hold no networks (role revoked): keep the last
@@ -807,6 +809,7 @@ async fn register_until_ready(
             }
             r = coord::register(
                 &cfg.coordinator,
+                &cfg.state_dir,
                 wg_pub,
                 cfg.device_name(),
                 endpoint,

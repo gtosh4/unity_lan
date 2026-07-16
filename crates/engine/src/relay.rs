@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
+use async_trait::async_trait;
 use common::api::{RelayAllocation, RelayInfo};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
@@ -24,11 +25,107 @@ use turn::allocation::AllocationInfo;
 use turn::auth::{generate_auth_key, AuthHandler};
 use turn::client::{Client, ClientConfig};
 use turn::relay::relay_static::RelayAddressGeneratorStatic;
+use turn::relay::RelayAddressGenerator;
 use turn::server::config::{ConnConfig, ServerConfig};
 use turn::server::Server;
 use turn::Error as TurnError;
 use webrtc_util::conn::Conn;
 use webrtc_util::vnet::net::Net;
+
+/// True if `ip` is a plausible relay destination — a public (global-unicast) address. The embedded
+/// relay only ever forwards WireGuard ciphertext to a peer's *public* endpoint or another relay's
+/// public relayed address, so any private / loopback / link-local / CGNAT / multicast target is
+/// illegitimate. Refusing them stops the relay being used as an open UDP proxy to arbitrary hosts
+/// or as an SSRF pivot into the relay host's own LAN (§7.2 abuse surface).
+fn allowed_relay_dst(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            // 100.64.0.0/10 is the mesh's *internal* WG range — never a relay egress target.
+            let cgnat = o[0] == 100 && (64..=127).contains(&o[1]);
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                || cgnat)
+        }
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            let link_local = (seg0 & 0xffc0) == 0xfe80; // fe80::/10
+            let unique_local = (seg0 & 0xfe00) == 0xfc00; // fc00::/7
+            !(v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || link_local
+                || unique_local)
+        }
+    }
+}
+
+/// Wraps a relay allocation's UDP socket to drop packets aimed at non-public destinations (see
+/// [`allowed_relay_dst`]). Every other [`Conn`] method delegates unchanged. The second field, when
+/// `true`, disables the filter (dev/test only — see `Config::relay_allow_private_dst`).
+struct MeshFilteredConn(Arc<dyn Conn + Send + Sync>, bool);
+
+#[async_trait]
+impl Conn for MeshFilteredConn {
+    async fn connect(&self, addr: SocketAddr) -> webrtc_util::Result<()> {
+        self.0.connect(addr).await
+    }
+    async fn recv(&self, buf: &mut [u8]) -> webrtc_util::Result<usize> {
+        self.0.recv(buf).await
+    }
+    async fn recv_from(&self, buf: &mut [u8]) -> webrtc_util::Result<(usize, SocketAddr)> {
+        self.0.recv_from(buf).await
+    }
+    async fn send(&self, buf: &[u8]) -> webrtc_util::Result<usize> {
+        self.0.send(buf).await
+    }
+    async fn send_to(&self, buf: &[u8], target: SocketAddr) -> webrtc_util::Result<usize> {
+        if self.1 || allowed_relay_dst(target.ip()) {
+            self.0.send_to(buf, target).await
+        } else {
+            // Report success but drop it: a client trying to relay to a private/loopback/CGNAT
+            // address just gets no delivery, without tearing its allocation down.
+            tracing::debug!(%target, "relay: refusing to forward to non-public destination");
+            Ok(buf.len())
+        }
+    }
+    fn local_addr(&self) -> webrtc_util::Result<SocketAddr> {
+        self.0.local_addr()
+    }
+    fn remote_addr(&self) -> Option<SocketAddr> {
+        self.0.remote_addr()
+    }
+    async fn close(&self) -> webrtc_util::Result<()> {
+        self.0.close().await
+    }
+    fn as_any(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self.0.as_any()
+    }
+}
+
+/// Relay address generator that wraps [`RelayAddressGeneratorStatic`] and routes each allocation's
+/// egress through a [`MeshFilteredConn`], so the relay can't be pointed at non-public destinations.
+/// The second field is the `allow_private_dst` escape passed to each [`MeshFilteredConn`].
+struct MeshFilteredGenerator(RelayAddressGeneratorStatic, bool);
+
+#[async_trait]
+impl RelayAddressGenerator for MeshFilteredGenerator {
+    fn validate(&self) -> Result<(), TurnError> {
+        self.0.validate()
+    }
+    async fn allocate_conn(
+        &self,
+        use_ipv4: bool,
+        requested_port: u16,
+    ) -> Result<(Arc<dyn Conn + Send + Sync>, SocketAddr), TurnError> {
+        let (conn, addr) = self.0.allocate_conn(use_ipv4, requested_port).await?;
+        Ok((Arc::new(MeshFilteredConn(conn, self.1)), addr))
+    }
+}
 
 /// TURN auth handler that both validates a minted credential (coturn `use-auth-secret`: the key is
 /// derived from the shared `secret` + the `<expiry>` username) and **caps concurrent allocations**,
@@ -79,12 +176,14 @@ pub struct RelayServer {
 impl RelayServer {
     /// Start a TURN server bound to `bind` (UDP), advertising `public_ip` as the relayed address
     /// clients reach it at, authorizing credentials minted against `secret`, and capping concurrent
-    /// allocations at `max_allocations`.
+    /// allocations at `max_allocations`. When `allow_private_dst` is false (the default), egress to
+    /// non-public destinations is refused (see [`allowed_relay_dst`]).
     pub async fn start(
         bind: SocketAddr,
         public_ip: IpAddr,
         secret: String,
         max_allocations: usize,
+        allow_private_dst: bool,
     ) -> anyhow::Result<Self> {
         // turn itself allocates no sockets — we hand it the listener (an `Arc<UdpSocket>` is a
         // `webrtc_util::Conn`). The relay generator hands each allocation a relayed address on
@@ -108,11 +207,14 @@ impl RelayServer {
         let server = Server::new(ServerConfig {
             conn_configs: vec![ConnConfig {
                 conn,
-                relay_addr_generator: Box::new(RelayAddressGeneratorStatic {
-                    relay_address: public_ip,
-                    address: "0.0.0.0".to_owned(),
-                    net: Arc::new(Net::new(None)),
-                }),
+                relay_addr_generator: Box::new(MeshFilteredGenerator(
+                    RelayAddressGeneratorStatic {
+                        relay_address: public_ip,
+                        address: "0.0.0.0".to_owned(),
+                        net: Arc::new(Net::new(None)),
+                    },
+                    allow_private_dst,
+                )),
             }],
             realm: common::relay::RELAY_REALM.to_owned(),
             auth_handler: Arc::new(CappedAuth {
@@ -317,5 +419,25 @@ mod tests {
         let past = (common::now_unix() - 1).to_string();
         let a: SocketAddr = "10.0.0.2:1".parse().unwrap();
         assert!(h.auth_handle(&past, "unitylan", a).is_err());
+    }
+
+    #[test]
+    fn relay_egress_allows_only_public_destinations() {
+        let allow = |s: &str| allowed_relay_dst(s.parse().unwrap());
+        // Public unicast → allowed (a real peer endpoint / relay address).
+        assert!(allow("203.0.113.7"));
+        assert!(allow("8.8.8.8"));
+        assert!(allow("2606:4700:4700::1111"));
+        // Private / loopback / link-local / CGNAT / multicast → refused (SSRF / open-proxy targets).
+        assert!(!allow("10.0.0.1"));
+        assert!(!allow("192.168.1.1"));
+        assert!(!allow("172.16.0.1"));
+        assert!(!allow("127.0.0.1"));
+        assert!(!allow("169.254.1.1"));
+        assert!(!allow("100.64.0.9")); // mesh-internal WG /32 — never a relay egress target
+        assert!(!allow("224.0.0.1"));
+        assert!(!allow("::1"));
+        assert!(!allow("fe80::1"));
+        assert!(!allow("fc00::1"));
     }
 }

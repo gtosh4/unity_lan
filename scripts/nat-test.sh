@@ -139,6 +139,7 @@ EOF
 # firewall off to isolate NAT behavior (the firewall path is covered by mesh-test.sh).
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/a"
 enrollment_key = "key-a"
 device_name = "host-a"
@@ -152,6 +153,7 @@ refresh_secs = 2
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/b"
 enrollment_key = "key-b"
 device_name = "host-b"
@@ -164,6 +166,7 @@ refresh_secs = 2
 EOF
 cat >"$TMP/c.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/c"
 enrollment_key = "key-c"
 device_name = "host-c"

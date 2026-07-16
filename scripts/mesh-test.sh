@@ -64,6 +64,7 @@ EOF
 # (boringtun's control socket is /run/wireguard/<iface>.sock). Real hosts each have their own.
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/a"
 enrollment_key = "key-a"
 device_name = "host-a"
@@ -76,6 +77,7 @@ dns_bind = "127.0.0.1:15353"
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/b"
 enrollment_key = "key-b"
 device_name = "host-b"

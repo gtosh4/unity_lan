@@ -6793,6 +6793,7 @@ name = "unitylan-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "base64",
  "clap",
  "defguard_wireguard_rs",

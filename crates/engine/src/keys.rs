@@ -59,6 +59,18 @@ pub fn pin_anchor(
     }
 }
 
+/// Load the pinned trust anchor's raw bytes. Errors if unpinned or corrupt. Every coordinator
+/// response is gated through [`pin_anchor`] before we verify any attestation, so by the time we
+/// verify grants/seeds the pin exists and this is the key we must verify against — never the
+/// anchor the response carries.
+pub fn load_anchor(state_dir: &Path) -> anyhow::Result<[u8; 32]> {
+    let bytes = std::fs::read(state_dir.join("anchor.pub")).context("reading pinned anchor")?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("pinned anchor file is not 32 bytes"))
+}
+
 /// Load the persisted device token, if any.
 pub fn load_token(state_dir: &Path) -> Option<String> {
     std::fs::read_to_string(state_dir.join("token"))

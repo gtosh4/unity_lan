@@ -7,8 +7,16 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Base URL of the coordinator, e.g. "http://127.0.0.1:8080".
+    /// Base URL of the coordinator, e.g. "https://coord.example.com" (or loopback http for dev).
     pub coordinator: String,
+    /// Allow a plaintext-`http` coordinator URL to a **non-loopback** host. Off by default: the
+    /// engine refuses such URLs at load, since an on-path attacker who can tamper the plaintext
+    /// control channel could feed the client forged coordinator responses. HTTPS is always allowed,
+    /// and loopback `http` (local dev) is always allowed. Set `true` only for a trusted offline
+    /// dev/test setup (e.g. the namespace scripts) where the coordinator is reachable only over a
+    /// private link you control.
+    #[serde(default)]
+    pub allow_insecure_http: bool,
     /// State directory (WG private key, pinned anchor). Created if missing.
     pub state_dir: PathBuf,
     /// One-time enrollment key that binds this device to its owner on first register. Sent until
@@ -79,6 +87,12 @@ pub struct Config {
     /// uplink a relayed mesh can spend (§7.2 DoS surface). A new client over the cap is refused.
     #[serde(default = "default_relay_max_allocations")]
     pub relay_max_allocations: usize,
+    /// Allow the embedded relay to forward to **private/loopback/CGNAT** destinations. Off by
+    /// default: the relay refuses non-public egress so it can't be abused as an open UDP proxy or an
+    /// SSRF pivot into the relay host's LAN (§7.2). Set `true` only for an offline test topology
+    /// where the mesh's "public" endpoints are themselves RFC1918 (e.g. the namespace scripts).
+    #[serde(default)]
+    pub relay_allow_private_dst: bool,
     /// Side-socket ICE for stuck peers (M5.5), on the userspace backend only. Default on. When off,
     /// the userspace path falls back to the M5.2 punch + M5.4 relay (the pre-ICE behavior) — an
     /// escape hatch and how the M5.4 relay path is exercised on Linux. No effect on kernel backends.
@@ -135,7 +149,50 @@ impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Ok(toml::from_str(&text)?)
+        let cfg: Self = toml::from_str(&text)?;
+        cfg.validate_coordinator()?;
+        Ok(cfg)
+    }
+
+    /// Reject a plaintext-`http` coordinator URL to a non-loopback host unless the operator opted in
+    /// via `allow_insecure_http`. HTTPS and loopback http are always fine. Fail-closed: a
+    /// misconfigured (tamperable) control channel stops the engine at load rather than silently
+    /// trusting whatever a MITM returns.
+    fn validate_coordinator(&self) -> anyhow::Result<()> {
+        let url = reqwest::Url::parse(&self.coordinator)
+            .map_err(|e| anyhow::anyhow!("invalid coordinator URL {:?}: {e}", self.coordinator))?;
+        match url.scheme() {
+            "https" => Ok(()),
+            "http" => {
+                let host = url.host_str().unwrap_or("");
+                let host = host.trim_start_matches('[').trim_end_matches(']');
+                let loopback = host == "localhost"
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .map(|ip| ip.is_loopback())
+                        .unwrap_or(false);
+                if loopback {
+                    Ok(())
+                } else if self.allow_insecure_http {
+                    tracing::warn!(
+                        "coordinator {:?} uses plaintext http to a non-loopback host — allowed \
+                         only because allow_insecure_http is set (dev/test only; the control \
+                         channel is unauthenticated and tamperable)",
+                        self.coordinator
+                    );
+                    Ok(())
+                } else {
+                    anyhow::bail!(
+                        "coordinator {:?} uses plaintext http to a non-loopback host; use https:// \
+                         (or set allow_insecure_http = true for a trusted offline dev/test link)",
+                        self.coordinator
+                    )
+                }
+            }
+            other => {
+                anyhow::bail!("coordinator URL scheme must be http or https, got {other:?}")
+            }
+        }
     }
 
     /// Load `path`, first writing a starter config if it's missing. Used only for the default
@@ -188,5 +245,32 @@ impl Config {
             .or_else(|| std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()))
             .or_else(|| std::env::var("COMPUTERNAME").ok().filter(|h| !h.is_empty()))
             .unwrap_or_else(|| "device".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate(url: &str, allow: bool) -> anyhow::Result<()> {
+        let toml =
+            format!("coordinator = \"{url}\"\nstate_dir = \"s\"\nallow_insecure_http = {allow}");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        cfg.validate_coordinator()
+    }
+
+    #[test]
+    fn coordinator_url_policy() {
+        // https and loopback http are always fine.
+        assert!(validate("https://coord.example.com", false).is_ok());
+        assert!(validate("http://127.0.0.1:8080", false).is_ok());
+        assert!(validate("http://localhost:8080", false).is_ok());
+        assert!(validate("http://[::1]:8080", false).is_ok());
+        // Plaintext http to a non-loopback host is refused unless explicitly opted in.
+        assert!(validate("http://10.0.0.1:8080", false).is_err());
+        assert!(validate("http://coord.example.com", false).is_err());
+        assert!(validate("http://10.0.0.1:8080", true).is_ok());
+        // Unsupported scheme.
+        assert!(validate("ftp://coord.example.com", false).is_err());
     }
 }

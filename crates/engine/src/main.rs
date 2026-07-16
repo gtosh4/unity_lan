@@ -241,8 +241,9 @@ async fn register_once(config: Option<String>) -> anyhow::Result<()> {
 
     let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
-    let (resp, device) = coord::register(
+    let (_resp, device) = coord::register(
         &cfg.coordinator,
+        &cfg.state_dir,
         wg_pubkey,
         cfg.device_name(),
         cfg.endpoint,
@@ -253,9 +254,7 @@ async fn register_once(config: Option<String>) -> anyhow::Result<()> {
         coord::RelayReport::default(),
     )
     .await?;
-
-    // Trust-on-first-use: pin the anchor, reject if it ever changes.
-    keys::pin_anchor(&cfg.state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
+    // `register` pins/verifies the anchor internally (trust-on-first-use, then rotation-chain).
 
     match device {
         None => tracing::warn!("registered, but hold no networks (no roles)"),
@@ -307,6 +306,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
     // The binding is now in place, so a register succeeds and confirms the device.
     let (_, device) = coord::register(
         &cfg.coordinator,
+        &cfg.state_dir,
         wg_pub,
         cfg.device_name(),
         cfg.endpoint,

@@ -1,6 +1,7 @@
 //! Coordinator client: register/refresh, verify our grant + seeds against the pinned anchor.
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::path::Path;
 
 use anyhow::{bail, Context};
 use common::api::{NetworkRef, RegisterReq, RegisterResp};
@@ -8,6 +9,8 @@ use common::attestation::verify_attestation;
 use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
 use common::wire::Signed;
+
+use crate::keys;
 
 /// Return the response if it's a success status, else read the body and bail with the
 /// coordinator's error. `what` names the route for the error message.
@@ -76,6 +79,7 @@ pub struct SeedPeer {
 #[allow(clippy::too_many_arguments)]
 pub async fn register(
     base_url: &str,
+    state_dir: &Path,
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
@@ -90,6 +94,7 @@ pub async fn register(
     // retires a prior pubkey we just re-keyed away from (no-op unless the token names a different key).
     post(
         base_url,
+        state_dir,
         "register",
         wg_pubkey,
         device_name,
@@ -111,6 +116,7 @@ pub async fn register(
 #[allow(clippy::too_many_arguments)]
 pub async fn refresh(
     base_url: &str,
+    state_dir: &Path,
     wg_pubkey: WgPublicKey,
     device_name: String,
     endpoint: Option<SocketAddr>,
@@ -124,6 +130,7 @@ pub async fn refresh(
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     post(
         base_url,
+        state_dir,
         "refresh",
         wg_pubkey,
         device_name,
@@ -143,6 +150,7 @@ pub async fn refresh(
 #[allow(clippy::too_many_arguments)]
 async fn post(
     base_url: &str,
+    state_dir: &Path,
     path: &str,
     wg_pubkey: WgPublicKey,
     device_name: String,
@@ -190,8 +198,15 @@ async fn post(
     let resp = ensure_ok(resp, path).await?;
     let resp: RegisterResp = resp.json().await.context("decoding RegisterResp")?;
 
+    // Trust gate: pin the anchor on first sight; on a change, accept it only if the rotation chain
+    // proves a signed path from our *pinned* anchor to the new one. A MITM that swaps `coord_pubkey`
+    // (and self-signs the seeds) is rejected here — before we trust any attestation in the response.
+    // Every register *and* refresh goes through this, so the pin holds in steady state, not just at
+    // first contact.
+    keys::pin_anchor(state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
+    let pinned = keys::load_anchor(state_dir)?;
     let anchor =
-        anchor_from_bytes(&resp.coord_pubkey).map_err(|e| anyhow::anyhow!("bad anchor: {e}"))?;
+        anchor_from_bytes(&pinned).map_err(|e| anyhow::anyhow!("bad pinned anchor: {e}"))?;
     let now = now_unix();
 
     let device = match &resp.grant {
@@ -265,10 +280,14 @@ pub async fn manage(
     resp.json().await.context("decoding ManageResp")
 }
 
-/// Verify the seeds in a response against its anchor → the co-members to peer with.
-pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
+/// Verify the seeds in a response against the **pinned** anchor → the co-members to peer with.
+/// The anchor comes from disk, not `resp.coord_pubkey`: the response was already gated through
+/// [`keys::pin_anchor`] in [`post`], so the pin on disk is the key we trust (re-pinned already if a
+/// valid rotation occurred). A response whose seeds are signed by any other key fails here.
+pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<Vec<SeedPeer>> {
+    let pinned = keys::load_anchor(state_dir)?;
     let anchor =
-        anchor_from_bytes(&resp.coord_pubkey).map_err(|e| anyhow::anyhow!("bad anchor: {e}"))?;
+        anchor_from_bytes(&pinned).map_err(|e| anyhow::anyhow!("bad pinned anchor: {e}"))?;
     let now = now_unix();
     let mut peers = Vec::new();
     for seed in &resp.seeds {
@@ -289,4 +308,81 @@ pub fn verified_seeds(resp: &RegisterResp) -> anyhow::Result<Vec<SeedPeer>> {
         });
     }
     Ok(peers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use common::api::{RegisterResp, Seed};
+    use common::attestation::Attestation;
+    use common::crypto::CoordinatorKey;
+
+    fn temp_state_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("unitylan-coord-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A seed attestation signed by `key` (attacker or honest coordinator).
+    fn seed_signed_by(key: &CoordinatorKey) -> Seed {
+        let now = now_unix();
+        let att = Attestation {
+            user_id: 7,
+            username: "eve".into(),
+            device_name: "box".into(),
+            is_primary: false,
+            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
+            wg_pubkey: [9u8; 32],
+            issued_at: now,
+            expires_at: now + common::ATTESTATION_TTL_SECS,
+        };
+        Seed {
+            attestation: Signed::sign(key, &att).unwrap().to_base64(),
+            community_name: "c".into(),
+            endpoint: None,
+            punch: None,
+            networks: Vec::new(),
+            relay: None,
+            ice: None,
+        }
+    }
+
+    /// Regression for the steady-state MITM: after we pin the honest anchor on first contact, a
+    /// later response that swaps `coord_pubkey` to an attacker key and self-signs its seeds with
+    /// that key must be rejected — seeds are verified against the PINNED anchor, not the anchor the
+    /// response carries. Before the fix, `verified_seeds` trusted `resp.coord_pubkey` and accepted
+    /// these forged peers.
+    #[test]
+    fn seeds_verified_against_pinned_not_response_anchor() {
+        let dir = temp_state_dir("pinned");
+        let honest = CoordinatorKey::generate();
+        let attacker = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, &honest.anchor_bytes(), &[]).unwrap();
+
+        // Attacker-substituted response: its own anchor + seeds self-signed by it.
+        let forged = RegisterResp {
+            coord_pubkey: attacker.anchor_bytes(),
+            rotation_chain: Vec::new(),
+            grant: None,
+            device_token: None,
+            seeds: vec![seed_signed_by(&attacker)],
+            version: 1,
+            networks: Vec::new(),
+            stun_addr: None,
+        };
+        assert!(
+            verified_seeds(&forged, &dir).is_err(),
+            "seeds signed by a non-pinned anchor must be rejected"
+        );
+
+        // Sanity: seeds legitimately signed by the pinned anchor still verify (coord_pubkey is
+        // irrelevant to the seed check — only the pin matters).
+        let honest_resp = RegisterResp {
+            seeds: vec![seed_signed_by(&honest)],
+            ..forged
+        };
+        assert!(verified_seeds(&honest_resp, &dir).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

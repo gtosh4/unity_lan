@@ -30,6 +30,7 @@ hickory-proto = "0.26.1"
 turn = "0.17"
 webrtc-util = "0.17"
 webrtc-ice = "0.17"
+async-trait = "0.1"
 surge-ping = "0.8"
 futures = "0.3"
 

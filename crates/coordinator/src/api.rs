@@ -2,10 +2,13 @@
 //! caller shares with the bot, for every registered network whose role they hold.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -79,6 +82,7 @@ pub struct RelayReg {
 }
 
 pub fn router(state: AppState) -> Router {
+    let limiter = Arc::new(Mutex::new(RateLimiter::new(Instant::now())));
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         // register and refresh share the same logic: issue grants, record presence, return seeds.
@@ -90,6 +94,82 @@ pub fn router(state: AppState) -> Router {
         .route("/oauth/pkce-config", get(oauth_pkce_config))
         .route("/oauth/complete", post(oauth_complete))
         .with_state(state)
+        // Rate-limit every route. The API is internet-facing and `/oauth/complete` is unauthenticated
+        // yet makes an outbound Discord call per request; without a bound it's a DoS + Discord-REST
+        // amplifier. Requires the connect-info make-service (see `main`) for the source IP.
+        .layer(middleware::from_fn_with_state(limiter, rate_limit))
+}
+
+/// Rate-limit window and caps for the HTTP API. Generous per-IP so a legitimate NAT'd herd of
+/// clients (all waking on one version bump) isn't throttled — long-pollers issue well under 1 req/s
+/// each — while a real flood (thousands/s) is refused. The global cap bounds total work regardless of
+/// source spoofing; the per-IP table is cleared every window and hard-capped so it can't grow
+/// unbounded. Tune `RL_MAX_PER_IP` up for deployments behind a large shared NAT.
+const RL_WINDOW: Duration = Duration::from_secs(1);
+const RL_MAX_PER_IP: u32 = 30;
+const RL_MAX_TOTAL: u32 = 500;
+const RL_MAX_TRACKED_IPS: usize = 65_536;
+
+/// A per-source + global windowed request counter, shared across handlers behind an `Arc<Mutex>`.
+struct RateLimiter {
+    window_start: Instant,
+    total: u32,
+    per_ip: HashMap<IpAddr, u32>,
+}
+
+impl RateLimiter {
+    fn new(now: Instant) -> Self {
+        Self {
+            window_start: now,
+            total: 0,
+            per_ip: HashMap::new(),
+        }
+    }
+
+    /// Whether to admit a request from `ip` at `now`, accounting it against the window if so.
+    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
+        if now.duration_since(self.window_start) >= RL_WINDOW {
+            self.window_start = now;
+            self.total = 0;
+            self.per_ip.clear();
+        }
+        if self.total >= RL_MAX_TOTAL {
+            return false;
+        }
+        match self.per_ip.get_mut(&ip) {
+            Some(count) if *count >= RL_MAX_PER_IP => return false,
+            Some(count) => *count += 1,
+            None => {
+                if self.per_ip.len() >= RL_MAX_TRACKED_IPS {
+                    return false; // table full this window — refuse unknown sources
+                }
+                self.per_ip.insert(ip, 1);
+            }
+        }
+        self.total += 1;
+        true
+    }
+}
+
+/// Axum middleware: refuse a request with `429 Too Many Requests` once the caller's source IP (or the
+/// deployment as a whole) exceeds the window budget. The source IP comes from `ConnectInfo`; if it's
+/// absent the request still counts against the global cap under the unspecified-address bucket.
+async fn rate_limit(
+    State(limiter): State<Arc<Mutex<RateLimiter>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let ip = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let admit = limiter.lock().unwrap().allow(ip, Instant::now());
+    if admit {
+        next.run(req).await
+    } else {
+        StatusCode::TOO_MANY_REQUESTS.into_response()
+    }
 }
 
 /// `POST /register` | `/refresh`: record presence + return the caller's grant and seeds.
@@ -351,8 +431,13 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // the victim's own co-members (the network trust boundary), instead of letting any authenticated
     // member redirect any device's punch target to an attacker-chosen address. A first sighting or a
     // roam (address change) bumps the version so a parked co-member wakes and picks up the target.
+    // The caller's co-members: every device it shares ≥1 network with. This is the trust boundary
+    // for all peer-keyed exchange tables below — the caller may only publish reflexive/relay/ICE
+    // state *about a peer it actually meshes with*. Without this gate an authenticated member could
+    // inject entries for arbitrary pubkeys, growing the tables unbounded and (since a novel entry
+    // bumps the version) waking the whole long-poll herd for free.
+    let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
     {
-        let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
         let mut refl = st.reflexive.lock().unwrap();
         for obs in accepted_reflexives(&req.observed, &comembers) {
             if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
@@ -390,6 +475,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     {
         let mut allocs = st.relay_allocs.lock().unwrap();
         for a in &req.relay_allocated {
+            // Only accept a relayed address for a peer the caller actually meshes with (mirrors the
+            // reflexive gate) — otherwise the map grows unbounded and each novel entry wakes the herd.
+            if !comembers.contains(&a.peer) {
+                continue;
+            }
             if allocs.get(&(req.wg_pubkey, a.peer)) != Some(&a.relayed) {
                 allocs.insert((req.wg_pubkey, a.peer), a.relayed);
                 changed = true;
@@ -404,6 +494,12 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     {
         let mut ice = st.ice.lock().unwrap();
         for e in &req.ice {
+            // Same co-member gate as reflexive/relay: an ICE offer is only accepted for a peer the
+            // caller shares a network with, so the map stays bounded and can't be used to force herd
+            // wakeups for arbitrary pubkeys.
+            if !comembers.contains(&e.peer) {
+                continue;
+            }
             if ice.get(&(req.wg_pubkey, e.peer)) != Some(&e.params) {
                 ice.insert((req.wg_pubkey, e.peer), e.params.clone());
                 changed = true;
@@ -767,8 +863,41 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_reflexives, punch_target, relay_target, should_supersede, RelayReg};
+    use super::{
+        accepted_reflexives, punch_target, relay_target, should_supersede, RateLimiter, RelayReg,
+        RL_MAX_PER_IP, RL_MAX_TOTAL, RL_WINDOW,
+    };
     use common::api::ObservedEndpoint;
+    use std::net::IpAddr;
+    use std::time::Instant;
+
+    #[test]
+    fn rate_limiter_per_ip_and_window_reset() {
+        let t0 = Instant::now();
+        let mut rl = RateLimiter::new(t0);
+        let ip: IpAddr = "203.0.113.5".parse().unwrap();
+        for _ in 0..RL_MAX_PER_IP {
+            assert!(rl.allow(ip, t0));
+        }
+        assert!(!rl.allow(ip, t0)); // over the per-IP cap
+        let other: IpAddr = "198.51.100.9".parse().unwrap();
+        assert!(rl.allow(other, t0)); // a different source is unaffected
+        assert!(rl.allow(ip, t0 + RL_WINDOW)); // a new window clears the counters
+    }
+
+    #[test]
+    fn rate_limiter_global_cap() {
+        let t0 = Instant::now();
+        let mut rl = RateLimiter::new(t0);
+        let mut allowed = 0u32;
+        for i in 0..(RL_MAX_TOTAL + 200) {
+            let ip = IpAddr::from([10, 0, (i >> 8) as u8, (i & 0xff) as u8]);
+            if rl.allow(ip, t0) {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, RL_MAX_TOTAL);
+    }
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().unwrap()

@@ -21,7 +21,7 @@ use interprocess::local_socket::GenericFilePath;
 #[cfg(windows)]
 use interprocess::local_socket::GenericNamespaced;
 use interprocess::local_socket::{ListenerOptions, Name};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{Notify, RwLock};
 
 use crate::coord::{self, SeedPeer, SelfDevice};
@@ -289,11 +289,24 @@ fn group_gid(name: &str) -> Option<u32> {
     }
 }
 
+/// Cap on a single control request. The socket is a privilege boundary (an unprivileged local
+/// client → the root daemon); bound the read so a client that never sends a newline can't grow the
+/// buffer unbounded and OOM the daemon. A control request is a one-line JSON `ControlRequest`,
+/// comfortably under this.
+const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+
 async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
+    let n = (&mut reader)
+        .take(MAX_REQUEST_BYTES)
+        .read_line(&mut line)
+        .await?;
+    if n == 0 {
         return Ok(());
+    }
+    if n as u64 >= MAX_REQUEST_BYTES {
+        anyhow::bail!("control request exceeds {MAX_REQUEST_BYTES}-byte cap");
     }
     let req: ControlRequest = serde_json::from_str(line.trim())?;
     let resp = match req {

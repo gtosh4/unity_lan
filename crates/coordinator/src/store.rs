@@ -46,6 +46,31 @@ pub fn match_device_by_name(devices: &[([u8; 32], String)], name: &str) -> Devic
     }
 }
 
+/// Restrict the SQLite DB (and its WAL/SHM sidecars, if present) to owner-only `0600`. Fatal on the
+/// main file — we must not leave the signing seed in a world-readable file; best-effort on the
+/// sidecars, which SQLite may not have created yet. No-op on non-unix (ACL model differs).
+#[cfg(unix)]
+fn restrict_db_perms(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let owner_only = || std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, owner_only())
+        .with_context(|| format!("restricting permissions on {}", path.display()))?;
+    for ext in ["-wal", "-shm"] {
+        let mut side = path.as_os_str().to_owned();
+        side.push(ext);
+        let side = std::path::PathBuf::from(side);
+        if side.exists() {
+            let _ = std::fs::set_permissions(&side, owner_only());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_db_perms(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 pub struct Store {
     pool: SqlitePool,
 }
@@ -59,6 +84,11 @@ impl Store {
             .connect_with(opts)
             .await
             .with_context(|| format!("opening sqlite {}", path.display()))?;
+        // The DB holds the Ed25519 signing seed — the deployment's entire trust anchor. SQLite
+        // creates the file at the process umask (commonly world-readable 0644); tighten it to
+        // owner-only before the seed is ever written. Anyone who can read this file can forge
+        // attestations for any user/role/ip/device.
+        restrict_db_perms(path)?;
         let store = Self { pool };
         store.migrate().await?;
         Ok(store)

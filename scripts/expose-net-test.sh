@@ -95,6 +95,7 @@ EOF
 node_toml() { # $1=name $2=iface $3=port $4=endpoint_ip $5=key
   cat >"$TMP/$1.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/$1"
 enrollment_key = "$5"
 device_name = "host-$1"

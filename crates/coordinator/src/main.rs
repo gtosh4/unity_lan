@@ -165,6 +165,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", cfg.bind))?;
     tracing::info!(addr = %cfg.bind, "coordinator listening");
-    axum::serve(listener, api::router(state)).await?;
+    // `into_make_service_with_connect_info` surfaces the peer address to the rate-limit middleware.
+    axum::serve(
+        listener,
+        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }

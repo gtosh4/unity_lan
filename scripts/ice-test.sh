@@ -138,6 +138,7 @@ EOF
 # A is reachable AND a relay. B and C advertise no endpoint → NAT'd, and isolated from each other.
 cat >"$TMP/a.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/a"
 enrollment_key = "key-a"
 device_name = "host-a"
@@ -149,10 +150,12 @@ upnp = false
 firewall = false
 relay = true
 relay_port = 3478
+relay_allow_private_dst = true
 refresh_secs = 2
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/b"
 enrollment_key = "key-b"
 device_name = "host-b"
@@ -165,6 +168,7 @@ refresh_secs = 2
 EOF
 cat >"$TMP/c.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
+allow_insecure_http = true
 state_dir = "$TMP/c"
 enrollment_key = "key-c"
 device_name = "host-c"
