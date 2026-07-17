@@ -673,3 +673,10 @@ elevated box. macOS `/etc/resolver` still deferred.
          between simultaneously-gamed meshes needs a **separate interface per mesh** — same broadcast
          constraint, different axis. Ship layer 1 only if direct-IP-by-hand is judged worth it on its
          own; otherwise treat the pair as one milestone gated on the relay.
+- [ ] **Peer-to-peer file sharing** — send/receive files directly between peers over the mesh, with
+      no Discord upload-size cap in the way. Rides the existing P2P tunnel + `.unity.internal` names
+      (transfer targets a peer by hostname/IP; the coordinator stays off the path — pure data plane,
+      north-star-clean). Firewall: a transfer needs an inbound listener, so either an ephemeral
+      auto-`expose` scoped to the sender's IP (torn down after) or a reserved port opened only to
+      co-members. Open scope: transport (a small QUIC/HTTP listener in the engine vs. an out-of-band
+      helper), sender/receiver consent UX in the GUI, and resumable/large-file chunking.
