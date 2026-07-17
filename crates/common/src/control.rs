@@ -240,11 +240,13 @@ pub struct UiDirective {
 pub enum UiAction {
     /// Switch the visible content tab.
     SelectTab(UiTab),
-    /// Open a peer's action menu (kebab dropdown), by the owner's Discord `user_id`.
-    OpenPeerMenu(u64),
+    /// Open a peer's action menu (kebab dropdown), by that device's WireGuard IP (menus are
+    /// per-device, since copy-hostname/IP are device-specific).
+    OpenPeerMenu(Ipv4Addr),
     /// Close any open peer menu.
     CloseMenu,
-    /// Arm the "block peer" confirm for a peer's owner (shows the inline confirm/cancel controls).
+    /// Arm the "block user" confirm for a peer's owner (opens the user-scoped block modal), by the
+    /// owner's Discord `user_id`.
     ArmBlockPeer(u64),
     /// Dismiss any armed confirm.
     Cancel,

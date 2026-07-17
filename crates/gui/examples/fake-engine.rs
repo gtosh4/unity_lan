@@ -72,12 +72,13 @@ struct State {
     script: Vec<(u64, UiAction)>,
 }
 
-/// The demo timeline: at each `at_secs` mark the GUI is told to do one UI action, once. Bob's
-/// owner `user_id` is 2001 (see [`fixture_peers`]). Tuned to loop-record cleanly in ~30s.
+/// The demo timeline: at each `at_secs` mark the GUI is told to do one UI action, once. The peer
+/// menu is keyed by device IP — Bob's desktop is 100.64.0.10 (see [`fixture_peers`]) — while a block
+/// acts on the owner (`user_id` 2001) and opens the user-scoped modal. Tuned to loop-record in ~30s.
 fn demo_script() -> Vec<(u64, UiAction)> {
     vec![
         (3, UiAction::SelectTab(UiTab::Peers)),
-        (8, UiAction::OpenPeerMenu(2001)),
+        (8, UiAction::OpenPeerMenu(Ipv4Addr::new(100, 64, 0, 10))),
         (12, UiAction::ArmBlockPeer(2001)),
         (16, UiAction::Cancel),
         (18, UiAction::CloseMenu),

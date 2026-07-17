@@ -14,6 +14,7 @@
 mod ctl;
 mod tray;
 
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,8 +27,8 @@ use common::control::{
 use iced::alignment::Vertical;
 use iced::font::Weight;
 use iced::widget::{
-    button, checkbox, column, container, horizontal_space, row, scrollable, svg, text, text_input,
-    toggler, tooltip, Column, Row, Text,
+    button, center, checkbox, column, container, horizontal_space, mouse_area, opaque, row,
+    scrollable, stack, svg, text, text_input, toggler, tooltip, Column, Row, Text,
 };
 use iced::window;
 use iced::{Color, Element, Font, Length, Subscription, Task, Theme};
@@ -92,7 +93,8 @@ fn dot<'a>(color: Color) -> Element<'a, Message> {
 const KEBAB_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>"##;
 
 /// The kebab button that opens a peer's action menu — a borderless icon that toggles the dropdown.
-fn kebab_button<'a>(user_id: u64) -> Element<'a, Message> {
+/// Keyed by the device's WireGuard IP so it opens only that device's menu (a user can own several).
+fn kebab_button<'a>(key: Ipv4Addr) -> Element<'a, Message> {
     let icon = svg(svg::Handle::from_memory(KEBAB_ICON))
         .width(Length::Fixed(16.0))
         .height(Length::Fixed(16.0))
@@ -100,7 +102,7 @@ fn kebab_button<'a>(user_id: u64) -> Element<'a, Message> {
     button(icon)
         .style(button::text)
         .padding(2)
-        .on_press(Message::ToggleMenu(user_id))
+        .on_press(Message::ToggleMenu(key))
         .into()
 }
 
@@ -129,13 +131,25 @@ fn menu_surface(theme: &Theme) -> container::Style {
 }
 
 /// A peer's action menu: a kebab button that opens a floating dropdown (copy hostname / copy IP /
-/// block). `open` drives whether the overlay is shown; a click outside dismisses it via `CloseMenu`.
-fn peer_menu<'a>(hostname: String, ip: String, user_id: u64, open: bool) -> Element<'a, Message> {
+/// block user). `open` drives whether the overlay is shown; a click outside dismisses it via
+/// `CloseMenu`. Copy actions are device-specific (this row's hostname/IP); "block user" acts on the
+/// owner (all their devices) and so arms the user-scoped block modal.
+fn peer_menu<'a>(
+    hostname: String,
+    ip: String,
+    key: Ipv4Addr,
+    user_id: u64,
+    username: String,
+    open: bool,
+) -> Element<'a, Message> {
     let menu = container(
         column![
             menu_item("copy hostname", Message::CopyText(hostname)),
             menu_item("copy IP", Message::CopyText(ip)),
-            menu_item("block", Message::AskConfirm(Confirm::BlockPeer(user_id))),
+            menu_item(
+                "block user",
+                Message::AskConfirm(Confirm::BlockPeer { user_id, username })
+            ),
         ]
         .spacing(2),
     )
@@ -145,11 +159,40 @@ fn peer_menu<'a>(hostname: String, ip: String, user_id: u64, open: bool) -> Elem
     // Anchor the menu below the kebab, extending left (right edge at the kebab) so it stays inside
     // the narrow window rather than spilling off the right edge. `width` sizes the overlay itself —
     // without it the overlay defaults to the kebab's width and the labels wrap to one char per line.
-    DropDown::new(kebab_button(user_id), menu, open)
+    DropDown::new(kebab_button(key), menu, open)
         .on_dismiss(Message::CloseMenu)
         .alignment(drop_down::Alignment::BottomStart)
         .width(Length::Fixed(160.0))
         .into()
+}
+
+/// Overlay `content` centered above `base`, dimming the rest of the window. A click on the dimmed
+/// backdrop sends `on_blur` (dismiss). Used for the block-user confirmation, which acts on a whole
+/// user rather than any single peer row and so doesn't belong inline in the list.
+fn modal<'a>(
+    base: impl Into<Element<'a, Message>>,
+    content: impl Into<Element<'a, Message>>,
+    on_blur: Message,
+) -> Element<'a, Message> {
+    stack![
+        base.into(),
+        opaque(
+            mouse_area(center(opaque(content)).style(|_theme| {
+                container::Style {
+                    background: Some(
+                        Color {
+                            a: 0.7,
+                            ..Color::BLACK
+                        }
+                        .into(),
+                    ),
+                    ..container::Style::default()
+                }
+            }))
+            .on_press(on_blur)
+        )
+    ]
+    .into()
 }
 
 /// Wrap a section's contents in a bordered, padded card so sections read as distinct groups
@@ -248,8 +291,9 @@ struct App {
     connect_busy: bool,
     /// A pending destructive action awaiting a second confirming click (remove device / log out).
     confirm: Option<Confirm>,
-    /// Which peer's action menu (kebab dropdown) is open, by owner `user_id`; `None` when closed.
-    menu_open: Option<u64>,
+    /// Which peer's action menu (kebab dropdown) is open, by that device's WireGuard IP; `None` when
+    /// closed.
+    menu_open: Option<Ipv4Addr>,
     /// Which content tab is showing (below the always-visible connection header).
     tab: Tab,
     /// The last action error, shown as a banner until the next action clears it.
@@ -282,8 +326,12 @@ enum Tab {
 enum Confirm {
     RemoveDevice(String),
     Logout,
-    /// Block a peer's owner, armed by the peer's `user_id`.
-    BlockPeer(u64),
+    /// Block a peer's owner (all their devices) — armed by `user_id`, shown as a modal. `username`
+    /// is carried for the modal's prompt.
+    BlockPeer {
+        user_id: u64,
+        username: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -350,8 +398,8 @@ enum Message {
     AskConfirm(Confirm),
     /// Dismiss the armed destructive action without running it.
     CancelConfirm,
-    /// Toggle a peer's action menu (kebab dropdown) open/closed, keyed by owner `user_id`.
-    ToggleMenu(u64),
+    /// Toggle a peer's action menu (kebab dropdown) open/closed, keyed by that device's WireGuard IP.
+    ToggleMenu(Ipv4Addr),
     /// Close any open peer action menu (a click landed outside it).
     CloseMenu,
     /// Dismiss the current error banner.
@@ -408,11 +456,20 @@ impl App {
                     UiTab::Manage => Tab::Manage,
                 }
             }
-            UiAction::OpenPeerMenu(id) => self.menu_open = Some(*id),
+            UiAction::OpenPeerMenu(ip) => self.menu_open = Some(*ip),
             UiAction::CloseMenu => self.menu_open = None,
             UiAction::ArmBlockPeer(id) => {
                 self.menu_open = None;
-                self.confirm = Some(Confirm::BlockPeer(*id));
+                let username = s
+                    .peers
+                    .iter()
+                    .find(|p| p.user_id == *id)
+                    .map(|p| p.username.clone())
+                    .unwrap_or_default();
+                self.confirm = Some(Confirm::BlockPeer {
+                    user_id: *id,
+                    username,
+                });
             }
             UiAction::Cancel => self.confirm = None,
         }
@@ -707,7 +764,72 @@ impl App {
             .push_maybe(self.error.as_deref().map(error_banner))
             .push(sections)
             .padding(20);
-        scrollable(body).into()
+        let content = scrollable(body);
+        // Blocking acts on a whole user (all their devices), so it confirms in a modal rather than
+        // inline on any one peer row.
+        match &self.confirm {
+            Some(Confirm::BlockPeer { user_id, username }) => modal(
+                content,
+                self.block_modal(*user_id, username),
+                Message::CancelConfirm,
+            ),
+            _ => content.into(),
+        }
+    }
+
+    /// The block-user confirmation modal: names the owner and lists every device of theirs currently
+    /// in the mesh (so the user sees the full blast radius), then confirm/cancel.
+    fn block_modal(&self, user_id: u64, username: &str) -> Element<'_, Message> {
+        let devices: Vec<&str> = self
+            .status
+            .as_ref()
+            .map(|s| {
+                s.peers
+                    .iter()
+                    .filter(|p| p.user_id == user_id)
+                    .map(|p| p.hostname.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut list = Column::new().spacing(2);
+        for d in &devices {
+            list = list.push(muted(format!("• {d}")));
+        }
+        let devices_block: Element<'_, Message> = if devices.is_empty() {
+            muted("They have no devices in the mesh right now.").into()
+        } else {
+            list.into()
+        };
+        let dialog = column![
+            header("block user"),
+            text(format!(
+                "Block {username}? This drops all their devices from your mesh and refuses to peer \
+                 with them until you un-block. It's local — they aren't notified and stay in your \
+                 shared networks."
+            ))
+            .size(14),
+            devices_block,
+            row![
+                horizontal_space(),
+                button(text("cancel").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::CancelConfirm),
+                button(text("block user").size(13))
+                    .style(button::danger)
+                    .on_press(Message::BlockPeer {
+                        user_id,
+                        username: username.to_string(),
+                    }),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+        ]
+        .spacing(14);
+        container(dialog)
+            .padding(20)
+            .max_width(360)
+            .style(container::rounded_box)
+            .into()
     }
 
     /// The three-tab selector under the connection header. Active tab is the loud primary style,
@@ -940,30 +1062,21 @@ impl App {
                     peer_menu(
                         p.hostname.clone(),
                         p.wg_ip.to_string(),
+                        p.wg_ip,
                         p.user_id,
-                        self.menu_open == Some(p.user_id),
+                        p.username.clone(),
+                        self.menu_open == Some(p.wg_ip),
                     ),
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
                 // Second line: the status label (same color as the dot, never contradicting it).
-                // Blocking a peer is chosen from the kebab menu — it arms an inline confirm here
-                // rather than acting immediately, keeping the destructive action a two-step.
-                let mut status_line = row![text(slabel).size(13).color(sc).width(Length::Fill)]
+                // Blocking is chosen from the kebab menu ("block user") — it acts on the owner, not
+                // this device, so it opens a user-scoped modal (see `block_modal`) rather than a
+                // per-row confirm.
+                let status_line = row![text(slabel).size(13).color(sc).width(Length::Fill)]
                     .spacing(8)
                     .align_y(Vertical::Center);
-                if self.confirm == Some(Confirm::BlockPeer(p.user_id)) {
-                    status_line = status_line
-                        .push(
-                            button(text("confirm block").size(13))
-                                .style(button::danger)
-                                .on_press(Message::BlockPeer {
-                                    user_id: p.user_id,
-                                    username: p.username.clone(),
-                                }),
-                        )
-                        .push(button(text("cancel").size(13)).on_press(Message::CancelConfirm));
-                }
                 // Telemetry line: latency (last ICMP RTT, only meaningful while up) + transfer totals.
                 let mut metrics = Row::new().spacing(10).align_y(Vertical::Center);
                 if p.up {
