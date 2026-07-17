@@ -17,6 +17,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -24,7 +25,9 @@ use windows_service::service::{
     ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
     ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
-use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+use windows_service::service_control_handler::{
+    self, ServiceControlHandlerResult, ServiceStatusHandle,
+};
 use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 use windows_service::{define_windows_service, service_dispatcher};
 
@@ -153,11 +156,14 @@ fn uninstall() -> Result<()> {
         )
         .context("opening the service (is it installed?)")?;
 
-    // Ask it to stop, then wait briefly so `delete` doesn't leave a marked-for-deletion service
-    // lingering until the next reboot.
+    // Ask it to stop, then wait for it to actually stop so `delete` doesn't hit a still-running
+    // service (which marks it for deletion until the next reboot — and then blocks a reinstall's
+    // `service install` with ERROR_SERVICE_MARKED_FOR_DELETE). The window matches the stop wait hint
+    // the service reports (see `run_service`), since a clean stop tears down the interface, firewall,
+    // and NRPT resolver first.
     if service.query_status()?.current_state != ServiceState::Stopped {
         let _ = service.stop();
-        let deadline = Instant::now() + Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
             if service.query_status()?.current_state == ServiceState::Stopped {
                 break;
@@ -240,9 +246,31 @@ fn run_service() -> Result<()> {
 
     let (trigger, shutdown) = shutdown::channel();
 
+    // The status handle, shared into the control handler so a Stop can report STOP_PENDING before
+    // the daemon runs its teardown. Populated right after `register` returns (below) — well before
+    // any control can arrive, since we announce Running only afterwards.
+    let status_slot: Arc<OnceLock<ServiceStatusHandle>> = Arc::new(OnceLock::new());
+    let handler_slot = Arc::clone(&status_slot);
+
     // Translate the SCM Stop/Shutdown controls into our latched shutdown signal.
     let event_handler = move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
+            // Teardown on shutdown (remove the WG adapter, reset the firewall, revert the NRPT
+            // resolver) takes seconds. Report STOP_PENDING with a wait hint so the SCM / services.msc
+            // / the MSI's `service uninstall` wait for it instead of treating the still-Running
+            // service as hung (and, in the uninstall case, deleting it mid-stop → marked-for-delete,
+            // which would then fail the reinstall's `service install`).
+            if let Some(h) = handler_slot.get() {
+                let _ = h.set_service_status(ServiceStatus {
+                    service_type: SERVICE_TYPE,
+                    current_state: ServiceState::StopPending,
+                    controls_accepted: ServiceControlAccept::empty(),
+                    exit_code: ServiceExitCode::Win32(0),
+                    checkpoint: 0,
+                    wait_hint: Duration::from_secs(30),
+                    process_id: None,
+                });
+            }
             trigger.trigger();
             ServiceControlHandlerResult::NoError
         }
@@ -251,6 +279,7 @@ fn run_service() -> Result<()> {
     };
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
         .context("registering the service control handler")?;
+    let _ = status_slot.set(status_handle);
 
     let set_state = |state: ServiceState, accepted: ServiceControlAccept| -> Result<()> {
         status_handle
