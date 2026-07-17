@@ -16,9 +16,10 @@ const DESC: &str = "UnityLAN";
 const LEASE_SECS: u32 = 3600;
 
 /// Map `port` (UDP) through the local IGD gateway and return the external `ip:port` peers can dial.
-/// Spawns a background task that renews the lease at half-life for as long as the daemon runs.
+/// Spawns a background task that renews the lease at half-life for as long as the daemon runs, and
+/// deletes the mapping on `shutdown` so a clean stop leaves no stale forward at the router.
 /// Best-effort: any failure returns `Err` and the caller falls back to advertising no endpoint.
-pub async fn map_port(port: u16) -> Result<SocketAddr> {
+pub async fn map_port(port: u16, shutdown: crate::shutdown::Shutdown) -> Result<SocketAddr> {
     let gateway = igd::search_gateway(SearchOptions {
         // Bound the SSDP wait so a gateway-less network fails fast rather than hanging startup.
         timeout: Some(Duration::from_secs(3)),
@@ -44,17 +45,27 @@ pub async fn map_port(port: u16) -> Result<SocketAddr> {
         .context("reading external IP")?;
     let endpoint = SocketAddr::new(external_ip, port);
 
-    // Renew at half-life so the mapping never lapses while the daemon is up.
+    // Renew at half-life so the mapping never lapses while the daemon is up; on shutdown, delete it
+    // so a clean stop leaves no stale forward (a crash still self-cleans when the finite lease lapses).
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs((LEASE_SECS / 2) as u64));
         tick.tick().await; // the first tick fires immediately; skip it (we just mapped)
         loop {
-            tick.tick().await;
-            if let Err(e) = gateway
-                .add_port(PortMappingProtocol::UDP, port, local, LEASE_SECS, DESC)
-                .await
-            {
-                tracing::warn!("UPnP lease renewal failed: {e:#}");
+            tokio::select! {
+                _ = shutdown.wait() => {
+                    if let Err(e) = gateway.remove_port(PortMappingProtocol::UDP, port).await {
+                        tracing::warn!("UPnP: removing port mapping on shutdown: {e:#}");
+                    }
+                    return;
+                }
+                _ = tick.tick() => {
+                    if let Err(e) = gateway
+                        .add_port(PortMappingProtocol::UDP, port, local, LEASE_SECS, DESC)
+                        .await
+                    {
+                        tracing::warn!("UPnP lease renewal failed: {e:#}");
+                    }
+                }
             }
         }
     });

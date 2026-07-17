@@ -114,7 +114,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // public addr); otherwise try UPnP-IGD to map our port; otherwise none (rely on being dialed).
     let endpoint = match cfg.endpoint {
         Some(e) => Some(e),
-        None if cfg.upnp => match crate::nat::map_port(cfg.listen_port).await {
+        None if cfg.upnp => match crate::nat::map_port(cfg.listen_port, shutdown.clone()).await {
             Ok(ep) => {
                 tracing::info!(endpoint = %ep, "UPnP: mapped external endpoint");
                 Some(ep)
@@ -476,8 +476,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 since
             };
             let refreshed = tokio::select! {
-                // Clean shutdown: tear down the firewall so no stale default-deny rules linger.
+                // Clean shutdown: reverse every host mutation so a stop leaves no trace — destroy the
+                // interface, tear down the firewall, revert the resolver. (UPnP unmaps via its own
+                // shutdown-aware task.)
                 _ = shutdown.wait() => {
+                    if let Err(e) = backend.down() {
+                        tracing::warn!("interface down on shutdown: {e:#}");
+                    }
                     if let Some(fw) = &fw {
                         if let Err(e) = fw.reset() {
                             tracing::warn!("firewall reset on shutdown: {e:#}");

@@ -134,6 +134,18 @@ pub fn clear_enrollment(state_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Wipe *all* local engine state — WG key, token, pinned anchors, relay secret, and local settings —
+/// by removing the state dir. Unlike [`clear_enrollment`] (logout, keeps the pinned anchors), this
+/// is the "forget me" path for `uninstall --purge` / a package purge: nothing about this device's
+/// identity or trust survives. A missing dir is not an error.
+pub fn purge_state(state_dir: &Path) -> anyhow::Result<()> {
+    match std::fs::remove_dir_all(state_dir) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context(format!("wiping state dir {}", state_dir.display())),
+    }
+}
+
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     std::fs::write(path, bytes)?;
     #[cfg(unix)]

@@ -139,7 +139,10 @@ fn relax_acl() -> Result<()> {
     Ok(())
 }
 
-/// Stop (best-effort) and delete the service.
+/// Stop (best-effort) and delete the service. Stopping triggers the SCM Stop control, which latches
+/// the daemon's shutdown signal (see `run_service`) so it reverts the interface, firewall, and NRPT
+/// resolver on the way out — this leaves the host clean without deleting local state. To also wipe
+/// device identity from `%ProgramData%\UnityLAN`, run `unitylan-engine uninstall --purge`.
 fn uninstall() -> Result<()> {
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("opening the service manager (run this from an elevated/Administrator shell)")?;

@@ -76,6 +76,16 @@ enum Cmd {
         name: String,
         ip: Ipv4Addr,
     },
+    /// Un-enroll this device at the coordinator; with `--purge`, also wipe all local state (keys,
+    /// token, pinned anchors) — the "forget me" teardown a package purge invokes. Stop the daemon
+    /// first (it reverts the interface/firewall/DNS on shutdown); this handles the coordinator + disk.
+    Uninstall {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+        /// Also delete local state (device identity). Without this, state is kept for reinstall.
+        #[arg(long)]
+        purge: bool,
+    },
     /// Install this platform's OS resolver hook.
     ResolverInstall { iface: String, server: SocketAddr },
     /// Revert this platform's OS resolver hook.
@@ -230,6 +240,9 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             daemon::run(cfg, shutdown).await
         }
         Some(Cmd::Ctl { sub }) => ctl(sub).await,
+        Some(Cmd::Uninstall { config, purge }) => {
+            uninstall(load_config(Some(config))?, purge).await
+        }
         Some(Cmd::Login { config }) => login(load_config(config)?).await,
         None => register_once(cli.config).await,
     }
@@ -269,6 +282,37 @@ async fn register_once(config: Option<String>) -> anyhow::Result<()> {
                 d.networks.join(", ")
             );
         }
+    }
+    Ok(())
+}
+
+/// `uninstall [config] [--purge]` — un-enroll this device at the coordinator (so its row doesn't
+/// linger until presence-timeout) and, with `--purge`, wipe all local state. Host mutations (the WG
+/// interface, firewall, DNS) are reverted by the daemon's own clean shutdown, so this only needs the
+/// coordinator + disk. Un-enroll is best-effort: reads the persisted token and asks the coordinator
+/// to drop this device; a re-key on any later run would supersede it anyway, so a failure here just
+/// leaves an orphaned row to expire.
+async fn uninstall(cfg: Config, purge: bool) -> anyhow::Result<()> {
+    match keys::load_token(&cfg.state_dir) {
+        Some(token) => {
+            let op = common::api::ManageOp::Remove {
+                device_name: cfg.device_name(),
+            };
+            match coord::manage(&cfg.coordinator, token, op).await {
+                Ok(_) => println!("Un-enrolled device at the coordinator."),
+                Err(e) => eprintln!("warning: coordinator un-enroll failed (continuing): {e:#}"),
+            }
+        }
+        None => println!("No local token — nothing to un-enroll."),
+    }
+    if purge {
+        keys::purge_state(&cfg.state_dir)?;
+        println!("Wiped local state at {}.", cfg.state_dir.display());
+    } else {
+        println!(
+            "Kept local state (device identity) at {} — pass --purge to wipe it.",
+            cfg.state_dir.display()
+        );
     }
     Ok(())
 }

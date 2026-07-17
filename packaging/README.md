@@ -179,7 +179,7 @@ To support another init system, add its unit under `init/<system>/` and referenc
 ```
 init/systemd/unitylan-engine.service   systemd unit (root; CAP_NET_ADMIN + CAP_NET_BIND_SERVICE)
 config/engine.toml                     installed to /etc/unitylan/engine.toml (config, noreplace)
-scripts/engine-*.sh                    maintainer scripts (daemon-reload, stop/disable on remove)
+scripts/engine-*.sh                    maintainer scripts (daemon-reload, stop/disable on remove, wipe state on purge)
 gui/unitylan-gui.desktop               desktop launcher (points at /run/unitylan/control.sock)
 nfpm/engine.yaml, nfpm/desktop.yaml    package specs → deb + rpm
 docker/coordinator.Dockerfile          coordinator image
@@ -218,3 +218,31 @@ The wireguard-nt DLL ships inside the MSI at
 `Program Files\UnityLAN\resources-windows\binaries\wireguard-amd64.dll` — defguard loads it by that
 path relative to the engine exe, and the service pins its working directory to the install folder so
 it resolves. Uninstalling (Add/Remove Programs) stops and removes the service.
+
+## Uninstall & cleanup
+
+Host mutations are made at **runtime** by the daemon, not at install, so uninstall cleanup hinges on
+stopping the daemon cleanly: on shutdown it **destroys the WireGuard interface, tears down the
+nftables firewall, reverts the resolver, and removes any UPnP port mapping** — the host is left as it
+was before the engine ran. A crash skips this, but the interface (userspace TUN) dies with the
+process, the firewall/NRPT are replaced idempotently on next start, and the UPnP lease is finite.
+
+**Linux.** `remove` keeps local state so a reinstall keeps the device's identity/IP; `purge` wipes it:
+
+```sh
+sudo systemctl disable --now unitylan-engine   # (the preremove script also does this)
+sudo apt remove unitylan                        # host reverted on stop; keeps /var/lib/unitylan
+sudo apt purge unitylan                         # also deletes /var/lib/unitylan (keys, token, anchors)
+```
+
+The package's device row at the coordinator is left to expire on presence-timeout. To un-enroll it
+**actively** (and optionally wipe state) — the "forget me" path — run before removing:
+
+```sh
+sudo unitylan uninstall /etc/unitylan/engine.toml            # un-enroll at the coordinator, keep state
+sudo unitylan uninstall /etc/unitylan/engine.toml --purge    # un-enroll and wipe local state
+```
+
+**Windows.** Uninstalling via Add/Remove Programs stops the service — which runs the same host
+teardown — then removes it. Local state under `%ProgramData%\UnityLAN` is kept for reinstall; to
+un-enroll and wipe it, run `unitylan-engine uninstall --purge` from an elevated shell first.
