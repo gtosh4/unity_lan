@@ -15,6 +15,10 @@ alice@laptop  ~ $  ssh nas.bob.mycommunity.unity.internal
 bob@nas       ~ $
 ```
 
+<p align="center">
+  <img src="assets/demo.gif" alt="UnityLAN desktop app: live mesh status, peers, and per-network peering" width="400">
+</p>
+
 ---
 
 ## What it actually is
@@ -25,16 +29,17 @@ bob@nas       ~ $
 - **Membership = Discord roles.** An admin registers a Discord role as a *network* with a slash
   command (`/unitylan network add`). Holding the role gets you in; a role change in Discord takes
   effect on the mesh within seconds.
-- **Self-hosted control plane.** You run a small **coordinator** service (one Docker container). It
-  authenticates people against Discord, hands out addresses, and helps peers find each other — then
-  gets out of the way. It **carries no traffic and holds no one's private keys.**
+- **A lightweight control plane.** A **coordinator** authenticates people against Discord, hands out
+  addresses, and helps peers find each other — then gets out of the way. Use the **hosted canonical
+  instance** (just invite its bot to your server) or **self-host** your own (one Docker container).
+  Either way it **carries no traffic and holds no one's private keys.**
 - **Human-readable names.** Machines get DNS names like
   `laptop.alice.mycommunity.unity.internal` (or just `alice.mycommunity.unity.internal` for a
   member's primary device) instead of raw IPs.
 
 If you know Tailscale: it's the same *shape* (control plane + P2P WireGuard data plane), but the
-identity source is **your own Discord server** and the coordinator is **yours to host** — no
-third-party account, no company in the middle.
+identity source is **your own Discord server** — no third-party account, no company in the middle.
+Use the project's hosted coordinator, or run your own if you'd rather hold the trust anchor.
 
 ## Why you might want it
 
@@ -52,9 +57,6 @@ Being upfront so you can decide before installing:
 
 - **Pre-1.0.** UnityLAN works end-to-end (Linux and Windows), but it's young software. Treat it as
   such.
-- **You must run the coordinator.** Enforcing *someone else's* Discord role requires a bot reading
-  the guild members API, so a small self-hosted server is unavoidable. It's one container, but it's
-  not zero.
 - **NAT traversal is still maturing.** Direct hole-punching works for common (cone) NATs today; a
   ciphertext-only relay fallback for the hardest CGNAT/symmetric-NAT cases is on the roadmap, not
   shipped. Most home connections are fine.
@@ -64,8 +66,8 @@ Being upfront so you can decide before installing:
 
 ## How it works (the 60-second version)
 
-1. **You host a coordinator** and point its bot at your Discord server. It generates one Ed25519
-   signing key — the trust anchor for your whole mesh.
+1. **A coordinator watches your Discord server** — invite the hosted bot, or self-host your own. It
+   holds one Ed25519 signing key: the trust anchor for your whole mesh.
 2. **A member installs the client** (a privileged background *engine* + an unprivileged desktop
    *GUI*, à la Tailscale) and logs in with Discord.
 3. The coordinator checks their roles and issues a **short-lived, signed attestation** — a token
@@ -106,14 +108,22 @@ full install steps live in [`packaging/README.md`](packaging/README.md).
 - **Headless game server:** install the `unitylan` package (engine + CLI, no graphics libs) and
   enroll with a one-time key — no Discord client needed on the box.
 
-## Host a coordinator
+## Get a coordinator
 
-One container. You'll need a Discord app with a bot token (Server Members Intent on) and a place to
-run it behind HTTPS. Full walkthrough — Discord setup, config, `docker run`, TLS, backups — is in
+**Easiest — use the hosted instance.** A canonical coordinator + bot is up and free to use.
+[Invite the bot](https://discord.com/oauth2/authorize?client_id=1525265707821170818) to your Discord
+server, then run `/unitylan network add <role>` —
+nothing to host. Point clients at `https://coordinator.unitylan.com`. You're trusting that instance to gate
+access to your mesh (it still never sees your traffic or your keys); self-host if you'd rather hold
+the trust anchor yourself.
+
+**Full control — self-host.** One container. You'll need a Discord app with a bot token (Server
+Members Intent on) and a place to run it behind HTTPS. Full walkthrough — Discord setup, config,
+`docker run`, TLS, backups — is in
 [**Host the coordinator**](packaging/README.md#host-the-coordinator-server).
 
-> The coordinator's database holds your deployment's signing key. **Back it up.** If you lose it,
-> every enrolled peer's pinned trust anchor breaks and everyone re-enrolls.
+> A self-hosted coordinator's database holds your deployment's signing key. **Back it up.** If you
+> lose it, every enrolled peer's pinned trust anchor breaks and everyone re-enrolls.
 
 Discord app details: [`docs/discord-setup.md`](docs/discord-setup.md).
 
