@@ -300,6 +300,9 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 for (g, r) in st.presence.networks_of(&old_pubkey) {
                     changed |= st.presence.evict(g, r, &old_pubkey);
                 }
+                // …and from the per-user own-device set, so a re-keyed device's siblings prune the
+                // retired pubkey immediately rather than waiting for the reaper.
+                changed |= st.presence.evict_self(owner, &old_pubkey);
             }
         }
     }
@@ -420,6 +423,30 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
+    // Own-device peering: record this device in the per-user online set (independent of networks) so
+    // its siblings can seed it even with no shared enabled network. Gated on the client opting in
+    // (`peer_own_devices`, default on), not being paused, and holding an identity (≥1 role → a grant
+    // is issued below; without one there's no anchor to attest a sibling under). Evict in every other
+    // case so an opt-out / pause / role-loss withdraws this device from its siblings' seeds.
+    let has_identity = !networks_status.is_empty();
+    if req.peer_own_devices && !req.paused && has_identity {
+        changed |= st.presence.record_self(
+            user_id,
+            MemberPresence {
+                pubkey: req.wg_pubkey,
+                ip,
+                user_id,
+                username: username.clone(),
+                device_name: device_name.clone(),
+                is_primary,
+                endpoint: req.endpoint,
+            },
+            now,
+        );
+    } else {
+        changed |= st.presence.evict_self(user_id, &req.wg_pubkey);
+    }
+
     // Every guild the caller holds a role in (enabled or not). Drives the self-grant attestations
     // and the response anchors; peers' shared guilds are a subset of this, so it covers them too.
     let grant_guilds: BTreeSet<u64> = networks_status.iter().map(|n| n.guild_id).collect();
@@ -476,6 +503,20 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
                 entry.1.push(net.clone());
             }
             entry.2.insert(*guild_id);
+        }
+    }
+    // Own-device peering: fold in the caller's other online devices (same user) not already seeded
+    // via a shared network. They carry no `SharedNetwork` (they share none) and are attested under
+    // the caller's own guilds — same user → identical guild membership → the caller already pins each
+    // anchor, so every attestation verifies. Guarded on the caller opting in *and* holding an identity
+    // (`grant_guilds` non-empty), since each seed needs ≥1 guild-signed attestation or the client
+    // rejects the whole batch. `or_insert_with` keeps a sibling already present via a shared network
+    // (its narrower shared-guild set stands).
+    if req.peer_own_devices && has_identity {
+        for mp in st.presence.others_of_user(user_id, &req.wg_pubkey) {
+            by_pubkey
+                .entry(mp.pubkey)
+                .or_insert_with(|| (mp, Vec::new(), grant_guilds.clone()));
         }
     }
     // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device

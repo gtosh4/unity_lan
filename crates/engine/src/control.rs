@@ -85,6 +85,11 @@ pub fn set_disable_new(shared: &Shared, disable: bool) {
     shared.send_if_modified(|s| std::mem::replace(&mut s.disable_new_networks, disable) != disable);
 }
 
+/// Set the own-device-peering flag the daemon reports, so the GUI reflects it without a full refresh.
+pub fn set_peer_own(shared: &Shared, enabled: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.peer_own_devices, enabled) != enabled);
+}
+
 /// Overlay coordinator reachability without rebuilding the snapshot — the mesh runs from cache when
 /// a refresh fails, so this flags the health of the last coordinator contact.
 pub fn set_coord_online(shared: &Shared, online: bool) {
@@ -123,6 +128,7 @@ pub fn update(
     blocked: &HashMap<u64, String>,
     connected: bool,
     disable_new_networks: bool,
+    peer_own_devices: bool,
     coordinator_online: bool,
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
@@ -169,6 +175,7 @@ pub fn update(
         needs_login: false, // a device present means we're enrolled
         connected,
         disable_new_networks,
+        peer_own_devices,
         identity: Some(device.username.clone()),
         coordinator_online,
         blocked: blocked_list(blocked),
@@ -535,6 +542,18 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
         }
+        // Own-device peering toggle: update the local policy (persisted, source of truth). Wakes the
+        // daemon to re-register — the coordinator adds/evicts this device from its siblings' seeds —
+        // then re-mesh. Mirror it into the live status so the GUI reflects it at once.
+        ControlRequest::SetOwnDevicePeering { enabled } => {
+            match ctx.localnet.set_peer_own_devices(enabled) {
+                Ok(_) => {
+                    set_peer_own(&ctx.status, enabled);
+                    ControlResponse::Status(ctx.status.borrow().clone())
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
         // Apply the staged auto-update. The daemon verified the coordinator's signed manifest against
         // the pinned anchor and staged a platform-matching artifact; here we ack immediately, then a
         // background task downloads + re-verifies (SHA-256) + applies, after which the engine restarts
@@ -710,6 +729,18 @@ pub async fn client_set_network(
         )
         .await?,
         ControlResponse::Network
+    )
+}
+
+/// Client: toggle whether this device always peers with the owner's own other devices. Returns the
+/// updated status.
+pub async fn client_set_own_device_peering(
+    endpoint: &str,
+    enabled: bool,
+) -> anyhow::Result<StatusReport> {
+    expect_resp!(
+        request(endpoint, &ControlRequest::SetOwnDevicePeering { enabled }).await?,
+        ControlResponse::Status
     )
 }
 

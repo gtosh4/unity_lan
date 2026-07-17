@@ -51,6 +51,12 @@ pub enum ControlRequest {
     SetNewNetworkDefault {
         disable: bool,
     },
+    /// Set whether this device always peers with the owner's own other devices (same Discord user),
+    /// even when they share no enabled network. Handled locally (persisted, source of truth); rides
+    /// to the coordinator on the next register/refresh. Returns the updated [`StatusReport`].
+    SetOwnDevicePeering {
+        enabled: bool,
+    },
     /// Log out: tear down the mesh (drop every peer, bring the interface down), un-enroll this
     /// device at the coordinator, and discard the local key + token so the next enrollment uses a
     /// fresh key. The daemon stays resident and returns to the not-logged-in state (`needs_login`).
@@ -187,6 +193,11 @@ pub struct StatusReport {
     /// secure default is `true`; the GUI toggles it via `SetNewNetworkDefault`.
     #[serde(default = "default_true")]
     pub disable_new_networks: bool,
+    /// Whether this device always peers with the owner's own other devices, regardless of shared
+    /// networks. The default is `true`; the GUI toggles it via `SetOwnDevicePeering`. Defaults to
+    /// `true` when absent (an older daemon) so the GUI shows the feature as on.
+    #[serde(default = "default_true")]
+    pub peer_own_devices: bool,
     /// The Discord identity this device is enrolled as (the owner's handle). `None` before login.
     #[serde(default)]
     pub identity: Option<String>,

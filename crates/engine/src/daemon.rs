@@ -36,7 +36,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
-    let localnet = Arc::new(LocalNet::load(&cfg.state_dir, cfg.disable_new_networks));
+    let localnet = Arc::new(LocalNet::load(
+        &cfg.state_dir,
+        cfg.disable_new_networks,
+        cfg.peer_own_devices,
+    ));
 
     let token = Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
     // This device's WG public key, shared with the control socket so interactive login binds the
@@ -563,6 +567,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     localnet.as_refs(),
                     observed.clone(),
                     localnet.is_paused(),
+                    localnet.peer_own_devices(),
                     relay_iter,
                     ice_offers.clone(),
                 ) => r,
@@ -735,6 +740,7 @@ async fn apply_state(
             &blocked,
             !paused,
             localnet.disable_new(),
+            localnet.peer_own_devices(),
             coord_online,
         );
     }
@@ -878,6 +884,7 @@ async fn register_until_ready(
                 localnet.as_refs(),
                 supersede.clone(),
                 localnet.is_paused(),
+                localnet.peer_own_devices(),
                 relay.clone(),
             ) => r,
         };

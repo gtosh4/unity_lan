@@ -421,6 +421,10 @@ enum Message {
     SetNewNetworkDefault(bool),
     /// The new-network default was set → the daemon returns the updated status.
     NewNetworkDefaultSet(Result<StatusReport, String>),
+    /// Set whether this device always peers with the owner's own other devices.
+    SetOwnDevicePeering(bool),
+    /// Own-device peering was set → the daemon returns the updated status.
+    OwnDevicePeeringSet(Result<StatusReport, String>),
     /// Locally block a peer's owner (all their devices) by Discord `user_id`.
     BlockPeer {
         user_id: u64,
@@ -667,6 +671,17 @@ impl App {
                 self.error = None;
             }
             Message::NewNetworkDefaultSet(Err(e)) => self.error = Some(e),
+            Message::SetOwnDevicePeering(enabled) => {
+                return Task::perform(
+                    ctl::set_own_device_peering(self.socket.clone(), enabled),
+                    Message::OwnDevicePeeringSet,
+                )
+            }
+            Message::OwnDevicePeeringSet(Ok(s)) => {
+                self.status = Some(s);
+                self.error = None;
+            }
+            Message::OwnDevicePeeringSet(Err(e)) => self.error = Some(e),
             Message::BlockPeer { user_id, username } => {
                 self.confirm = None; // consume the armed confirmation
                 return Task::perform(
@@ -1291,6 +1306,13 @@ impl App {
             .on_toggle(Message::SetNewNetworkDefault)
             .size(16)
             .text_size(14);
+        // Own-device peering: always reach the owner's other devices, regardless of networks. On by
+        // default; sits alongside the new-network policy as a section-wide setting.
+        let own_devices = self.status.as_ref().is_none_or(|s| s.peer_own_devices);
+        let own_policy = checkbox("Always peer with my own devices", own_devices)
+            .on_toggle(Message::SetOwnDevicePeering)
+            .size(16)
+            .text_size(14);
         let inner: Element<'_, Message> = if nets.is_empty() {
             muted("No networks discovered yet.").into()
         } else {
@@ -1323,7 +1345,9 @@ impl App {
             }
             col.into()
         };
-        column![header("networks"), policy, inner].spacing(8).into()
+        column![header("networks"), policy, own_policy, inner]
+            .spacing(8)
+            .into()
     }
 
     fn exposed_section(&self) -> Element<'_, Message> {
@@ -1504,6 +1528,7 @@ mod tests {
             needs_login: false,
             connected: true,
             disable_new_networks: true,
+            peer_own_devices: true,
             identity: None,
             coordinator_online: true,
             blocked: vec![],
@@ -1653,6 +1678,7 @@ mod tests {
             needs_login: false,
             connected: true,
             disable_new_networks: true,
+            peer_own_devices: true,
             identity: None,
             coordinator_online: true,
             blocked: vec![],
@@ -1690,6 +1716,7 @@ mod tests {
             needs_login: false,
             connected: false,
             disable_new_networks: true,
+            peer_own_devices: true,
             identity: None,
             coordinator_online: true,
             blocked: vec![],

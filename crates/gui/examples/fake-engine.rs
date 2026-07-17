@@ -59,6 +59,7 @@ fn to_name(path: &str) -> std::io::Result<Name<'static>> {
 struct State {
     connected: bool,
     disable_new_networks: bool,
+    peer_own_devices: bool,
     /// The full peer set, served when `connected`; disconnect returns an empty peer list.
     peers: Vec<PeerStatus>,
     networks: Vec<NetworkStatus>,
@@ -93,6 +94,7 @@ impl State {
             script,
             connected: true,
             disable_new_networks: true,
+            peer_own_devices: true,
             peers: fixture_peers(),
             networks: fixture_networks(),
             devices: fixture_devices(),
@@ -155,6 +157,7 @@ impl State {
             needs_login: false,
             connected: self.connected,
             disable_new_networks: self.disable_new_networks,
+            peer_own_devices: self.peer_own_devices,
             identity: Some("alice#4021".into()),
             coordinator_online: true,
             blocked: self.blocked.clone(),
@@ -379,6 +382,11 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
 
         ControlRequest::SetNewNetworkDefault { disable } => {
             s.disable_new_networks = disable;
+            ControlResponse::Status(s.status())
+        }
+
+        ControlRequest::SetOwnDevicePeering { enabled } => {
+            s.peer_own_devices = enabled;
             ControlResponse::Status(s.status())
         }
 

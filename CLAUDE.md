@@ -48,7 +48,7 @@ scripts/dev-run.sh                                           # engine (via sudo)
 
 `scripts/*.sh` are Linux-only end-to-end tests over network namespaces (a fake Discord/OAuth
 coordinator + `nft`/`veth`). `mesh-test.sh`, `nat-test.sh`, `expose-net-test.sh`,
-`net-toggle-test.sh`, `rotation-test.sh` are the ones that exercise the coordinator↔engine path;
+`net-toggle-test.sh`, `rotation-test.sh`, `own-device-test.sh` are the ones that exercise the coordinator↔engine path;
 prefer running the relevant one to verify a behavior change end-to-end.
 
 ## Architecture

@@ -146,6 +146,11 @@ enum CtlCmd {
         action: String,
         network: String,
     },
+    /// Toggle always peering with your own other devices (regardless of networks): `on` | `off`.
+    OwnDevices {
+        config: String,
+        action: String,
+    },
     /// Locally block a peer's owner (all their devices) by handle — drops them from the mesh.
     Block {
         config: String,
@@ -273,6 +278,7 @@ async fn register_once(config: Option<String>) -> anyhow::Result<()> {
         Vec::new(),
         keys::load_token(&cfg.state_dir),
         false,
+        true, // own-device peering: default on for the one-shot CLI paths
         coord::RelayReport::default(),
     )
     .await?;
@@ -367,6 +373,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
         Vec::new(),
         None, // login binds a fresh identity; nothing to supersede
         false,
+        true, // own-device peering: default on for the one-shot CLI paths
         coord::RelayReport::default(),
     )
     .await?;
@@ -524,6 +531,20 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                 let state = if n.enabled { "on" } else { "off" };
                 println!("  {} [{}]", n.name, state);
             }
+            Ok(())
+        }
+        CtlCmd::OwnDevices { config, action } => {
+            let enabled = match action.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => anyhow::bail!("use 'on' or 'off'"),
+            };
+            let status =
+                control::client_set_own_device_peering(&socket_for(&config)?, enabled).await?;
+            println!(
+                "own-device peering {} (locally; syncs to coordinator on next refresh)",
+                if status.peer_own_devices { "on" } else { "off" }
+            );
             Ok(())
         }
         CtlCmd::Block { config, user } => {

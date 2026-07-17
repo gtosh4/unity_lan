@@ -70,6 +70,10 @@ pub struct LocalNet {
     /// Whether newly-discovered networks default to disabled (opted out). Seeded from config on
     /// first run, then GUI-settable; persisted to `disable_new_networks.json`.
     disable_new: Mutex<bool>,
+    /// Whether to always peer with the owner's own other devices (same Discord user), even when they
+    /// share no enabled network. Seeded from config on first run, then GUI-settable; persisted to
+    /// `peer_own_devices.json`. Rides to the coordinator on each register/refresh.
+    peer_own: Mutex<bool>,
     /// Users this device has locally blocked, `user_id -> username` (the handle kept only for
     /// display). A blocked user's peers are filtered out of the mesh regardless of shared networks.
     /// Client is the source of truth (never sent to the coordinator); persisted to
@@ -79,6 +83,7 @@ pub struct LocalNet {
     paused_path: PathBuf,
     known_path: PathBuf,
     disable_new_path: PathBuf,
+    peer_own_path: PathBuf,
     blocked_path: PathBuf,
     /// Notified whenever the disabled set *or* the paused flag changes, so the daemon re-meshes
     /// (or tears the mesh down) at once.
@@ -91,7 +96,7 @@ impl LocalNet {
     /// `<state_dir>/known_networks.json` (empty if absent), and the new-network policy from
     /// `<state_dir>/disable_new_networks.json` — falling back to `disable_new_default` (from config)
     /// on first run, so config sets the initial posture and the GUI toggle overrides it thereafter.
-    pub fn load(state_dir: &Path, disable_new_default: bool) -> Self {
+    pub fn load(state_dir: &Path, disable_new_default: bool, peer_own_default: bool) -> Self {
         let path = state_dir.join("network_optout.json");
         let disabled = read_json_or(&path, Vec::<(u64, u64)>::new())
             .into_iter()
@@ -104,6 +109,8 @@ impl LocalNet {
             .collect();
         let disable_new_path = state_dir.join("disable_new_networks.json");
         let disable_new = read_json_or(&disable_new_path, disable_new_default);
+        let peer_own_path = state_dir.join("peer_own_devices.json");
+        let peer_own = read_json_or(&peer_own_path, peer_own_default);
         let blocked_path = state_dir.join("blocked_users.json");
         let blocked = read_json_or(&blocked_path, Vec::<(u64, String)>::new())
             .into_iter()
@@ -113,11 +120,13 @@ impl LocalNet {
             paused: Mutex::new(paused),
             known: Mutex::new(known),
             disable_new: Mutex::new(disable_new),
+            peer_own: Mutex::new(peer_own),
             blocked: Mutex::new(blocked),
             path,
             paused_path,
             known_path,
             disable_new_path,
+            peer_own_path,
             blocked_path,
             wake: Notify::new(),
         }
@@ -159,6 +168,28 @@ impl LocalNet {
         };
         if changed {
             write_json(&self.disable_new_path, &disable)?;
+        }
+        Ok(changed)
+    }
+
+    /// Whether to always peer with the owner's own other devices, regardless of shared networks.
+    pub fn peer_own_devices(&self) -> bool {
+        *self.peer_own.lock().unwrap()
+    }
+
+    /// Enable/disable own-device peering. Persists + wakes the daemon if it changed: the daemon
+    /// re-registers so the coordinator adds (or evicts) this device from its siblings' seeds, then
+    /// re-meshes to bring the own-device tunnels up or down.
+    pub fn set_peer_own_devices(&self, enabled: bool) -> anyhow::Result<bool> {
+        let changed = {
+            let mut p = self.peer_own.lock().unwrap();
+            let changed = *p != enabled;
+            *p = enabled;
+            changed
+        };
+        if changed {
+            write_json(&self.peer_own_path, &enabled)?;
+            self.wake.notify_one();
         }
         Ok(changed)
     }
@@ -286,7 +317,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("unitylan-netcfg-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let ln = LocalNet::load(&dir, true);
+        let ln = LocalNet::load(&dir, true, true);
         assert!(!ln.is_paused(), "defaults to connected");
 
         // First toggle changes; a redundant set does not.
@@ -295,13 +326,13 @@ mod tests {
         assert!(ln.is_paused());
 
         // A fresh load sees the persisted state; the per-network opt-out is untouched (separate file).
-        let reloaded = LocalNet::load(&dir, true);
+        let reloaded = LocalNet::load(&dir, true, true);
         assert!(reloaded.is_paused());
         assert!(reloaded.snapshot().is_empty());
 
         // Reconnecting clears it.
         assert!(reloaded.set_paused(false).unwrap());
-        assert!(!LocalNet::load(&dir, true).is_paused());
+        assert!(!LocalNet::load(&dir, true, true).is_paused());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -312,7 +343,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // Policy on: a freshly-seen network is opted out; re-seeing it doesn't re-disable.
-        let ln = LocalNet::load(&dir, true);
+        let ln = LocalNet::load(&dir, true, true);
         assert!(ln.reconcile_new(&[(1, 10)]).unwrap(), "new net disabled");
         assert!(ln.snapshot().contains(&(1, 10)));
         assert!(!ln.reconcile_new(&[(1, 10)]).unwrap(), "already known");
@@ -324,7 +355,7 @@ mod tests {
 
         // Known set + policy survive a reload; policy is now GUI-settable.
         assert!(ln.set_disable_new(false).unwrap());
-        let reloaded = LocalNet::load(&dir, true);
+        let reloaded = LocalNet::load(&dir, true, true);
         assert!(
             !reloaded.disable_new(),
             "persisted policy wins over config default"
@@ -337,12 +368,33 @@ mod tests {
     }
 
     #[test]
+    fn peer_own_devices_persists_and_reloads() {
+        let dir = std::env::temp_dir().join(format!("unitylan-netcfg-own-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Defaults to the config-seeded value (enabled).
+        let ln = LocalNet::load(&dir, true, true);
+        assert!(ln.peer_own_devices());
+
+        // First toggle changes; a redundant set does not.
+        assert!(ln.set_peer_own_devices(false).unwrap());
+        assert!(!ln.set_peer_own_devices(false).unwrap());
+        assert!(!ln.peer_own_devices());
+
+        // The persisted value wins over the config default on reload.
+        let reloaded = LocalNet::load(&dir, true, true);
+        assert!(!reloaded.peer_own_devices());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn blocked_users_persist_and_reload() {
         let dir =
             std::env::temp_dir().join(format!("unitylan-netcfg-block-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let ln = LocalNet::load(&dir, true);
+        let ln = LocalNet::load(&dir, true, true);
         assert!(ln.blocked_snapshot().is_empty(), "defaults to none blocked");
 
         // First block changes; blocking the same user again does not.
@@ -354,7 +406,7 @@ mod tests {
         );
 
         // The block survives a reload (keyed by user_id, handle kept for display).
-        let reloaded = LocalNet::load(&dir, true);
+        let reloaded = LocalNet::load(&dir, true, true);
         assert_eq!(
             reloaded.blocked_snapshot().get(&333).map(String::as_str),
             Some("alice")
@@ -363,7 +415,9 @@ mod tests {
         // Un-blocking changes once, then is a no-op; the persisted set empties.
         assert!(reloaded.set_blocked(333, String::new(), false).unwrap());
         assert!(!reloaded.set_blocked(333, String::new(), false).unwrap());
-        assert!(LocalNet::load(&dir, true).blocked_snapshot().is_empty());
+        assert!(LocalNet::load(&dir, true, true)
+            .blocked_snapshot()
+            .is_empty());
 
         std::fs::remove_dir_all(&dir).ok();
     }

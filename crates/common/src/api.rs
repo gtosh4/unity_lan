@@ -8,6 +8,10 @@ use std::net::SocketAddr;
 
 use serde::{Deserialize, Serialize};
 
+fn default_true() -> bool {
+    true
+}
+
 /// `POST /register` or `/refresh` request: the client's WG public key, device name, endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterReq {
@@ -85,6 +89,14 @@ pub struct RegisterReq {
     /// userspace ICE path is active for some peer.
     #[serde(default)]
     pub ice: Vec<IceEndpoint>,
+    /// Always peer with the caller's **own other devices** (same Discord user), even when they
+    /// share no enabled network — so a user's devices stay mutually reachable regardless of network
+    /// membership. The client is the source of truth (persisted, GUI-toggleable); it defaults to
+    /// `true` (enabled) so an omitted field — an older client, or one that never disabled it — still
+    /// gets own-device peering. Withdrawing it (`false`) evicts this device from its siblings' seeds
+    /// and drops them from its own.
+    #[serde(default = "default_true")]
+    pub peer_own_devices: bool,
     /// Wire protocol version this client speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
     /// pre-versioning client. The coordinator logs a warning on a mismatch (negotiate, don't crash).
     #[serde(default)]

@@ -77,6 +77,12 @@ pub struct Config {
     /// Seeds the persisted policy on first run; thereafter the GUI toggle is the source of truth.
     #[serde(default = "default_true")]
     pub disable_new_networks: bool,
+    /// Always peer with the owner's own other devices (same Discord user), even when they share no
+    /// enabled network — so a user's devices stay mutually reachable regardless of network membership.
+    /// Default `true`. Seeds the persisted policy on first run; thereafter the GUI toggle is the
+    /// source of truth.
+    #[serde(default = "default_true")]
+    pub peer_own_devices: bool,
     /// Offer this device as a **ciphertext relay** for co-members whose hole punch fails (§7.2,
     /// M5.4). Opt-in (default `false`) — relaying spends this host's uplink for others. Only takes
     /// effect when the device is directly dialable (a self `endpoint`, manual or UPnP): a NAT'd

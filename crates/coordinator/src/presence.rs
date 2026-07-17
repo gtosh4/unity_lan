@@ -33,6 +33,11 @@ pub struct Presence {
     // The composite key is the domain model; a type alias would hide it.
     #[allow(clippy::type_complexity)]
     map: Mutex<HashMap<(u64, u64, [u8; 32]), Entry>>,
+    // (user_id, device_pubkey) -> entry: every online device, keyed by owner independent of any
+    // network — the source for **own-device peering**, so a user's devices can seed each other even
+    // when they share no network. Recorded only when the device opts in (`peer_own_devices`) and is
+    // live; reaped/evicted on the same paths as `map`.
+    self_map: Mutex<HashMap<(u64, [u8; 32]), Entry>>,
 }
 
 impl Presence {
@@ -48,16 +53,61 @@ impl Presence {
         changed
     }
 
-    /// Evict every entry not refreshed within `max_age` seconds. Catches devices that vanished
-    /// without a clean drop: a crashed client, or one that **re-keyed** and abandoned this pubkey
-    /// (its owner now refreshes under a new key, so this entry is never self-evicted). Returns
-    /// `true` if anything was removed → the caller bumps the version so co-members prune the dead
-    /// peer instead of carrying it until coordinator restart.
+    /// Record a device in the per-user online set (own-device peering). Semantics mirror [`record`]:
+    /// returns `true` if it changed the map (new device / altered fields) so the caller bumps the
+    /// version; an identical re-record refreshes `last_seen` only.
+    pub fn record_self(&self, user_id: u64, p: MemberPresence, now: u64) -> bool {
+        let key = (user_id, p.pubkey);
+        let mut map = self.self_map.lock().unwrap();
+        let changed = map.get(&key).map(|e| &e.p) != Some(&p);
+        map.insert(key, Entry { p, last_seen: now });
+        changed
+    }
+
+    /// Drop a device from the per-user online set (own-device peering) — on opt-out, pause, role
+    /// loss, or a re-key retiring the old pubkey. Returns `true` if an entry was removed.
+    pub fn evict_self(&self, user_id: u64, pubkey: &[u8; 32]) -> bool {
+        self.self_map
+            .lock()
+            .unwrap()
+            .remove(&(user_id, *pubkey))
+            .is_some()
+    }
+
+    /// The user's other online devices (own-device peering), excluding the caller (`exclude_pubkey`).
+    /// Queried only for the caller's own `user_id`, so it never exposes another user's devices.
+    pub fn others_of_user(&self, user_id: u64, exclude_pubkey: &[u8; 32]) -> Vec<MemberPresence> {
+        self.self_map
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((uid, pk), _)| *uid == user_id && pk != exclude_pubkey)
+            .map(|(_, e)| e.p.clone())
+            .collect()
+    }
+
+    /// Evict every entry not refreshed within `max_age` seconds, across **both** the per-network and
+    /// per-user (own-device) sets. Catches devices that vanished without a clean drop: a crashed
+    /// client, or one that **re-keyed** and abandoned this pubkey (its owner now refreshes under a
+    /// new key, so this entry is never self-evicted). Returns `true` if anything was removed → the
+    /// caller bumps the version so co-members prune the dead peer instead of carrying it until
+    /// coordinator restart.
     pub fn reap(&self, now: u64, max_age: u64) -> bool {
-        let mut map = self.map.lock().unwrap();
-        let before = map.len();
-        map.retain(|_, e| now.saturating_sub(e.last_seen) <= max_age);
-        map.len() != before
+        let fresh = |e: &Entry| now.saturating_sub(e.last_seen) <= max_age;
+        let mut changed = false;
+        {
+            let mut map = self.map.lock().unwrap();
+            let before = map.len();
+            map.retain(|_, e| fresh(e));
+            changed |= map.len() != before;
+        }
+        {
+            let mut sm = self.self_map.lock().unwrap();
+            let before = sm.len();
+            sm.retain(|_, e| fresh(e));
+            changed |= sm.len() != before;
+        }
+        changed
     }
 
     /// The networks a device is currently recorded in. Used to detect networks the caller has
@@ -203,6 +253,31 @@ mod tests {
         assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
         assert_eq!(s.online_devices, 3); // A, B, C distinct
         assert_eq!(s.online_users, 2); // 42, 99
+    }
+
+    #[test]
+    fn self_presence_scopes_to_owner_and_reaps() {
+        let p = Presence::default();
+        // user 42 devices A & B; user 99 device C.
+        assert!(p.record_self(42, mp([1; 32], 42), 100));
+        assert!(p.record_self(42, mp([2; 32], 42), 100));
+        assert!(p.record_self(99, mp([3; 32], 99), 100));
+        // A sees only its sibling B, never user 99's C.
+        let others: Vec<_> = p
+            .others_of_user(42, &[1; 32])
+            .iter()
+            .map(|m| m.pubkey)
+            .collect();
+        assert_eq!(others, vec![[2; 32]]);
+        // Identical re-record doesn't report a change (no spurious version bump).
+        assert!(!p.record_self(42, mp([2; 32], 42), 200));
+        // Explicit evict removes B; a second evict is a no-op.
+        assert!(p.evict_self(42, &[2; 32]));
+        assert!(!p.evict_self(42, &[2; 32]));
+        assert!(p.others_of_user(42, &[1; 32]).is_empty());
+        // Reap ages out the per-user set too: at t=400, max_age 60, A (last seen 100) is stale.
+        assert!(p.reap(400, 60));
+        assert!(p.others_of_user(99, &[0; 32]).is_empty());
     }
 
     #[test]

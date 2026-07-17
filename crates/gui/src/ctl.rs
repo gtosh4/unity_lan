@@ -138,6 +138,15 @@ pub async fn set_new_network_default(path: PathBuf, disable: bool) -> Result<Sta
     )
 }
 
+/// Set whether this device always peers with the owner's own other devices. Returns updated status.
+pub async fn set_own_device_peering(path: PathBuf, enabled: bool) -> Result<StatusReport, String> {
+    expect!(
+        path,
+        ControlRequest::SetOwnDevicePeering { enabled },
+        ControlResponse::Status
+    )
+}
+
 /// Locally block a user (by Discord `user_id`) — drop all their peers from the mesh. Returns the
 /// updated status.
 pub async fn block_peer(

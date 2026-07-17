@@ -91,6 +91,7 @@ pub async fn register(
     disabled_networks: Vec<NetworkRef>,
     supersede: Option<String>,
     paused: bool,
+    peer_own_devices: bool,
     relay: RelayReport,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
@@ -109,6 +110,7 @@ pub async fn register(
         Vec::new(),
         supersede,
         paused,
+        peer_own_devices,
         relay,
         Vec::new(), // no ICE offers at initial register (no peers yet)
     )
@@ -129,6 +131,7 @@ pub async fn refresh(
     disabled_networks: Vec<NetworkRef>,
     observed: Vec<common::api::ObservedEndpoint>,
     paused: bool,
+    peer_own_devices: bool,
     relay: RelayReport,
     ice: Vec<common::api::IceEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
@@ -145,6 +148,7 @@ pub async fn refresh(
         observed,
         None, // refresh never supersedes: a re-key retires the old key on the initial register
         paused,
+        peer_own_devices,
         relay,
         ice,
     )
@@ -165,6 +169,7 @@ async fn post(
     observed: Vec<common::api::ObservedEndpoint>,
     supersede: Option<String>,
     paused: bool,
+    peer_own_devices: bool,
     relay: RelayReport,
     ice: Vec<common::api::IceEndpoint>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
@@ -189,6 +194,7 @@ async fn post(
             observed,
             supersede,
             paused,
+            peer_own_devices,
             relay_capable: relay.capable,
             relay_addr: relay.addr,
             relay_secret: relay.secret,
