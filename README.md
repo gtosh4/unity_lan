@@ -43,9 +43,10 @@ Use the project's hosted coordinator, or run your own if you'd rather hold the t
 
 ## Why you might want it
 
-- **You run a game-server community.** Give the `@members` role a network and everyone can hit the
-  Minecraft/Valheim/whatever box by name, with no port forwarding and no public exposure. Kick
-  someone in Discord and they're off the LAN.
+- **You run a game-server community.** Give a role you create — say `@regulars` — a network, and
+  everyone who holds it can hit the Minecraft/Valheim/whatever box by name, with no port forwarding
+  and no public exposure. Kick someone in Discord and they're off the LAN. (A network is always a
+  role you pick; `@everyone` can't be one, so nobody joins just by being in the server.)
 - **You have a homelab and a few trusted people.** Share services (NAS, Jellyfin, a git server)
   with exactly the people who hold a role — no VPN accounts to provision or revoke by hand.
 - **You want a private LAN for a team** but don't want to stand up an identity provider. You already
