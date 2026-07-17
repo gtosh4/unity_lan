@@ -2,8 +2,8 @@
 # Edit `coordinator` and `enrollment_key`, then start the service:  sc.exe start UnityLANEngine
 # (the installer registers + starts it for you; this is here for edits and reinstalls).
 
-# Coordinator base URL.
-coordinator = "http://127.0.0.1:8080"
+# Coordinator base URL. Defaults to the hosted instance; point at your own to self-host.
+coordinator = "https://coordinator.unitylan.com"
 
 # Engine state (WG private key + pinned trust anchor). LocalSystem creates this on first run.
 state_dir = 'C:\ProgramData\UnityLAN'

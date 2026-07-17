@@ -61,9 +61,10 @@ Being upfront so you can decide before installing:
 
 - **Pre-1.0.** UnityLAN works end-to-end (Linux and Windows), but it's young software. Treat it as
   such.
-- **NAT traversal is still maturing.** Direct hole-punching works for common (cone) NATs today; a
-  ciphertext-only relay fallback for the hardest CGNAT/symmetric-NAT cases is on the roadmap, not
-  shipped. Most home connections are fine.
+- **NAT traversal is still maturing.** A userspace ICE agent (STUN + UDP hole-punching) forms
+  direct tunnels for common NATs, and a ciphertext-only relay fallback carries the hardest
+  CGNAT/symmetric-NAT pairs a punch can't connect — so no pair is left stranded, but the paths are
+  young and haven't been hardened across every network shape. Most home connections are fine.
 - **macOS/mobile aren't ready.** Linux and Windows are the current first-class targets. The data
   plane is portable userspace WireGuard by design, so macOS and mobile are planned — just not here
   yet.
@@ -75,8 +76,9 @@ Being upfront so you can decide before installing:
 2. **A member installs the client** (a privileged background *engine* + an unprivileged desktop
    *GUI*, à la Tailscale) and logs in with Discord.
 3. The coordinator checks their roles and issues a **short-lived, signed attestation** — a token
-   that cryptographically binds *this user + this role + this device + this IP + this WireGuard key*.
-   It can't be forged, and it expires, so it must be continually re-earned.
+   that cryptographically binds *this user + this device + this IP + this WireGuard key* to your
+   Discord server. Roles aren't baked into the token; the coordinator gates who it hands one to and
+   who it shows you. It can't be forged, and it expires, so it must be continually re-earned.
 4. **Peers verify each other's attestations** against the pinned coordinator key and form direct
    WireGuard tunnels. From here the data plane is pure peer-to-peer.
 5. Members discover each other by **long-polling the coordinator** (no gossip flood, no always-on
@@ -94,9 +96,9 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
 
 - **The coordinator never sees your traffic** and never holds a peer's private key. WireGuard keys
   are generated on each device and never leave it.
-- **One signing key per deployment is the trust anchor.** Clients pin it on first contact (TOFU) and
-  verify every peer against it — a compromised or forged key's blast radius is a single guild, never
-  across guilds.
+- **One signing key per Discord server is the trust anchor.** Clients pin it on first contact (TOFU)
+  and verify every peer against it — a compromised or forged key's blast radius is a single guild,
+  never across guilds.
 - **Attestations are short-lived** and re-issued on a TTL, so revoking a Discord role revokes mesh
   access without waiting for anything to expire on its own schedule.
 - **Nothing on your machine is exposed by default.** Joining a network does *not* open your box up.
@@ -155,6 +157,25 @@ cargo build --release
 | [`docs/coordinator-setup.md`](docs/coordinator-setup.md) | Standing up a coordinator: Discord app + bot, config, admin dashboard |
 | [`packaging/README.md`](packaging/README.md) | Building packages, hosting the coordinator, releases |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, running a local mesh, the checks CI enforces |
+
+## A note on AI assistance
+
+In the interest of transparency: much of UnityLAN was written with the help of AI coding tools,
+with a human in the loop directing the work, reviewing changes, and making the design decisions.
+
+If that gives you pause, that's fair — especially for software that touches your network and
+handles cryptographic keys. A few things worth knowing:
+
+- **It's open source.** Every line is here to read, and the security-critical parts (the trust
+  model, attestations, key handling) are documented in [`docs/design.md`](docs/design.md) and
+  [`docs/technical.md`](docs/technical.md). You don't have to take anyone's word for how it works.
+- **It's tested and gated.** CI enforces formatting, linting, and a full test suite on every
+  change, and end-to-end network tests exercise the real coordinator↔engine path.
+- **It's pre-1.0.** Treat it accordingly — audit before you trust it with anything you can't
+  afford to have go wrong, same as you would any young security tool.
+
+The goal is to be upfront rather than quietly ship and hope nobody asks. Bug reports and reviews
+are welcome.
 
 ## License
 

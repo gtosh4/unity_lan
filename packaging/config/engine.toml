@@ -1,8 +1,8 @@
 # UnityLAN engine config (installed at /etc/unitylan/engine.toml).
 # Edit `coordinator` and `enrollment_key`, then: systemctl enable --now unitylan-engine
 
-# Coordinator base URL.
-coordinator = "http://127.0.0.1:8080"
+# Coordinator base URL. Defaults to the hosted instance; point at your own to self-host.
+coordinator = "https://coordinator.unitylan.com"
 
 # Managed by the systemd unit (StateDirectory / RuntimeDirectory). Leave these as-is.
 state_dir = "/var/lib/unitylan"
