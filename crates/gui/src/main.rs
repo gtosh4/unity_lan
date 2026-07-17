@@ -240,13 +240,51 @@ fn confirm_controls<'a>(
 
 /// The main window's settings. `exit_on_close_request(false)` so the close button hits our
 /// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
+/// The app icon (titlebar + taskbar/dock while running), rendered from the shared squircle SVG via
+/// resvg. Straight-alpha RGBA is what winit's `from_rgba` wants; `None` if rendering ever fails so a
+/// missing icon never blocks the window from opening.
+fn app_icon() -> Option<window::Icon> {
+    use resvg::{tiny_skia, usvg};
+
+    const SVG: &str = include_str!("../../../assets/icon.svg");
+    const N: u32 = 256;
+
+    let tree = usvg::Tree::from_str(SVG, &usvg::Options::default()).ok()?;
+    let mut pixmap = tiny_skia::Pixmap::new(N, N)?;
+    let scale = N as f32 / 100.0; // icon.svg is a 0..100 viewBox
+    resvg::render(
+        &tree,
+        tiny_skia::Transform::from_scale(scale, scale),
+        &mut pixmap.as_mut(),
+    );
+
+    let mut px = pixmap.take();
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        for c in &mut p[..3] {
+            *c = (*c as u32 * 255).checked_div(a).map_or(0, |v| v.min(255)) as u8;
+        }
+    }
+    window::icon::from_rgba(px, N, N).ok()
+}
+
 fn window_settings() -> window::Settings {
-    window::Settings {
+    #[allow(unused_mut)]
+    let mut settings = window::Settings {
         size: iced::Size::new(440.0, 640.0),
         position: window::Position::Centered,
         exit_on_close_request: false,
+        icon: app_icon(),
         ..Default::default()
+    };
+    // On Wayland the compositor derives the titlebar/taskbar icon from the window's app_id → the
+    // matching `.desktop` file (client-set icons are a no-op there), so this must equal the
+    // installed `unitylan-gui.desktop` basename. Harmless on X11/Windows, which use `icon` above.
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific.application_id = "unitylan-gui".to_string();
     }
+    settings
 }
 
 fn main() -> iced::Result {

@@ -22,3 +22,6 @@ contents:
     dst: /usr/bin/unitylan-gui
   - src: ../gui/unitylan-gui.desktop
     dst: /usr/share/applications/unitylan-gui.desktop
+  # App icon the .desktop's `Icon=unitylan` resolves to (and the Wayland app_id maps through).
+  - src: ../../assets/icon.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/unitylan.svg
