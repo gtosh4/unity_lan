@@ -35,7 +35,7 @@ pub struct SelfDevice {
     pub wg_net: ipnet::Ipv4Net,
     pub hostname: String,
     pub is_primary: bool,
-    /// `<user>.<community>.unity.internal` if we're the owner's primary device.
+    /// `<user>.unity.internal` if we're the owner's primary device.
     pub primary_alias: Option<String>,
     /// Every network our roles grant (role@guild) with per-device enabled state — for the toggle.
     pub networks_status: Vec<common::api::NetworkStatus>,
@@ -65,12 +65,13 @@ pub struct SeedPeer {
     pub endpoint: Option<SocketAddr>,
     /// Hole-punch target (peer's reflexive `ip:port`) when neither side is directly dialable.
     pub punch: Option<SocketAddr>,
-    /// `<device>.<user>.<community>.unity.internal`.
+    /// `<device>.<user>.unity.internal`.
     pub hostname: String,
-    /// `<user>.<community>.unity.internal` if this is the owner's primary device, else `None`.
+    /// `<user>.unity.internal` if this is the owner's primary device, else `None`.
     pub primary_alias: Option<String>,
-    /// Networks (display names) shared with us — used to scope `expose --net`.
-    pub networks: Vec<String>,
+    /// Networks shared with us (name + community) — used to scope `expose --net` and to show which
+    /// server each shared network came from.
+    pub networks: Vec<common::api::SharedNetwork>,
     /// Relay reservation for reaching this peer when direct + punch both fail (§7.2, M5.4): the TURN
     /// server + credentials to allocate on, and (once known) the peer's own relayed address.
     pub relay: Option<common::api::RelayInfo>,
@@ -216,8 +217,8 @@ async fn post(
     let device = match &resp.grant {
         Some(grant) => {
             let (att, community) = verify_grant(grant, &pinned, now).context("verifying grant")?;
-            let hostname = att.hostname(&community);
-            let primary_alias = att.primary_alias(&community);
+            let hostname = att.hostname();
+            let primary_alias = att.primary_alias();
             Some(SelfDevice {
                 community_name: community,
                 username: att.username.clone(),
@@ -344,17 +345,19 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
     let now = now_unix();
     let mut peers = Vec::new();
     for seed in &resp.seeds {
-        let mut verified: Option<(Attestation, String)> = None;
+        // Any one of the peer's shared-guild attestations verifying admits it; the hostname no longer
+        // depends on which guild (community left the name — see `Attestation::hostname`), so we just
+        // need the first that clears a pinned anchor.
+        let mut verified: Option<Attestation> = None;
         for ga in &seed.attestations {
             let signed =
                 Signed::from_base64(&ga.attestation).context("decoding seed attestation")?;
             if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
-                verified = Some((att, ga.community_name.clone()));
+                verified = Some(att);
                 break;
             }
         }
-        let (att, community) =
-            verified.context("seed has no attestation signed by a pinned guild anchor")?;
+        let att = verified.context("seed has no attestation signed by a pinned guild anchor")?;
         peers.push(SeedPeer {
             pubkey: att.wg_pubkey,
             user_id: att.user_id,
@@ -362,8 +365,8 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             ip: att.wg_ip,
             endpoint: seed.endpoint,
             punch: seed.punch,
-            hostname: att.hostname(&community),
-            primary_alias: att.primary_alias(&community),
+            hostname: att.hostname(),
+            primary_alias: att.primary_alias(),
             networks: seed.networks.clone(),
             relay: seed.relay.clone(),
             ice: seed.ice.clone(),

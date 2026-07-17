@@ -310,10 +310,11 @@ pub struct PeerStatus {
     /// Surfaced on hover in the GUI; `up` is just this crossing the freshness threshold.
     #[serde(default)]
     pub last_handshake_secs: Option<u64>,
-    /// Display names of the networks shared with this peer (the intersection of our memberships) —
-    /// the ACL groups over which we're mutually reachable. Shown on hover over the peer's name.
+    /// The networks shared with this peer (the intersection of our memberships), each tagged with the
+    /// community (server) it lives in — the ACL groups over which we're mutually reachable. Shown,
+    /// grouped by community, on hover over the peer's name.
     #[serde(default)]
-    pub networks: Vec<String>,
+    pub networks: Vec<crate::api::SharedNetwork>,
 }
 
 /// A peer's data-plane reachability, for status display (§7.2 diagnostics).

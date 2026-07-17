@@ -20,7 +20,7 @@ IFACE="unl-restest"
 LINK_IP="10.123.45.1"          # the link MUST have an address — resolved ignores per-link DNS on a
                                # non-operational link (this is why prod works: the wg iface carries its /32)
 BIND="127.0.0.1:15353"        # loopback bind, as the daemon does (dns_bind); routes once the link is operational
-NAME="host-a.alice.lan.unity.internal"
+NAME="host-a.alice.unity.internal"
 IP="100.64.0.9"
 
 cleanup() {

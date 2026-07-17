@@ -8,8 +8,11 @@ UnityLAN: a WireGuard mesh VPN whose membership is defined by **Discord roles** 
 self-hosted **coordinator** that issues short-lived Ed25519-signed **attestations**. Peers discover
 each other through the coordinator (long-poll) and form **direct P2P WireGuard tunnels**. The
 coordinator is a **control plane only** — it carries no traffic and holds no peer private keys.
-Hostnames: `<device>.<user>.<community>.unity.internal` (a user's primary device is also the bare
-`<user>.<community>.unity.internal`).
+Hostnames: `<device>.<user>.unity.internal` (a user's primary device is also the bare
+`<user>.unity.internal`). The `unity` label is the coordinator's namespace (fixed while
+single-coordinator); the community/guild is **not** in the name — a device is one identity/IP
+across all a coordinator's guilds (Model B), so the guild rides on each shared network instead
+(`api::SharedNetwork`). Multi-coordinator will make `unity` per-coordinator — see `DNS_SUFFIX`.
 
 Deeper design lives in `docs/design.md` (concepts, trust model, NAT), `docs/technical.md`, and
 `CONTRIBUTING.md` (full local-mesh setup for Linux + Windows). Read those before large changes.

@@ -24,7 +24,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use common::api::{DeviceInfo, ManageOp, ManageResp, NetworkStatus};
+use common::api::{DeviceInfo, ManageOp, ManageResp, NetworkStatus, SharedNetwork};
 use common::control::{
     BlockedUser, ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp,
     ExposeResp, ExposedPort, LoginResp, LogoutResp, NetworkResp, PeerReach, PeerStatus, Proto,
@@ -185,7 +185,7 @@ fn peer(
     latency: Option<u32>,
     user_id: u64,
     username: &str,
-    nets: &[&str],
+    nets: &[(&str, &str)],
 ) -> PeerStatus {
     PeerStatus {
         hostname: host.into(),
@@ -199,61 +199,69 @@ fn peer(
         rx_bytes: 0,
         tx_bytes: 0,
         last_handshake_secs: up.then_some(4),
-        networks: nets.iter().map(|s| s.to_string()).collect(),
+        networks: nets
+            .iter()
+            .map(|(name, community)| SharedNetwork {
+                name: (*name).into(),
+                community: (*community).into(),
+            })
+            .collect(),
     }
 }
 
 fn fixture_peers() -> Vec<PeerStatus> {
     vec![
+        // bob's primary device shows the bare `<user>.unity.internal` alias, and shares networks
+        // across two communities — the hover groups them by server (`acme: … · playhouse: …`).
         peer(
-            "desktop.bob.acme.unity.internal",
+            "bob.unity.internal",
             10,
             PeerReach::Direct,
             true,
             Some(12),
             2001,
             "bob#1180",
-            &["Engineering", "Gaming"],
+            &[("Engineering", "acme"), ("Gaming", "playhouse")],
         ),
         peer(
-            "phone.bob.acme.unity.internal",
+            "phone.bob.unity.internal",
             11,
             PeerReach::Ice,
             true,
             Some(38),
             2001,
             "bob#1180",
-            &["Gaming"],
+            &[("Gaming", "playhouse")],
         ),
         peer(
-            "server.carol.acme.unity.internal",
+            "server.carol.unity.internal",
             20,
             PeerReach::Relayed,
             true,
             Some(73),
             3044,
             "carol#7788",
-            &["Engineering"],
+            &[("Engineering", "acme")],
         ),
         peer(
-            "laptop.dave.acme.unity.internal",
+            "laptop.dave.unity.internal",
             30,
             PeerReach::Punching,
             false,
             None,
             4055,
             "dave#2093",
-            &["Gaming"],
+            &[("Gaming", "playhouse")],
         ),
         peer(
-            "nas.erin.acme.unity.internal",
+            "nas.erin.unity.internal",
             40,
             PeerReach::Unreachable,
             false,
             None,
             5066,
             "erin#6610",
-            &["Engineering"],
+            &[("Engineering", "acme")],
         ),
     ]
 }

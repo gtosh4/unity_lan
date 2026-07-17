@@ -791,7 +791,7 @@ fn filter_active(
             s.networks.is_empty()
                 || s.networks
                     .iter()
-                    .any(|name| match name_to_id.get(name.as_str()) {
+                    .any(|n| match name_to_id.get(n.name.as_str()) {
                         Some(id) => !disabled.contains(id),
                         None => true,
                     })
@@ -871,7 +871,7 @@ fn peers_by_net(seeds: &[SeedPeer]) -> crate::fw::PeersByNet {
     let mut map: crate::fw::PeersByNet = HashMap::new();
     for s in seeds {
         for n in &s.networks {
-            map.entry(n.clone()).or_default().push(s.ip);
+            map.entry(n.name.clone()).or_default().push(s.ip);
         }
     }
     map

@@ -112,7 +112,7 @@ struct Attestation {
     user_id:     u64,        // Discord snowflake (owner)
     username:    String,     // global @handle, sanitized DNS label  → the <user>
     device_name: String,     // per-user machine label, sanitized    → the <device>
-    is_primary:  bool,       // owner's primary device gets <user>.<community> alias
+    is_primary:  bool,       // owner's primary device gets bare <user>.unity.internal alias
     wg_ip:       Ipv4Addr,   // coordinator-allocated /32, stable, keyed by pubkey
     wg_net:      Ipv4Net,    // the deployment's mesh CIDR — signed so a MITM can't shadow the LAN
     wg_pubkey:   [u8; 32],   // Curve25519 — the device identity
@@ -123,9 +123,13 @@ struct Attestation {
 **Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild)`: signature
 valid under the **pinned per-guild anchor**, **AND** `guild_id == expected_guild`, **AND** unexpired.
 The `guild_id` check is load-bearing defence-in-depth even with per-guild keys (design §4.1).
-Hostname = `<device>.<user>.<community>.unity.internal`; primary alias =
-`<user>.<community>.unity.internal` (`is_primary` only). Community label lives at the coordinator
-(not in the attestation) and is passed alongside.
+Hostname = `<device>.<user>.unity.internal`; primary alias = `<user>.unity.internal`
+(`is_primary` only). The `unity` label is the coordinator's namespace (fixed while
+single-coordinator, `DNS_SUFFIX`); the community/guild is **not** in the name — one device is one
+identity/IP across all a coordinator's guilds (Model B), so the community would be a redundant
+label. It rides on each shared network (`api::SharedNetwork`) instead. The community slug still
+lives at the coordinator (not in the attestation) — it tags shared networks and the CLI shows it.
+`TODO(multi-coordinator)`: `unity` becomes per-coordinator (design §6.2).
 
 ### 3.3 Live endpoints (unsigned today)
 There is **no `EndpointRecord`/`seq` type**. A device's endpoint rides as a plain
@@ -217,8 +221,8 @@ deployment_seed(id=1, seed)                     -- random; selects default mesh 
 networks(guild_id, role_id, name, PK(guild,role))       -- the registry
 devices(pubkey PK, idx UNIQUE, user_id, device_name, token)  -- one /32 per device
 enrollment_keys(key PK, user_id, expires_at?, used_by?)      -- one-time, race-free consume
-communities(guild_id PK, slug)                  -- the <community> DNS label
-primary_device(user_id PK, pubkey)              -- backs <user>.<community> alias
+communities(guild_id PK, slug)                  -- community slug (tags shared networks; not in hostname)
+primary_device(user_id PK, pubkey)              -- backs the bare <user>.unity.internal alias
 oauth_authorized(pubkey PK, user_id)            -- interactive-login pubkey→user binding
 guild_rotation_certs(idx PK AUTOINCREMENT, guild_id, cert)   -- prev→new chain, oldest→newest
 ```
@@ -280,7 +284,7 @@ Most-direct-first (design §7.2):
 
 ### 5.6 DNS (`dns.rs`, `resolver/`)
 Build the `unity.internal` zone from verified attestations (own + co-device seeds):
-`<device>.<user>.<community>` → `wg_ip`, plus the `<user>.<community>` primary alias. Serve via
+`<device>.<user>` → `wg_ip`, plus the bare `<user>` primary alias. Serve via
 `hickory-proto`; per-OS hookup in `resolver/{linux,windows}.rs` (resolved / NRPT+netsh). Labels are
 sanitized (`sanitize_label`); **authorization is always the pubkey in the signed attestation**, never
 the name.

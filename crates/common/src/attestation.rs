@@ -9,7 +9,6 @@ use ed25519_dalek::VerifyingKey;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
-use crate::netid::sanitize_label;
 use crate::wire::{Signed, WireError};
 use crate::DNS_SUFFIX;
 
@@ -31,7 +30,7 @@ pub struct Attestation {
     pub username: String,
     /// Per-user device label, sanitized to a DNS label (the `<device>` in a hostname).
     pub device_name: String,
-    /// Whether this is the owner's primary device (gets the `<user>.<community>` alias).
+    /// Whether this is the owner's primary device (gets the bare `<user>.unity.internal` alias).
     pub is_primary: bool,
     /// Coordinator-allocated `/32` for this device, within `wg_net`.
     pub wg_ip: Ipv4Addr,
@@ -53,28 +52,19 @@ impl Attestation {
         now >= self.expires_at
     }
 
-    /// `<device>.<user>.<community>.unity.internal`. The community name lives at the coordinator and
-    /// is passed in (only ids/labels are in the attestation).
-    pub fn hostname(&self, community_name: &str) -> String {
-        format!(
-            "{}.{}.{}.{}",
-            self.device_name,
-            self.username,
-            sanitize_label(community_name),
-            DNS_SUFFIX,
-        )
+    /// `<device>.<user>.unity.internal`. The `unity` label is the coordinator's namespace; while we
+    /// support a single coordinator it is fixed (see `DNS_SUFFIX`). The community/guild is **not** in
+    /// the name — a device has one identity and one IP across all the coordinator's guilds it's in
+    /// (Model B), so the community would be a redundant label on one machine. It rides on each shared
+    /// network instead (`SharedNetwork`), where it's real signal.
+    pub fn hostname(&self) -> String {
+        format!("{}.{}.{}", self.device_name, self.username, DNS_SUFFIX)
     }
 
-    /// `<user>.<community>.unity.internal` — the alias for the owner's primary device; `None` otherwise.
-    pub fn primary_alias(&self, community_name: &str) -> Option<String> {
-        self.is_primary.then(|| {
-            format!(
-                "{}.{}.{}",
-                self.username,
-                sanitize_label(community_name),
-                DNS_SUFFIX,
-            )
-        })
+    /// `<user>.unity.internal` — the alias for the owner's primary device; `None` otherwise.
+    pub fn primary_alias(&self) -> Option<String> {
+        self.is_primary
+            .then(|| format!("{}.{}", self.username, DNS_SUFFIX))
     }
 }
 
@@ -183,11 +173,14 @@ mod tests {
     }
 
     #[test]
-    fn hostname_is_sanitized() {
+    fn hostname_has_no_community() {
         let att = sample(0);
-        assert_eq!(
-            att.hostname("My Community!"),
-            "laptop.alice.my-community.unity.internal"
-        );
+        assert_eq!(att.hostname(), "laptop.alice.unity.internal");
+    }
+
+    #[test]
+    fn primary_alias_is_bare_user() {
+        let att = sample(0); // sample() sets is_primary: true
+        assert_eq!(att.primary_alias().as_deref(), Some("alice.unity.internal"));
     }
 }

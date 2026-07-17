@@ -13,7 +13,7 @@ No accounts to invite, no keys to hand out, no IPs to remember. If you can manag
 you can run the network.
 
 ```
-alice@laptop  ~ $  ssh nas.bob.mycommunity.unity.internal
+alice@laptop  ~ $  ssh nas.bob.unity.internal
 bob@nas       ~ $
 ```
 
@@ -36,8 +36,8 @@ bob@nas       ~ $
   instance** (just invite its bot to your server) or **self-host** your own (one Docker container).
   Either way it **carries no traffic and holds no one's private keys.**
 - **Human-readable names.** Machines get DNS names like
-  `laptop.alice.mycommunity.unity.internal` (or just `alice.mycommunity.unity.internal` for a
-  member's primary device) instead of raw IPs.
+  `laptop.alice.unity.internal` (or just `alice.unity.internal` for a member's primary device)
+  instead of raw IPs.
 
 If you know Tailscale: it's the same *shape* (control plane + P2P WireGuard data plane), but the
 identity source is **your own Discord server** — no third-party account, no company in the middle.

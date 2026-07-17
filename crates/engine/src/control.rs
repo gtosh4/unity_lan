@@ -137,7 +137,13 @@ pub async fn update(
         peers: seeds
             .iter()
             .map(|s| PeerStatus {
-                hostname: s.hostname.clone(),
+                // Show the shortest name: a primary device's bare `<user>.unity.internal` alias when
+                // it has one, else its `<device>.<user>` name. Primary changes rarely and callers
+                // want whoever is primary anyway, so the bare alias is the friendlier default.
+                hostname: s
+                    .primary_alias
+                    .clone()
+                    .unwrap_or_else(|| s.hostname.clone()),
                 wg_ip: s.ip,
                 endpoint: s.endpoint,
                 reach: common::control::PeerReach::Direct, // overlaid by `set_live`

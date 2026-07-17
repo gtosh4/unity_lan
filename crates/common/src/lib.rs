@@ -40,6 +40,17 @@ pub const PRESENCE_TTL_SECS: u64 = LONGPOLL_HOLD_SECS * 2 + 60;
 
 /// Private DNS suffix (design.md §6.3): project namespace under ICANN-reserved `.internal`,
 /// not `.local`.
+///
+/// The `unity` label is the **coordinator's** namespace. While we support a single coordinator it
+/// is fixed, so a hostname is just `<device>.<user>.unity.internal` — the community/guild is *not*
+/// in the name (one device = one identity/IP across all a coordinator's guilds; the guild rides on
+/// each shared network instead, see `api::SharedNetwork`).
+///
+/// TODO(multi-coordinator): when a client can join guilds on **different** coordinators, this label
+/// must become per-coordinator (e.g. derived from the coordinator's domain — `unitylan.com` →
+/// `unity`) rather than a fixed constant. That per-coordinator label is what disambiguates the same
+/// `@handle` / resolves IP-range collisions across coordinators — the role the community label used
+/// to play in the hostname. See design.md §6.2.
 pub const DNS_SUFFIX: &str = "unity.internal";
 
 /// Lifetime of a minted TURN relay credential (design.md §7.2, M5.4). Comfortably exceeds the

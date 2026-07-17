@@ -1083,7 +1083,10 @@ impl App {
                 let net_hover = if p.networks.is_empty() {
                     "no shared networks".to_string()
                 } else {
-                    format!("shared networks: {}", p.networks.join(", "))
+                    format!(
+                        "shared networks — {}",
+                        shared_networks_by_community(&p.networks)
+                    )
                 };
                 let name_line = row![
                     tooltip(dot(sc), muted(hover), tooltip::Position::Right)
@@ -1391,6 +1394,25 @@ fn fmt_ago(secs: u64) -> String {
     }
 }
 
+/// Render a peer's shared networks grouped by the community (server) each lives in, e.g.
+/// `gaming: mesh, raiders · work: staff`. Community is the disambiguator now that it's out of the
+/// hostname — a peer met across two servers is one device, so its networks carry the server tag.
+/// Communities and networks appear in first-seen order (the coordinator's stable snapshot order).
+fn shared_networks_by_community(networks: &[common::api::SharedNetwork]) -> String {
+    let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+    for n in networks {
+        match groups.iter_mut().find(|(c, _)| *c == n.community) {
+            Some((_, names)) => names.push(&n.name),
+            None => groups.push((&n.community, vec![&n.name])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(community, names)| format!("{}: {}", community, names.join(", ")))
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// A dismissible error banner, pinned above the sections in `view`.
 fn error_banner<'a>(e: &str) -> Element<'a, Message> {
     let content = row![
@@ -1445,12 +1467,12 @@ mod tests {
         let report = StatusReport {
             device: Some(DeviceStatus {
                 wg_ip: Ipv4Addr::new(100, 64, 0, 1),
-                hostname: "host-a.alice.lan.unity.internal".into(),
+                hostname: "host-a.alice.unity.internal".into(),
                 is_primary: true,
                 networks: vec!["mesh".into()],
             }),
             peers: vec![PeerStatus {
-                hostname: "host-b.bob.lan.unity.internal".into(),
+                hostname: "host-b.bob.unity.internal".into(),
                 wg_ip: Ipv4Addr::new(100, 64, 0, 2),
                 endpoint: None,
                 reach: common::control::PeerReach::Direct,
@@ -1461,7 +1483,10 @@ mod tests {
                 rx_bytes: 2048,
                 tx_bytes: 512,
                 last_handshake_secs: Some(5),
-                networks: vec!["mesh".into()],
+                networks: vec![common::api::SharedNetwork {
+                    name: "mesh".into(),
+                    community: "acme".into(),
+                }],
             }],
             networks: vec![],
             needs_login: false,
@@ -1479,6 +1504,29 @@ mod tests {
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
         assert_eq!(a.status.unwrap().peers.len(), 1);
+    }
+
+    #[test]
+    fn shared_networks_group_by_community() {
+        let net = |name: &str, community: &str| common::api::SharedNetwork {
+            name: name.into(),
+            community: community.into(),
+        };
+        // Two communities, first-seen order preserved; networks joined within each.
+        let nets = vec![
+            net("Engineering", "acme"),
+            net("Gaming", "playhouse"),
+            net("Ops", "acme"),
+        ];
+        assert_eq!(
+            shared_networks_by_community(&nets),
+            "acme: Engineering, Ops · playhouse: Gaming"
+        );
+        // A single community still carries its tag (the disambiguator).
+        assert_eq!(
+            shared_networks_by_community(&[net("mesh", "acme")]),
+            "acme: mesh"
+        );
     }
 
     #[test]

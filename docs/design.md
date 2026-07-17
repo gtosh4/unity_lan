@@ -3,8 +3,8 @@
 A WireGuard mesh VPN whose membership is defined by Discord roles and enforced by a
 self-hosted coordinator that issues **short-lived signed attestations**. Peers discover each
 other **via the coordinator (long-poll)** and form direct P2P tunnels. Hostnames:
-`<device>.<user>.<community>.unity.internal` (a user's primary device is just
-`<user>.<community>.unity.internal`, §6.2).
+`<device>.<user>.unity.internal` (a user's primary device is just
+`<user>.unity.internal`, §6.2).
 
 > Status: **draft**. Decisions marked ✅ are settled; ❓ are open. See
 > [Open Questions](#open-questions).
@@ -39,7 +39,7 @@ their own devices (name, primary, remove) from the client app / CLI (§8).
 - Direct peer-to-peer encrypted data plane (WireGuard). Coordinator carries **no traffic
   and no private keys** (Tailscale-style: control plane only).
 - Self-hostable; one instance serves 1..N guilds → decentralized across operators.
-- Human DNS: `alice.minecraft.mycommunity.unity.internal`.
+- Human DNS: `gameserver.alice.unity.internal` (primary device: bare `alice.unity.internal`).
 - Local control: toggle networks you're entitled to, expose local ports to a network.
 
 **Non-Goals (v1)**
@@ -291,25 +291,35 @@ point at them (context).
 
 ### 6.2 Naming
 ```
-alice.mycommunity.unity.internal                 ← single device, or the user's PRIMARY device
-gameserver.alice.mycommunity.unity.internal      ← a specific device
-laptop.alice.mycommunity.unity.internal          ← another device
+alice.unity.internal                 ← single device, or the user's PRIMARY device
+gameserver.alice.unity.internal      ← a specific device
+laptop.alice.unity.internal          ← another device
 ```
-- **community** = an **admin-chosen slug** (config, default = sanitized guild name). Discord
-  guild *names* aren't unique and *ids* are ugly, so the community picks a slug (like a
-  Tailscale tailnet name / a domain). Needed to disambiguate across communities/coordinators.
+- **unity** = the **coordinator's** namespace label. While UnityLAN supports a **single
+  coordinator** it is fixed (`DNS_SUFFIX`), so the community/guild is **not** in the name. A
+  device has one identity and one IP across *all* a coordinator's guilds it belongs to (Model B),
+  so a community label would be a redundant tag on one machine. The community rides on each
+  **shared network** instead (`api::SharedNetwork`, surfaced in the GUI grouped by server), where
+  it's real signal — which server a shared role came from.
+  - *Multi-coordinator (future):* when a client can join guilds on **different** coordinators, the
+    `unity` label becomes **per-coordinator** (derived from the coordinator's domain, e.g.
+    `unitylan.com` → `unity`). That per-coordinator label is what then disambiguates the same
+    `@handle` and resolves IP-range collisions across coordinators — the role the community label
+    used to play here. Tracked as a `TODO(multi-coordinator)` on `DNS_SUFFIX`.
 - **user** = the **global Discord username** (`@handle`, globally unique + readable). Not the
-  per-guild nick (nicks aren't unique). Nicks stay as display labels in the GUI only.
+  per-guild nick (nicks aren't unique). Nicks stay as display labels in the GUI only. Because the
+  handle is already globally unique, `<device>.<user>` names a machine uniquely with no community
+  label.
 - **device** = a per-user machine name (unique per user → collision-free; default = OS
   hostname).
-- **`<user>.<community>.unity.internal`** always resolves to the user's **primary** device, so the
-  common single-device case is trivially short. `<device>.<user>.<community>.unity.internal`
-  addresses a specific device.
-- **Search domains** (`<community>.unity.internal`, `<user>.<community>.unity.internal`) let friends type
-  short names: `alice`, or `gameserver.alice`.
+- **`<user>.unity.internal`** always resolves to the user's **primary** device, so the common
+  single-device case is trivially short. `<device>.<user>.unity.internal` addresses a specific
+  device.
+- **Search domains** (`unity.internal`, `<user>.unity.internal`) let friends type short names:
+  `alice`, or `gameserver.alice`.
 
 ### 6.3 Primary device
-The `<user>.<community>` alias is a *global* name, so **primary is authoritative at the
+The `<user>.unity.internal` alias is a *global* name, so **primary is authoritative at the
 coordinator** (`primary_device` per `(community, user)`) and propagated in register/refresh
 (an `is_primary` flag per device). Default = first enrolled. Owner-updatable from **any** of
 their devices (`unitylan primary <device>`) — no need for the old/dead one; on primary

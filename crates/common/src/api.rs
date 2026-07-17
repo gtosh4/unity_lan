@@ -296,9 +296,22 @@ pub struct DeviceInfo {
 pub struct GuildAttestation {
     /// base64(`Signed<Attestation>`), signed by the guild's per-guild key.
     pub attestation: String,
-    /// Community display name of that guild (the `<community>` DNS label; admin-chosen, defaults to
-    /// guild name) — used to build this device's hostname within the guild.
+    /// Community slug of that guild (admin-chosen, defaults to guild name). No longer part of the
+    /// hostname (see `Attestation::hostname`); surfaced as metadata — the CLI shows it, and it tags
+    /// shared networks (`SharedNetwork`).
     pub community_name: String,
+}
+
+/// A network (ACL role) a peer shares with the caller, tagged with the community (guild) it lives
+/// in. The community is the disambiguator here — a peer met across two of the coordinator's guilds
+/// is one device/one IP (Model B), so it's carried per shared network, not in the hostname.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedNetwork {
+    /// Role display name (the ACL group).
+    pub name: String,
+    /// Community slug of the guild this role belongs to — disambiguates same-named roles across
+    /// the coordinator's guilds, and labels which server a shared network came from.
+    pub community: String,
 }
 
 /// The caller's own device: its signed attestation(s) + the names to build its hostname(s).
@@ -325,10 +338,11 @@ pub struct Seed {
     /// (their long-polls wake on the same version bump) to punch through their NATs (§7.2).
     #[serde(default)]
     pub punch: Option<SocketAddr>,
-    /// The networks (by display name) this peer shares with the caller — lets the client scope
-    /// `expose --net <role>` to just this network's peers.
+    /// The networks this peer shares with the caller, each tagged with its community — lets the
+    /// client scope `expose --net <role>` to just this network's peers, and lets the GUI show which
+    /// server each shared network came from.
     #[serde(default)]
-    pub networks: Vec<String>,
+    pub networks: Vec<SharedNetwork>,
     /// Relay reservation for reaching this peer when a direct path and a hole punch both fail
     /// (§7.2, M5.4). Set by the coordinator when either side reported the other in `need_relay`;
     /// the client allocates on the named TURN server and routes this peer's WG traffic through it.

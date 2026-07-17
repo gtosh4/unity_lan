@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use common::api::{
     DeviceInfo, Grant, GuildAnchor, GuildAttestation, IceParams, ManageOp, ManageReq, ManageResp,
     NetworkStatus, OauthCompleteReq, ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp,
-    Seed,
+    Seed, SharedNetwork,
 };
 use common::netid::sanitize_label;
 use common::update::ReleaseManifest;
@@ -436,18 +436,23 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     };
 
     // Seeds: every other device sharing ≥1 network with the caller, deduplicated by pubkey but
-    // accumulating the shared network *names* (so the client can scope `expose --net` per network).
-    // Third slot: the set of guilds this peer shares with the caller (always a subset of the
-    // caller's held guilds). Each shared guild yields one attestation, signed by that guild's key.
-    let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<String>, BTreeSet<u64>)> =
+    // accumulating the shared networks (name + community, so the client can scope `expose --net` per
+    // network and show which server each came from). Third slot: the set of guilds this peer shares
+    // with the caller (always a subset of the caller's held guilds). Each shared guild yields one
+    // attestation, signed by that guild's key.
+    let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<SharedNetwork>, BTreeSet<u64>)> =
         HashMap::new();
     for ((guild_id, role_id), net_name) in held.iter().zip(network_names.iter()) {
+        let net = SharedNetwork {
+            name: net_name.clone(),
+            community: community_cache.get(guild_id).cloned().unwrap_or_default(),
+        };
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
             let entry = by_pubkey
                 .entry(mp.pubkey)
                 .or_insert_with(|| (mp.clone(), Vec::new(), BTreeSet::new()));
-            if !entry.1.contains(net_name) {
-                entry.1.push(net_name.clone());
+            if !entry.1.contains(&net) {
+                entry.1.push(net.clone());
             }
             entry.2.insert(*guild_id);
         }
@@ -541,7 +546,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // both endpoints, building their own snapshots, pick the same min-pubkey relay from the same
     // set, so they meet on it.
     let relay_regs = st.relays.lock().unwrap().clone();
-    let relay_candidates: Vec<([u8; 32], Vec<String>, RelayReg)> = by_pubkey
+    let relay_candidates: Vec<([u8; 32], Vec<SharedNetwork>, RelayReg)> = by_pubkey
         .iter()
         .filter_map(|(pk, (_mp, nets, _c))| {
             relay_regs
@@ -860,8 +865,8 @@ fn punch_target(
 /// credentials for that relay, or `None` if no third-party relay serves both.
 fn relay_target(
     peer: &[u8; 32],
-    peer_networks: &[String],
-    candidates: &[([u8; 32], Vec<String>, RelayReg)],
+    peer_networks: &[SharedNetwork],
+    candidates: &[([u8; 32], Vec<SharedNetwork>, RelayReg)],
     now: u64,
 ) -> Option<common::api::RelayInfo> {
     candidates
@@ -931,7 +936,7 @@ mod tests {
         accepted_reflexives, punch_target, relay_target, should_supersede, RateLimiter, RelayReg,
         RL_MAX_PER_IP, RL_MAX_TOTAL, RL_WINDOW,
     };
-    use common::api::ObservedEndpoint;
+    use common::api::{ObservedEndpoint, SharedNetwork};
     use std::net::IpAddr;
     use std::time::Instant;
 
@@ -976,17 +981,21 @@ mod tests {
 
     #[test]
     fn relay_target_picks_shared_network_lowest_pubkey_third_party() {
+        let net = |name: &str| SharedNetwork {
+            name: name.into(),
+            community: "c".into(),
+        };
         let peer = [9u8; 32];
         // Two relay candidates sharing "mesh" with the peer, plus one on an unrelated network.
         let candidates = vec![
-            ([5u8; 32], vec!["mesh".into()], reg("203.0.113.5:3478")),
-            ([2u8; 32], vec!["mesh".into()], reg("203.0.113.2:3478")),
-            ([1u8; 32], vec!["other".into()], reg("203.0.113.1:3478")),
+            ([5u8; 32], vec![net("mesh")], reg("203.0.113.5:3478")),
+            ([2u8; 32], vec![net("mesh")], reg("203.0.113.2:3478")),
+            ([1u8; 32], vec![net("other")], reg("203.0.113.1:3478")),
         ];
         let now = 1_000;
 
         // Lowest pubkey among those sharing the peer's network wins → the [2;32] relay at .2.
-        let info = relay_target(&peer, &["mesh".into()], &candidates, now)
+        let info = relay_target(&peer, &[net("mesh")], &candidates, now)
             .expect("a shared-network relay exists");
         assert_eq!(info.turn_addr, addr("203.0.113.2:3478"));
         // Credential is the HMAC over the minted username (verifiable by the relay).
@@ -996,11 +1005,11 @@ mod tests {
         );
 
         // A peer on a network no candidate shares → no relay.
-        assert!(relay_target(&peer, &["lonely".into()], &candidates, now).is_none());
+        assert!(relay_target(&peer, &[net("lonely")], &candidates, now).is_none());
 
         // The peer is never handed itself as a relay (no self-relay).
-        let only_self = vec![(peer, vec!["mesh".into()], reg("203.0.113.9:3478"))];
-        assert!(relay_target(&peer, &["mesh".into()], &only_self, now).is_none());
+        let only_self = vec![(peer, vec![net("mesh")], reg("203.0.113.9:3478"))];
+        assert!(relay_target(&peer, &[net("mesh")], &only_self, now).is_none());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! A tiny authoritative resolver for the `.unity.internal` zone (design.md §6.4). Answers A queries
 //! from an in-memory name→IP map built from our verified attestations (self + seeds), so peers
-//! are reachable by `<device>.<user>.<community>.unity.internal` and primaries by `<user>.<community>`.
+//! are reachable by `<device>.<user>.unity.internal` and primaries also by `<user>.unity.internal`.
 //!
 //! Per-OS resolver hookup (systemd-resolved / NRPT / macOS resolver dir) is separate polish;
 //! this just serves correct answers on a UDP socket.
