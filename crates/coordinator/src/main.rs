@@ -18,14 +18,16 @@ use std::sync::Arc;
 
 use anyhow::Context;
 
+use common::update::ReleaseManifest;
+
 use crate::api::AppState;
 use crate::config::Config;
 use crate::roles::{FakeRoleSource, RoleSource};
-use crate::signer::Signer;
+use crate::signer::GuildKeys;
 use crate::store::Store;
 
 /// Resolve the deployment's mesh CIDR: the configured `cidr` (validated), or a `/16` derived from
-/// the trust anchor within 100.64.0.0/10. Fails closed on a configured range outside private space.
+/// the deployment seed within 100.64.0.0/10. Fails closed on a configured range outside private space.
 fn resolve_mesh_cidr(cfg: &Config, seed: &[u8; 32]) -> anyhow::Result<ipnet::Ipv4Net> {
     match cfg.cidr {
         Some(net) => {
@@ -76,33 +78,53 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    // `rotate-key [config]` is an offline admin subcommand: rotate the trust anchor and exit. The
-    // operator restarts the coordinator afterward to sign under the new key.
-    let mut args = std::env::args().skip(1);
-    let first = args.next();
-    let (rotate_only, config_path) = match first.as_deref() {
-        Some("rotate-key") => (true, args.next()),
-        other => (false, other.map(String::from)),
-    };
-    let config_path = config_path.unwrap_or_else(|| "coordinator.toml".to_string());
+    // `rotate-key --guild <id> [config]` is an offline admin subcommand: rotate one guild's signing
+    // key and exit (keys are per-guild, §3.1). The operator restarts to sign under the new key.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let (rotate_guild, config_path): (Option<u64>, String) =
+        if argv.first().map(String::as_str) == Some("rotate-key") {
+            let mut guild = None;
+            let mut config = None;
+            let mut it = argv[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--guild" => {
+                        let id = it.next().context("rotate-key: --guild needs an id")?;
+                        guild = Some(id.parse::<u64>().context("rotate-key: bad --guild id")?);
+                    }
+                    other => config = Some(other.to_string()),
+                }
+            }
+            let guild = guild.context("rotate-key requires --guild <guild_id>")?;
+            (
+                Some(guild),
+                config.unwrap_or_else(|| "coordinator.toml".to_string()),
+            )
+        } else {
+            (
+                None,
+                argv.first()
+                    .cloned()
+                    .unwrap_or_else(|| "coordinator.toml".to_string()),
+            )
+        };
     let cfg = Config::load(std::path::Path::new(&config_path))
         .with_context(|| format!("loading config {config_path}"))?;
 
     let store = Arc::new(Store::open(&cfg.database).await?);
 
-    if rotate_only {
-        let anchor = crate::rotate::rotate_key(&store).await?;
+    if let Some(guild_id) = rotate_guild {
+        let anchor = crate::rotate::rotate_key(&store, guild_id).await?;
         let hex: String = anchor.iter().map(|b| format!("{b:02x}")).collect();
-        println!("trust anchor rotated. new anchor: {hex}");
+        println!("guild {guild_id} trust anchor rotated. new anchor: {hex}");
         println!("restart the coordinator to sign under the new key.");
         return Ok(());
     }
 
-    let seed = store.load_or_create_seed().await?;
-    let mesh_cidr = resolve_mesh_cidr(&cfg, &seed)?;
+    let deployment_seed = store.load_or_create_deployment_seed().await?;
+    let mesh_cidr = resolve_mesh_cidr(&cfg, &deployment_seed)?;
     tracing::info!(cidr = %mesh_cidr, "mesh address range");
-    let signer = Arc::new(Signer::from_seed(&seed, mesh_cidr));
-    let rotation_chain = store.rotation_chain().await?;
+    let guild_keys = Arc::new(GuildKeys::new(store.clone(), mesh_cidr));
 
     // Seed the network registry from config (test convenience; prod uses slash commands).
     for n in &cfg.network_seeds {
@@ -189,13 +211,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Sign the auto-update manifest from `[release]` — it's static, so every RegisterResp serves the
-    // cached string with no per-request work. Fails closed at startup: a malformed `[release]` aborts
-    // boot. Held behind a RwLock so SIGHUP can re-sign it without a restart (see below).
-    let release = Arc::new(std::sync::RwLock::new(build_release(
-        cfg.release.as_ref(),
-        &signer,
-    )?));
+    // Parse + validate the auto-update manifest from `[release]`. It's signed per-request under a
+    // guild key the caller holds (§3.1), so we hold the *parsed* manifest, not a pre-signed string.
+    // Fails closed at startup: a malformed `[release]` aborts boot. Behind a RwLock so SIGHUP can
+    // swap it without a restart (see below).
+    let release = Arc::new(std::sync::RwLock::new(build_release(cfg.release.as_ref())?));
 
     // Reload the release manifest on SIGHUP (unix): re-read the config, re-sign `[release]`, and swap
     // it in — so an admin publishes a new release with `kill -HUP`, no restart. Only the release
@@ -204,7 +224,6 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let release = release.clone();
-        let signer = signer.clone();
         let config_path = config_path.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
@@ -217,7 +236,7 @@ async fn main() -> anyhow::Result<()> {
             };
             while hup.recv().await.is_some() {
                 match Config::load(std::path::Path::new(&config_path))
-                    .and_then(|cfg| build_release(cfg.release.as_ref(), &signer))
+                    .and_then(|cfg| build_release(cfg.release.as_ref()))
                 {
                     Ok(new) => {
                         *release.write().unwrap() = new;
@@ -232,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let state = AppState {
-        signer,
+        guild_keys,
         roles,
         store,
         presence,
@@ -243,7 +262,6 @@ async fn main() -> anyhow::Result<()> {
         relay_allocs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         stun_addr,
-        rotation_chain,
         release,
     };
 
@@ -266,17 +284,16 @@ async fn main() -> anyhow::Result<()> {
 /// of `cfg` is partially moved into the role/oauth sources by the time this runs at startup.
 fn build_release(
     release: Option<&crate::config::ReleaseConfig>,
-    signer: &Signer,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<Option<ReleaseManifest>> {
     match release {
         Some(rc) => {
-            let signed = signer.sign_to_base64(&rc.to_manifest()?)?;
+            let manifest = rc.to_manifest()?;
             tracing::info!(
                 version = %rc.version,
                 artifacts = rc.artifacts.len(),
-                "serving signed auto-update manifest"
+                "serving auto-update manifest"
             );
-            Ok(Some(signed))
+            Ok(Some(manifest))
         }
         None => Ok(None),
     }

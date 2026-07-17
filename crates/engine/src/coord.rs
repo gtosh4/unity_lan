@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{bail, Context};
-use common::api::{NetworkRef, RegisterReq, RegisterResp};
-use common::attestation::verify_attestation;
+use common::api::{Grant, NetworkRef, RegisterReq, RegisterResp};
+use common::attestation::{verify_attestation, Attestation};
 use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
 use common::wire::Signed;
@@ -203,25 +203,23 @@ async fn post(
     let resp = ensure_ok(resp, path).await?;
     let resp: RegisterResp = resp.json().await.context("decoding RegisterResp")?;
 
-    // Trust gate: pin the anchor on first sight; on a change, accept it only if the rotation chain
-    // proves a signed path from our *pinned* anchor to the new one. A MITM that swaps `coord_pubkey`
-    // (and self-signs the seeds) is rejected here — before we trust any attestation in the response.
-    // Every register *and* refresh goes through this, so the pin holds in steady state, not just at
-    // first contact.
-    keys::pin_anchor(state_dir, &resp.coord_pubkey, &resp.rotation_chain)?;
-    let pinned = keys::load_anchor(state_dir)?;
-    let anchor =
-        anchor_from_bytes(&pinned).map_err(|e| anyhow::anyhow!("bad pinned anchor: {e}"))?;
+    // Trust gate: pin every guild anchor the response carries (TOFU per guild, design.md §3.1). On a
+    // change we accept only a valid rotation path for that guild; a MITM that swaps an anchor (and
+    // self-signs) is rejected here — before we trust any attestation. Every register *and* refresh
+    // goes through this, so the pins hold in steady state, not just at first contact.
+    for a in &resp.anchors {
+        keys::pin_anchor(state_dir, a.guild_id, &a.pubkey, &a.rotation_chain)?;
+    }
+    let pinned = pinned_anchors(&resp, state_dir);
     let now = now_unix();
 
     let device = match &resp.grant {
         Some(grant) => {
-            let signed = Signed::from_base64(&grant.attestation).context("decoding grant")?;
-            let att = verify_attestation(&signed, &anchor, now).context("verifying grant")?;
-            let hostname = att.hostname(&grant.community_name);
-            let primary_alias = att.primary_alias(&grant.community_name);
+            let (att, community) = verify_grant(grant, &pinned, now).context("verifying grant")?;
+            let hostname = att.hostname(&community);
+            let primary_alias = att.primary_alias(&community);
             Some(SelfDevice {
-                community_name: grant.community_name.clone(),
+                community_name: community,
                 username: att.username.clone(),
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,
@@ -235,6 +233,55 @@ async fn post(
         None => None,
     };
     Ok((resp, device))
+}
+
+/// The trusted `(guild_id, anchor-bytes)` pairs read **from disk** (the pins) for every guild the
+/// response references. The response was already gated through [`keys::pin_anchor`], so these — not
+/// the anchors the response carries — are the keys we verify attestations against.
+fn pinned_anchors(resp: &RegisterResp, state_dir: &Path) -> Vec<(u64, [u8; 32])> {
+    resp.anchors
+        .iter()
+        .filter_map(|a| {
+            keys::load_anchor(state_dir, a.guild_id)
+                .ok()
+                .map(|pk| (a.guild_id, pk))
+        })
+        .collect()
+}
+
+/// Verify one attestation against whichever pinned guild anchor it is scoped to (the `guild_id`
+/// check inside [`verify_attestation`] binds it to that guild). Returns the verified attestation, or
+/// `None` if no pinned anchor accepts it — wrong guild, bad signature, or expired.
+fn verify_against_pinned(
+    signed: &Signed,
+    pinned: &[(u64, [u8; 32])],
+    now: u64,
+) -> Option<Attestation> {
+    for (guild_id, pk) in pinned {
+        let Ok(anchor) = anchor_from_bytes(pk) else {
+            continue;
+        };
+        if let Ok(att) = verify_attestation(signed, &anchor, now, *guild_id) {
+            return Some(att);
+        }
+    }
+    None
+}
+
+/// Verify our grant: return the first per-guild attestation that verifies against its pinned anchor,
+/// with its community name (the representative hostname for this device). Fails closed if none do.
+fn verify_grant(
+    grant: &Grant,
+    pinned: &[(u64, [u8; 32])],
+    now: u64,
+) -> anyhow::Result<(Attestation, String)> {
+    for ga in &grant.attestations {
+        let signed = Signed::from_base64(&ga.attestation).context("decoding grant attestation")?;
+        if let Some(att) = verify_against_pinned(&signed, pinned, now) {
+            return Ok((att, ga.community_name.clone()));
+        }
+    }
+    bail!("no grant attestation verified against a pinned guild anchor")
 }
 
 /// Fetch the public PKCE config (Discord `client_id`, fake-mode flag) so the engine can run the
@@ -286,19 +333,28 @@ pub async fn manage(
     resp.json().await.context("decoding ManageResp")
 }
 
-/// Verify the seeds in a response against the **pinned** anchor → the co-members to peer with.
-/// The anchor comes from disk, not `resp.coord_pubkey`: the response was already gated through
-/// [`keys::pin_anchor`] in [`post`], so the pin on disk is the key we trust (re-pinned already if a
-/// valid rotation occurred). A response whose seeds are signed by any other key fails here.
+/// Verify the seeds in a response against the **pinned** per-guild anchors → the co-members to peer
+/// with. Anchors come from disk, not the response: the response was already gated through
+/// [`keys::pin_anchor`] in [`post`], so a pinned key is what we trust (re-pinned already if a valid
+/// rotation occurred). Each seed is admitted on the first of its shared-guild attestations that
+/// verifies against the matching pinned anchor; a seed none of whose attestations verify fails the
+/// whole batch (fail closed — a substituted/self-signed seed must be rejected, not silently peered).
 pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<Vec<SeedPeer>> {
-    let pinned = keys::load_anchor(state_dir)?;
-    let anchor =
-        anchor_from_bytes(&pinned).map_err(|e| anyhow::anyhow!("bad pinned anchor: {e}"))?;
+    let pinned = pinned_anchors(resp, state_dir);
     let now = now_unix();
     let mut peers = Vec::new();
     for seed in &resp.seeds {
-        let signed = Signed::from_base64(&seed.attestation).context("decoding seed")?;
-        let att = verify_attestation(&signed, &anchor, now).context("verifying seed")?;
+        let mut verified: Option<(Attestation, String)> = None;
+        for ga in &seed.attestations {
+            let signed =
+                Signed::from_base64(&ga.attestation).context("decoding seed attestation")?;
+            if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
+                verified = Some((att, ga.community_name.clone()));
+                break;
+            }
+        }
+        let (att, community) =
+            verified.context("seed has no attestation signed by a pinned guild anchor")?;
         peers.push(SeedPeer {
             pubkey: att.wg_pubkey,
             user_id: att.user_id,
@@ -306,8 +362,8 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             ip: att.wg_ip,
             endpoint: seed.endpoint,
             punch: seed.punch,
-            hostname: att.hostname(&seed.community_name),
-            primary_alias: att.primary_alias(&seed.community_name),
+            hostname: att.hostname(&community),
+            primary_alias: att.primary_alias(&community),
             networks: seed.networks.clone(),
             relay: seed.relay.clone(),
             ice: seed.ice.clone(),
@@ -319,9 +375,10 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use common::api::{RegisterResp, Seed};
-    use common::attestation::Attestation;
+    use common::api::{GuildAnchor, GuildAttestation, RegisterResp, Seed};
     use common::crypto::CoordinatorKey;
+
+    const GUILD: u64 = 42;
 
     fn temp_state_dir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("unitylan-coord-{tag}-{}", std::process::id()));
@@ -329,10 +386,11 @@ mod tests {
         dir
     }
 
-    /// A seed attestation signed by `key` (attacker or honest coordinator).
-    fn seed_signed_by(key: &CoordinatorKey) -> Seed {
+    /// A seed with one attestation for `guild_id`, signed by `key` (attacker or honest coordinator).
+    fn seed_signed_by(key: &CoordinatorKey, guild_id: u64) -> Seed {
         let now = now_unix();
         let att = Attestation {
+            guild_id,
             user_id: 7,
             username: "eve".into(),
             device_name: "box".into(),
@@ -344,8 +402,10 @@ mod tests {
             expires_at: now + common::ATTESTATION_TTL_SECS,
         };
         Seed {
-            attestation: Signed::sign(key, &att).unwrap().to_base64(),
-            community_name: "c".into(),
+            attestations: vec![GuildAttestation {
+                attestation: Signed::sign(key, &att).unwrap().to_base64(),
+                community_name: "c".into(),
+            }],
             endpoint: None,
             punch: None,
             networks: Vec::new(),
@@ -354,44 +414,70 @@ mod tests {
         }
     }
 
-    /// Regression for the steady-state MITM: after we pin the honest anchor on first contact, a
-    /// later response that swaps `coord_pubkey` to an attacker key and self-signs its seeds with
-    /// that key must be rejected — seeds are verified against the PINNED anchor, not the anchor the
-    /// response carries. Before the fix, `verified_seeds` trusted `resp.coord_pubkey` and accepted
-    /// these forged peers.
-    #[test]
-    fn seeds_verified_against_pinned_not_response_anchor() {
-        let dir = temp_state_dir("pinned");
-        let honest = CoordinatorKey::generate();
-        let attacker = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, &honest.anchor_bytes(), &[]).unwrap();
-
-        // Attacker-substituted response: its own anchor + seeds self-signed by it.
-        let forged = RegisterResp {
-            coord_pubkey: attacker.anchor_bytes(),
-            rotation_chain: Vec::new(),
+    fn resp_with_seeds(
+        anchor_guild: u64,
+        anchor_key: &CoordinatorKey,
+        seeds: Vec<Seed>,
+    ) -> RegisterResp {
+        RegisterResp {
+            anchors: vec![GuildAnchor {
+                guild_id: anchor_guild,
+                pubkey: anchor_key.anchor_bytes(),
+                rotation_chain: Vec::new(),
+            }],
             grant: None,
             device_token: None,
-            seeds: vec![seed_signed_by(&attacker)],
+            seeds,
             version: 1,
             networks: Vec::new(),
             stun_addr: None,
             proto: common::PROTOCOL_VERSION,
             server_version: common::VERSION.to_string(),
             release: None,
-        };
+        }
+    }
+
+    /// Regression for the steady-state MITM: after we pin the honest anchor for a guild, a later
+    /// response that self-signs its seeds with an attacker key must be rejected — seeds are verified
+    /// against the PINNED anchor, not the anchor the response carries.
+    #[test]
+    fn seeds_verified_against_pinned_not_response_anchor() {
+        let dir = temp_state_dir("pinned");
+        let honest = CoordinatorKey::generate();
+        let attacker = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        // Attacker-substituted response: its own anchor for GUILD + seeds self-signed by it. The
+        // pin on disk (honest) is what we verify against, so the forged seed is rejected.
+        let forged = resp_with_seeds(GUILD, &attacker, vec![seed_signed_by(&attacker, GUILD)]);
         assert!(
             verified_seeds(&forged, &dir).is_err(),
             "seeds signed by a non-pinned anchor must be rejected"
         );
 
-        // Sanity: seeds legitimately signed by the pinned anchor still verify (coord_pubkey is
-        // irrelevant to the seed check — only the pin matters).
-        let honest_resp = RegisterResp {
-            seeds: vec![seed_signed_by(&honest)],
-            ..forged
-        };
+        // Sanity: seeds legitimately signed by the pinned anchor still verify.
+        let honest_resp = resp_with_seeds(GUILD, &attacker, vec![seed_signed_by(&honest, GUILD)]);
         assert!(verified_seeds(&honest_resp, &dir).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Tenant isolation: a seed's attestation signed by guild A's honest key but presented for a
+    /// guild we pinned with a *different* key must be rejected — a compromised guild-A key cannot
+    /// vouch for a peer in guild B (design.md §3.1). Here we pin GUILD with `honest`; a seed carrying
+    /// a GUILD-scoped attestation signed by `other` fails because the signature doesn't match the pin.
+    #[test]
+    fn cross_guild_key_cannot_vouch() {
+        let dir = temp_state_dir("cross-guild");
+        let honest = CoordinatorKey::generate();
+        let other = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        let forged = resp_with_seeds(GUILD, &honest, vec![seed_signed_by(&other, GUILD)]);
+        assert!(
+            verified_seeds(&forged, &dir).is_err(),
+            "an attestation signed by a different guild's key must be rejected"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

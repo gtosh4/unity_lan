@@ -162,16 +162,28 @@ pub struct NetworkRef {
     pub role_id: u64,
 }
 
+/// One guild's trust anchor: its per-guild Ed25519 signing key (design.md §3.1) plus that key's
+/// rotation chain. The client pins each guild's key independently (TOFU on first contact) and
+/// verifies a peer's attestation against the anchor for the guild the attestation is scoped to.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuildAnchor {
+    pub guild_id: u64,
+    /// Ed25519 anchor bytes for this guild; the client pins it on first sight of the guild.
+    pub pubkey: [u8; 32],
+    /// Trust-anchor rotation certs (base64 `Signed<RotationCert>`), oldest→newest, for this guild's
+    /// key. A client whose pinned anchor differs from `pubkey` walks these to re-pin without manual
+    /// intervention (design.md §9). Empty until this guild's key has been rotated at least once.
+    #[serde(default)]
+    pub rotation_chain: Vec<String>,
+}
+
 /// `POST /register` or `/refresh` response.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RegisterResp {
-    /// Ed25519 anchor bytes; the client pins this on first register.
-    pub coord_pubkey: [u8; 32],
-    /// Trust-anchor rotation certs (base64 `Signed<RotationCert>`), oldest→newest. A client whose
-    /// pinned anchor differs from `coord_pubkey` walks these to re-pin without manual intervention
-    /// (design.md §9). Empty until the coordinator's key has been rotated at least once.
+    /// One trust anchor per guild referenced anywhere in this response (the caller's own guilds and
+    /// every peer's). The client pins each independently and re-pins via its `rotation_chain`.
     #[serde(default)]
-    pub rotation_chain: Vec<String>,
+    pub anchors: Vec<GuildAnchor>,
     /// The caller's own device grant; `None` if they hold no networks.
     #[serde(default)]
     pub grant: Option<Grant>,
@@ -277,25 +289,35 @@ pub struct DeviceInfo {
     pub is_self: bool,
 }
 
-/// The caller's own device: its signed attestation + the names to build its hostname.
+/// One guild's attestation for a device, plus that guild's community label. A device that
+/// participates in several guilds carries one of these per guild — the attestation is signed by
+/// that guild's per-guild key and its `guild_id` names the guild whose anchor verifies it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GuildAttestation {
+    /// base64(`Signed<Attestation>`), signed by the guild's per-guild key.
+    pub attestation: String,
+    /// Community display name of that guild (the `<community>` DNS label; admin-chosen, defaults to
+    /// guild name) — used to build this device's hostname within the guild.
+    pub community_name: String,
+}
+
+/// The caller's own device: its signed attestation(s) + the names to build its hostname(s).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Grant {
-    /// base64(`Signed<Attestation>`) for this device.
-    pub attestation: String,
-    /// Community display name (the `<community>` DNS label; admin-chosen, defaults to guild name).
-    pub community_name: String,
+    /// One attestation per guild this device participates in (design.md §3.1). Each is signed by
+    /// that guild's per-guild key; the device gets a hostname within each guild's community.
+    pub attestations: Vec<GuildAttestation>,
     /// Network display names this device belongs to (ACL groups; for status display).
     pub networks: Vec<String>,
 }
 
-/// A co-member to peer with: their signed attestation (pubkey + wg_ip) + last-known endpoint.
+/// A co-member to peer with: their signed attestation(s) (pubkey + wg_ip) + last-known endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Seed {
-    /// base64(`Signed<Attestation>`) for a co-member sharing ≥1 network.
-    pub attestation: String,
-    /// Community display name of a shared network's guild (the `<community>` DNS label).
-    #[serde(default)]
-    pub community_name: String,
+    /// One attestation per guild this peer **shares with the caller**, each signed by that guild's
+    /// per-guild key. The client admits the peer once any one verifies against the matching pinned
+    /// guild anchor (design.md §4.1/§4.3).
+    pub attestations: Vec<GuildAttestation>,
     /// The co-member's last-reported (directly dialable) endpoint (may be stale/absent).
     pub endpoint: Option<SocketAddr>,
     /// Hole-punch target: this peer's reflexive `ip:port`, set only when neither we nor the peer
@@ -328,11 +350,13 @@ mod tests {
     // string) rather than fail to decode — the whole compatibility story rests on this.
     #[test]
     fn register_resp_decodes_without_version_fields() {
-        let old =
-            r#"{"coord_pubkey":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}"#;
+        // A minimal response (no version fields, no anchors) must decode with the fields defaulting
+        // rather than failing — proto=0, empty server_version, no anchors.
+        let old = r#"{}"#;
         let resp: RegisterResp = serde_json::from_str(old).unwrap();
         assert_eq!(resp.proto, 0);
         assert_eq!(resp.server_version, "");
+        assert!(resp.anchors.is_empty());
     }
 
     #[test]
@@ -347,8 +371,7 @@ mod tests {
     #[test]
     fn register_resp_roundtrips_version_fields() {
         let resp = RegisterResp {
-            coord_pubkey: [0u8; 32],
-            rotation_chain: vec![],
+            anchors: vec![],
             grant: None,
             device_token: None,
             seeds: vec![],

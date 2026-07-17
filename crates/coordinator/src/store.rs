@@ -98,9 +98,13 @@ impl Store {
     async fn migrate(&self) -> anyhow::Result<()> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS signing_key (
-                id   INTEGER PRIMARY KEY CHECK (id = 1),
-                seed BLOB NOT NULL
+            CREATE TABLE IF NOT EXISTS guild_signing_keys (
+                guild_id INTEGER PRIMARY KEY,  -- one independent Ed25519 seed per guild (§3.1)
+                seed     BLOB    NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS deployment_seed (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),  -- one row; not a signing key
+                seed BLOB    NOT NULL                     -- random, selects the default mesh /16
             );
             CREATE TABLE IF NOT EXISTS networks (
                 guild_id INTEGER NOT NULL,
@@ -133,9 +137,10 @@ impl Store {
                 pubkey  BLOB    PRIMARY KEY,  -- device pubkey bound to a user via interactive login
                 user_id INTEGER NOT NULL
             );
-            CREATE TABLE IF NOT EXISTS rotation_certs (
-                idx  INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
-                cert TEXT    NOT NULL                    -- base64 Signed<RotationCert> (prev→new)
+            CREATE TABLE IF NOT EXISTS guild_rotation_certs (
+                idx      INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
+                guild_id INTEGER NOT NULL,                   -- the guild whose key was rotated
+                cert     TEXT    NOT NULL                    -- base64 Signed<RotationCert> (prev→new)
             );
             "#,
         )
@@ -148,9 +153,33 @@ impl Store {
         Ok(())
     }
 
-    /// Load the signing seed, or generate + persist one on first run.
-    pub async fn load_or_create_seed(&self) -> anyhow::Result<[u8; 32]> {
-        if let Some(row) = sqlx::query("SELECT seed FROM signing_key WHERE id = 1")
+    /// A deployment-stable random seed, generated + persisted once. Not a signing key — it only
+    /// picks the default mesh `/16` (see `netid::default_cidr`) so the range is stable across
+    /// restarts now that signing keys are per-guild (§3.1) and no single key spans the deployment.
+    pub async fn load_or_create_deployment_seed(&self) -> anyhow::Result<[u8; 32]> {
+        if let Some(row) = sqlx::query("SELECT seed FROM deployment_seed WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let seed: Vec<u8> = row.try_get("seed")?;
+            return seed
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored deployment seed is not 32 bytes"));
+        }
+        let seed = common::crypto::CoordinatorKey::generate().to_seed();
+        sqlx::query("INSERT INTO deployment_seed (id, seed) VALUES (1, ?)")
+            .bind(seed.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(seed)
+    }
+
+    /// Load a guild's signing seed, or generate + persist one on first use — so each guild's key is
+    /// independently generated on first contact (design.md §3.1), not derived from a shared secret.
+    pub async fn load_or_create_seed(&self, guild_id: u64) -> anyhow::Result<[u8; 32]> {
+        if let Some(row) = sqlx::query("SELECT seed FROM guild_signing_keys WHERE guild_id = ?")
+            .bind(guild_id as i64)
             .fetch_optional(&self.pool)
             .await?
         {
@@ -161,38 +190,44 @@ impl Store {
                 .map_err(|_| anyhow::anyhow!("stored signing seed is not 32 bytes"));
         }
         let seed = common::crypto::CoordinatorKey::generate().to_seed();
-        sqlx::query("INSERT INTO signing_key (id, seed) VALUES (1, ?)")
+        sqlx::query("INSERT INTO guild_signing_keys (guild_id, seed) VALUES (?, ?)")
+            .bind(guild_id as i64)
             .bind(seed.as_slice())
             .execute(&self.pool)
             .await?;
-        tracing::info!("generated new signing key");
+        tracing::info!(guild_id, "generated new signing key for guild");
         Ok(seed)
     }
 
-    /// Replace the signing seed (trust-anchor rotation). The caller must first append the
+    /// Replace a guild's signing seed (trust-anchor rotation). The caller must first append the
     /// `prev → new` rotation cert via [`Store::append_rotation_cert`] so clients can follow.
-    pub async fn replace_seed(&self, seed: &[u8; 32]) -> anyhow::Result<()> {
-        sqlx::query("INSERT OR REPLACE INTO signing_key (id, seed) VALUES (1, ?)")
+    pub async fn replace_seed(&self, guild_id: u64, seed: &[u8; 32]) -> anyhow::Result<()> {
+        sqlx::query("INSERT OR REPLACE INTO guild_signing_keys (guild_id, seed) VALUES (?, ?)")
+            .bind(guild_id as i64)
             .bind(seed.as_slice())
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// Append a rotation cert (base64 `Signed<RotationCert>`) to the chain.
-    pub async fn append_rotation_cert(&self, cert_b64: &str) -> anyhow::Result<()> {
-        sqlx::query("INSERT INTO rotation_certs (cert) VALUES (?)")
+    /// Append a rotation cert (base64 `Signed<RotationCert>`) to a guild's chain.
+    pub async fn append_rotation_cert(&self, guild_id: u64, cert_b64: &str) -> anyhow::Result<()> {
+        sqlx::query("INSERT INTO guild_rotation_certs (guild_id, cert) VALUES (?, ?)")
+            .bind(guild_id as i64)
             .bind(cert_b64)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// The rotation-cert chain (base64), oldest→newest, for clients to re-pin across rotations.
-    pub async fn rotation_chain(&self) -> anyhow::Result<Vec<String>> {
-        let rows = sqlx::query("SELECT cert FROM rotation_certs ORDER BY idx ASC")
-            .fetch_all(&self.pool)
-            .await?;
+    /// A guild's rotation-cert chain (base64), oldest→newest, for clients to re-pin across rotations.
+    pub async fn rotation_chain(&self, guild_id: u64) -> anyhow::Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT cert FROM guild_rotation_certs WHERE guild_id = ? ORDER BY idx ASC",
+        )
+        .bind(guild_id as i64)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
             .into_iter()
             .map(|r| r.get::<String, _>("cert"))
@@ -610,6 +645,22 @@ mod tests {
         let store = Store { pool };
         store.migrate().await.unwrap();
         store
+    }
+
+    #[tokio::test]
+    async fn guild_seeds_are_independent_and_stable() {
+        let st = mem_store().await;
+        // First use generates + persists a seed; re-loading returns the same one (stable per guild).
+        let a1 = st.load_or_create_seed(1).await.unwrap();
+        let a2 = st.load_or_create_seed(1).await.unwrap();
+        assert_eq!(a1, a2, "a guild's seed must be stable across loads");
+        // A different guild gets an independently-generated seed (§3.1 — not derived from another).
+        let b1 = st.load_or_create_seed(2).await.unwrap();
+        assert_ne!(a1, b1, "distinct guilds must have distinct seeds");
+        // Rotation is scoped to one guild: replacing guild 1's seed leaves guild 2 untouched.
+        st.replace_seed(1, &[7u8; 32]).await.unwrap();
+        assert_eq!(st.load_or_create_seed(1).await.unwrap(), [7u8; 32]);
+        assert_eq!(st.load_or_create_seed(2).await.unwrap(), b1);
     }
 
     #[tokio::test]

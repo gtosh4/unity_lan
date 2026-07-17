@@ -61,12 +61,15 @@ Four crates (`crates/*`), two planes:
 
 **Trust model.** A *network* is a Discord role an admin registered (`/unitylan network add`) — an
 ACL group, not a subnet. Networks may overlap; a device has **one IP and one tunnel per co-device**
-regardless of how many networks they share. The coordinator holds one Ed25519 signing key per
-deployment (the trust anchor) and signs short-lived attestations binding device identity —
-`user + device + ip + wg_pubkey (+ is_primary)`, **not** role. Role/network membership rides
-separately in the snapshot (each peer lists the networks it shares with you); the coordinator gates
-access by only putting peers you share a network with into your snapshot. Peers verify each other's
-attestations against the pinned anchor — the coordinator never sees peer traffic.
+regardless of how many networks they share. The coordinator holds **one Ed25519 signing key per
+guild** (the trust anchor; independently generated on first use — design.md §3.1) and signs
+short-lived attestations binding device identity + guild — `guild + user + device + ip + wg_pubkey
+(+ is_primary)`, **not** role. A device in N guilds gets N attestations (same identity, different
+signer/guild). Role/network membership rides separately in the snapshot (each peer lists the
+networks it shares with you); the coordinator gates access by only putting peers you share a network
+with into your snapshot. Peers **pin one anchor per guild** (TOFU) and verify each peer's
+attestation against the matching guild anchor, checking `guild_id` — so a compromised guild key's
+blast radius is one guild. The coordinator never sees peer traffic.
 
 **Discovery is coordinator-mediated long-poll, not gossip** (`coordinator/src/api.rs`,
 `engine/src/coord.rs`). Clients long-poll `/register` + `/refresh`; the coordinator holds each

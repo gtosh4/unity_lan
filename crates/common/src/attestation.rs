@@ -20,6 +20,11 @@ use crate::DNS_SUFFIX;
 /// sanitized to DNS labels by the coordinator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
+    /// The guild (Discord server) this attestation is scoped to. Signed by that guild's own
+    /// per-guild key (design.md §3.1), so a compromised/forged key's blast radius is one guild.
+    /// The verifier checks this equals the guild it pinned the signing anchor for — load-bearing
+    /// defence-in-depth against a cross-tenant signing bug (§4.1).
+    pub guild_id: u64,
     /// Owner's Discord user id (snowflake).
     pub user_id: u64,
     /// Owner's global handle, sanitized to a DNS label (the `<user>` in a hostname).
@@ -73,13 +78,23 @@ impl Attestation {
     }
 }
 
-/// Verify a signed attestation against the pinned anchor and reject if expired.
+/// Verify a signed attestation against the pinned anchor for `expected_guild`, and reject if
+/// expired or scoped to a different guild. `anchor` must be the key the client pinned **for
+/// `expected_guild`** (per-guild keys, design.md §3.1); the `guild_id` check is load-bearing even
+/// so — defence in depth against a coordinator cross-signing guild A's member into guild B (§4.1).
 pub fn verify_attestation(
     signed: &Signed,
     anchor: &VerifyingKey,
     now: u64,
+    expected_guild: u64,
 ) -> Result<Attestation, AttestationError> {
     let att: Attestation = signed.verify(anchor)?;
+    if att.guild_id != expected_guild {
+        return Err(AttestationError::GuildMismatch {
+            expected: expected_guild,
+            got: att.guild_id,
+        });
+    }
     if att.is_expired(now) {
         return Err(AttestationError::Expired);
     }
@@ -92,6 +107,8 @@ pub enum AttestationError {
     Wire(#[from] WireError),
     #[error("attestation expired")]
     Expired,
+    #[error("attestation guild mismatch: expected {expected}, got {got}")]
+    GuildMismatch { expected: u64, got: u64 },
 }
 
 #[cfg(test)]
@@ -99,8 +116,11 @@ mod tests {
     use super::*;
     use crate::crypto::CoordinatorKey;
 
+    const GUILD: u64 = 42;
+
     fn sample(now: u64) -> Attestation {
         Attestation {
+            guild_id: GUILD,
             user_id: 333,
             username: "alice".into(),
             device_name: "laptop".into(),
@@ -118,7 +138,7 @@ mod tests {
         let key = CoordinatorKey::generate();
         let now = 1_000;
         let signed = Signed::sign(&key, &sample(now)).unwrap();
-        let att = verify_attestation(&signed, &key.anchor(), now).unwrap();
+        let att = verify_attestation(&signed, &key.anchor(), now, GUILD).unwrap();
         assert_eq!(att.username, "alice");
     }
 
@@ -129,8 +149,36 @@ mod tests {
         let signed = Signed::sign(&key, &sample(now)).unwrap();
         let later = now + crate::ATTESTATION_TTL_SECS + 1;
         assert!(matches!(
-            verify_attestation(&signed, &key.anchor(), later),
+            verify_attestation(&signed, &key.anchor(), later, GUILD),
             Err(AttestationError::Expired)
+        ));
+    }
+
+    #[test]
+    fn wrong_guild_rejected() {
+        // An attestation scoped to GUILD, verified as if for another guild, is refused even though
+        // the signature and TTL are valid — the guild_id check is load-bearing (§4.1).
+        let key = CoordinatorKey::generate();
+        let now = 1_000;
+        let signed = Signed::sign(&key, &sample(now)).unwrap();
+        assert!(matches!(
+            verify_attestation(&signed, &key.anchor(), now, GUILD + 1),
+            Err(AttestationError::GuildMismatch { expected, got })
+                if expected == GUILD + 1 && got == GUILD
+        ));
+    }
+
+    #[test]
+    fn other_guild_key_rejected() {
+        // A different guild's key cannot vouch for this guild's attestation — cross-tenant forgery
+        // fails at the signature check (per-guild keys, §3.1).
+        let key = CoordinatorKey::generate();
+        let other = CoordinatorKey::generate();
+        let now = 1_000;
+        let signed = Signed::sign(&key, &sample(now)).unwrap();
+        assert!(matches!(
+            verify_attestation(&signed, &other.anchor(), now, GUILD),
+            Err(AttestationError::Wire(_))
         ));
     }
 

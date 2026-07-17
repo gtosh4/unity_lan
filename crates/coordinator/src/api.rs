@@ -1,7 +1,7 @@
 //! Axum HTTP API. M1: `POST /register` issues signed attestations across all guilds the
 //! caller shares with the bot, for every registered network whose role they hold.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -13,20 +13,23 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use common::api::{
-    DeviceInfo, Grant, IceParams, ManageOp, ManageReq, ManageResp, NetworkStatus, OauthCompleteReq,
-    ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp, Seed,
+    DeviceInfo, Grant, GuildAnchor, GuildAttestation, IceParams, ManageOp, ManageReq, ManageResp,
+    NetworkStatus, OauthCompleteReq, ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp,
+    Seed,
 };
 use common::netid::sanitize_label;
+use common::update::ReleaseManifest;
 
 use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
-use crate::signer::Signer;
+use crate::signer::GuildKeys;
 use crate::store::{match_device_by_name, DeviceMatch, Store};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub signer: Arc<Signer>,
+    /// Per-guild signing keys (design.md §3.1), created lazily on first contact with a guild.
+    pub guild_keys: Arc<GuildKeys>,
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
@@ -58,16 +61,13 @@ pub struct AppState {
     /// The coordinator-hosted STUN Binding responder's client-reachable address (M5.5 ICE bootstrap
     /// fallback), advertised in every `RegisterResp`. `None` when no responder is configured.
     pub stun_addr: Option<std::net::SocketAddr>,
-    /// Trust-anchor rotation chain (base64 `Signed<RotationCert>`, oldest→newest), served in every
-    /// `RegisterResp` so a client pinned to a superseded anchor can re-pin (design.md §9). Loaded at
-    /// startup; changes only via the `rotate-key` subcommand (which requires a restart).
-    pub rotation_chain: Vec<String>,
-    /// The signed auto-update manifest (base64 `Signed<ReleaseManifest>`), served in every
-    /// `RegisterResp.release`. Signed from the `[release]` config at startup and re-signed on SIGHUP
-    /// (unix) so an admin can publish a new release without a restart; `None` when the deployment
-    /// configured no release (auto-update disabled). A `RwLock` because reads are per-request but
-    /// writes are rare (only on reload); reads clone the small string and never hold across an await.
-    pub release: Arc<std::sync::RwLock<Option<String>>>,
+    /// The parsed auto-update manifest, signed per-request with a guild key the caller holds and
+    /// served in `RegisterResp.release` (design.md §3.1: no deployment-wide key, so the manifest is
+    /// signed under a guild the client has pinned). Loaded from `[release]` at startup and swapped on
+    /// SIGHUP (unix) so an admin can publish without a restart; `None` disables auto-update. A
+    /// `RwLock` because reads are per-request but writes are rare; the read clones and never holds
+    /// across an await.
+    pub release: Arc<std::sync::RwLock<Option<ReleaseManifest>>>,
 }
 
 /// `(owner, peer)` → the relayed address `owner` allocated to reach `peer` (the relayed-candidate
@@ -232,7 +232,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let (ip, device_name) = st
         .store
         .allocate_device(
-            st.signer.wg_net(),
+            st.guild_keys.wg_net(),
             &req.wg_pubkey,
             user_id,
             &sanitize_label(&req.device_name),
@@ -283,7 +283,6 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
     let mut network_names: Vec<String> = Vec::new();
-    let mut community_name: Option<String> = None;
     let mut community_cache: HashMap<u64, String> = HashMap::new();
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
 
@@ -361,9 +360,6 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         // never appear: a chicken-and-egg lockout.
         // Chunk 2 (enrollment) wires the global handle; for now derive it from the nick.
         username = sanitize_label(&member.nick);
-        if community_name.is_none() {
-            community_name = Some(guild_label);
-        }
 
         // A disabled network is listed (above) but contributes no presence / grant-network / seeds
         // (so it doesn't peer, in either direction) until the user enables it.
@@ -403,43 +399,57 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         }
     }
 
-    // Self-grant: one device attestation. Issued whenever the caller holds ≥1 network role, even if
-    // every one is currently disabled (`networks` is then empty) — the device still needs its
-    // identity/IP and the client needs the grant to surface the toggle list. `None` only when the
-    // caller holds no network roles at all.
+    // Every guild the caller holds a role in (enabled or not). Drives the self-grant attestations
+    // and the response anchors; peers' shared guilds are a subset of this, so it covers them too.
+    let grant_guilds: BTreeSet<u64> = networks_status.iter().map(|n| n.guild_id).collect();
+
+    // Self-grant: one device attestation **per guild**, each signed by that guild's key (design.md
+    // §3.1/§4.1). Issued whenever the caller holds ≥1 network role, even if every one is currently
+    // disabled — the device still needs its identity/IP and the client needs the grant to surface
+    // the toggle list. `None` only when the caller holds no network roles at all.
     let grant = if networks_status.is_empty() {
         None
     } else {
-        let signed = st
-            .signer
-            .sign_attestation(
-                user_id,
-                username,
-                device_name,
-                is_primary,
-                ip,
-                req.wg_pubkey,
-            )
-            .map_err(internal)?;
+        let mut attestations = Vec::with_capacity(grant_guilds.len());
+        for &g in &grant_guilds {
+            let key = st.guild_keys.get(g).await.map_err(internal)?;
+            let signed = key
+                .signer
+                .sign_attestation(
+                    user_id,
+                    username.clone(),
+                    device_name.clone(),
+                    is_primary,
+                    ip,
+                    req.wg_pubkey,
+                )
+                .map_err(internal)?;
+            attestations.push(GuildAttestation {
+                attestation: signed.to_base64(),
+                community_name: community_cache.get(&g).cloned().unwrap_or_default(),
+            });
+        }
         Some(Grant {
-            attestation: signed.to_base64(),
-            community_name: community_name.unwrap_or_default(),
+            attestations,
             networks: network_names.clone(),
         })
     };
 
     // Seeds: every other device sharing ≥1 network with the caller, deduplicated by pubkey but
     // accumulating the shared network *names* (so the client can scope `expose --net` per network).
-    let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<String>, String)> = HashMap::new();
+    // Third slot: the set of guilds this peer shares with the caller (always a subset of the
+    // caller's held guilds). Each shared guild yields one attestation, signed by that guild's key.
+    let mut by_pubkey: HashMap<[u8; 32], (MemberPresence, Vec<String>, BTreeSet<u64>)> =
+        HashMap::new();
     for ((guild_id, role_id), net_name) in held.iter().zip(network_names.iter()) {
-        let seed_community = community_of(st, *guild_id).await.map_err(internal)?;
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
             let entry = by_pubkey
                 .entry(mp.pubkey)
-                .or_insert_with(|| (mp.clone(), Vec::new(), seed_community.clone()));
+                .or_insert_with(|| (mp.clone(), Vec::new(), BTreeSet::new()));
             if !entry.1.contains(net_name) {
                 entry.1.push(net_name.clone());
             }
+            entry.2.insert(*guild_id);
         }
     }
     // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device
@@ -548,7 +558,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     let caller_dialable = req.endpoint.is_some();
     let reflexive = st.reflexive.lock().unwrap().clone();
     let mut seeds = Vec::new();
-    for (_pubkey, (mp, networks, community)) in by_pubkey {
+    for (_pubkey, (mp, networks, shared_guilds)) in by_pubkey {
         let punch = punch_target(
             caller_dialable,
             mp.endpoint,
@@ -565,23 +575,32 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         } else {
             None
         };
-        let signed = st
-            .signer
-            .sign_attestation(
-                mp.user_id,
-                mp.username,
-                mp.device_name,
-                mp.is_primary,
-                mp.ip,
-                mp.pubkey,
-            )
-            .map_err(internal)?;
+        // One attestation per guild this peer shares with the caller, each signed by that guild's
+        // key. The client admits the peer once any one verifies against the matching pinned anchor.
+        let mut attestations = Vec::with_capacity(shared_guilds.len());
+        for &g in &shared_guilds {
+            let key = st.guild_keys.get(g).await.map_err(internal)?;
+            let signed = key
+                .signer
+                .sign_attestation(
+                    mp.user_id,
+                    mp.username.clone(),
+                    mp.device_name.clone(),
+                    mp.is_primary,
+                    mp.ip,
+                    mp.pubkey,
+                )
+                .map_err(internal)?;
+            attestations.push(GuildAttestation {
+                attestation: signed.to_base64(),
+                community_name: community_cache.get(&g).cloned().unwrap_or_default(),
+            });
+        }
         // The peer's ICE offer for reaching us (if it has run ICE toward this caller): key is
         // (owner=peer, peer=caller). The client feeds it into its agent to run connectivity checks.
         let ice = ice_exchange.get(&(mp.pubkey, req.wg_pubkey)).cloned();
         seeds.push(Seed {
-            attestation: signed.to_base64(),
-            community_name: community,
+            attestations,
             endpoint: mp.endpoint,
             punch,
             networks,
@@ -615,9 +634,33 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         "snapshot built"
     );
 
+    // One trust anchor per guild the caller participates in (covers every peer's guild too, since
+    // shared guilds are a subset). The client pins each independently and re-pins via its chain.
+    let mut anchors = Vec::with_capacity(grant_guilds.len());
+    for &g in &grant_guilds {
+        let key = st.guild_keys.get(g).await.map_err(internal)?;
+        anchors.push(GuildAnchor {
+            guild_id: g,
+            pubkey: key.signer.anchor_bytes(),
+            rotation_chain: key.rotation_chain.clone(),
+        });
+    }
+
+    // Auto-update manifest: signed on demand with a guild key the caller holds (the smallest
+    // guild_id, deterministically) so the client verifies it against an anchor it has pinned
+    // (design.md §3.1 — no deployment-wide key). Clone the manifest out before the await so the
+    // RwLock guard isn't held across it.
+    let manifest = st.release.read().unwrap().clone();
+    let release = match (manifest, grant_guilds.iter().next()) {
+        (Some(m), Some(&g)) => {
+            let key = st.guild_keys.get(g).await.map_err(internal)?;
+            Some(key.signer.sign_to_base64(&m).map_err(internal)?)
+        }
+        _ => None,
+    };
+
     Ok(RegisterResp {
-        coord_pubkey: st.signer.anchor_bytes(),
-        rotation_chain: st.rotation_chain.clone(),
+        anchors,
         grant,
         device_token,
         seeds,
@@ -626,7 +669,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         stun_addr: st.stun_addr,
         proto: common::PROTOCOL_VERSION,
         server_version: common::VERSION.to_string(),
-        release: st.release.read().unwrap().clone(),
+        release,
     })
 }
 

@@ -24,51 +24,71 @@ pub fn load_or_generate_keypair(state_dir: &Path) -> anyhow::Result<(WgPrivateKe
     Ok((priv_bytes, wg_public_from_private(&priv_bytes)))
 }
 
-/// Pin the coordinator's anchor on first sight. On a later change, accept it only if the rotation
-/// chain proves a signed path from our pinned anchor to the new one (design.md §9); otherwise
-/// refuse (possible MITM, or a key lost past recovery → the operator must have the user re-pin).
+/// Pin one guild's anchor on first sight (design.md §3.1: keys are per-guild). On a later change,
+/// accept it only if that guild's rotation chain proves a signed path from our pinned anchor to the
+/// new one (§9); otherwise refuse (possible MITM, or a key lost past recovery → re-pin manually).
 pub fn pin_anchor(
     state_dir: &Path,
+    guild_id: u64,
     anchor: &[u8; 32],
     rotation_chain: &[String],
 ) -> anyhow::Result<()> {
-    let path = state_dir.join("anchor.pub");
+    let dir = state_dir.join("anchors");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{guild_id}.pub"));
     let Ok(existing) = std::fs::read(&path) else {
         std::fs::write(&path, anchor)?;
-        tracing::info!("pinned coordinator trust anchor");
+        tracing::info!(guild_id, "pinned guild trust anchor");
         return Ok(());
     };
     let pinned: [u8; 32] = existing
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow::anyhow!("pinned anchor file is not 32 bytes"))?;
+        .map_err(|_| anyhow::anyhow!("pinned anchor file for guild {guild_id} is not 32 bytes"))?;
     if pinned == *anchor {
         return Ok(());
     }
-    // Anchor changed: follow the rotation chain. A malformed cert simply can't advance the walk.
+    // Anchor changed: follow this guild's rotation chain. A malformed cert can't advance the walk.
     let chain: Vec<Signed> = rotation_chain
         .iter()
         .filter_map(|c| Signed::from_base64(c).ok())
         .collect();
     if walk_chain(pinned, *anchor, &chain) {
         std::fs::write(&path, anchor)?;
-        tracing::warn!("coordinator anchor rotated — re-pinned via rotation chain");
+        tracing::warn!(
+            guild_id,
+            "guild anchor rotated — re-pinned via rotation chain"
+        );
         Ok(())
     } else {
-        bail!("coordinator trust anchor changed with no valid rotation path — refusing (possible MITM)");
+        bail!("guild {guild_id} trust anchor changed with no valid rotation path — refusing (possible MITM)");
     }
 }
 
-/// Load the pinned trust anchor's raw bytes. Errors if unpinned or corrupt. Every coordinator
-/// response is gated through [`pin_anchor`] before we verify any attestation, so by the time we
-/// verify grants/seeds the pin exists and this is the key we must verify against — never the
-/// anchor the response carries.
-pub fn load_anchor(state_dir: &Path) -> anyhow::Result<[u8; 32]> {
-    let bytes = std::fs::read(state_dir.join("anchor.pub")).context("reading pinned anchor")?;
+/// Load a guild's pinned anchor bytes. Errors if that guild is unpinned or corrupt. Every response
+/// is gated through [`pin_anchor`] before we verify any attestation, so by the time we verify a
+/// grant/seed the pin exists and this is the key we verify against — never the response's anchor.
+pub fn load_anchor(state_dir: &Path, guild_id: u64) -> anyhow::Result<[u8; 32]> {
+    let path = state_dir.join("anchors").join(format!("{guild_id}.pub"));
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("reading pinned anchor for guild {guild_id}"))?;
     bytes
         .as_slice()
         .try_into()
-        .map_err(|_| anyhow::anyhow!("pinned anchor file is not 32 bytes"))
+        .map_err(|_| anyhow::anyhow!("pinned anchor file for guild {guild_id} is not 32 bytes"))
+}
+
+/// Every pinned guild anchor's bytes. Used where the signing guild isn't known up front — the
+/// release manifest is signed by one guild key the caller holds, so the verifier tries each pin.
+pub fn load_all_anchors(state_dir: &Path) -> Vec<[u8; 32]> {
+    let Ok(entries) = std::fs::read_dir(state_dir.join("anchors")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| std::fs::read(e.path()).ok())
+        .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .collect()
 }
 
 /// Load the persisted device token, if any.

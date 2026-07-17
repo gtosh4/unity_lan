@@ -56,22 +56,33 @@ pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
 /// platform. `None` in every other case (no manifest, bad signature, not newer, wrong platform) — a
 /// failure is logged and swallowed, never fatal to the mesh.
 ///
-/// The anchor is the pinned `anchor.pub` on disk (`keys::load_anchor`), **not** `resp.coord_pubkey`:
-/// trusting the response's own anchor would let a substituted response ship an attacker-signed
-/// update. Same discipline as [`crate::coord::verified_seeds`].
+/// The anchors are the pinned per-guild keys on disk (`keys::load_all_anchors`), **not** the
+/// response's own anchors: trusting those would let a substituted response ship an attacker-signed
+/// update. The coordinator signs the manifest under one guild key the caller holds (design.md
+/// §3.1), so we accept it if it verifies against *any* pinned anchor. Same discipline as
+/// [`crate::coord::verified_seeds`].
 pub fn stage(resp: &RegisterResp, state_dir: &Path) -> Option<PendingUpdate> {
     let b64 = resp.release.as_ref()?;
-    let pinned = crate::keys::load_anchor(state_dir)
-        .map_err(|e| tracing::warn!("release manifest: no pinned anchor: {e}"))
-        .ok()?;
-    let anchor = anchor_from_bytes(&pinned).ok()?;
     let signed = Signed::from_base64(b64)
         .map_err(|e| tracing::warn!("release manifest: bad base64: {e}"))
         .ok()?;
-    let manifest: ReleaseManifest = signed
-        .verify(&anchor)
-        .map_err(|e| tracing::warn!("release manifest failed signature verification: {e}"))
-        .ok()?;
+    let anchors = crate::keys::load_all_anchors(state_dir);
+    if anchors.is_empty() {
+        tracing::warn!("release manifest: no pinned anchors yet");
+        return None;
+    }
+    // Accept the manifest if it verifies against any pinned guild anchor.
+    let manifest: ReleaseManifest = anchors
+        .iter()
+        .find_map(|pk| {
+            anchor_from_bytes(pk)
+                .ok()
+                .and_then(|a| signed.verify(&a).ok())
+        })
+        .or_else(|| {
+            tracing::warn!("release manifest verified against no pinned anchor");
+            None
+        })?;
     if !is_newer(&manifest.version, common::VERSION) {
         return None;
     }
@@ -189,7 +200,8 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let honest = CoordinatorKey::generate();
         let attacker = CoordinatorKey::generate();
-        crate::keys::pin_anchor(&dir, &honest.anchor_bytes(), &[]).unwrap();
+        const GUILD: u64 = 42;
+        crate::keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
 
         // Version far ahead so the semver gate never masks the signature check; both platforms
         // present so `current_platform()` matches on either CI target.
@@ -211,8 +223,13 @@ mod tests {
             ],
         };
         let base = |signer: &CoordinatorKey| RegisterResp {
-            coord_pubkey: attacker.anchor_bytes(), // attacker-substituted anchor in the response
-            rotation_chain: Vec::new(),
+            // Attacker-substituted anchor for GUILD in the response; `stage` must ignore it and
+            // verify against the pinned (honest) anchor on disk instead.
+            anchors: vec![common::api::GuildAnchor {
+                guild_id: GUILD,
+                pubkey: attacker.anchor_bytes(),
+                rotation_chain: Vec::new(),
+            }],
             grant: None,
             device_token: None,
             seeds: Vec::new(),
@@ -223,9 +240,9 @@ mod tests {
             server_version: "9.9.9".into(),
             release: Some(Signed::sign(signer, &manifest).unwrap().to_base64()),
         };
-        // Signed by the attacker (matches the response's coord_pubkey) → must still be rejected.
+        // Signed by the attacker (matches the response's anchor) → must still be rejected.
         assert!(stage(&base(&attacker), &dir).is_none());
-        // Signed by the pinned (honest) anchor → stages, proving the gate keys on the pin, not coord_pubkey.
+        // Signed by the pinned (honest) anchor → stages, proving the gate keys on the pin.
         assert!(stage(&base(&honest), &dir).is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
