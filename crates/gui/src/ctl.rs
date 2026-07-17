@@ -160,3 +160,73 @@ pub async fn unblock_peer(path: PathBuf, user_id: u64) -> Result<StatusReport, S
         ControlResponse::Status
     )
 }
+
+/// How long to wait before reconnecting the status stream after the engine is down or drops us
+/// (e.g. it restarts after an auto-update). Matches the old status-poll cadence.
+const WATCH_RECONNECT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Open a `Watch` subscription: connect and send the request, returning the reader to stream
+/// [`ControlResponse::Status`] lines from.
+async fn connect_watch(path: PathBuf) -> Result<BufReader<LocalStream>, String> {
+    let name = to_name(path).map_err(|e| e.to_string())?;
+    let stream = LocalStream::connect(name)
+        .await
+        .map_err(|e| format!("connect (is the daemon running?): {e}"))?;
+    let mut reader = BufReader::new(stream);
+    let mut bytes = serde_json::to_vec(&ControlRequest::Watch).map_err(|e| e.to_string())?;
+    bytes.push(b'\n');
+    reader
+        .get_mut()
+        .write_all(&bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    reader.get_mut().flush().await.map_err(|e| e.to_string())?;
+    Ok(reader)
+}
+
+/// Live status stream backing the GUI's push subscription: connect, subscribe to `Watch`, and yield
+/// a `StatusReport` every time the engine's status changes (the engine sends the current one first,
+/// so this replaces polling for the initial state too). Reconnects with a short backoff if the
+/// engine is down or the connection drops, yielding `Err` on each break so the UI can show "engine
+/// unreachable" — mirroring how the old poll surfaced a failed fetch.
+pub fn watch_status(
+    path: PathBuf,
+) -> impl iced::futures::Stream<Item = Result<StatusReport, String>> {
+    // State machine driven by `unfold`: connect → read a line → read the next → reconnect on break.
+    enum State {
+        Connect,
+        Read(BufReader<LocalStream>),
+    }
+    iced::futures::stream::unfold(State::Connect, move |state| {
+        let path = path.clone();
+        async move {
+            let mut reader = match state {
+                State::Read(reader) => reader,
+                State::Connect => match connect_watch(path).await {
+                    Ok(reader) => reader,
+                    Err(e) => {
+                        tokio::time::sleep(WATCH_RECONNECT).await;
+                        return Some((Err(e), State::Connect));
+                    }
+                },
+            };
+            let mut line = String::new();
+            match reader.read_line(&mut line).await {
+                // EOF (engine gone) or read error: surface it and reconnect after a backoff.
+                Ok(0) | Err(_) => {
+                    tokio::time::sleep(WATCH_RECONNECT).await;
+                    Some((Err("engine connection closed".into()), State::Connect))
+                }
+                Ok(_) => {
+                    let item = match serde_json::from_str::<ControlResponse>(line.trim()) {
+                        Ok(ControlResponse::Status(s)) => Ok(s),
+                        Ok(ControlResponse::Error(e)) => Err(e),
+                        Ok(_) => Err("unexpected response".into()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    Some((item, State::Read(reader)))
+                }
+            }
+        }
+    })
+}

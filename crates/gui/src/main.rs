@@ -529,13 +529,11 @@ impl App {
         }
     }
 
-    /// Fetch status + device list + exposed ports concurrently.
+    /// Fetch the device list + exposed ports concurrently. Status isn't polled here — it arrives
+    /// over the live `watch_status` subscription (see [`Self::status_subscription`]), which pushes a
+    /// fresh snapshot the instant the engine's state changes.
     fn reload(&self) -> Task<Message> {
         Task::batch([
-            Task::perform(
-                ctl::fetch_status(self.socket.clone()),
-                Message::StatusFetched,
-            ),
             Task::perform(
                 ctl::manage(self.socket.clone(), ManageOp::List),
                 Message::DevicesFetched,
@@ -744,10 +742,24 @@ impl App {
 
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
+            // Status is pushed live over `watch_status`; the timer only refreshes the device list
+            // and exposed ports (which change rarely and aren't part of the status snapshot).
             iced::time::every(Duration::from_secs(2)).map(|_| Message::Tick),
+            self.status_subscription(),
             window::close_requests().map(|_| Message::CloseRequested),
             self.tray_subscription(),
         ])
+    }
+
+    /// Live status push: a long-lived `Watch` subscription that emits a `StatusFetched` every time
+    /// the engine's status changes (and reconnects itself if the engine restarts), so the UI
+    /// reflects connect/peer/login changes instantly instead of on the next poll.
+    fn status_subscription(&self) -> Subscription<Message> {
+        use iced::futures::StreamExt;
+        Subscription::run_with_id(
+            "unitylan-status",
+            ctl::watch_status(self.socket.clone()).map(Message::StatusFetched),
+        )
     }
 
     /// Bridge the tray thread's channel into the iced runtime. The receiver is taken once (on the

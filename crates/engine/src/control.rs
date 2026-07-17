@@ -71,47 +71,51 @@ pub struct Ctx {
 }
 
 /// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
-pub async fn set_needs_login(shared: &Shared, needs: bool) {
-    shared.write().await.needs_login = needs;
+pub fn set_needs_login(shared: &Shared, needs: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.needs_login, needs) != needs);
 }
 
 /// Set the mesh connection state the daemon reports (`true` = connected, `false` = disconnected).
-pub async fn set_connected(shared: &Shared, connected: bool) {
-    shared.write().await.connected = connected;
+pub fn set_connected(shared: &Shared, connected: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.connected, connected) != connected);
 }
 
 /// Set the new-network default the daemon reports, so the GUI reflects it without a full refresh.
-pub async fn set_disable_new(shared: &Shared, disable: bool) {
-    shared.write().await.disable_new_networks = disable;
+pub fn set_disable_new(shared: &Shared, disable: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.disable_new_networks, disable) != disable);
 }
 
 /// Overlay coordinator reachability without rebuilding the snapshot — the mesh runs from cache when
 /// a refresh fails, so this flags the health of the last coordinator contact.
-pub async fn set_coord_online(shared: &Shared, online: bool) {
-    shared.write().await.coordinator_online = online;
+pub fn set_coord_online(shared: &Shared, online: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.coordinator_online, online) != online);
 }
 
 /// Reset the status to the logged-out state: no device/peers/identity, `needs_login` set so the GUI
 /// shows the login screen. Called after a logout tears the mesh down and before we re-register.
-pub async fn set_logged_out(shared: &Shared) {
-    *shared.write().await = StatusReport {
+pub fn set_logged_out(shared: &Shared) {
+    shared.send_replace(StatusReport {
         needs_login: true,
         ..Default::default()
-    };
+    });
 }
 
-/// Shared, live status the daemon updates and the control socket reads.
-pub type Shared = Arc<RwLock<StatusReport>>;
+/// Shared, live status the daemon updates and the control socket reads. A `watch` channel so a
+/// `Watch` subscription can be woken the instant the status changes, instead of polling. The daemon
+/// mutates it through the setters below; each `send_*` notifies every parked `Watch` stream.
+pub type Shared = Arc<tokio::sync::watch::Sender<StatusReport>>;
 
 pub fn shared() -> Shared {
-    Arc::new(RwLock::new(StatusReport::default()))
+    // The initial receiver is dropped; `Watch` streams create their own via `subscribe()`. A
+    // `watch::Sender` keeps working (send_* never errors) with zero receivers.
+    Arc::new(tokio::sync::watch::channel(StatusReport::default()).0)
 }
 
 /// Rebuild the status snapshot from the current device + seed peers. `disabled` is the local
 /// opt-out set, so the reported per-network `enabled` reflects the local toggle immediately (even
 /// before the coordinator has mirrored it).
 #[allow(clippy::too_many_arguments)]
-pub async fn update(
+pub fn update(
     shared: &Shared,
     device: &SelfDevice,
     seeds: &[SeedPeer],
@@ -123,7 +127,7 @@ pub async fn update(
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
     let (prev_update_available, prev_update_ready, prev_lan_overlap) = {
-        let prev = shared.read().await;
+        let prev = shared.borrow();
         (
             prev.update_available.clone(),
             prev.update_ready,
@@ -178,14 +182,21 @@ pub async fn update(
         // Demo-only UI push; the real engine never drives the GUI (see `StatusReport::directive`).
         directive: None,
     };
-    *shared.write().await = report;
+    shared.send_replace(report);
 }
 
 /// Record (or clear) the warning that the coordinator's mesh CIDR overlaps a local interface's
 /// subnet. Set once when the mesh comes up; surfaced in the GUI so the user notices a range that
 /// could shadow their real LAN.
-pub async fn set_lan_overlap(shared: &Shared, warning: Option<String>) {
-    shared.write().await.lan_overlap = warning;
+pub fn set_lan_overlap(shared: &Shared, warning: Option<String>) {
+    shared.send_if_modified(|s| {
+        if s.lan_overlap == warning {
+            false
+        } else {
+            s.lan_overlap = warning;
+            true
+        }
+    });
 }
 
 /// Overlay the coordinator-advertised latest release: set `update_available` iff `latest` is a newer
@@ -193,15 +204,23 @@ pub async fn set_lan_overlap(shared: &Shared, warning: Option<String>) {
 /// each refresh without rebuilding the snapshot; the empty string (a pre-versioning coordinator)
 /// never parses, so it reads as "no update". This is the notice-only signal (phase 2); an actually
 /// applyable update is gated by [`set_update_ready`].
-pub async fn set_update_available(shared: &Shared, latest: &str) {
+pub fn set_update_available(shared: &Shared, latest: &str) {
     let newer = crate::selfupdate::is_newer(latest, common::VERSION);
-    shared.write().await.update_available = newer.then(|| latest.to_string());
+    let val = newer.then(|| latest.to_string());
+    shared.send_if_modified(|s| {
+        if s.update_available == val {
+            false
+        } else {
+            s.update_available = val;
+            true
+        }
+    });
 }
 
 /// Overlay whether a verified, applyable update is staged (the daemon verified the signed manifest
 /// and matched an artifact for this platform). Drives whether the GUI shows an Update button.
-pub async fn set_update_ready(shared: &Shared, ready: bool) {
-    shared.write().await.update_ready = ready;
+pub fn set_update_ready(shared: &Shared, ready: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.update_ready, ready) != ready);
 }
 
 /// The blocked map as a sorted (stable order) list of [`BlockedUser`] for the status report.
@@ -220,10 +239,11 @@ fn blocked_list(blocked: &HashMap<u64, String>) -> Vec<BlockedUser> {
 /// Mirror a block/un-block into the live status without waiting for the daemon's next re-mesh:
 /// rewrite the blocked list and drop any now-blocked user's peers so the GUI updates at once. The
 /// daemon's `wake`-triggered re-mesh follows and settles the peer set (adds them back on un-block).
-pub async fn set_blocked(shared: &Shared, blocked: &HashMap<u64, String>) {
-    let mut report = shared.write().await;
-    report.peers.retain(|p| !blocked.contains_key(&p.user_id));
-    report.blocked = blocked_list(blocked);
+pub fn set_blocked(shared: &Shared, blocked: &HashMap<u64, String>) {
+    shared.send_modify(|report| {
+        report.peers.retain(|p| !blocked.contains_key(&p.user_id));
+        report.blocked = blocked_list(blocked);
+    });
 }
 
 /// Live per-peer telemetry overlaid onto the status each refresh loop: reachability, liveness, the
@@ -240,21 +260,19 @@ pub struct PeerLive {
 /// Overlay per-peer live telemetry onto the current status without rebuilding it (cheap — no DNS or
 /// firewall work), so a stuck hole punch, byte counters, and latency all surface promptly even when
 /// nothing else changed. Keyed by the peer's wg IP.
-pub async fn set_live(
-    shared: &Shared,
-    live: &std::collections::HashMap<std::net::Ipv4Addr, PeerLive>,
-) {
-    let mut report = shared.write().await;
-    for p in &mut report.peers {
-        if let Some(l) = live.get(&p.wg_ip) {
-            p.reach = l.reach;
-            p.up = l.up;
-            p.latency_ms = l.latency_ms;
-            p.rx_bytes = l.rx_bytes;
-            p.tx_bytes = l.tx_bytes;
-            p.last_handshake_secs = l.last_handshake_secs;
+pub fn set_live(shared: &Shared, live: &std::collections::HashMap<std::net::Ipv4Addr, PeerLive>) {
+    shared.send_modify(|report| {
+        for p in &mut report.peers {
+            if let Some(l) = live.get(&p.wg_ip) {
+                p.reach = l.reach;
+                p.up = l.up;
+                p.latency_ms = l.latency_ms;
+                p.rx_bytes = l.rx_bytes;
+                p.tx_bytes = l.tx_bytes;
+                p.last_handshake_secs = l.last_handshake_secs;
+            }
         }
-    }
+    });
 }
 
 /// Apply the local opt-out to a network list: a locally-disabled network reports `enabled = false`
@@ -363,8 +381,14 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         anyhow::bail!("control request exceeds {MAX_REQUEST_BYTES}-byte cap");
     }
     let req: ControlRequest = serde_json::from_str(line.trim())?;
+    // Watch holds the connection open and streams status changes, so it doesn't fit the
+    // one-request/one-response path below — hand off to the streaming loop.
+    if let ControlRequest::Watch = req {
+        return stream_status(reader.into_inner(), ctx.status.subscribe()).await;
+    }
     let resp = match req {
-        ControlRequest::Status => ControlResponse::Status(ctx.status.read().await.clone()),
+        ControlRequest::Status => ControlResponse::Status(ctx.status.borrow().clone()),
+        ControlRequest::Watch => unreachable!("Watch handled above"),
         ControlRequest::Manage(op) => match ctx.token.read().await.clone() {
             None => ControlResponse::Error("device not enrolled yet".into()),
             Some(token) => match coord::manage(&ctx.coordinator, token, op).await {
@@ -377,8 +401,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             Some(fw) => {
                 let held = ctx
                     .status
-                    .read()
-                    .await
+                    .borrow()
                     .device
                     .as_ref()
                     .map(|d| d.networks.clone())
@@ -402,8 +425,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                     // only override the row we just toggled; the rest stay as reported.
                     let networks = ctx
                         .status
-                        .read()
-                        .await
+                        .borrow()
                         .networks
                         .iter()
                         .map(|n| NetworkStatus {
@@ -486,8 +508,8 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         ControlRequest::BlockPeer { user_id, username } => {
             match ctx.localnet.set_blocked(user_id, username, true) {
                 Ok(_) => {
-                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot()).await;
-                    ControlResponse::Status(ctx.status.read().await.clone())
+                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot());
+                    ControlResponse::Status(ctx.status.borrow().clone())
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -495,8 +517,8 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         ControlRequest::UnblockPeer { user_id } => {
             match ctx.localnet.set_blocked(user_id, String::new(), false) {
                 Ok(_) => {
-                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot()).await;
-                    ControlResponse::Status(ctx.status.read().await.clone())
+                    set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot());
+                    ControlResponse::Status(ctx.status.borrow().clone())
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -507,8 +529,8 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         ControlRequest::SetNewNetworkDefault { disable } => {
             match ctx.localnet.set_disable_new(disable) {
                 Ok(_) => {
-                    set_disable_new(&ctx.status, disable).await;
-                    ControlResponse::Status(ctx.status.read().await.clone())
+                    set_disable_new(&ctx.status, disable);
+                    ControlResponse::Status(ctx.status.borrow().clone())
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -543,6 +565,29 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
     stream.write_all(&out).await?;
     stream.flush().await?; // flush before drop so the named-pipe peer sees the reply
     Ok(())
+}
+
+/// Serve a `Watch` subscription: write the current status, then a fresh `ControlResponse::Status`
+/// line every time it changes, until the client disconnects (a write fails) or the daemon drops the
+/// sender on shutdown. `borrow_and_update` marks the value seen so `changed()` waits for the *next*
+/// change; the first iteration always sends the current snapshot.
+async fn stream_status(
+    mut stream: LocalStream,
+    mut rx: tokio::sync::watch::Receiver<StatusReport>,
+) -> anyhow::Result<()> {
+    loop {
+        let mut out = {
+            let report = rx.borrow_and_update();
+            serde_json::to_vec(&ControlResponse::Status(report.clone()))?
+        };
+        out.push(b'\n');
+        stream.write_all(&out).await?;
+        stream.flush().await?;
+        // Park until the next change; Err means every sender was dropped (daemon shutting down).
+        if rx.changed().await.is_err() {
+            return Ok(());
+        }
+    }
 }
 
 async fn request(endpoint: &str, req: &ControlRequest) -> anyhow::Result<ControlResponse> {

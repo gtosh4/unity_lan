@@ -87,7 +87,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
     let status = control::shared();
     // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
-    control::set_connected(&status, !localnet.is_paused()).await;
+    control::set_connected(&status, !localnet.is_paused());
     // Verified auto-update staged by the refresh loop; consumed by the control socket's ApplyUpdate.
     let pending_update = crate::selfupdate::pending_slot();
     {
@@ -232,7 +232,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         if let Some(w) = &overlap {
             tracing::warn!("{w}");
         }
-        control::set_lan_overlap(&status, overlap).await;
+        control::set_lan_overlap(&status, overlap);
 
         // Resolver address: this device's own mesh IP (now on the interface) + the configured port.
         // Bound here, not on loopback, so `:53` is free on every platform and Windows NRPT (port-53
@@ -461,7 +461,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     );
                 }
             }
-            control::set_live(&status, &live).await;
+            control::set_live(&status, &live);
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
@@ -570,11 +570,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             match refreshed {
                 Ok((resp, dev)) => {
                     coord_online = true;
-                    control::set_update_available(&status, &resp.server_version).await;
+                    control::set_update_available(&status, &resp.server_version);
                     // Verify the signed release manifest against the pinned anchor and stage a
                     // platform-matching, strictly-newer artifact for the GUI's Update button.
                     let staged = crate::selfupdate::stage(&resp, &cfg.state_dir);
-                    control::set_update_ready(&status, staged.is_some()).await;
+                    control::set_update_ready(&status, staged.is_some());
                     *pending_update.lock().unwrap() = staged;
                     since = Some(resp.version);
                     last_reported = observed; // the coordinator now has this reflexive set
@@ -625,7 +625,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 Err(e) => {
                     tracing::warn!("refresh failed: {e:#}");
                     coord_online = false;
-                    control::set_coord_online(&status, false).await;
+                    control::set_coord_online(&status, false);
                     tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
                 }
             }
@@ -663,7 +663,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // Discard the local key + token so the next register re-keys and reports not-logged-in.
         keys::clear_enrollment(&cfg.state_dir)?;
         *token.write().await = None;
-        control::set_logged_out(&status).await;
+        control::set_logged_out(&status);
         continue 'lifecycle;
     }
 }
@@ -736,8 +736,7 @@ async fn apply_state(
             !paused,
             localnet.disable_new(),
             coord_online,
-        )
-        .await;
+        );
     }
     if let Some(fw) = fw {
         fw.update_peers(peers_by_net(&active))?;
@@ -884,12 +883,12 @@ async fn register_until_ready(
         };
         match attempt {
             Ok((resp, Some(dev))) => {
-                control::set_needs_login(status, false).await;
+                control::set_needs_login(status, false);
                 return Ok(Some((resp, dev)));
             }
             // Enrolled but no networks yet — not a login problem; wait for a role.
             Ok((_resp, None)) => {
-                control::set_needs_login(status, false).await;
+                control::set_needs_login(status, false);
                 tracing::info!("registered but hold no networks yet; waiting for a role");
             }
             Err(e) => {
@@ -897,7 +896,7 @@ async fn register_until_ready(
                 // errors (coordinator down) are transient — just retry without the flag.
                 let msg = format!("{e:#}");
                 let needs_login = msg.contains("not enrolled") || msg.contains("log in");
-                control::set_needs_login(status, needs_login).await;
+                control::set_needs_login(status, needs_login);
                 if needs_login {
                     tracing::info!("not logged in — waiting for interactive login");
                 } else {

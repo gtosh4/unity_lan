@@ -18,6 +18,11 @@ pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
 #[derive(Serialize, Deserialize)]
 pub enum ControlRequest {
     Status,
+    /// Subscribe to live status: the daemon holds the connection open and writes a fresh
+    /// [`ControlResponse::Status`] line every time the status changes (starting with the current
+    /// one). Lets a frontend reflect state instantly instead of polling. The stream ends when the
+    /// client disconnects or the daemon shuts down.
+    Watch,
     Manage(ManageOp),
     /// Firewall port exposure — handled locally by the daemon (not forwarded to the coordinator).
     Expose(ExposeOp),

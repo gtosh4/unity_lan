@@ -298,7 +298,8 @@ fn fixture_devices() -> Vec<DeviceInfo> {
 fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
     let mut s = state.lock().unwrap();
     match req {
-        ControlRequest::Status => ControlResponse::Status(s.status()),
+        // Watch is streamed in `serve_conn` and never reaches here; a snapshot is a safe fallback.
+        ControlRequest::Status | ControlRequest::Watch => ControlResponse::Status(s.status()),
 
         ControlRequest::Manage(op) => {
             let message = match op {
@@ -418,17 +419,40 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
 }
 
 /// Read one newline-JSON request, reply with one newline-JSON response, then close — matching the
-/// GUI client's one-shot-per-request transport.
+/// GUI client's one-shot-per-request transport. `Watch` is the exception: it holds the connection
+/// open and re-pushes the status snapshot periodically (like the real engine's live stream), which
+/// also keeps the demo's rotating directive flowing.
 async fn serve_conn(stream: impl AsyncReadWrite, state: Arc<Mutex<State>>) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
         return;
     }
-    let resp = match serde_json::from_str::<ControlRequest>(line.trim()) {
-        Ok(req) => handle(&state, req),
-        Err(e) => ControlResponse::Error(format!("bad request: {e}")),
+    let req = match serde_json::from_str::<ControlRequest>(line.trim()) {
+        Ok(req) => req,
+        Err(e) => {
+            let mut bytes =
+                serde_json::to_vec(&ControlResponse::Error(format!("bad request: {e}")))
+                    .unwrap_or_default();
+            bytes.push(b'\n');
+            let _ = reader.get_mut().write_all(&bytes).await;
+            let _ = reader.get_mut().flush().await;
+            return;
+        }
     };
+    if matches!(req, ControlRequest::Watch) {
+        let mut stream = reader.into_inner();
+        loop {
+            let resp = ControlResponse::Status(state.lock().unwrap().status());
+            let mut bytes = serde_json::to_vec(&resp).unwrap_or_default();
+            bytes.push(b'\n');
+            if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+    let resp = handle(&state, req);
     let mut bytes = serde_json::to_vec(&resp).unwrap_or_default();
     bytes.push(b'\n');
     let _ = reader.get_mut().write_all(&bytes).await;
