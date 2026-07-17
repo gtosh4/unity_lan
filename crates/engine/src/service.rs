@@ -308,7 +308,13 @@ fn run_service() -> Result<()> {
     let result = rt.block_on(daemon::run(cfg, shutdown));
 
     // Report Stopped regardless of how the daemon exited (the SCM needs a terminal state).
-    set_state(ServiceState::Stopped, ServiceControlAccept::empty())?;
+    let stopped = set_state(ServiceState::Stopped, ServiceControlAccept::empty());
+    // Then bound cleanup: reqwest's default DNS resolver runs `getaddrinfo` on tokio's *blocking*
+    // pool, which can't be cancelled — so a lookup in flight at shutdown would otherwise make the
+    // runtime's `Drop` block the service process past its Stopped report for the OS resolver timeout.
+    // Abandon such stragglers after a short grace.
+    rt.shutdown_timeout(Duration::from_secs(2));
+    stopped?;
     result
 }
 

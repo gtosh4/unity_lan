@@ -180,7 +180,14 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()
         .context("building tokio runtime")?;
-    rt.block_on(async_main(cli))
+    let result = rt.block_on(async_main(cli));
+    // Bound process exit. reqwest's default DNS resolver runs `getaddrinfo` on tokio's *blocking*
+    // pool, and a blocking thread can't be cancelled — so a lookup still in flight when we shut down
+    // (e.g. a coordinator/STUN resolve interrupted by Ctrl-C) would make the runtime's `Drop` wait on
+    // it for the OS resolver timeout (~tens of seconds on Windows), hanging exit long after the
+    // daemon already reverted the interface/firewall/DNS. Abandon such stragglers after a short grace.
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
+    result
 }
 
 async fn async_main(cli: Cli) -> anyhow::Result<()> {

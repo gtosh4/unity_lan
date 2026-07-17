@@ -128,15 +128,32 @@ try {
         Write-Host "control pipe \\.\pipe\$pipe not seen yet - launching GUI anyway (it retries)" -ForegroundColor Yellow
     }
 
-    # GUI (viewer/controller). Its arg's file stem selects the same pipe. Foreground: closing it
-    # ends the dev session (the finally below stops the engine).
+    # GUI (viewer/controller). Its arg's file stem selects the same pipe.
     Write-Host "gui:     $GUI $guiArg" -ForegroundColor Cyan
     $gui = Start-Process -FilePath $GUI -ArgumentList @($guiArg) -PassThru
-    $gui.WaitForExit()
+
+    # End the session when EITHER side exits. Ctrl-C reaches the console-attached engine (-NoNewWindow
+    # shares this console), which shuts down and exits — so we poll for that and then tear down the
+    # GUI. The GUI has no console, so it never receives Ctrl-C itself; the finally below is what closes
+    # it. (Closing the GUI window ends the session the same way, via the other half of the condition.)
+    Write-Host 'running - Ctrl-C here, or close the GUI window, to stop both' -ForegroundColor DarkGray
+    while (-not $eng.HasExited -and -not $gui.HasExited) {
+        Start-Sleep -Milliseconds 300
+    }
 }
 finally {
+    # Engine: on Ctrl-C it already got the console signal and is reverting the interface/firewall/DNS,
+    # so give it a moment to finish cleanly before force-killing as a backstop. (If the GUI was closed
+    # instead, it never got a signal - the WaitForExit lapses and we force-kill.)
     if ($eng -and -not $eng.HasExited) {
         Write-Host "stopping engine (pid $($eng.Id))..." -ForegroundColor Yellow
-        Stop-Process -Id $eng.Id -Force -ErrorAction SilentlyContinue
+        if (-not $eng.WaitForExit(10000)) {
+            Stop-Process -Id $eng.Id -Force -ErrorAction SilentlyContinue
+        }
+    }
+    # GUI: no console => never received Ctrl-C, so close it so the tray icon doesn't linger.
+    if ($gui -and -not $gui.HasExited) {
+        Write-Host "closing GUI (pid $($gui.Id))..." -ForegroundColor Yellow
+        Stop-Process -Id $gui.Id -Force -ErrorAction SilentlyContinue
     }
 }
