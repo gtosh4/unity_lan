@@ -95,6 +95,12 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
   across guilds.
 - **Attestations are short-lived** and re-issued on a TTL, so revoking a Discord role revokes mesh
   access without waiting for anything to expire on its own schedule.
+- **Nothing on your machine is exposed by default.** Joining a network does *not* open your box up.
+  The engine installs a host firewall that, on the mesh interface, **drops all inbound** except what
+  you explicitly share — a peer can ping you and nothing else. To let peers reach a service you run
+  `expose` a specific port, and you can scope it to a single network's members. Your regular LAN and
+  localhost traffic is never touched. So a random role-holder can be *on the mesh* without being able
+  to open a single connection to your machine.
 
 ## Try it / install
 
