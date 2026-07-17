@@ -14,6 +14,12 @@ pub struct Config {
     pub bind: String,
     /// SQLite database path (signing key, network registry, allocations).
     pub database: PathBuf,
+    /// The mesh address range this deployment allocates device `/32`s from. Absent → a `/16`
+    /// derived from the trust anchor within 100.64.0.0/10 (see `netid::default_cidr`). Set it to
+    /// carve a disjoint block so a user on multiple meshes doesn't get colliding IPs, or to fit an
+    /// environment. Validated at startup to a private/CGNAT range (fails closed otherwise).
+    #[serde(default)]
+    pub cidr: Option<ipnet::Ipv4Net>,
     /// Offline role source. Mutually exclusive with a live Discord source.
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).

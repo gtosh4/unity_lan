@@ -18,7 +18,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 base64 = "0.22"
-ipnet = "2"
+ipnet = { version = "2", features = ["serde"] }
 siphasher = "1"
 hmac = "0.12"
 sha1 = "0.10"

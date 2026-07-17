@@ -30,6 +30,9 @@ pub struct SelfDevice {
     pub username: String,
     pub networks: Vec<String>,
     pub wg_ip: Ipv4Addr,
+    /// The deployment's mesh CIDR (from our signed attestation) — checked against local interfaces
+    /// for overlap, and the range future multi-coordinator support would route.
+    pub wg_net: ipnet::Ipv4Net,
     pub hostname: String,
     pub is_primary: bool,
     /// `<user>.<community>.unity.internal` if we're the owner's primary device.
@@ -222,6 +225,7 @@ async fn post(
                 username: att.username.clone(),
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,
+                wg_net: att.wg_net,
                 hostname,
                 is_primary: att.is_primary,
                 primary_alias,
@@ -334,6 +338,7 @@ mod tests {
             device_name: "box".into(),
             is_primary: false,
             wg_ip: Ipv4Addr::new(100, 64, 0, 9),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
             wg_pubkey: [9u8; 32],
             issued_at: now,
             expires_at: now + common::ATTESTATION_TTL_SECS,

@@ -1284,6 +1284,7 @@ mod tests {
             engine_version: String::new(),
             update_available: None,
             update_ready: false,
+            lan_overlap: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -1408,6 +1409,7 @@ mod tests {
             engine_version: String::new(),
             update_available: None,
             update_ready: false,
+            lan_overlap: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1443,6 +1445,7 @@ mod tests {
             engine_version: String::new(),
             update_available: None,
             update_ready: false,
+            lan_overlap: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

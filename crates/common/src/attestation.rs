@@ -6,6 +6,7 @@
 use std::net::Ipv4Addr;
 
 use ed25519_dalek::VerifyingKey;
+use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 
 use crate::netid::sanitize_label;
@@ -27,8 +28,13 @@ pub struct Attestation {
     pub device_name: String,
     /// Whether this is the owner's primary device (gets the `<user>.<community>` alias).
     pub is_primary: bool,
-    /// Coordinator-allocated `/32` for this device within 100.64.0.0/10.
+    /// Coordinator-allocated `/32` for this device, within `wg_net`.
     pub wg_ip: Ipv4Addr,
+    /// The deployment's mesh CIDR (`wg_ip` falls inside it). Signed so a client learns the range
+    /// from anchor-verified data — a MITM can't claim the client's real LAN as the mesh range and
+    /// hijack its traffic. Defaults to the CGNAT `/10`; a coordinator may narrow it (see
+    /// `netid::default_cidr`). Every peer's attestation carries the same value.
+    pub wg_net: Ipv4Net,
     /// Curve25519 WireGuard public key — the device identity.
     pub wg_pubkey: [u8; 32],
     /// When the coordinator signed this, in unix epoch seconds.
@@ -100,6 +106,7 @@ mod tests {
             device_name: "laptop".into(),
             is_primary: true,
             wg_ip: Ipv4Addr::new(100, 64, 42, 7),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
             wg_pubkey: [1u8; 32],
             issued_at: now,
             expires_at: now + crate::ATTESTATION_TTL_SECS,

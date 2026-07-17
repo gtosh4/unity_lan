@@ -231,7 +231,12 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // *that* so DNS tracks renames and never advertises a duplicate label.
     let (ip, device_name) = st
         .store
-        .allocate_device(&req.wg_pubkey, user_id, &sanitize_label(&req.device_name))
+        .allocate_device(
+            st.signer.wg_net(),
+            &req.wg_pubkey,
+            user_id,
+            &sanitize_label(&req.device_name),
+        )
         .await
         .map_err(internal)?;
 

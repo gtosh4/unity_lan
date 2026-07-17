@@ -8,7 +8,40 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use common::api::NetworkRef;
+use ipnet::Ipv4Net;
 use tokio::sync::Notify;
+
+/// Warn if the coordinator's mesh CIDR overlaps a subnet on a local, non-mesh interface — which
+/// would risk shadowing (routing over) the user's real LAN. Returns a human-readable warning for
+/// the first overlapping interface, or `None` if the mesh range is disjoint from every local
+/// subnet. Best-effort: if interface enumeration fails, returns `None` rather than a false alarm.
+/// Advisory — per-peer `/32` routes still come from signed attestations, so this flags a
+/// misconfigured/ill-fitting range, it doesn't gate the mesh.
+pub fn lan_overlap_warning(mesh: Ipv4Net, mesh_iface: &str) -> Option<String> {
+    let ifaces = if_addrs::get_if_addrs().ok()?;
+    for iface in ifaces {
+        if iface.name == mesh_iface || iface.is_loopback() {
+            continue;
+        }
+        let if_addrs::IfAddr::V4(v4) = iface.addr else {
+            continue;
+        };
+        let Ok(prefix) = ipnet::ipv4_mask_to_prefix(v4.netmask) else {
+            continue;
+        };
+        let Ok(subnet) = Ipv4Net::new(v4.ip, prefix) else {
+            continue;
+        };
+        if common::netid::nets_overlap(&mesh, &subnet) {
+            return Some(format!(
+                "mesh range {mesh} overlaps local interface {} ({})",
+                iface.name,
+                subnet.trunc()
+            ));
+        }
+    }
+    None
+}
 
 /// JSON-decode `path` as `T`, falling back to `default` if it's missing, unreadable, or corrupt.
 fn read_json_or<T: serde::de::DeserializeOwned>(path: &Path, default: T) -> T {

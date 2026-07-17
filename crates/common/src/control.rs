@@ -210,6 +210,12 @@ pub struct StatusReport {
     /// `[release]`, the artifact isn't for this platform, or verification failed (notice-only).
     #[serde(default)]
     pub update_ready: bool,
+    /// A human-readable warning that the coordinator's mesh CIDR overlaps a local network
+    /// interface's subnet (checked at join). Overlap risks shadowing the user's real LAN, so the
+    /// GUI surfaces it. `None` when the ranges are disjoint (the expected case). Advisory only —
+    /// per-peer `/32` routes still come from signed attestations.
+    #[serde(default)]
+    pub lan_overlap: Option<String>,
 }
 
 /// A locally-blocked user: their Discord `user_id` plus a display handle for the blocked list.

@@ -119,9 +119,13 @@ pub async fn update(
     coordinator_online: bool,
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
-    let (prev_update_available, prev_update_ready) = {
+    let (prev_update_available, prev_update_ready, prev_lan_overlap) = {
         let prev = shared.read().await;
-        (prev.update_available.clone(), prev.update_ready)
+        (
+            prev.update_available.clone(),
+            prev.update_ready,
+            prev.lan_overlap.clone(),
+        )
     };
     let report = StatusReport {
         device: Some(DeviceStatus {
@@ -160,8 +164,17 @@ pub async fn update(
         // verified manifest each refresh, independent of this snapshot's inputs.
         update_available: prev_update_available,
         update_ready: prev_update_ready,
+        // Set once at join by `set_lan_overlap`; preserved across snapshot rebuilds.
+        lan_overlap: prev_lan_overlap,
     };
     *shared.write().await = report;
+}
+
+/// Record (or clear) the warning that the coordinator's mesh CIDR overlaps a local interface's
+/// subnet. Set once when the mesh comes up; surfaced in the GUI so the user notices a range that
+/// could shadow their real LAN.
+pub async fn set_lan_overlap(shared: &Shared, warning: Option<String>) {
+    shared.write().await.lan_overlap = warning;
 }
 
 /// Overlay the coordinator-advertised latest release: set `update_available` iff `latest` is a newer

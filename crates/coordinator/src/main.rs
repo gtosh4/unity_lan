@@ -24,6 +24,47 @@ use crate::roles::{FakeRoleSource, RoleSource};
 use crate::signer::Signer;
 use crate::store::Store;
 
+/// Resolve the deployment's mesh CIDR: the configured `cidr` (validated), or a `/16` derived from
+/// the trust anchor within 100.64.0.0/10. Fails closed on a configured range outside private space.
+fn resolve_mesh_cidr(cfg: &Config, seed: &[u8; 32]) -> anyhow::Result<ipnet::Ipv4Net> {
+    match cfg.cidr {
+        Some(net) => {
+            validate_mesh_cidr(net)?;
+            Ok(net)
+        }
+        None => {
+            let anchor = common::crypto::CoordinatorKey::from_seed(seed).anchor_bytes();
+            Ok(common::netid::default_cidr(&anchor))
+        }
+    }
+}
+
+/// A configured mesh CIDR must sit inside RFC1918/RFC6598 private space (so it can't collide with
+/// the public internet or be spoofed as one) and be a sane size. Fails closed — a bad range surfaces
+/// at startup, not as broken clients.
+fn validate_mesh_cidr(net: ipnet::Ipv4Net) -> anyhow::Result<()> {
+    const PRIVATE: [&str; 4] = [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+    ];
+    let prefix = net.prefix_len();
+    if !(8..=30).contains(&prefix) {
+        anyhow::bail!("mesh cidr {net} prefix /{prefix} out of range (want /8..=/30)");
+    }
+    let inside = PRIVATE.iter().any(|s| {
+        let sup: ipnet::Ipv4Net = s.parse().unwrap();
+        sup.contains(&net.network()) && prefix >= sup.prefix_len()
+    });
+    if !inside {
+        anyhow::bail!(
+            "mesh cidr {net} is not within RFC1918/RFC6598 private space {PRIVATE:?}; refusing"
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // twilight's HTTPS (rustls) needs a process-wide crypto provider selected explicitly.
@@ -58,7 +99,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let seed = store.load_or_create_seed().await?;
-    let signer = Arc::new(Signer::from_seed(&seed));
+    let mesh_cidr = resolve_mesh_cidr(&cfg, &seed)?;
+    tracing::info!(cidr = %mesh_cidr, "mesh address range");
+    let signer = Arc::new(Signer::from_seed(&seed, mesh_cidr));
     let rotation_chain = store.rotation_chain().await?;
 
     // Seed the network registry from config (test convenience; prod uses slash commands).
@@ -236,5 +279,37 @@ fn build_release(
             Ok(Some(signed))
         }
         None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_mesh_cidr;
+
+    fn net(s: &str) -> ipnet::Ipv4Net {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn accepts_private_ranges() {
+        for s in [
+            "100.72.0.0/16",
+            "10.0.0.0/8",
+            "192.168.5.0/24",
+            "172.16.0.0/12",
+        ] {
+            assert!(validate_mesh_cidr(net(s)).is_ok(), "{s} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_public_and_absurd_ranges() {
+        // Public space — a MITM/typo mustn't point the mesh at real internet addresses.
+        assert!(validate_mesh_cidr(net("8.8.8.0/24")).is_err());
+        // Straddles private/public (192.168/16 is private but /15 leaks into 192.169).
+        assert!(validate_mesh_cidr(net("192.168.0.0/15")).is_err());
+        // Too small to allocate from, and too large.
+        assert!(validate_mesh_cidr(net("10.0.0.0/31")).is_err());
+        assert!(validate_mesh_cidr(net("10.0.0.0/7")).is_err());
     }
 }

@@ -612,6 +612,31 @@ elevated box. macOS `/etc/resolver` still deferred.
 - [ ] **Tailnet-lock-style co-signature** (prior-art §7) — optional admin/peer co-signature on a
       new device's attestation so a compromised coordinator alone can't inject a peer. Hardens the
       single-anchor trust root; fail-closed. Secure-by-default aligned.
+- [ ] **Multi-coordinator client (federated meshes)** — a client trusts >1 coordinator at once,
+      so a user in guilds served by *different* self-hosters isn't forced to pick. Builds on the
+      per-deployment mesh CIDR already shipped (each coordinator owns a disjoint `/16`, default
+      hashed from its anchor, or an explicit `cidr`). Two rungs, both client-only (coordinators stay
+      mutually ignorant — decentralization-clean):
+      1. **Profile store + in-client switch** — persist N `(url, pinned anchor, cidr)` profiles, one
+         *active* at a time; instant switch (anchor pre-pinned, just re-drive the interface). No IP
+         collision because one mesh drives the interface at a time. Also extends the join-time LAN
+         overlap check to warn on **cross-coordinator** CIDR overlap (misconfig).
+      2. **Concurrent meshes** — all pinned meshes live at once. Unicast composes on one interface
+         (disjoint CIDRs → unambiguous routes); **separate interface per mesh** is needed only to
+         isolate broadcast (game LAN discovery `255.255.255.255`) between simultaneously-gamed
+         meshes. Degrades to switch-between when two of a user's coordinators hash to the same block.
+      Constraint that makes this *switch-first*: games need a flat IPv4 LAN (broadcast + IPv4-only
+      binaries) and sovereign coordinators can't share one IPv4 authority — so concurrent-flat-IPv4
+      is bounded by construction (`docs/design.md` "IPv4-only for now"). IPv6-ULA-per-anchor is the
+      only path to unbounded concurrency and stays parked as the design's additive dual-stack option.
+- [ ] **Discord coordinator auto-discovery** — each self-hoster's bot advertises its own endpoint
+      URL (e.g. a `/unitylan join` response) so a member auto-populates the coordinator profile
+      (above) with no hand-typed URL. Inherently decentralized: the guild is the namespace, no
+      central directory. Trust stays sovereign — advertise the **URL only**, show the anchor
+      fingerprint for out-of-band verification on first pin (never let Discord distribute the anchor
+      key). Off the long-poll hot path (user-initiated interaction response), so cheap on the
+      north-star. **Do not** add a well-known bootstrap address or global registry — that would
+      recreate a privileged main instance.
 - [ ] **Coordinator release auto-poll (opt-in)** — the coordinator periodically polls GitHub
       Releases for the latest tag + `SHA256SUMS`, auto-builds and signs the release manifest, and
       hot-swaps it (the SIGHUP reload path already does the swap). Replaces the admin's manual

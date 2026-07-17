@@ -4,20 +4,29 @@ use common::attestation::Attestation;
 use common::crypto::{CoordinatorKey, WgPublicKey};
 use common::wire::Signed;
 use common::{now_unix, ATTESTATION_TTL_SECS};
+use ipnet::Ipv4Net;
 
 pub struct Signer {
     key: CoordinatorKey,
+    /// The deployment's mesh CIDR, stamped into every attestation (see `Attestation::wg_net`).
+    wg_net: Ipv4Net,
 }
 
 impl Signer {
-    pub fn from_seed(seed: &[u8; 32]) -> Self {
+    pub fn from_seed(seed: &[u8; 32], wg_net: Ipv4Net) -> Self {
         Self {
             key: CoordinatorKey::from_seed(seed),
+            wg_net,
         }
     }
 
     pub fn anchor_bytes(&self) -> [u8; 32] {
         self.key.anchor_bytes()
+    }
+
+    /// The deployment's mesh CIDR — the allocation range and the value stamped into attestations.
+    pub fn wg_net(&self) -> Ipv4Net {
+        self.wg_net
     }
 
     /// Build and sign a device attestation with the default TTL.
@@ -38,6 +47,7 @@ impl Signer {
             device_name,
             is_primary,
             wg_ip,
+            wg_net: self.wg_net,
             wg_pubkey,
             issued_at: now,
             expires_at: now + ATTESTATION_TTL_SECS,

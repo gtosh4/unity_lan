@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use common::netid::{addr_from_index, device_hint, pick_free_index};
+use ipnet::Ipv4Net;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
@@ -313,6 +314,7 @@ impl Store {
     /// authoritative way to change the name.
     pub async fn allocate_device(
         &self,
+        net: Ipv4Net,
         pubkey: &[u8; 32],
         user_id: u64,
         device_name: &str,
@@ -322,7 +324,7 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
         {
-            let ip = addr_from_index(row.get::<i64, _>("idx") as u32);
+            let ip = addr_from_index(&net, row.get::<i64, _>("idx") as u32);
             return Ok((ip, row.get::<String, _>("device_name")));
         }
 
@@ -333,8 +335,8 @@ impl Store {
             .map(|r| r.get::<i64, _>("idx") as u32)
             .collect();
 
-        let idx = pick_free_index(&taken, device_hint(pubkey))
-            .ok_or_else(|| anyhow::anyhow!("address space 100.64.0.0/10 exhausted"))?;
+        let idx = pick_free_index(&net, &taken, device_hint(&net, pubkey))
+            .ok_or_else(|| anyhow::anyhow!("mesh address space {net} exhausted"))?;
         // No existing row for this pubkey yet, so nothing to exclude from the dedup.
         let name = self.unique_device_name(user_id, device_name, None).await?;
 
@@ -348,7 +350,7 @@ impl Store {
         .bind(common::crypto::gen_enrollment_key())
         .execute(&self.pool)
         .await?;
-        Ok((addr_from_index(idx), name))
+        Ok((addr_from_index(&net, idx), name))
     }
 
     /// Disambiguate `desired` against the owner's *other* devices: return it unchanged if free,
@@ -593,6 +595,11 @@ impl Store {
 mod tests {
     use super::*;
 
+    /// A test mesh CIDR for allocation calls.
+    fn tnet() -> Ipv4Net {
+        "100.72.0.0/16".parse().unwrap()
+    }
+
     async fn mem_store() -> Store {
         // Each :memory: db is private to its single connection.
         let pool = SqlitePoolOptions::new()
@@ -643,8 +650,8 @@ mod tests {
         let st = mem_store().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
-        st.allocate_device(&a, 9, "laptop").await.unwrap();
-        st.allocate_device(&b, 9, "phone").await.unwrap();
+        st.allocate_device(tnet(), &a, 9, "laptop").await.unwrap();
+        st.allocate_device(tnet(), &b, 9, "phone").await.unwrap();
 
         // First device auto-becomes primary; enrolling a second doesn't steal it.
         st.ensure_primary(9, &a).await.unwrap();
@@ -670,8 +677,8 @@ mod tests {
         let st = mem_store().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
-        st.allocate_device(&a, 5, "laptop").await.unwrap();
-        st.allocate_device(&b, 5, "phone").await.unwrap();
+        st.allocate_device(tnet(), &a, 5, "laptop").await.unwrap();
+        st.allocate_device(tnet(), &b, 5, "phone").await.unwrap();
         st.ensure_primary(5, &a).await.unwrap();
 
         // Token resolves back to (user, device); unknown token → None.
@@ -692,7 +699,7 @@ mod tests {
 
         // A subsequent register (which re-sends the engine's config-derived name) must NOT clobber
         // the rename — otherwise the GUI rename reverts within one refresh interval.
-        st.allocate_device(&a, 5, "device").await.unwrap();
+        st.allocate_device(tnet(), &a, 5, "device").await.unwrap();
         let name = st
             .user_devices(5)
             .await
@@ -719,9 +726,18 @@ mod tests {
     #[tokio::test]
     async fn device_ip_is_stable_per_pubkey() {
         let st = mem_store().await;
-        let (a, _) = st.allocate_device(&[1u8; 32], 1, "laptop").await.unwrap();
-        let (a2, _) = st.allocate_device(&[1u8; 32], 1, "laptop").await.unwrap();
-        let (b, _) = st.allocate_device(&[2u8; 32], 1, "phone").await.unwrap();
+        let (a, _) = st
+            .allocate_device(tnet(), &[1u8; 32], 1, "laptop")
+            .await
+            .unwrap();
+        let (a2, _) = st
+            .allocate_device(tnet(), &[1u8; 32], 1, "laptop")
+            .await
+            .unwrap();
+        let (b, _) = st
+            .allocate_device(tnet(), &[2u8; 32], 1, "phone")
+            .await
+            .unwrap();
         assert_eq!(a, a2, "same device pubkey → same IP");
         assert_ne!(a, b, "same user's two devices → distinct IPs");
         assert_eq!(st.device_owner(&[1u8; 32]).await.unwrap(), Some(1));
@@ -736,19 +752,22 @@ mod tests {
 
         // Two devices of one user asking for the same name: the first keeps it, the rest get a
         // per-owner-unique suffix — so DNS `<device>.<user>…` never collapses two devices to one A.
-        let (_, na) = st.allocate_device(&a, 7, "device").await.unwrap();
-        let (_, nb) = st.allocate_device(&b, 7, "device").await.unwrap();
-        let (_, nc) = st.allocate_device(&c, 7, "device").await.unwrap();
+        let (_, na) = st.allocate_device(tnet(), &a, 7, "device").await.unwrap();
+        let (_, nb) = st.allocate_device(tnet(), &b, 7, "device").await.unwrap();
+        let (_, nc) = st.allocate_device(tnet(), &c, 7, "device").await.unwrap();
         assert_eq!(na, "device");
         assert_eq!(nb, "device-2");
         assert_eq!(nc, "device-3");
 
         // A different owner is a separate namespace — no suffix.
-        let (_, other) = st.allocate_device(&[4u8; 32], 8, "device").await.unwrap();
+        let (_, other) = st
+            .allocate_device(tnet(), &[4u8; 32], 8, "device")
+            .await
+            .unwrap();
         assert_eq!(other, "device");
 
         // Re-registering an existing device returns its stored name, never re-suffixing.
-        let (_, na2) = st.allocate_device(&a, 7, "device").await.unwrap();
+        let (_, na2) = st.allocate_device(tnet(), &a, 7, "device").await.unwrap();
         assert_eq!(na2, "device");
 
         // Renaming onto a taken name suffixes; renaming a device to its own name is a no-op (its

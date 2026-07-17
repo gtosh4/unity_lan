@@ -221,6 +221,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         })?;
         tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
 
+        // Check the coordinator's mesh range against local interfaces once at join: an overlap with
+        // the user's real LAN could shadow it. Advisory — routes come from signed attestations — so
+        // we warn and surface it, we don't refuse.
+        let overlap = crate::netcfg::lan_overlap_warning(device.wg_net, &cfg.iface);
+        if let Some(w) = &overlap {
+            tracing::warn!("{w}");
+        }
+        control::set_lan_overlap(&status, overlap).await;
+
         // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
         // clean shutdown; also clears with the link if we exit uncleanly.
         let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {

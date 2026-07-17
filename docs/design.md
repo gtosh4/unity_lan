@@ -273,7 +273,13 @@ point at them (context).
 ### 6.1 IP space — one IP per device
 - Reserved range **`100.64.0.0/10`** (RFC 6598 / CGNAT). **IPv4-only for now** (games/apps
   need it); dual-stack IPv6 ULA (pubkey-derived) is an additive future option.
-- **One `/32` per device**, allocated in the flat `/10` (~4.19M addresses), keyed by the
+- **Per-deployment mesh CIDR**: each coordinator allocates from its own block inside the `/10`
+  — a `/16` derived from its trust anchor by default (`netid::default_cidr`), or an explicit
+  `cidr` in coordinator config (validated to private/CGNAT space). Disjoint blocks let a future
+  multi-coordinator client avoid IP collisions. The CIDR is carried in the **signed attestation**
+  (`Attestation::wg_net`), so a client learns it from anchor-verified data and warns at join if it
+  overlaps a local interface (can't be spoofed into shadowing the real LAN).
+- **One `/32` per device**, allocated in the deployment's CIDR, keyed by the
   device pubkey. Deterministic hint from `hash(pubkey)`, collision-resolved by the
   coordinator. A device has the **same IP in every network** it's in. (An attacker can grind
   pubkeys toward a target IP, but the coordinator arbitrates final assignment — squatting at worst,
