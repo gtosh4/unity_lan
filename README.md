@@ -1,6 +1,8 @@
-# UnityLAN
+<p align="center">
+  <img src="assets/wordmark.svg" alt="UnityLAN" width="360">
+</p>
 
-**A private mesh VPN whose membership is your Discord roles.**
+<p align="center"><strong>A private mesh VPN whose membership is your Discord roles.</strong></p>
 
 You already have a group of people organized in Discord — a gaming community, a homelab crew, a
 project team. UnityLAN turns those Discord roles into a private, encrypted LAN. Give a role a

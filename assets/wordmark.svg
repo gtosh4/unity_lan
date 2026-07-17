@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 100" width="340" height="100" role="img" aria-label="UnityLAN">
+  <style>
+    .wm { font-family: "Segoe UI", ui-sans-serif, system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+          font-weight: 700; font-size: 46px; letter-spacing: -0.5px; }
+    .u { fill: #5865F2; }            /* "Unity" — blurple */
+    .l { fill: #1b1c24; }            /* "LAN"  — ink, theme-aware below */
+    @media (prefers-color-scheme: dark) { .l { fill: #ededf2; } }
+  </style>
+
+  <!-- mark, scaled into the left ~100px -->
+  <g transform="translate(6 6) scale(0.88)">
+    <g fill="none" stroke="#2FAE7C" stroke-width="1.9" stroke-linecap="round" opacity="0.5">
+      <path d="M26 24 34 66M26 24 50 72M26 24 66 66"/>
+    </g>
+    <path d="M26 24 24 46 34 66 50 72 66 66 76 46 74 24" fill="none" stroke="#5865F2" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#5865F2">
+      <circle cx="24" cy="46" r="5"/><circle cx="34" cy="66" r="5"/><circle cx="50" cy="72" r="5"/><circle cx="66" cy="66" r="5"/><circle cx="76" cy="46" r="5"/><circle cx="74" cy="24" r="5"/>
+    </g>
+    <circle cx="26" cy="24" r="6" fill="#2FAE7C"/>
+  </g>
+
+  <text class="wm" x="106" y="64">
+    <tspan class="u">Unity</tspan><tspan class="l">LAN</tspan>
+  </text>
+</svg>
