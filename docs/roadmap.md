@@ -646,3 +646,30 @@ elevated box. macOS `/etc/resolver` still deferred.
       advertises, so no human vets each one — a compromised GitHub release/tag would auto-propagate
       to the whole mesh. Therefore **off by default, behind a config flag**; the shipped manual +
       SIGHUP flow keeps a human in the loop (see `packaging/README.md` "Signed auto-update").
+- [ ] **Trusted networks + LAN game discovery** — let a user flag a network as *trusted* to run
+      LAN-aware games (Warcraft III–style) across the mesh. Two layers, and the cheap one is nearly
+      worthless without the expensive one:
+      1. **Firewall relaxation (cheap, ~1 unit).** Client-local per-network `trusted` flag mirroring
+         the existing opt-out pattern (`SetNetwork`/`LocalNet`/`netcfg.rs`): new `trusted.json` set,
+         `SetNetworkTrusted` control msg, a `saddr @net_<name> accept` rule before the default drop
+         in `fw/nftables.rs` + `fw/windows.rs`, and a GUI toggle in `networks_section`. Firewall
+         stays default-deny; trusted is opt-in relaxation (secure-by-default aligned). **Unlocks
+         direct-connect-by-IP only** (WC3 has this) — leaves auto-discovery empty.
+      2. **Broadcast/multicast relay (the real feature, ~5–10× layer 1 + a platform dep).** Classic
+         LAN discovery is UDP broadcast (`255.255.255.255`) / multicast (mDNS `224.0.0.251`), which
+         does **not** traverse the routed point-to-point WG mesh — so layer 1 alone gives an empty
+         server browser. A relay must capture a local game's *outgoing* broadcast, unicast it to each
+         trusted peer, and re-inject it as arriving broadcast on their side. **No hook exists:**
+         `defguard_wireguard_rs` owns the TUN on both backends and the `WgBackend` trait is
+         control-plane only (no packet read/write/inject) — by design (engine stays off the data
+         plane). So this punches the engine into the packet path for the first time, via a raw
+         capture/inject subsystem *beside* the wg iface (can't tap defguard without forking it).
+         Linux is moderate (AF_PACKET, root already held); **Windows is the scope bomb** — an
+         ordinary UDP socket can't see another process's outgoing broadcast, so it needs **Npcap**
+         (new external dep, installer bundling, redistribution licensing) or a **WFP callout driver**
+         (signed kernel driver). Plus loop-prevention tagging, a dst/port relay filter, IGMP joins,
+         trusted-net scoping, and netns-harness coverage for injected broadcast. Note the
+         concurrent-multi-coordinator item above already flags that isolating `255.255.255.255`
+         between simultaneously-gamed meshes needs a **separate interface per mesh** — same broadcast
+         constraint, different axis. Ship layer 1 only if direct-IP-by-hand is judged worth it on its
+         own; otherwise treat the pair as one milestone gated on the relay.
