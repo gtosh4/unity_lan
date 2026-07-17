@@ -26,6 +26,10 @@ async fn ensure_ok(resp: reqwest::Response, what: &str) -> anyhow::Result<reqwes
 /// Our own verified device: its `/32`, hostname, and the networks it belongs to.
 pub struct SelfDevice {
     pub community_name: String,
+    /// The owner's Discord user id (from our verified attestation). Lets the client recognize its
+    /// own other devices among the peers — they carry this same `user_id` — for the "My devices"
+    /// display grouping.
+    pub user_id: u64,
     /// The owner's Discord handle this device is enrolled as (the `<user>` label).
     pub username: String,
     pub networks: Vec<String>,
@@ -227,6 +231,7 @@ async fn post(
             let primary_alias = att.primary_alias();
             Some(SelfDevice {
                 community_name: community,
+                user_id: att.user_id,
                 username: att.username.clone(),
                 networks: grant.networks.clone(),
                 wg_ip: att.wg_ip,

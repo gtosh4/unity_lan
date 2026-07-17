@@ -1306,17 +1306,24 @@ impl App {
             .on_toggle(Message::SetNewNetworkDefault)
             .size(16)
             .text_size(14);
-        // Own-device peering: always reach the owner's other devices, regardless of networks. On by
-        // default; sits alongside the new-network policy as a section-wide setting.
+        // Own devices are shown as a special network-style row (same toggler treatment), always
+        // present since own-device peering exists regardless of network membership. It leads the
+        // list; the real networks follow.
         let own_devices = self.status.as_ref().is_none_or(|s| s.peer_own_devices);
-        let own_policy = checkbox("Always peer with my own devices", own_devices)
-            .on_toggle(Message::SetOwnDevicePeering)
-            .size(16)
-            .text_size(14);
-        let inner: Element<'_, Message> = if nets.is_empty() {
-            muted("No networks discovered yet.").into()
+        let own_row = row![
+            toggler(own_devices)
+                .width(Length::Shrink)
+                .on_toggle(Message::SetOwnDevicePeering),
+            text(common::control::OWN_DEVICES_LABEL)
+                .size(14)
+                .width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center);
+        let mut list = Column::new().spacing(6).push(own_row);
+        if nets.is_empty() {
+            list = list.push(muted("No other networks discovered yet."));
         } else {
-            let mut col = Column::new().spacing(6);
             for n in nets {
                 let title = if n.guild_name.is_empty() {
                     n.name.clone()
@@ -1341,13 +1348,10 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
-                col = col.push(r);
+                list = list.push(r);
             }
-            col.into()
-        };
-        column![header("networks"), policy, own_policy, inner]
-            .spacing(8)
-            .into()
+        }
+        column![header("networks"), policy, list].spacing(8).into()
     }
 
     fn exposed_section(&self) -> Element<'_, Message> {
@@ -1444,7 +1448,14 @@ fn shared_networks_by_community(networks: &[common::api::SharedNetwork]) -> Stri
     }
     groups
         .iter()
-        .map(|(community, names)| format!("{}: {}", community, names.join(", ")))
+        .map(|(community, names)| {
+            // The synthetic "My devices" group has no community — show its name bare, no `: ` prefix.
+            if community.is_empty() {
+                names.join(", ")
+            } else {
+                format!("{}: {}", community, names.join(", "))
+            }
+        })
         .collect::<Vec<_>>()
         .join(" · ")
 }
@@ -1563,6 +1574,15 @@ mod tests {
         assert_eq!(
             shared_networks_by_community(&[net("mesh", "acme")]),
             "acme: mesh"
+        );
+        // The synthetic "My devices" group has no community → shown bare, and mixes cleanly with a
+        // real (community-tagged) network on the same own-device peer.
+        assert_eq!(
+            shared_networks_by_community(&[
+                net(common::control::OWN_DEVICES_LABEL, ""),
+                net("Engineering", "acme"),
+            ]),
+            "My devices · acme: Engineering"
         );
     }
 

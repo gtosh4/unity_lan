@@ -15,6 +15,12 @@ use crate::api::{ManageOp, ManageResp, NetworkStatus};
 /// SCM entry point) and the GUI (status query + start/stop) address the same service.
 pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
 
+/// Display label for the synthetic "own devices" grouping: the pseudo-network the GUI shows for the
+/// always-on own-device peering toggle, and the tag on peers that are the owner's other devices. Not
+/// a real network (never on the coordinator wire) — a client-side display convention only, so both
+/// the engine (peer tagging) and the GUI (the toggle row) name it the same thing.
+pub const OWN_DEVICES_LABEL: &str = "My devices";
+
 #[derive(Serialize, Deserialize)]
 pub enum ControlRequest {
     Status,

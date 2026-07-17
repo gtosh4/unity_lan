@@ -214,6 +214,18 @@ fn peer(
 
 fn fixture_peers() -> Vec<PeerStatus> {
     vec![
+        // alice's own second device: same owner, tagged with the synthetic "My devices" group (no
+        // shared community) — it peers via own-device peering, not a network.
+        peer(
+            "desktop.alice.unity.internal",
+            2,
+            PeerReach::Direct,
+            true,
+            Some(2),
+            1001,
+            "alice#4021",
+            &[(common::control::OWN_DEVICES_LABEL, "")],
+        ),
         // bob's primary device shows the bare `<user>.unity.internal` alias, and shares networks
         // across two communities — the hover groups them by server (`acme: … · playhouse: …`).
         peer(

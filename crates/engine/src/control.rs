@@ -168,7 +168,10 @@ pub fn update(
                 rx_bytes: 0,
                 tx_bytes: 0,
                 last_handshake_secs: None,
-                networks: s.networks.clone(),
+                // Own devices (same owner) carry a synthetic "My devices" tag for display, so they
+                // group like a network in the peer view — matching the special networks-list row.
+                // Display-only: `SeedPeer.networks` stays empty, so firewall/DNS/expose are untouched.
+                networks: own_device_networks(s, device.user_id),
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
@@ -190,6 +193,23 @@ pub fn update(
         directive: None,
     };
     shared.send_replace(report);
+}
+
+/// The networks shown for a peer: its real shared networks, plus a synthetic "My devices" tag first
+/// when the peer is one of the owner's own devices (same `user_id`). Display-only — never fed back
+/// to the coordinator or into firewall/DNS grouping.
+fn own_device_networks(s: &SeedPeer, self_user_id: u64) -> Vec<common::api::SharedNetwork> {
+    let mut nets = s.networks.clone();
+    if s.user_id == self_user_id {
+        nets.insert(
+            0,
+            common::api::SharedNetwork {
+                name: common::control::OWN_DEVICES_LABEL.to_string(),
+                community: String::new(),
+            },
+        );
+    }
+    nets
 }
 
 /// Record (or clear) the warning that the coordinator's mesh CIDR overlaps a local interface's
@@ -756,4 +776,57 @@ pub async fn client_set_blocked(
         None => ControlRequest::UnblockPeer { user_id },
     };
     expect_resp!(request(endpoint, &req).await?, ControlResponse::Status)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coord::SeedPeer;
+    use std::net::Ipv4Addr;
+
+    fn seed(user_id: u64, nets: &[(&str, &str)]) -> SeedPeer {
+        SeedPeer {
+            pubkey: [0; 32],
+            user_id,
+            username: "u".into(),
+            ip: Ipv4Addr::new(100, 64, 0, 2),
+            endpoint: None,
+            punch: None,
+            hostname: "d.u.unity.internal".into(),
+            primary_alias: None,
+            networks: nets
+                .iter()
+                .map(|(n, c)| common::api::SharedNetwork {
+                    name: (*n).into(),
+                    community: (*c).into(),
+                })
+                .collect(),
+            relay: None,
+            ice: None,
+        }
+    }
+
+    #[test]
+    fn own_device_gets_my_devices_tag_prepended() {
+        // Same user (7) → "My devices" leads, real networks follow, in display order.
+        let mine = seed(7, &[("Engineering", "acme")]);
+        let tagged = own_device_networks(&mine, 7);
+        assert_eq!(tagged[0].name, common::control::OWN_DEVICES_LABEL);
+        assert!(tagged[0].community.is_empty());
+        assert_eq!(tagged[1].name, "Engineering");
+
+        // An own device sharing no network still gets the tag (the whole point of the feature).
+        let bare = seed(7, &[]);
+        assert_eq!(own_device_networks(&bare, 7).len(), 1);
+        assert_eq!(
+            own_device_networks(&bare, 7)[0].name,
+            common::control::OWN_DEVICES_LABEL
+        );
+
+        // A different user's peer is untouched — no tag, no leak.
+        let other = seed(9, &[("Engineering", "acme")]);
+        let untouched = own_device_networks(&other, 7);
+        assert_eq!(untouched.len(), 1);
+        assert_eq!(untouched[0].name, "Engineering");
+    }
 }
