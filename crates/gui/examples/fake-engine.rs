@@ -170,7 +170,7 @@ impl State {
 fn fixture_self() -> DeviceStatus {
     DeviceStatus {
         wg_ip: Ipv4Addr::new(100, 64, 0, 1),
-        hostname: "laptop.alice.acme.unity.internal".into(),
+        hostname: "laptop.alice.unity.internal".into(),
         is_primary: true,
         networks: vec!["Engineering".into(), "Gaming".into()],
     }
