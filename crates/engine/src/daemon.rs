@@ -45,6 +45,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = Arc::new(tokio::sync::Notify::new());
+    // Signalled once interactive login binds the device — wakes the enrollment loop out of its
+    // `refresh_secs` backoff so the mesh comes up at once instead of on the next poll.
+    let login_done = Arc::new(tokio::sync::Notify::new());
 
     // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
     // The server itself is bound per-enrollment inside `'lifecycle` — it listens on this device's own
@@ -99,6 +102,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             pubkey: pubkey.clone(),
             oauth_redirect: cfg.oauth_redirect.clone(),
             logout: logout.clone(),
+            login_done: login_done.clone(),
             state_dir: cfg.state_dir.clone(),
             pending_update: pending_update.clone(),
         };
@@ -193,6 +197,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             &fw,
             &shutdown,
             &relay_report,
+            &login_done,
         )
         .await?
         else {
@@ -849,6 +854,7 @@ async fn register_until_ready(
     fw: &Option<Arc<Firewall>>,
     shutdown: &Shutdown,
     relay: &coord::RelayReport,
+    login_done: &tokio::sync::Notify,
 ) -> anyhow::Result<Option<(common::api::RegisterResp, SelfDevice)>> {
     // Our persisted device token as of startup. If we re-keyed (new wg.key) since it was issued,
     // it still names the old pubkey → the coordinator retires that stale identity on our first
@@ -899,7 +905,12 @@ async fn register_until_ready(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(2))).await;
+        // Back off before the next attempt, but wake early if interactive login just bound us —
+        // collapses the post-"Login successful" gap from up to `refresh_secs` to near-zero.
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(2))) => {}
+            _ = login_done.notified() => {}
+        }
     }
 }
 

@@ -61,6 +61,9 @@ pub struct Ctx {
     pub oauth_redirect: String,
     /// Signalled on `Logout` to wake the daemon's mesh loop into its teardown + re-key path.
     pub logout: Arc<Notify>,
+    /// Signalled when interactive login binds the device — wakes the enrollment loop out of its
+    /// `refresh_secs` backoff so the mesh comes up at once instead of on the next poll.
+    pub login_done: Arc<Notify>,
     /// The engine state dir — where a staged update artifact is written before it's applied.
     pub state_dir: std::path::PathBuf,
     /// The verified auto-update the daemon has staged (if any), consumed by `ApplyUpdate`.
@@ -430,6 +433,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             match oauth::begin(&ctx.coordinator, &ctx.oauth_redirect, pubkey).await {
                 Ok(login) => {
                     let authorize_url = login.authorize_url.clone();
+                    let login_done = ctx.login_done.clone();
                     tokio::spawn(async move {
                         match tokio::time::timeout(
                             std::time::Duration::from_secs(300),
@@ -437,7 +441,9 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                         )
                         .await
                         {
-                            Ok(Ok(())) => {}
+                            // Device bound — wake the enrollment loop so the mesh comes up now, not
+                            // on its next `refresh_secs` poll.
+                            Ok(Ok(())) => login_done.notify_one(),
                             Ok(Err(e)) => tracing::error!("interactive login failed: {e:#}"),
                             Err(_) => tracing::warn!("interactive login timed out; retry `login`"),
                         }
