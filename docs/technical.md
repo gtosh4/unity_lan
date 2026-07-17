@@ -1,306 +1,354 @@
 # UnityLAN — Technical Design
 
-Implementation-level companion to [design.md](./design.md). Covers crate layout, wire
-formats, APIs, and algorithms. Library picks marked ⭐ are recommended defaults; ⚠️ marks
-choices worth confirming before M1.
+Implementation-level companion to [design.md](./design.md). Covers crate layout, wire formats,
+APIs, and algorithms **as built**. design.md is the conceptual reference (today + vision); this
+file tracks the code. When the two disagree, the code wins — flag the drift.
+
+> **Model B** is the load-bearing fact throughout: the signed unit of membership is a **device**
+> (one WG key, one IP), *not* a per-network slot. Networks (Discord roles) are **pure ACL groups**
+> that gate *peering*, never addressing. Everything below follows from that.
 
 ## 1. Workspace Layout
 
-Cargo workspace. The **client is two processes** (privileged engine + unprivileged iced
-GUI) — the Tailscale/WireGuard-GUI split (design §3.2). Five crates:
+Cargo workspace, **four crates**, two planes. The client is **two processes** (privileged engine +
+unprivileged iced GUI) — the Tailscale/WireGuard-GUI split (design §3.2). All crates ship from one
+monorepo tag (`common::VERSION`), so the coordinator can advertise its own version as "the release
+the mesh should run".
 
 ```
 unitylan/
-├── Cargo.toml            # [workspace]
+├── Cargo.toml            # [workspace] + [workspace.dependencies]
 ├── crates/
 │   ├── common/           # shared types, wire formats, crypto, IP math, control proto
-│   │   ├── attestation.rs
-│   │   ├── wire.rs       # postcard (de)serialization + signing envelope
-│   │   ├── crypto.rs     # ed25519 sign/verify, key types
-│   │   ├── netid.rs      # subnet-from-hash, IP allocation math, name sanitize
-│   │   ├── api.rs        # coordinator HTTP + gossip DTOs
-│   │   └── control.rs    # engine↔GUI RPC types (requests, events)
-│   ├── coordinator/      # the multi-tenant bot (binary), serves 1..N guilds
+│   │   ├── attestation.rs # the signed device-membership unit + verify
+│   │   ├── api.rs         # coordinator HTTP DTOs (RegisterReq/Resp, Grant, Seed, ICE, relay…)
+│   │   ├── control.rs     # engine↔GUI RPC types (ControlRequest/Response, StatusReport)
+│   │   ├── wire.rs        # postcard signing envelope (`Signed`) + base64 transport
+│   │   ├── crypto.rs      # ed25519 sign/verify, CoordinatorKey, enrollment-key gen
+│   │   ├── netid.rs       # per-device /32 allocation math, mesh-CIDR default, label sanitize
+│   │   ├── rotation.rs    # RotationCert (prev→new anchor rotation chain)
+│   │   ├── relay.rs       # TURN credential (HMAC) helpers shared by engine + coordinator
+│   │   └── update.rs      # signed ReleaseManifest (auto-update)
+│   ├── coordinator/      # the multi-tenant bot (binary), serves 1..N guilds — control plane
 │   │   ├── main.rs
-│   │   ├── config.rs     # TOML: bind, db path, [fake] source (M1), live discord/oauth (later)
-│   │   ├── roles.rs      # RoleSource trait: guild names + per-guild member roles (fake now)
-│   │   ├── discord.rs    # twilight: bot-token role/nick reads + gateway events (later)
-│   │   ├── commands.rs   # /unitylan network add|remove|list slash handler (later)
-│   │   ├── oauth.rs      # Discord OAuth2 (identify) for client auth (later)
-│   │   ├── api.rs        # axum HTTP API for clients (/register)
-│   │   ├── signer.rs     # ed25519 attestation signing, TTL
-│   │   └── store.rs      # SQLite: signing key, network registry, allocations
-│   ├── engine/           # PRIVILEGED daemon (binary) — the mesh
-│   │   ├── main.rs       # runs as systemd / Windows Service / launchd
-│   │   ├── daemon.rs     # long-running mesh state machine
-│   │   ├── control.rs    # local-socket server (interprocess: UDS / named pipe)
-│   │   ├── auth.rs       # OAuth loopback flow, token/key storage
-│   │   ├── coord.rs      # coordinator client (register/refresh, verify attestations)
-│   │   ├── wg/           # WgBackend trait + defguard impls
-│   │   │   ├── mod.rs
-│   │   │   ├── native.rs     # kernel/netlink (Linux) · WireGuardNT (Windows)
-│   │   │   └── userspace.rs  # boringtun/wireguard-go (portable primary)
-│   │   ├── gossip.rs     # anti-entropy over the mesh (axum on wg_ip)
-│   │   ├── nat.rs        # UPnP mapping + hole-punch coordination
-│   │   └── dns.rs        # local *.internal resolver (per-OS integration)
+│   │   ├── config.rs      # TOML: bind, db path, [fake] source / live discord+oauth, [release], cidr
+│   │   ├── api.rs         # axum HTTP API + long-poll (build_snapshot / wait_for_change)
+│   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
+│   │   ├── discord.rs     # twilight: bot-token role/nick reads + per-guild role-name TTL cache
+│   │   ├── commands.rs    # /unitylan network add|remove|list|revoke slash handler + gateway events
+│   │   ├── oauth.rs       # Discord OAuth2 PKCE config + token verify (binds pubkey→user)
+│   │   ├── presence.rs    # in-memory presence table + reaper (PRESENCE_TTL_SECS)
+│   │   ├── signer.rs      # per-guild Ed25519 attestation signing, TTL
+│   │   ├── rotate.rs      # offline `rotate-key` subcommand (mints prev→new cert)
+│   │   ├── stun.rs        # STUN Binding responder (UDP; server-reflexive for ICE)
+│   │   └── store.rs       # SQLite: per-guild signing keys, network registry, device allocations…
+│   ├── engine/           # PRIVILEGED daemon (binary) — the data plane / mesh
+│   │   ├── main.rs · service.rs · shutdown.rs   # systemd/Windows-Service/launchd lifecycle
+│   │   ├── daemon.rs      # long-running mesh state machine
+│   │   ├── control.rs     # local-socket server (interprocess: UDS / named pipe)
+│   │   ├── coord.rs       # coordinator client: register/refresh long-poll, verify + pin anchors
+│   │   ├── oauth.rs · keys.rs   # OAuth loopback PKCE; WG + token/anchor key storage
+│   │   ├── wg/{mod,userspace,windows}.rs   # WgBackend: boringtun userspace · Windows wg-nt kernel
+│   │   ├── fw/{mod,nftables,windows}.rs    # host firewall (default-deny on unl0)
+│   │   ├── resolver/{mod,linux,windows}.rs # *.unity.internal split-DNS hookup
+│   │   ├── dns.rs        # local .internal zone built from verified attestations
+│   │   ├── nat.rs        # UPnP-IGD port mapping
+│   │   ├── ice.rs        # userspace ICE agent (webrtc-ice): STUN gather + hole-punch
+│   │   ├── relay.rs      # embedded TURN server (ciphertext relay) + client
+│   │   ├── ping.rs      # peer reachability probing (surge-ping)
+│   │   ├── netcfg.rs · util.rs
+│   │   └── selfupdate.rs # apply signed ReleaseManifest (self-replace / MSI)
 │   └── gui/              # UNPRIVILEGED desktop app (binary) — iced
-│       ├── main.rs       # iced app + tray-icon; connects to engine control socket
-│       ├── app.rs        # State / Message / update / view (Elm architecture)
-│       ├── screens/      # networks, peers, settings views
-│       └── engine.rs     # control-socket client + Subscription of engine events
+│       ├── main.rs       # iced app (Elm) + tray; connects to engine control socket
+│       ├── ctl.rs        # control-socket client + event Subscription
+│       └── tray/         # tray-icon integration
 ```
 
-An optional thin CLI can be added later as a third front-end on the same control socket;
-not in v1.
+There is **no separate CLI crate** yet; the CLI surface is folded into the engine binary's
+subcommands. `common` also carries no `gossip`/`EndpointRecord` type — discovery is long-poll (§5),
+not gossip.
 
 ## 2. Key Dependencies
 
+Actual crates in use (workspace + per-crate). ⭐ = load-bearing.
+
 | Concern | Crate | Notes |
 |---|---|---|
-| async runtime | `tokio` ⭐ | everywhere |
-| Discord bot + gateway | `twilight-{http,gateway,model}` ⭐ | lean, selective intents; need **GUILD_MEMBERS** privileged intent for role/nick + member-update events |
-| Discord OAuth2 | `oauth2` + `reqwest` ⭐ | `identify` scope only; coordinator maps `user_id → roles` via bot token |
-| HTTP server (coord API) | `axum` ⭐ | client-facing API |
-| HTTP client | `reqwest` ⭐ | client → coordinator; peer → peer gossip |
-| signing | `ed25519-dalek` ⭐ | attestations + tombstones |
-| WG keys | `x25519-dalek` ⭐ | generate/parse Curve25519 WG keys |
-| WireGuard control | `defguard_wireguard_rs` ⚠️ | one crate over **userspace (portable primary)** + **native** (Linux netlink, Windows WireGuardNT). ⚠️ verify Win/Mac paths in M2 spike |
-| GUI | `iced` ⭐ | Elm-architecture, all-Rust, wgpu-rendered, cross-platform. No JS toolchain |
-| system tray | `tray-icon` ⭐ | iced has no built-in tray; VPN app lives in the tray |
-| engine↔GUI IPC | `interprocess` ⭐ | one API over **Unix sockets + Windows named pipes** |
-| engine as a service | systemd unit · `windows-service` · launchd plist | per-OS install of the privileged engine |
-| serialization | `postcard` ⭐ (signed) / `serde_json` (API envelopes) | postcard = deterministic bytes → stable signatures. JSON not canonical → never sign over it |
-| persistence (coord) | `sqlx` (SQLite) ⚠️ | allocations, signing key, tombstones. Alt: `sled` / JSON file |
-| UPnP | `igd-next` ⭐ | open WG listen port |
-| local DNS | `hickory-server` ⚠️ | serve `.internal`. Per-OS hookup: resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS). MVP fallback: hosts file |
+| async runtime | `tokio` ⭐ | everywhere (`features = ["full"]`) |
+| HTTP server (coord API) | `axum` ⭐ | client-facing long-poll API |
+| HTTP client | `reqwest` ⭐ | engine → coordinator; OAuth token exchange |
+| Discord bot + gateway | `twilight-{http,gateway,model,util}` ⭐ | bot-token role/nick reads; role-revocation gateway events. **GUILD_MEMBERS** privileged intent |
+| signing / keys | `ed25519-dalek` ⭐ · `x25519-dalek` (via defguard) | attestations + rotation certs + release manifest; WG keys |
+| WireGuard control | `defguard_wireguard_rs` ⭐ | userspace (boringtun, Linux) + Windows wg-nt kernel. Userspace path is unix-only today (§7.3) |
+| NAT traversal | `webrtc-ice` · `turn` · `webrtc-util` ⭐ · `stun` (coord) · `igd-next` (UPnP) · `surge-ping` | userspace ICE agent + embedded TURN relay + STUN responder |
+| GUI | `iced` ⭐ · `iced_aw` · `open` | Elm-architecture, wgpu-rendered, cross-platform. No JS toolchain |
+| engine↔GUI IPC | `interprocess` ⭐ | one API over Unix sockets + Windows named pipes |
+| serialization | `postcard` ⭐ (signed) · `serde_json` (API/control envelopes) | postcard = deterministic bytes → stable signatures; **never sign over JSON** |
+| persistence (coord) | `sqlx` (SQLite) ⭐ | per-guild signing keys, network registry, device allocations, enrollment keys, rotation certs |
+| DNS | `hickory-proto` (engine) | build/serve `.internal`; per-OS hookup in `resolver/` |
+| self-update | `self-replace` · `sha2` · `semver` | verify + swap engine binary from signed manifest |
 | logging | `tracing` ⭐ | all binaries |
 
 ## 3. Shared Types & Wire Formats (`common`)
 
-### 3.1 Attestation (the signed unit)
+### 3.1 Signing envelope (`wire.rs`)
+`Signed` is **not generic** — it carries opaque postcard bytes:
 ```rust
-// serialized with postcard → canonical bytes → signed
+struct Signed { payload: Vec<u8>, sig: Vec<u8> }   // sig = Ed25519 over payload
+impl Signed {
+    fn sign<T: Serialize>(key: &CoordinatorKey, value: &T) -> Result<Signed, WireError>;
+    fn verify<T: DeserializeOwned>(&self, anchor: &VerifyingKey) -> Result<T, WireError>;
+    fn to_base64(&self) -> String;   // transport form: base64(postcard(Signed))
+}
+```
+Signatures are over the **postcard** bytes of the payload (deterministic). API/control envelopes
+around a `Signed` are JSON, but the signed bytes inside are always postcard.
+
+### 3.2 Attestation — the signed unit (`attestation.rs`)
+**Model B: the signed unit is a device.** No `role_id`, no `nick`.
+```rust
 struct Attestation {
-    guild_id: u64,
-    role_id:  u64,          // = network id
-    user_id:  u64,
-    nick:     String,       // sanitized DNS label, unique within network
-    wg_ip:    Ipv4Addr,     // coordinator-allocated /32 in the role subnet
-    wg_pubkey:[u8; 32],     // Curve25519
-    issued_at: u64,         // unix secs
-    expires_at:u64,         // issued_at + 1800
+    guild_id:    u64,        // scoped guild; signed by THAT guild's per-guild key (§4)
+    user_id:     u64,        // Discord snowflake (owner)
+    username:    String,     // global @handle, sanitized DNS label  → the <user>
+    device_name: String,     // per-user machine label, sanitized    → the <device>
+    is_primary:  bool,       // owner's primary device gets <user>.<community> alias
+    wg_ip:       Ipv4Addr,   // coordinator-allocated /32, stable, keyed by pubkey
+    wg_net:      Ipv4Net,    // the deployment's mesh CIDR — signed so a MITM can't shadow the LAN
+    wg_pubkey:   [u8; 32],   // Curve25519 — the device identity
+    issued_at:   u64,
+    expires_at:  u64,        // issued_at + ATTESTATION_TTL_SECS (30 min)
 }
-
-struct Signed<T> {          // transport envelope
-    payload: Vec<u8>,       // postcard(T)
-    sig:     [u8; 64],      // ed25519 over payload, by coordinator key
-}
-// on the wire: base64(postcard(Signed<Attestation>))
 ```
-Verify: `ed25519 verify(coord_pubkey, payload, sig)` **and** `now < expires_at`. Then
-`postcard::from_bytes::<Attestation>(payload)`.
+**Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild)`: signature
+valid under the **pinned per-guild anchor**, **AND** `guild_id == expected_guild`, **AND** unexpired.
+The `guild_id` check is load-bearing defence-in-depth even with per-guild keys (design §4.1).
+Hostname = `<device>.<user>.<community>.unity.internal`; primary alias =
+`<user>.<community>.unity.internal` (`is_primary` only). Community label lives at the coordinator
+(not in the attestation) and is passed alongside.
 
-### 3.2 Endpoint record (unsigned, gossiped)
+### 3.3 Live endpoints (unsigned today)
+There is **no `EndpointRecord`/`seq` type**. A device's endpoint rides as a plain
+`Option<SocketAddr>` in `RegisterReq.endpoint` / `Seed.endpoint`, plus `ObservedEndpoint`
+(`{pubkey, endpoint}`) for peer-observed reflexive addresses. Correctness is guarded by the WG
+handshake (a forged endpoint fails it). design §4.2's **signed** per-member identity key for
+endpoints/ICE is **planned, not built** — today only the coordinator's per-guild key signs anything.
+
+### 3.4 Rotation cert (`rotation.rs`)
+`RotationCert { prev, new }` signed by the **outgoing** guild key; the ordered chain
+(`GuildAnchor.rotation_chain`, base64) lets a client whose pin is superseded walk `prev → new` and
+re-pin (design §9).
+
+### 3.5 Addressing math (`netid.rs`) — one /32 per device
 ```rust
-struct EndpointRecord { wg_pubkey: [u8;32], endpoint: SocketAddr, seq: u64 }
+const CGNAT_BASE = 100.64.0.0; const CGNAT_PREFIX = 10; const DEFAULT_PREFIX = 16;
+fn default_cidr(anchor: &[u8;32]) -> Ipv4Net;              // a /16 inside 100.64.0.0/10, hash(anchor)%64
+fn device_hint(net: &Ipv4Net, wg_pubkey: &[u8;32]) -> u32; // first-choice host index
+fn pick_free_index(net, taken, hint) -> Option<u32>;       // probe upward, coordinator arbitrates
+fn addr_from_index(net, index) -> Ipv4Addr;
+fn sanitize_label(&str) -> String;                          // [a-z0-9-], ≤63, "device" fallback
 ```
-Newest `seq` wins. Correctness guarded by WG handshake (see design §4.2). `seq` = client's
-monotonic counter (persisted) so a restart doesn't regress.
-
-### 3.3 Tombstone (signed revocation)
-```rust
-struct Tombstone { guild_id:u64, role_id:u64, user_id:u64, revoked_at:u64 }
-// transported as Signed<Tombstone>; supersedes any attestation for that (user,role)
-```
-
-### 3.4 Subnet & IP math (`netid.rs`)
-```rust
-// network subnet: /24 inside 100.64.0.0/10
-fn subnet_of(guild_id:u64, role_id:u64) -> Ipv4Net {   // 100.64.0.0/10 has 2^14 /24s
-    let h = siphash(guild_id, role_id) % (1<<14);       // 14 bits of /24 index
-    // 100.64.0.0/10 → vary the low 14 bits above the /10 prefix
-    ipv4_from_index(0x6440_0000, 10, h)                 // → 100.64.x.0/24
-}
-// host: coordinator allocates .2..=.254 (.1 reserved for... nothing; no gateway in mesh)
-fn host_hint(user_id:u64) -> u8 { (siphash(user_id) % 253) as u8 + 2 }
-```
-`.1` reserved (future gateway/router); collisions resolved by coordinator's persistent map.
+- **Per-deployment mesh CIDR**: default `/16` derived from the deployment seed's anchor, or an
+  explicit validated `cidr` in coordinator config. Disjoint blocks let a future multi-coordinator
+  client avoid IP collisions. The CIDR is carried in the **signed** `Attestation::wg_net`.
+- **One /32 per device**, keyed by device **pubkey** (not user, not role). Deterministic hint,
+  coordinator resolves collisions. Same IP in every network the device is in. **No per-role /24s.**
 
 ## 4. Coordinator
 
-### 4.1 HTTP API (axum, HTTPS) — client-facing
-| Method | Path | Body → Resp | Purpose |
-|---|---|---|---|
-| `GET` | `/oauth/start` | → redirect | begin Discord OAuth (loopback redirect) |
-| `GET` | `/oauth/callback` | code → session token | finish OAuth; coordinator learns `user_id` |
-| `POST`| `/register` | `{wg_pubkey}` → `{coord_pubkey, grants[]}` | issue a grant per registered network the caller holds, **across all guilds** the caller shares with the bot; pin key |
-| `POST`| `/refresh` | `{wg_pubkey, endpoint?}` → `{grants[], seeds, tombstones_since}` | TTL refresh + report endpoint (source addr also observed = STUN) |
-| `GET` | `/tombstones?since=` | → `[Signed<Tombstone>]` | revocations |
+### 4.1 HTTP API (axum) — `api.rs::router`
+Actual routes:
 
-`Grant = { attestation: base64(Signed<Attestation>), guild_name, network_name }` — the names
-build `<nick>.<network>.<guild>.internal`. `SeedRecord` (added at M3) =
-`{ attestation, endpoint_hint: Option<SocketAddr> }`. Session auth: bearer token from OAuth
-callback; short-lived, tied to `user_id`. (M1 offline: `?dev_user=` query stands in for the
-session.)
+| Method | Path | Purpose |
+|---|---|---|
+| `GET`  | `/healthz` | liveness |
+| `POST` | `/register` | first contact / re-register; long-poll; issues grant + seeds + anchors |
+| `POST` | `/refresh` | **same handler as `/register`** — TTL renewal + presence + endpoint report |
+| `POST` | `/devices/manage` | owner-scoped device ops (list/rename/set-primary/remove), token-auth |
+| `GET`  | `/oauth/pkce-config` | Discord `client_id` + `fake` flag for the engine's PKCE flow |
+| `POST` | `/oauth/complete` | engine hands over the access token; coordinator binds pubkey → user |
 
-### 4.2 Discord integration (`discord.rs`)
-- **Bot token**, `GUILD_MEMBERS` intent.
-- On `/register`/`/refresh`: fetch member → roles + nick (REST, cached).
-- **Gateway** `GUILD_MEMBER_UPDATE` / `GUILD_MEMBER_REMOVE` → on role loss, write a
-  `Tombstone` and stop re-signing that `(user,role)`. This is what makes revocation prompt.
+STUN is a **separate UDP responder** (`stun.rs`), not an axum route; its address is advertised in
+`RegisterResp.stun_addr`. There is **no `/oauth/start`, `/oauth/callback`, or `/tombstones`** — the
+engine owns the OAuth loopback itself (§5.1), and revocation is presence-driven (no tombstone
+endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enrollment_key`.
 
-### 4.3 Signing & TTL (`signer.rs`)
-- Ed25519 keypair generated on first run, persisted (0600, or OS keystore). Public half =
-  the guild's trust anchor, returned in `/register`.
-- Attestation `expires_at = now + 1800`. Clients refresh at ~half-life (900 s).
+**Request/response** (`common::api`): `RegisterReq` carries `wg_pubkey`, `device_name`,
+`enrollment_key?`, `endpoint?`, `since?` (long-poll ETag), `disabled_networks`, `observed`,
+`supersede?`, `paused`, relay-capability fields, `need_relay`, `relay_allocated`, `ice`, `proto`,
+`client_version`. `RegisterResp` returns `anchors` (one `GuildAnchor` per referenced guild),
+`grant?` (own attestation(s) + names), `device_token?`, `seeds`, `version`, `networks`,
+`stun_addr?`, `proto`, `server_version`, `release?`. All version/relay/ICE fields are
+`#[serde(default)]` for forward-compat with pre-versioning peers.
 
-### 4.4 Storage (`store.rs`, SQLite) — implemented
+**A device that participates in N guilds carries N attestations** — `Grant.attestations` /
+`Seed.attestations` are `Vec<GuildAttestation>`, one per guild, each signed by that guild's key.
+
+### 4.2 Discovery — long-poll (`api.rs`)
+**Not gossip.** Clients long-poll `/register`+`/refresh` carrying their last-seen `version`
+(`since`). The handler:
+1. `build_snapshot` — assemble the caller's grant + `seeds` (every co-member sharing ≥1 enabled
+   network), re-signing/reusing cached attestations.
+2. If `since == current version`, park on a `tokio::watch` via `wait_for_change` for up to
+   `LONGPOLL_HOLD_SECS` (≈ TTL/2 = 15 min), then return a fresh re-signed snapshot (renewal
+   piggybacks the hold). Any membership change bumps the version and **wakes every parked client at
+   once** (the fan-in herd — see CLAUDE.md's coordinator-load guidance).
+3. Presence is tracked in-memory (`presence.rs`) with a reaper at `PRESENCE_TTL_SECS`
+   (`2×hold + 60s`); `paused`/`Logout`/`supersede` withdraw a device explicitly.
+
+### 4.3 Discord integration (`roles.rs`, `discord.rs`, `commands.rs`)
+- `RoleSource` trait: `TwilightRoleSource` (live bot token, GUILD_MEMBERS intent) vs
+  `FakeRoleSource` (config-seeded, offline). Per-guild role-name TTL cache in `discord.rs` dedups
+  the `GET guild roles` bucket across the herd.
+- Slash commands `/unitylan network add|remove|list|revoke` (Manage-Guild gated); gateway events
+  drive role-loss eviction. `@everyone` is rejected as a network.
+
+### 4.4 Signing & keys (`signer.rs`, `store.rs`)
+- **One independent Ed25519 key per guild** (`load_or_create_seed(guild_id)`), generated lazily on
+  first use — **not** derived from a shared master. `replace_seed` + `append_rotation_cert` back the
+  offline `rotate-key` subcommand (`rotate.rs`). A separate `deployment_seed` (id=1) is **not a
+  signing key** — it only picks the default mesh `/16`.
+- Attestation `expires_at = now + ATTESTATION_TTL_SECS` (30 min); renewal at ≈ hold (15 min).
+
+### 4.5 Storage (`store.rs`, SQLite) — implemented
 ```
-signing_key(id=1, seed BLOB)                             -- single row
-networks(guild_id, role_id, name, PRIMARY KEY(guild,role))  -- the registry
-allocations(guild_id, role_id, user_id, host, PRIMARY KEY(guild,role,user))  -- host octet
-tombstones(guild_id, role_id, user_id, revoked_at, sig)  -- added at M7
+guild_signing_keys(guild_id PK, seed)          -- one independent Ed25519 seed per guild (§4.4)
+deployment_seed(id=1, seed)                     -- random; selects default mesh /16 (NOT a key)
+networks(guild_id, role_id, name, PK(guild,role))       -- the registry
+devices(pubkey PK, idx UNIQUE, user_id, device_name, token)  -- one /32 per device
+enrollment_keys(key PK, user_id, expires_at?, used_by?)      -- one-time, race-free consume
+communities(guild_id PK, slug)                  -- the <community> DNS label
+primary_device(user_id PK, pubkey)              -- backs <user>.<community> alias
+oauth_authorized(pubkey PK, user_id)            -- interactive-login pubkey→user binding
+guild_rotation_certs(idx PK AUTOINCREMENT, guild_id, cert)   -- prev→new chain, oldest→newest
 ```
-Snowflakes stored as `i64` (bit-preserving cast; SQLite has no u64). `host` = the `.2..=.254`
-octet; the address is `host_addr(subnet_of(guild,role), host)`. Uses runtime `sqlx::query`
-(no compile-time `DATABASE_URL` needed). Endpoint cache = in-memory (added at M3), lost on
-restart (seeds repopulate via `/refresh`).
+Snowflakes stored as `i64` (bit-preserving; SQLite has no u64). The DB file is chmod `0600` on open
+(it holds the signing seeds). Runtime `sqlx::query` (no compile-time `DATABASE_URL`). Presence +
+endpoint cache are **in-memory**, lost on restart (repopulate via refresh).
 
-## 5. Client — Engine (§5.1–5.6) + GUI (§5.7)
+## 5. Client — Engine (§5.1–5.7) + GUI (§5.8)
 
-The engine (privileged daemon) owns all mesh state and the coordinator session. The iced GUI
-is a thin front-end over the engine's control socket. They talk via `interprocess`
-(UDS/named pipe) using `common::control` RPC types.
+The privileged engine owns all mesh state and the coordinator session; the iced GUI is a thin
+front-end over the engine's control socket (`common::control`, postcard-framed over `interprocess`).
 
-### 5.1 Auth flow (`engine/oauth.rs`, GUI/CLI-triggered)
-Discord OAuth2 **authorization-code + PKCE**, loopback redirect. The **engine** is the public
-client (it owns the session and calls `/register`); the coordinator holds no secret and only
-verifies the resulting token. The **GUI** just opens the browser.
-1. `Control::Login` (GUI button / `login` CLI) → engine `GET /oauth/pkce-config` (Discord
-   `client_id` + fake-mode flag), generates the PKCE `verifier`/`challenge`, binds a one-shot
-   `127.0.0.1:<port>` listener (the fixed `oauth_redirect`), and returns the authorize URL.
-2. The URL is opened; Discord redirects **straight to the engine's loopback** with `code`+`state`.
-   The engine exchanges the code at Discord's token endpoint (PKCE `code_verifier`, **no secret**)
-   for an access token, then `POST /oauth/complete {wg_pubkey, access_token}`.
-3. The coordinator verifies the token (`GET /users/@me`) and binds pubkey → user. The engine's
-   register loop picks up the binding and brings up the mesh.
+### 5.1 Auth / enrollment (`oauth.rs`, `coord.rs`)
+Two enrollment paths (design §3.3):
+- **Interactive**: Discord OAuth2 **authorization-code + PKCE**, loopback redirect. The **engine** is
+  the public client: `Control::Login` → `GET /oauth/pkce-config` (client_id + fake flag), engine
+  generates PKCE verifier/challenge, binds a one-shot `127.0.0.1:<port>` listener, returns the
+  authorize URL; the GUI just opens the browser. Discord redirects to the engine's loopback; the
+  engine exchanges the code itself (no secret) then `POST /oauth/complete {wg_pubkey, access_token}`.
+  In `fake` mode the engine skips Discord and treats the callback `code` as the token.
+- **Headless**: a one-time **enrollment key** (`RegisterReq.enrollment_key`), single-use + race-free
+  consume, binds the box's pubkey to its owner. No Discord client on the box.
 
-The loopback redirect is fixed and registered once with the Discord app (which needs the
-`PUBLIC_OAUTH2_CLIENT` flag), so login works from any host/VM regardless of LAN address — no
-reachable coordinator URL required. (Discord has no device-code grant → loopback is the
-desktop-friendly path.)
+The engine pins each guild's anchor **TOFU** on first sight, and re-pins across rotations via
+`GuildAnchor.rotation_chain`.
 
 ### 5.2 WG backend (`wg/`)
 ```rust
-trait WgBackend {
-    fn ensure_iface(&self, addrs: &[Ipv4Net], listen_port: u16) -> Result<()>;
-    fn set_peer(&self, pubkey: [u8;32], allowed: Ipv4Net, endpoint: Option<SocketAddr>) -> Result<()>;
-    fn remove_peer(&self, pubkey: [u8;32]) -> Result<()>;
-    fn gen_keypair() -> (StaticSecret, PublicKey);
-}
+trait WgBackend { ensure_iface, set_peer, remove_peer, gen_keypair, ... }
+  ├── userspace.rs  // boringtun via defguard_wireguard_rs — portable primary (unix today)
+  └── windows.rs    // Windows wg-nt kernel backend
 ```
-- **One interface** (`unl0`) holds all networks: `addrs` = the client's per-role `/32`s;
-  each peer added with `AllowedIPs = <peer_wg_ip>/32`. Cross-network isolation is automatic
-  (only shared-network peers get routes; no forwarding).
-- `native.rs` / `userspace.rs` both via `defguard_wireguard_rs`. **Userspace is the portable
-  primary** (Linux/Win/Mac); select **native** where present (Linux netlink, Windows
-  WireGuardNT) as an optimization. macOS = userspace only.
+- **One interface** (`unl0`) holds everything: the device's single `/32`; each co-device peer added
+  with `AllowedIPs = <peer>/32`. Cross-network isolation is automatic — only shared-network
+  co-members become peers (§6). No `native.rs` (Linux netlink deferred, design §7.3).
 
-### 5.3 Gossip (`gossip.rs`) — anti-entropy over the mesh ⭐
-Pull-based over WG (member-only, already encrypted). Each client runs a tiny HTTP endpoint on
-its `wg_ip`:
-```
-GET http://<peer_wg_ip>:<gport>/state
-  → { attestations: [Signed<Attestation>], endpoints: [EndpointRecord], tombstones: [Signed<Tombstone>] }
-```
-Loop: every ~10 s pick a few random current peers, `GET /state`, merge:
-- attestations: verify sig+TTL, keep unexpired; a matching tombstone drops the pubkey.
-- endpoints: keep highest `seq` per pubkey.
-- reconcile → compute desired peer-set → diff against WG → `set_peer`/`remove_peer`.
-State lives only in RAM; the coordinator + gossip repopulate on restart.
+### 5.3 Host firewall (`fw/`)
+`nftables.rs` (Linux) / `windows.rs` (PowerShell) enforce **default-deny on `unl0`** — a second gate
+beyond role membership. Both sides of the platform split are tested (arg-construction unit tests).
 
-### 5.4 NAT (`nat.rs`)
-- **UPnP** (`igd-next`): map an external UDP port → local WG `listen_port`; publish the
-  mapped `ip:port` as the endpoint.
-- **Hole punch**: for a peer whose direct dial fails, ask a mutually-connected peer (over the
-  mesh) to relay the other's live endpoint + a synchronized punch signal; both send
-  simultaneously to open NAT mappings, then WG handshakes.
+### 5.4 Discovery client (`coord.rs`, `daemon.rs`)
+Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned
+guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`. **No gossip module.**
 
-### 5.5 DNS (`dns.rs`)
-- Build the `.internal` zone from verified attestations: `<nick>.<role_name>.<guild_name>` →
-  `wg_ip`. (Role/guild *names* fetched once from the coordinator; ids used internally.)
-- Serve via `hickory-server` on `127.0.0.53:53` (or a chosen loopback), routed for
-  `.internal` through `systemd-resolved`/`resolv.conf`. ⚠️ MVP fallback: rewrite `/etc/hosts`.
+### 5.5 NAT traversal (`nat.rs`, `ice.rs`, `relay.rs`, `ping.rs`) — connectivity ladder
+Most-direct-first (design §7.2):
+- **`nat.rs`** — UPnP-IGD maps an external UDP port → local WG `listen_port`.
+- **`ice.rs`** — userspace **ICE** agent (`webrtc-ice`): host + STUN server-reflexive candidate
+  gathering + hole-punch. Candidates exchanged over the coordinator long-poll (`RegisterReq.ice` →
+  `Seed.ice`), never run by the coordinator. STUN server = a relay co-member or the coordinator's
+  `stun_addr`.
+- **`relay.rs`** — embedded **TURN** server (`turn` crate) + client: a **ciphertext-only** relay for
+  pairs a punch can't connect (symmetric/CGNAT/UDP-blocked). Relay eligibility is opt-in
+  (`relay_capable`); the coordinator mints short-lived HMAC TURN creds (`common::relay`,
+  `RELAY_CRED_TTL_SECS`) and pairs relay↔client — staying off the traffic path. `need_relay` /
+  `Seed.relay` (`RelayInfo`) carry the reservation.
+- **`ping.rs`** — reachability probing → `PeerReach` (`Direct`/`Punching`/`Relayed`/`Unreachable`)
+  surfaced in status.
 
-### 5.6 Daemon state machine (`daemon.rs`)
+### 5.6 DNS (`dns.rs`, `resolver/`)
+Build the `unity.internal` zone from verified attestations (own + co-device seeds):
+`<device>.<user>.<community>` → `wg_ip`, plus the `<user>.<community>` primary alias. Serve via
+`hickory-proto`; per-OS hookup in `resolver/{linux,windows}.rs` (resolved / NRPT+netsh). Labels are
+sanitized (`sanitize_label`); **authorization is always the pubkey in the signed attestation**, never
+the name.
+
+### 5.7 Daemon state machine (`daemon.rs`)
 ```mermaid
 stateDiagram-v2
     [*] --> Unauth
-    Unauth --> Registering: login ok
-    Registering --> Meshing: attestations + seeds
-    Meshing --> Meshing: gossip tick / refresh tick / peer churn
-    Meshing --> Registering: all attestations near expiry
+    Unauth --> Registering: login / enrollment ok
+    Registering --> Meshing: grant + seeds (anchors pinned)
+    Meshing --> Meshing: long-poll refresh / peer churn / NAT progress
+    Meshing --> Registering: attestations near expiry
     Meshing --> Degraded: coordinator unreachable
     Degraded --> Meshing: coordinator back (before TTL)
-    Degraded --> Unauth: attestations expired (TTL passed)
+    Degraded --> Unauth: attestations expired (TTL passed) / Logout
 ```
 
-### 5.7 GUI (`gui/`, iced) — unprivileged front-end
-All-Rust, Elm architecture. No web, no JS toolchain. Talks only to the engine (never to the
-coordinator or peers directly).
-```rust
-struct App { conn: EngineConn, networks: Vec<NetView>, status: EngineStatus }  // State
-enum Message {                                                                 // Message
-    Login, ToggleNet(RoleId), Expose { port: u16, role: RoleId },
-    EngineEvent(control::Event),        // pushed from the engine over the socket
-}
-// update(): map UI actions → control::Request sent to the engine
-// view():   render networks / peers / status from State
-// Subscription: stream control::Event from the engine socket → EngineEvent
-```
-- **Control transport**: `interprocess` local socket to the engine; `common::control`
-  request/event enums, postcard-framed. A `Subscription` turns the event stream into
-  `Message`s (live status/peer updates).
-- **Tray** (`tray-icon`): show up/down, quick toggles, "open"/"quit"; the engine keeps the
-  mesh running when the window is closed.
-- **No privilege**: every privileged action (WG, DNS, ports) is an RPC to the engine; the GUI
-  itself needs no elevation.
+### 5.8 GUI (`gui/`, iced) — unprivileged front-end
+All-Rust Elm architecture; talks **only** to the engine. `ctl.rs` = control-socket client + a
+`Subscription` streaming `ControlResponse`/`StatusReport` events into `Message`s. `tray/` = tray-icon
+(up/down, quick toggles, open/quit); the engine keeps the mesh up when the window closes. Every
+privileged action is a `ControlRequest` RPC — the GUI needs no elevation. `ControlRequest` covers
+`Status`, `Manage`, `Expose`, `SetNetwork`, `Login`, `SetConnected`, `SetNewNetworkDefault`,
+`Logout`, `BlockPeer`/`UnblockPeer` (local, user-keyed), `ApplyUpdate`.
 
-## 6. Security Notes
-- Coordinator holds no traffic, no WG private keys. Compromise → forge memberships for that
-  guild (not decrypt traffic). Protect the Ed25519 signing key (0600 / OS keystore).
-- Trust anchor pinned on first `/register`; ⚠️ rotation story is an open design item.
-- Gossip endpoint on `wg_ip` is reachable only by mesh members (WG-gated) — but still
-  validate/authorize inputs (a malicious member could feed junk; sig-checks + rate limits).
-- Client stores session token + WG privkey 0600.
+## 6. Peering = ACL (Model B)
 
-## 7. Open Technical Questions
-- **`defguard_wireguard_rs` vs split (`wireguard-control` + `boringtun`)** — validate the
-  former genuinely covers both kernel + userspace on target distros (⚠️ M2 spike).
-- **DNS integration** — `hickory-server` + resolved split-DNS vs `/etc/hosts` for MVP.
-- **Gossip over HTTP-on-wg_ip vs a compact UDP anti-entropy** (SWIM-style) — HTTP is simplest
-  to build/debug; revisit if churn/scale demands it.
-- **Coordinator persistence** — SQLite vs sled vs flat file (scale is tiny; SQLite chosen for
-  durability + simple queries).
-- **Signing-key custody** — file (0600) vs OS keystore vs age-encrypted at rest.
-- **Clock skew** — TTL/`issued_at` assume roughly synced clocks; how much skew to tolerate.
-- **Userspace backend throughput (GSO/GRO)** — the userspace primary (boringtun, via
-  `defguard_boringtun`) is strictly per-packet: one `send_to`/`recv_from` per datagram, `Tunn`
-  encap/decap per packet, no `vnet_hdr` on the TUN. wireguard-go gained Linux UDP GSO/GRO +
-  TUN-side TSO/GRO + vectorized `sendmmsg`/`recvmmsg` (wireguard-go PR #75, 2023) for ~2.2x bulk
-  throughput; boringtun has none of it. Adding it = forking `defguard_boringtun` (not this repo):
-  UDP GSO/GRO alone is a partial win (drops syscall overhead only — crypto stays per-packet),
-  and the big TUN-side TSO win needs a batched vector API through boringtun's noise core.
-  Invisible below ~2 Gbit/s for typical mesh traffic. Defer: accept the gap, track boringtun
-  upstream; revisit only if a workload gates on Linux bulk throughput.
+"Enforce role membership" = **only current role-holders' pubkeys appear in the peer-set**. A client
+adds a co-device as a WG `[Peer]` (`AllowedIPs = <device>/32`) iff it holds a valid, unexpired,
+guild-matched attestation for it in a **shared enabled network**. Non-shared devices → no peer → no
+route → dropped (plus the default-deny firewall, §5.3). A device in two networks reaches members of
+both; those two groups can't reach each other except through a shared member — Tailscale ACL/tag
+semantics. Local `disabled_networks` / block-peer let the client narrow this further, client-side.
 
-## 8. M1 Cut (what to build first)
-Smallest vertical slice proving the trust model:
-1. `common`: `Attestation`, `Signed<T>`, postcard wire, ed25519 sign/verify, `netid` math.
-2. `coordinator`: OAuth (`identify`) → `user_id`; bot-token role/nick read; `/register`
-   issuing a `Signed<Attestation>`; SQLite allocation.
-3. `engine` (headless, **no GUI yet**): OAuth loopback; gen WG keypair; `POST /register`;
-   **verify** the attestation + pin coord pubkey. Print the resulting `wg_ip` + hostname.
+## 7. Security Notes
 
-No WG, gossip, NAT, DNS, or iced GUI yet — just prove *authenticated, signed, role-derived
-membership* end to end. GUI lands once the engine + control socket exist (later milestone).
+- Coordinator holds **no traffic, no WG private keys**. Compromise of a guild key → forge
+  memberships **for that guild only** (per-guild keys bound the blast radius); never decrypt
+  traffic. DB is `0600`; signing seeds live in it. End-state: encrypted at rest (design §9).
+- Trust anchor **pinned per guild TOFU**; rotation via signed `prev → new` chain
+  (`rotation.rs`, `rotate-key`). Compromise ≠ loss → recovery is **out-of-band re-pin**; the pinned
+  fingerprint is surfaced in GUI/CLI for OOB verification.
+- Attestation is **pubkey-bound** → replay within TTL gains nothing without the WG private key
+  (never leaves the device). Re-key uses `supersede`; a presence reaper backstops unclean drops.
+- Relay sees **ciphertext only** (e2e intact) but learns traffic metadata + can drop/delay → relay
+  is **opt-in** and being-relayed is surfaced. ICE-candidate signing (design §4.2/§7.2) is the
+  planned hardening against candidate injection — **not built yet**.
+- Client secrets (WG privkey, OAuth token, pinned anchors) stored under OS protection / `0600`.
+- Register/enroll/refresh is auth-gated; enrollment keys are ≥128-bit, short-expiry, single-use.
+
+## 8. Open Technical Questions / Gaps vs design.md
+
+Built and settled: per-guild keys + `guild_id`-match MUST; long-poll discovery; ICE + TURN relay +
+STUN; anchor rotation chain; auto-update signed manifest; Model-B device addressing with signed
+`wg_net`.
+
+Still open / planned (design.md ahead of code):
+- **Signed endpoints + ICE candidates** — the per-member identity key (design §4.2) is unbuilt;
+  endpoints/candidates ride unsigned today (WG handshake guards correctness; rate-limit guards
+  volume). This is the main remaining integrity gap.
+- **In-mesh (peer-to-peer) endpoint propagation** — today all endpoint churn rides the coordinator
+  refresh; the sponsor-gossip / established-tunnel path (design §4.2/§5) is unbuilt.
+- **Tombstones** — no revocation endpoint yet; revocation is TTL + presence eviction only.
+- **Userspace Windows backend** (boringtun + Wintun) — Windows runs the wg-nt **kernel** backend;
+  userspace-Windows (prereq for magicsock-on-Windows and one-data-plane) is a future item (§7.3).
+- **Linux netlink native backend** — deferred (optional perf; userspace is primary).
+- **Userspace throughput (GSO/GRO)** — boringtun is strictly per-packet; wireguard-go's Linux
+  UDP-GSO/TUN-TSO batching (~2.2× bulk) is absent. Invisible below ~2 Gbit/s for mesh traffic;
+  deferred, track boringtun upstream.
+- **Per-network PSK**, **encrypted-at-rest signing key**, **tailnet-lock co-signature** — all
+  deferred (design §9).
