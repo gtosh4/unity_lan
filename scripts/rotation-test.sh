@@ -76,7 +76,8 @@ disable_new_networks = false
 EOF
 }
 
-anchor_hex() { xxd -p -c 64 "$TMP/client/anchor.pub" 2>/dev/null | tr -d '\n'; }
+# Per-guild pins live under anchors/<guild_id>.pub; the test config's only guild is id 1.
+anchor_hex() { xxd -p -c 64 "$TMP/client/anchors/1.pub" 2>/dev/null | tr -d '\n'; }
 
 # ---------------- Phase 1: initial TOFU pin (anchor A) ----------------
 mk_coord_toml "127.0.0.1:18080" "$TMP/coord.db" coord
@@ -90,7 +91,7 @@ echo "phase 1: TOFU-pinned anchor A=${A:0:16}… ✓"
 # ---------------- Phase 2: rotate TWICE (A→B→C) while offline, client walks the full chain ----------------
 rotate() { # echoes the new anchor hex
   local out
-  out="$("$COORD" rotate-key "$TMP/coord.toml" 2>&1)" || { echo "rotate-key failed: $out" >&2; return 1; }
+  out="$("$COORD" rotate-key --guild 1 "$TMP/coord.toml" 2>&1)" || { echo "rotate-key failed: $out" >&2; return 1; }
   printf '%s\n' "$out" | sed -n 's/.*new anchor: \([0-9a-f]*\).*/\1/p'
 }
 stop_coord
