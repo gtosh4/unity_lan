@@ -45,30 +45,33 @@ pub fn spawn(socket: PathBuf) -> Option<UnboundedReceiver<TrayMsg>> {
     }
 }
 
-/// A 22×22 RGBA dot for the tray icon — green when the mesh is connected, grey when not. Backends
-/// convert to their native pixel order. A filled circle with a 1px feathered edge (no asset files).
+/// A 22×22 straight-alpha RGBA tray glyph: the Woven-U mark, stripped to its bold silhouette for
+/// legibility at tray size, tinted green when the mesh is connected and grey when not. Backends
+/// convert to their native pixel order. Rendered from an inline SVG via resvg — the rasteriser iced
+/// already links — so the tray path still carries no asset files.
 #[cfg(any(target_os = "linux", windows))]
 pub(crate) fn dot_rgba(connected: bool) -> (u32, Vec<u8>) {
-    const N: i32 = 22;
-    let (r, g, b) = if connected {
-        (0x35, 0xc7, 0x59)
-    } else {
-        (0x88, 0x88, 0x88)
-    };
-    let mut px = vec![0u8; (N * N * 4) as usize];
-    let c = (N - 1) as f32 / 2.0;
-    let rad = c - 1.0;
-    for y in 0..N {
-        for x in 0..N {
-            let (dx, dy) = (x as f32 - c, y as f32 - c);
-            let d = (dx * dx + dy * dy).sqrt();
-            let a = ((rad - d) + 0.5).clamp(0.0, 1.0); // 1px feather for a smooth edge
-            let i = ((y * N + x) * 4) as usize;
-            px[i] = r;
-            px[i + 1] = g;
-            px[i + 2] = b;
-            px[i + 3] = (a * 255.0) as u8;
+    use resvg::{tiny_skia, usvg};
+
+    const N: u32 = 22;
+    let color = if connected { "#33C58A" } else { "#888888" };
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="{N}" height="{N}" viewBox="0 0 100 100"><path d="M26 26 26 50 Q26 72 50 72 Q74 72 74 50 L74 26" fill="none" stroke="{color}" stroke-width="10" stroke-linecap="round"/></svg>"##
+    );
+
+    let tree =
+        usvg::Tree::from_str(&svg, &usvg::Options::default()).expect("static tray glyph is valid");
+    let mut pixmap = tiny_skia::Pixmap::new(N, N).expect("22×22 is a valid pixmap size");
+    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+
+    // tiny-skia hands back premultiplied alpha; the tray backends want straight-alpha RGBA.
+    let mut px = pixmap.take();
+    for p in px.chunks_exact_mut(4) {
+        let a = p[3] as u32;
+        for c in &mut p[..3] {
+            // Straight = premultiplied · 255 / alpha; fully-transparent pixels stay 0.
+            *c = (*c as u32 * 255).checked_div(a).map_or(0, |v| v.min(255)) as u8;
         }
     }
-    (N as u32, px)
+    (N, px)
 }

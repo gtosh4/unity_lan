@@ -6857,6 +6857,7 @@ dependencies = [
  "interprocess",
  "ksni",
  "open",
+ "resvg",
  "serde_json",
  "tokio",
  "tray-icon",

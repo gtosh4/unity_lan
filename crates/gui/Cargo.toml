@@ -22,6 +22,8 @@ interprocess = { version = "2.4.2", features = ["tokio"] }
 # Open the Discord authorize URL in the user's default browser.
 open = "5"
 iced_aw = { version = "0.12", default-features = false, features = ["drop_down"] }
+# Rasterise the inline tray-icon SVG. Already in the tree via iced's `svg` feature — no new weight.
+resvg = "0.42"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = "0.3.5"
