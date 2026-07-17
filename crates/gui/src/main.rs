@@ -260,6 +260,11 @@ struct App {
     /// The main window's id while it's open; `None` while hidden to the tray (the window is
     /// destroyed, not just hidden — see [`window_settings`]). Show reopens a fresh one.
     window: Option<window::Id>,
+    /// Highest engine UI-directive `seq` already applied, so a re-poll of the same status doesn't
+    /// re-fire it. Debug builds only — release builds don't honor directives (see
+    /// [`common::control::StatusReport::directive`]).
+    #[cfg(debug_assertions)]
+    last_directive_seq: u64,
 }
 
 /// Content tabs shown under the persistent connection header. Networks = the ACL groups this
@@ -379,6 +384,37 @@ impl App {
             error: None,
             tray_rx: Arc::new(Mutex::new(None)),
             window: None,
+            #[cfg(debug_assertions)]
+            last_directive_seq: 0,
+        }
+    }
+
+    /// Apply a UI directive the engine pushed on the status poll (demo/testing only — a real engine
+    /// never sets one). Debug builds only; release builds don't compile this. Each directive fires
+    /// once, guarded by its monotonic `seq`. Maps to UI-only state, never mesh state.
+    #[cfg(debug_assertions)]
+    fn apply_directive(&mut self, s: &StatusReport) {
+        use common::control::{UiAction, UiTab};
+        let Some(d) = &s.directive else { return };
+        if d.seq <= self.last_directive_seq {
+            return;
+        }
+        self.last_directive_seq = d.seq;
+        match &d.action {
+            UiAction::SelectTab(t) => {
+                self.tab = match t {
+                    UiTab::Networks => Tab::Networks,
+                    UiTab::Peers => Tab::Peers,
+                    UiTab::Manage => Tab::Manage,
+                }
+            }
+            UiAction::OpenPeerMenu(id) => self.menu_open = Some(*id),
+            UiAction::CloseMenu => self.menu_open = None,
+            UiAction::ArmBlockPeer(id) => {
+                self.menu_open = None;
+                self.confirm = Some(Confirm::BlockPeer(*id));
+            }
+            UiAction::Cancel => self.confirm = None,
         }
     }
 
@@ -420,6 +456,8 @@ impl App {
         match message {
             Message::Tick => return self.reload(),
             Message::StatusFetched(Ok(s)) => {
+                #[cfg(debug_assertions)]
+                self.apply_directive(&s);
                 self.status = Some(s);
                 self.error = None;
             }
@@ -1285,6 +1323,7 @@ mod tests {
             update_available: None,
             update_ready: false,
             lan_overlap: None,
+            directive: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(a.error.is_none());
@@ -1410,6 +1449,7 @@ mod tests {
             update_available: None,
             update_ready: false,
             lan_overlap: None,
+            directive: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         let nets = &a.status.unwrap().networks;
@@ -1446,6 +1486,7 @@ mod tests {
             update_available: None,
             update_ready: false,
             lan_overlap: None,
+            directive: None,
         };
         let _ = a.update(Message::StatusFetched(Ok(report)));
         assert!(!a.status.unwrap().connected);

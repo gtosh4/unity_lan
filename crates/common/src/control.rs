@@ -216,6 +216,47 @@ pub struct StatusReport {
     /// per-peer `/32` routes still come from signed attestations.
     #[serde(default)]
     pub lan_overlap: Option<String>,
+    /// A UI directive the engine can push to drive the GUI (switch tab, open a peer menu, …),
+    /// delivered on the status poll. **Only a debug-build GUI acts on it** (`#[cfg(debug_assertions)]`);
+    /// a release build ignores it entirely. The real engine never sets this — it exists so
+    /// `examples/fake-engine` can script the UI for screenshots / demo video. `None` in normal use.
+    /// Boxed so this demo-only field doesn't grow `StatusReport` (the largest control response).
+    #[serde(default)]
+    pub directive: Option<Box<UiDirective>>,
+}
+
+/// A one-shot UI directive pushed from the engine to the GUI over the status poll (demo/testing
+/// only — see [`StatusReport::directive`]). `seq` is monotonic: the GUI applies a directive only
+/// when `seq` exceeds the last it applied, so re-polling the same status doesn't re-fire it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UiDirective {
+    pub seq: u64,
+    pub action: UiAction,
+}
+
+/// What a [`UiDirective`] tells the GUI to do. Each maps to a UI-only state change the GUI already
+/// supports (tab switch, peer menu, block confirm) — nothing that touches mesh state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum UiAction {
+    /// Switch the visible content tab.
+    SelectTab(UiTab),
+    /// Open a peer's action menu (kebab dropdown), by the owner's Discord `user_id`.
+    OpenPeerMenu(u64),
+    /// Close any open peer menu.
+    CloseMenu,
+    /// Arm the "block peer" confirm for a peer's owner (shows the inline confirm/cancel controls).
+    ArmBlockPeer(u64),
+    /// Dismiss any armed confirm.
+    Cancel,
+}
+
+/// The GUI's content tabs, in the wire protocol so a directive can name one without the GUI's
+/// internal `Tab` type. Mirrors it 1:1.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum UiTab {
+    Networks,
+    Peers,
+    Manage,
 }
 
 /// A locally-blocked user: their Discord `user_id` plus a display handle for the blocked list.

@@ -166,6 +166,8 @@ pub async fn update(
         update_ready: prev_update_ready,
         // Set once at join by `set_lan_overlap`; preserved across snapshot rebuilds.
         lan_overlap: prev_lan_overlap,
+        // Demo-only UI push; the real engine never drives the GUI (see `StatusReport::directive`).
+        directive: None,
     };
     *shared.write().await = report;
 }
