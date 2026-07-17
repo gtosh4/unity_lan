@@ -14,6 +14,8 @@
 mod ctl;
 mod tray;
 
+use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -21,8 +23,8 @@ use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
-    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, PeerReach, Proto,
-    StatusReport,
+    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, PeerReach,
+    PeerStatus, Proto, StatusReport,
 };
 use iced::alignment::Vertical;
 use iced::font::Weight;
@@ -91,6 +93,34 @@ fn dot<'a>(color: Color) -> Element<'a, Message> {
 /// because the default font renders such codepoints as tofu (same reason as [`dot`]). `fill` uses
 /// `currentColor`; the widget tints it via [`svg::Style::color`].
 const KEBAB_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>"##;
+
+/// Disclosure chevrons for a collapsible section header — down when open, right when collapsed.
+/// SVG for the same reason as [`dot`]/[`KEBAB_ICON`]: the default font tofus the triangle glyphs.
+const CHEVRON_DOWN: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>"##;
+const CHEVRON_RIGHT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg>"##;
+
+/// A collapsible section header: a borderless full-width button showing a disclosure chevron + the
+/// title; clicking it sends `msg` to toggle the section open/closed.
+fn collapsible_header<'a>(title: String, open: bool, msg: Message) -> Element<'a, Message> {
+    let icon = svg(svg::Handle::from_memory(if open {
+        CHEVRON_DOWN
+    } else {
+        CHEVRON_RIGHT
+    }))
+    .width(Length::Fixed(14.0))
+    .height(Length::Fixed(14.0))
+    .style(|_theme, _status| svg::Style { color: Some(MUTED) });
+    button(
+        row![icon, header(title)]
+            .spacing(6)
+            .align_y(Vertical::Center),
+    )
+    .style(button::text)
+    .padding(2)
+    .width(Length::Fill)
+    .on_press(msg)
+    .into()
+}
 
 /// The kebab button that opens a peer's action menu — a borderless icon that toggles the dropdown.
 /// Keyed by the device's WireGuard IP so it opens only that device's menu (a user can own several).
@@ -332,8 +362,11 @@ struct App {
     /// Which peer's action menu (kebab dropdown) is open, by that device's WireGuard IP; `None` when
     /// closed.
     menu_open: Option<Ipv4Addr>,
-    /// Which content tab is showing (below the always-visible connection header).
+    /// Which content tab is showing (below the always-visible status strip).
     tab: Tab,
+    /// Peer groups the user has collapsed (click the group header to toggle). Seeded with `Offline`
+    /// so a large mesh's dead peers stay folded away by default.
+    collapsed_groups: HashSet<PeerGroup>,
     /// The last action error, shown as a banner until the next action clears it.
     error: Option<String>,
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
@@ -357,6 +390,25 @@ enum Tab {
     Networks,
     Peers,
     Manage,
+}
+
+/// The three collapsible groups the peers list is split into. "My devices" is the owner's other
+/// devices (peered via own-device peering); the rest are co-members, split by liveness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum PeerGroup {
+    Mine,
+    Online,
+    Offline,
+}
+
+impl PeerGroup {
+    fn title(self) -> &'static str {
+        match self {
+            PeerGroup::Mine => "my devices",
+            PeerGroup::Online => "online",
+            PeerGroup::Offline => "offline",
+        }
+    }
 }
 
 /// A destructive action armed by a first click; the second click on the confirm control runs it.
@@ -448,6 +500,8 @@ enum Message {
     DismissError,
     /// Switch the visible content tab.
     SelectTab(Tab),
+    /// Collapse/expand a peer group (my devices / online / offline).
+    TogglePeerGroup(PeerGroup),
     /// A window/quit request from the system tray.
     Tray(TrayMsg),
     /// The window's close button was pressed → hide to the tray instead of exiting.
@@ -471,6 +525,7 @@ impl App {
             confirm: None,
             menu_open: None,
             tab: Tab::default(),
+            collapsed_groups: HashSet::from([PeerGroup::Offline]),
             error: None,
             tray_rx: Arc::new(Mutex::new(None)),
             window: None,
@@ -751,6 +806,11 @@ impl App {
             Message::CloseMenu => self.menu_open = None,
             Message::DismissError => self.error = None,
             Message::SelectTab(t) => self.tab = t,
+            Message::TogglePeerGroup(g) => {
+                if !self.collapsed_groups.remove(&g) {
+                    self.collapsed_groups.insert(g);
+                }
+            }
         }
         Task::none()
     }
@@ -802,17 +862,16 @@ impl App {
                 if s.needs_login {
                     col = col.push(card(self.login_section()));
                 } else {
-                    // Connection header is always visible; the rest lives under tabs so the peers
-                    // list (which can grow) and the rarely-touched ports don't crowd the header.
-                    // Tab strip + its content share one bordered panel, so the active tab visibly
-                    // owns the surface below it (rather than floating between look-alike cards).
+                    // A compact status strip (coordinator + mesh health, connect/disconnect) stays
+                    // always visible; everything else — including the account/version detail — lives
+                    // under tabs so the peers list (which can grow) and rarely-touched controls don't
+                    // crowd it. Tab strip + its content share one bordered panel, so the active tab
+                    // visibly owns the surface below it (rather than floating between look-alike cards).
                     let panel = container(column![self.tab_bar(), self.tab_body()].spacing(10))
                         .padding(8)
                         .width(Length::Fill)
                         .style(container::bordered_box);
-                    col = col
-                        .push_maybe(self.connection_section().map(card))
-                        .push(panel);
+                    col = col.push_maybe(self.status_strip()).push(panel);
                 }
                 col
             }
@@ -934,6 +993,7 @@ impl App {
                 .push(self.device_section())
                 .push(self.peers_section()),
             Tab::Manage => Column::new()
+                .push(self.account_section())
                 .push(self.devices_section())
                 .push(self.exposed_section()),
         };
@@ -956,13 +1016,17 @@ impl App {
     /// polling (instant reconnect) but brings the interface's link administratively down and drops
     /// all peers, withdrawing us from co-members' seed lists. Connect brings the link back up.
     /// Hidden until we have a status (need the socket) and only when enrolled (`!needs_login`).
-    fn connection_section(&self) -> Option<Element<'_, Message>> {
+    /// The always-visible compact status strip above the tabs: coordinator + mesh health as two
+    /// dotted items, a connect/disconnect toggle, and (when offered) the update button. The verbose
+    /// account/version detail lives in the Manage tab's [`account_section`](Self::account_section)
+    /// instead, so this stays one line.
+    fn status_strip(&self) -> Option<Element<'_, Message>> {
         let status = self.status.as_ref()?;
         let connected = status.connected;
-        let (state, label, target, mesh_color) = if connected {
-            ("connected", "disconnect", false, GREEN)
+        let (mesh_state, label, target, mesh_color) = if connected {
+            ("mesh: connected", "disconnect", false, GREEN)
         } else {
-            ("disconnected", "connect", true, MUTED)
+            ("mesh: disconnected", "connect", true, MUTED)
         };
         // Disconnect is the destructive direction (drops peers, withdraws us from seed lists) →
         // danger style; connect is benign.
@@ -977,17 +1041,38 @@ impl App {
         } else {
             b.on_press(Message::SetConnected(target))
         };
-        let controls = row![
+        // Coordinator health (the mesh keeps running from cache when it's offline, so it's a health
+        // signal, not the mesh state). Shortened here; the offline caveat is in the Manage account.
+        let (coord_color, coord) = if status.coordinator_online {
+            (GREEN, "coordinator")
+        } else {
+            (AMBER, "coordinator: offline")
+        };
+        let mut strip = row![
+            dot(coord_color),
+            text(coord).size(13),
             dot(mesh_color),
-            text(format!("mesh: {state}")).size(14).width(Length::Fill),
-            b,
+            text(mesh_state).size(13).width(Length::Fill),
         ]
-        .spacing(8)
+        .spacing(6)
         .align_y(Vertical::Center);
+        // Update button rides the strip when a verified, applyable artifact is staged (otherwise the
+        // notice-only line lives in the account section).
+        if status.update_available.is_some() && status.update_ready {
+            strip = strip.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
+        }
+        strip = strip.push(b);
+        Some(strip.padding([0, 4]).into())
+    }
+
+    /// Account detail, tucked into the Manage tab (out of the always-visible strip): who we're
+    /// enrolled as with a log-out control, the update-available notice, and the running version.
+    fn account_section(&self) -> Element<'_, Message> {
+        let status = self.status.as_ref();
         // Who we're enrolled as, with a log out control (tears the mesh down, un-enrolls, and
         // re-keys → back to the login screen). Destructive, so it arms an inline confirm first.
         let logging_out = self.confirm == Some(Confirm::Logout);
-        let identity = status.identity.as_deref().map(|u| {
+        let identity = status.and_then(|s| s.identity.as_deref()).map(|u| {
             let mut r = row![text(format!("signed in as {u}"))
                 .size(14)
                 .width(Length::Fill)]
@@ -1005,50 +1090,49 @@ impl App {
             }
             r
         });
-        // Whether the coordinator is currently reachable (the mesh keeps running from cache when
-        // it isn't, so that's a distinct health line).
-        let (coord_color, coord) = if status.coordinator_online {
-            (GREEN, "coordinator: online")
-        } else {
-            (AMBER, "coordinator: offline (mesh running from cache)")
-        };
-        let coord_line = row![dot(coord_color), text(coord).size(14)]
-            .spacing(8)
-            .align_y(Vertical::Center);
-        // Update-available signal: the coordinator advertised a newer release than we're running.
-        // When the daemon has a verified, platform-matching artifact staged (`update_ready`), offer
-        // an Update button that applies it (download → verify → swap → restart); otherwise it's a
-        // notice only (no `[release]` configured, or no artifact for this platform).
-        let update_line = status.update_available.as_deref().map(|v| {
-            let mut r = row![
+        // Coordinator-offline caveat (the strip only shows the short form).
+        let coord_line = status.filter(|s| !s.coordinator_online).map(|_| {
+            row![
                 dot(AMBER),
-                text(format!(
-                    "update available: v{v} (running v{})",
-                    status.engine_version
-                ))
-                .size(14)
-                .width(Length::Fill),
+                muted("coordinator offline — mesh running from cache")
             ]
             .spacing(8)
-            .align_y(Vertical::Center);
-            if status.update_ready {
-                r = r.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
-            }
-            r
+            .align_y(Vertical::Center)
         });
-        // Running engine version, muted footer — always shown once enrolled.
-        let version_line = (!status.engine_version.is_empty())
-            .then(|| muted(format!("UnityLAN v{}", status.engine_version)));
-        Some(
-            column![header("connection")]
-                .push_maybe(identity)
-                .push(coord_line)
-                .push_maybe(update_line)
-                .push(controls)
-                .push_maybe(version_line)
+        // Update-available signal: the coordinator advertised a newer release than we're running.
+        // When a verified, platform-matching artifact is staged (`update_ready`) the strip shows the
+        // Update button; here it's the descriptive notice (also the only surface when notice-only).
+        let update_line = status
+            .and_then(|s| {
+                s.update_available
+                    .as_deref()
+                    .map(|v| (v, s.engine_version.clone(), s.update_ready))
+            })
+            .map(|(v, running, ready)| {
+                let mut r = row![
+                    dot(AMBER),
+                    text(format!("update available: v{v} (running v{running})"))
+                        .size(14)
+                        .width(Length::Fill),
+                ]
                 .spacing(8)
-                .into(),
-        )
+                .align_y(Vertical::Center);
+                if ready {
+                    r = r.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
+                }
+                r
+            });
+        let version_line = status
+            .map(|s| s.engine_version.as_str())
+            .filter(|v| !v.is_empty())
+            .map(|v| muted(format!("UnityLAN v{v}")));
+        column![header("account")]
+            .push_maybe(identity)
+            .push_maybe(coord_line)
+            .push_maybe(update_line)
+            .push_maybe(version_line)
+            .spacing(8)
+            .into()
     }
 
     fn device_section(&self) -> Element<'_, Message> {
@@ -1087,87 +1171,39 @@ impl App {
             .as_ref()
             .map(|s| s.peers.as_slice())
             .unwrap_or(&[]);
-        let inner: Element<'_, Message> = if peers.is_empty() {
-            muted("No peers yet — waiting for co-members to come online.").into()
+        let mut body = Column::new().spacing(14);
+        if peers.is_empty() {
+            body = body.push(muted(
+                "No peers yet — waiting for co-members to come online.",
+            ));
         } else {
-            let mut col = Column::new().spacing(8);
-            for p in peers {
-                let ep = p
-                    .endpoint
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| "—".to_string());
-                let (sc, slabel) = peer_status(p.reach, p.up);
-                // Status dot + hostname own the first line so a long FQDN gets the full width. The
-                // dot's color is the single health signal (green up / amber connecting / red down);
-                // hovering it reveals when WG last handshook — the raw fact behind up/down.
-                let hover = match p.last_handshake_secs {
-                    Some(s) => format!("last handshake {} ago", fmt_ago(s)),
-                    None => "no handshake yet".to_string(),
-                };
-                // Hostname carries two hovers' worth of context without cluttering the row: the dot
-                // shows WG liveness (last handshake), the name shows which shared networks the peer is
-                // reachable over (the ACL intersection). The kebab at the end opens the action menu.
-                let net_hover = if p.networks.is_empty() {
-                    "no shared networks".to_string()
-                } else {
-                    format!(
-                        "shared networks — {}",
-                        shared_networks_by_community(&p.networks)
-                    )
-                };
-                let name_line = row![
-                    tooltip(dot(sc), muted(hover), tooltip::Position::Right)
-                        .padding(6)
-                        .style(container::rounded_box),
-                    tooltip(
-                        text(p.hostname.clone()).size(14),
-                        muted(net_hover),
-                        tooltip::Position::Bottom,
-                    )
-                    .padding(6)
-                    .style(container::rounded_box),
-                    horizontal_space(),
-                    peer_menu(
-                        p.hostname.clone(),
-                        p.wg_ip.to_string(),
-                        p.wg_ip,
-                        p.user_id,
-                        p.username.clone(),
-                        self.menu_open == Some(p.wg_ip),
-                    ),
-                ]
-                .spacing(8)
-                .align_y(Vertical::Center);
-                // Second line: the status label (same color as the dot, never contradicting it).
-                // Blocking is chosen from the kebab menu ("block user") — it acts on the owner, not
-                // this device, so it opens a user-scoped modal (see `block_modal`) rather than a
-                // per-row confirm.
-                let status_line = row![text(slabel).size(13).color(sc).width(Length::Fill)]
-                    .spacing(8)
-                    .align_y(Vertical::Center);
-                // Telemetry line: latency (last ICMP RTT, only meaningful while up) + transfer totals.
-                let mut metrics = Row::new().spacing(10).align_y(Vertical::Center);
-                if p.up {
-                    if let Some(ms) = p.latency_ms {
-                        metrics = metrics.push(muted(format!("{ms} ms")));
-                    }
+            // Partition into my devices / online / offline. Own devices carry the synthetic
+            // "My devices" tag from the engine, so a peer holding it is one of ours regardless of
+            // liveness; the rest split by WG-handshake liveness (`up`). Each group is sorted by
+            // shared-network count (desc), then latency (asc), then handle.
+            let is_own = |p: &&PeerStatus| {
+                p.networks
+                    .iter()
+                    .any(|n| n.name == common::control::OWN_DEVICES_LABEL)
+            };
+            let mut mine: Vec<&PeerStatus> = peers.iter().filter(is_own).collect();
+            let mut online: Vec<&PeerStatus> =
+                peers.iter().filter(|p| !is_own(p) && p.up).collect();
+            let mut offline: Vec<&PeerStatus> =
+                peers.iter().filter(|p| !is_own(p) && !p.up).collect();
+            for v in [&mut mine, &mut online, &mut offline] {
+                v.sort_by_key(|p| peer_sort_key(p));
+            }
+            for (group, list) in [
+                (PeerGroup::Mine, mine),
+                (PeerGroup::Online, online),
+                (PeerGroup::Offline, offline),
+            ] {
+                if let Some(section) = self.peer_group_section(group, &list) {
+                    body = body.push(section);
                 }
-                metrics = metrics.push(muted(format!(
-                    "rx {}  tx {}",
-                    fmt_bytes(p.rx_bytes),
-                    fmt_bytes(p.tx_bytes)
-                )));
-                let ip_line = muted(format!("{}   {}", p.wg_ip, ep));
-                col = col.push(column![name_line, status_line, ip_line, metrics].spacing(2));
             }
-            // Past a handful of peers, cap the list and scroll inside it so a large mesh doesn't
-            // push everything else off-screen. Small meshes render at natural height (no scrollbar).
-            if peers.len() > 6 {
-                scrollable(col).height(Length::Fixed(300.0)).into()
-            } else {
-                col.into()
-            }
-        };
+        }
         // Blocked users: shown as a separate list (a blocked owner never appears as a peer) so they
         // can be un-blocked even while filtered out of the mesh.
         let blocked = self
@@ -1198,9 +1234,106 @@ impl App {
             )
         };
 
-        column![header(format!("peers ({})", peers.len())), inner]
-            .push_maybe(blocked_section)
+        body.push_maybe(blocked_section).into()
+    }
+
+    /// One collapsible peer group (my devices / online / offline): a clickable header with the count,
+    /// and — when expanded — the peer rows. `None` when the group is empty (no header for it).
+    fn peer_group_section(
+        &self,
+        group: PeerGroup,
+        peers: &[&PeerStatus],
+    ) -> Option<Element<'_, Message>> {
+        if peers.is_empty() {
+            return None;
+        }
+        let open = !self.collapsed_groups.contains(&group);
+        let head = collapsible_header(
+            format!("{} ({})", group.title(), peers.len()),
+            open,
+            Message::TogglePeerGroup(group),
+        );
+        let mut col = column![head].spacing(8);
+        if open {
+            let mut rows = Column::new().spacing(8);
+            for p in peers {
+                rows = rows.push(self.peer_row(p));
+            }
+            col = col.push(rows);
+        }
+        Some(col.into())
+    }
+
+    /// One peer's row: status dot + hostname (with last-handshake and shared-network hovers) + the
+    /// action kebab, then the status label, address, and telemetry lines.
+    fn peer_row(&self, p: &common::control::PeerStatus) -> Element<'_, Message> {
+        let ep = p
+            .endpoint
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "—".to_string());
+        let (sc, slabel) = peer_status(p.reach, p.up);
+        // Status dot + hostname own the first line so a long FQDN gets the full width. The dot's
+        // color is the single health signal (green up / amber connecting / red down); hovering it
+        // reveals when WG last handshook — the raw fact behind up/down.
+        let hover = match p.last_handshake_secs {
+            Some(s) => format!("last handshake {} ago", fmt_ago(s)),
+            None => "no handshake yet".to_string(),
+        };
+        // Hostname carries two hovers' worth of context without cluttering the row: the dot shows WG
+        // liveness (last handshake), the name shows which shared networks the peer is reachable over
+        // (the ACL intersection). The kebab at the end opens the action menu.
+        let net_hover = if p.networks.is_empty() {
+            "no shared networks".to_string()
+        } else {
+            format!(
+                "shared networks — {}",
+                shared_networks_by_community(&p.networks)
+            )
+        };
+        let name_line = row![
+            tooltip(dot(sc), muted(hover), tooltip::Position::Right)
+                .padding(6)
+                .style(container::rounded_box),
+            tooltip(
+                text(p.hostname.clone()).size(14),
+                muted(net_hover),
+                tooltip::Position::Bottom,
+            )
+            .padding(6)
+            .style(container::rounded_box),
+            horizontal_space(),
+            peer_menu(
+                p.hostname.clone(),
+                p.wg_ip.to_string(),
+                p.wg_ip,
+                p.user_id,
+                p.username.clone(),
+                self.menu_open == Some(p.wg_ip),
+            ),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center);
+        // Second line: the status label (same color as the dot, never contradicting it). Blocking is
+        // chosen from the kebab menu ("block user") — it acts on the owner, not this device, so it
+        // opens a user-scoped modal (see `block_modal`) rather than a per-row confirm.
+        let status_line = row![text(slabel).size(13).color(sc).width(Length::Fill)]
             .spacing(8)
+            .align_y(Vertical::Center);
+        // Telemetry line: latency (last ICMP RTT, only meaningful while up) + transfer totals.
+        let mut metrics = Row::new().spacing(10).align_y(Vertical::Center);
+        if p.up {
+            if let Some(ms) = p.latency_ms {
+                metrics = metrics.push(muted(format!("{ms} ms")));
+            }
+        }
+        metrics = metrics.push(muted(format!(
+            "rx {}  tx {}",
+            fmt_bytes(p.rx_bytes),
+            fmt_bytes(p.tx_bytes)
+        )));
+        let ip_line = muted(format!("{}   {}", p.wg_ip, ep));
+        column![name_line, status_line, ip_line, metrics]
+            .spacing(2)
             .into()
     }
 
@@ -1410,6 +1543,17 @@ impl App {
 /// A peer's status as a single health color plus a label. One color axis: green = the tunnel is up
 /// (however it's reached), amber = still connecting, red = down. The label carries the path detail
 /// (`direct`/`relayed`/`ice`) or the reason it's not up — so the dot never contradicts the word.
+/// Sort key ordering peers within a group: most shared networks first, then lowest latency (a peer
+/// with no RTT reading — offline / no reply — sorts last), then handle (case-insensitive) as a
+/// stable tiebreak.
+fn peer_sort_key(p: &common::control::PeerStatus) -> (Reverse<usize>, u32, String) {
+    (
+        Reverse(p.networks.len()),
+        p.latency_ms.unwrap_or(u32::MAX),
+        p.username.to_lowercase(),
+    )
+}
+
 fn peer_status(reach: PeerReach, up: bool) -> (Color, &'static str) {
     match (up, reach) {
         (true, PeerReach::Relayed) => (GREEN, "relayed"),
@@ -1584,6 +1728,55 @@ mod tests {
             ]),
             "My devices · acme: Engineering"
         );
+    }
+
+    #[test]
+    fn peer_sort_orders_by_networks_then_latency_then_handle() {
+        let mk = |handle: &str, nets: usize, lat: Option<u32>| PeerStatus {
+            hostname: format!("{handle}.unity.internal"),
+            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
+            endpoint: None,
+            reach: common::control::PeerReach::Direct,
+            user_id: 1,
+            username: handle.into(),
+            up: lat.is_some(),
+            latency_ms: lat,
+            rx_bytes: 0,
+            tx_bytes: 0,
+            last_handshake_secs: None,
+            networks: (0..nets)
+                .map(|i| common::api::SharedNetwork {
+                    name: format!("n{i}"),
+                    community: "c".into(),
+                })
+                .collect(),
+        };
+        // Most shared networks first (zeb, 2 nets); then equal-net peers by latency (amy & bob at
+        // 5ms before ann at 80ms); handle breaks the amy/bob tie.
+        let a = mk("zeb", 2, Some(50));
+        let b = mk("amy", 1, Some(5));
+        let c = mk("bob", 1, Some(5));
+        let d = mk("ann", 1, Some(80));
+        let mut v = [&d, &c, &b, &a];
+        v.sort_by_key(|p| peer_sort_key(p));
+        let order: Vec<&str> = v.iter().map(|p| p.username.as_str()).collect();
+        assert_eq!(order, vec!["zeb", "amy", "bob", "ann"]);
+    }
+
+    #[test]
+    fn offline_group_starts_collapsed_and_toggles() {
+        let mut a = app();
+        // Secure-against-clutter default: offline folded, the rest open.
+        assert!(a.collapsed_groups.contains(&PeerGroup::Offline));
+        assert!(!a.collapsed_groups.contains(&PeerGroup::Online));
+        // Toggling flips it open, then closed again.
+        let _ = a.update(Message::TogglePeerGroup(PeerGroup::Offline));
+        assert!(!a.collapsed_groups.contains(&PeerGroup::Offline));
+        let _ = a.update(Message::TogglePeerGroup(PeerGroup::Offline));
+        assert!(a.collapsed_groups.contains(&PeerGroup::Offline));
+        // And an open group folds on toggle.
+        let _ = a.update(Message::TogglePeerGroup(PeerGroup::Online));
+        assert!(a.collapsed_groups.contains(&PeerGroup::Online));
     }
 
     #[test]
