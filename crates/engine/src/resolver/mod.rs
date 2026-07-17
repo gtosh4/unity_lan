@@ -4,7 +4,7 @@
 //! Per-OS backends behind [`ResolverHook`]: Linux drives systemd-resolved (per-link routing
 //! domain, [`linux`]); Windows drives NRPT (namespace policy, [`windows`]). macOS (`/etc/resolver`)
 //! is a future backend. Where no backend exists, [`platform_hook`] returns `None` and `.unity.internal`
-//! names still resolve when queried directly at `dns_bind` — they just aren't wired into the OS
+//! names still resolve when queried directly at the resolver's mesh IP — they just aren't wired into the OS
 //! resolver automatically.
 //!
 //! Best-effort: requires privilege (the daemon already runs privileged for the wg link + firewall).

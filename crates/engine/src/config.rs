@@ -43,11 +43,15 @@ pub struct Config {
     /// How often to refresh attestations + seeds from the coordinator.
     #[serde(default = "default_refresh")]
     pub refresh_secs: u64,
-    /// If set, run the `.unity.internal` DNS resolver on this UDP address (e.g. "127.0.0.1:53").
-    pub dns_bind: Option<SocketAddr>,
+    /// Run the `.unity.internal` DNS resolver for `<device>.<user>.unity.internal` name resolution.
+    /// On by default; set `false` to reach peers by IP and manage DNS yourself. It binds **this
+    /// device's own mesh IP on port 53** (not loopback): own-IP keeps `:53` free on every platform
+    /// (nothing else owns the wg address) and satisfies Windows NRPT, which forwards to port 53 only.
+    #[serde(default = "default_true")]
+    pub dns: bool,
     /// Point the OS resolver at our `.unity.internal` server (systemd-resolved per-link routing domain).
-    /// On by default; acts only when `dns_bind` is set. Best-effort — needs privilege, and a
-    /// failure only means `.unity.internal` names don't auto-resolve. Set `false` to manage DNS yourself.
+    /// On by default; acts only when `dns` is on. Best-effort — needs privilege, and a failure only
+    /// means `.unity.internal` names don't auto-resolve. Set `false` to manage DNS yourself.
     #[serde(default = "default_true")]
     pub resolver_hook: bool,
     /// Control socket path for CLI/GUI frontends. Defaults to `<state_dir>/control.sock`.

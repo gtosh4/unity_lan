@@ -19,7 +19,7 @@ systemctl is-active --quiet systemd-resolved || { echo "SKIP: systemd-resolved n
 IFACE="unl-restest"
 LINK_IP="10.123.45.1"          # the link MUST have an address — resolved ignores per-link DNS on a
                                # non-operational link (this is why prod works: the wg iface carries its /32)
-BIND="127.0.0.1:15353"        # loopback bind, as the daemon does (dns_bind); routes once the link is operational
+BIND="127.0.0.1:15353"        # standalone hook test binds loopback; the daemon binds its own mesh IP:53
 NAME="host-a.alice.unity.internal"
 IP="100.64.0.9"
 

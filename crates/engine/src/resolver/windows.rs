@@ -10,7 +10,8 @@
 //! Two consequences of NRPT vs. the Linux backend:
 //! - **Port 53 only.** NRPT nameservers are IPs queried on port 53 — there is no port field. If the
 //!   resolver is bound elsewhere the hook can't honor it, so `install` errors (best-effort: the
-//!   daemon logs it and meshes on without auto-resolution). Bind `dns_bind` on `:53` to use it.
+//!   daemon logs it and meshes on without auto-resolution). The daemon always binds `:53`, so this
+//!   only bites the `resolver-install` dev command with a non-53 address.
 //! - **Not auto-cleared.** NRPT rules live in the registry, not on the link, so an unclean exit
 //!   leaves the rule behind (pointing at a resolver that's no longer listening → `.unity.internal` names
 //!   SERVFAIL until the next run). `install` clears stale rules up front to self-heal; `revert` on
@@ -36,7 +37,7 @@ impl ResolverHook for NrptHook {
     fn install(&self, _iface: &str, server: SocketAddr) -> anyhow::Result<()> {
         if server.port() != 53 {
             anyhow::bail!(
-                "NRPT routes to a nameserver IP on port 53 only, but dns_bind is {server}; \
+                "NRPT routes to a nameserver IP on port 53 only, but the resolver bind is {server}; \
                  bind the resolver on port 53 to enable the Windows resolver hook"
             );
         }

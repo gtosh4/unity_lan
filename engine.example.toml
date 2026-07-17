@@ -3,6 +3,10 @@
 coordinator = "http://127.0.0.1:8080"
 state_dir = "engine-state"
 
+# The `.unity.internal` resolver (name resolution for `<device>.<user>.unity.internal`) listens on
+# this device's own mesh IP, port 53. On by default; set false to reach peers by IP.
+# dns = false
+
 # Enrollment: bind this device to its owner via a one-time key (minted by `/unitylan enroll`, or
 # seeded in the coordinator's [[enroll]] block for local dev). Alternatively, omit this and run
 # `unitylan-engine login engine.toml` for interactive Discord login.

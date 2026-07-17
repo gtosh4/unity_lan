@@ -73,7 +73,6 @@ iface = "unla"
 listen_port = 51820
 endpoint = "10.0.0.1:51820"
 refresh_secs = 2
-dns_bind = "127.0.0.1:15353"
 EOF
 cat >"$TMP/b.toml" <<EOF
 coordinator = "http://10.0.0.1:8080"
@@ -116,10 +115,11 @@ fi
 grep -q '\[primary\]' "$TMP/a.log" || { echo "FAIL: node A not marked primary"; exit 1; }
 echo "primary: node A auto-assigned primary ✓"
 
-# DNS: query node A's resolver for peer B by name (A learned B as a seed).
+# DNS: query node A's resolver for peer B by name (A learned B as a seed). The resolver listens on
+# node A's own mesh IP, port 53 (not loopback), so query it there.
 echo "=== dns: resolve peer B via node A's .unity.internal resolver ==="
-DNS_IP=$(dig @127.0.0.1 -p 15353 +short host-b.nodeb.unity.internal A | head -1)
-ALIAS_IP=$(dig @127.0.0.1 -p 15353 +short nodeb.unity.internal A | head -1)
+DNS_IP=$(dig @"$A_IP" +short host-b.nodeb.unity.internal A | head -1)
+ALIAS_IP=$(dig @"$A_IP" +short nodeb.unity.internal A | head -1)
 echo "host-b.nodeb.unity.internal -> ${DNS_IP:-<none>}   nodeb.unity.internal (primary alias) -> ${ALIAS_IP:-<none>}   (B=$B_IP)"
 { [ "$DNS_IP" = "$B_IP" ] && [ "$ALIAS_IP" = "$B_IP" ]; } || { echo "FAIL: resolver did not map peer name to its device IP"; exit 1; }
 echo "dns: peer hostname + primary alias resolve to B ✓"

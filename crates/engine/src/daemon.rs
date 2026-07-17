@@ -27,6 +27,11 @@ use crate::wg::{self, IfaceConfig, PeerConfig, WgBackend};
 /// this long without a handshake is treated as down (and drives relay/ICE fallback + status).
 const HANDSHAKE_FRESH: Duration = Duration::from_secs(180);
 
+/// The `.unity.internal` resolver always listens on port 53 of this device's own mesh IP. Fixed (not
+/// configurable): `:53` is what Windows NRPT forwards to, and own-IP keeps it free on every platform,
+/// so there's nothing to tune. The `dns` config flag only toggles the resolver on/off.
+const DNS_PORT: u16 = 53;
+
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
@@ -42,15 +47,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let logout = Arc::new(tokio::sync::Notify::new());
 
     // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
+    // The server itself is bound per-enrollment inside `'lifecycle` — it listens on this device's own
+    // mesh IP, which is only known after register and changes on re-key. The zone outlives enrollments.
     let zone = dns::empty_zone();
-    if let Some(bind) = cfg.dns_bind {
-        let z = zone.clone();
-        tokio::spawn(async move {
-            if let Err(e) = dns::serve(bind, z).await {
-                tracing::error!("dns resolver ended: {e:#}");
-            }
-        });
-    }
 
     // Host firewall, built *before* we register so the control socket can serve `expose` from the
     // start and the rules are in place the instant the interface appears (nft matches by iface
@@ -230,9 +229,36 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         }
         control::set_lan_overlap(&status, overlap).await;
 
+        // Resolver address: this device's own mesh IP (now on the interface) + the configured port.
+        // Bound here, not on loopback, so `:53` is free on every platform and Windows NRPT (port-53
+        // only) can forward to it. The IP is pubkey-derived, so it changes on re-key — hence the
+        // server is (re)bound per enrollment and torn down with the interface below.
+        let dns_bind = cfg
+            .dns
+            .then(|| SocketAddr::new(device.wg_ip.into(), DNS_PORT));
+
+        // Serve the `.unity.internal` zone on that address. Held so the logout/shutdown paths can stop
+        // it before the interface (and thus its bound IP) goes away.
+        let dns_task = dns_bind.map(|bind| {
+            let z = zone.clone();
+            tokio::spawn(async move {
+                match tokio::net::UdpSocket::bind(bind).await {
+                    Ok(sock) => {
+                        tracing::info!(%bind, "dns resolver listening");
+                        if let Err(e) = dns::serve(sock, z).await {
+                            tracing::error!("dns resolver ended: {e:#}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("dns resolver bind {bind} failed ({e}); name resolution off")
+                    }
+                }
+            })
+        });
+
         // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
         // clean shutdown; also clears with the link if we exit uncleanly.
-        let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, cfg.dns_bind) {
+        let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, dns_bind) {
             (true, Some(bind)) => match crate::resolver::platform_hook() {
                 Some(hook) => {
                     if let Err(e) = hook.install(&cfg.iface, bind) {
@@ -493,6 +519,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                             tracing::warn!("resolver revert on shutdown: {e:#}");
                         }
                     }
+                    if let Some(t) = &dns_task {
+                        t.abort();
+                    }
                     tracing::info!("shutting down");
                     return Ok(());
                 }
@@ -622,6 +651,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             if let Err(e) = r.revert(&cfg.iface) {
                 tracing::warn!("logout: resolver revert: {e:#}");
             }
+        }
+        if let Some(t) = &dns_task {
+            t.abort();
         }
         // Discard the local key + token so the next register re-keys and reports not-logged-in.
         keys::clear_enrollment(&cfg.state_dir)?;

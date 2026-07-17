@@ -133,7 +133,7 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
 5. **DNS** ✅ — engine `dns.rs`: a tiny authoritative UDP resolver (hickory-proto) serving the
    `.internal` zone from verified attestations (self + seeds). Answers `<device>.<user>.<community>`
    and the `<user>.<community>` primary alias; NXDOMAIN for unknown `.internal`; EDNS-compatible.
-   Zone rebuilt each refresh; enabled via `dns_bind`. Seeds now carry `community_name` so peer
+   Zone rebuilt each refresh; enabled via the `dns` flag. Seeds now carry `community_name` so peer
    hostnames are well-defined. Per-OS resolver hookup (resolved/NRPT/macOS) deferred to polish.
    Verified: `mesh-test.sh` digs node A's resolver → peer B's name + primary alias → B's IP; two
    engine unit tests (answer + socket).
@@ -415,16 +415,17 @@ falls back to a responder on the coordinator host when none is online.
       ~internal`), so only `*.internal` lookups go to us — global DNS untouched. Reverted on clean
       shutdown (`resolvectl revert`); also clears with the link. `resolver_hook = true` default,
       best-effort (needs privilege — the daemon already runs privileged; a failure only means names
-      don't auto-resolve). The resolver binds loopback (`dns_bind`) and resolved routes to it because
-      the wg iface is operational (carries its `/32`) — resolved ignores per-link DNS on a
-      non-operational link. macOS `/etc/resolver` is a future backend behind the trait.
+      don't auto-resolve). The resolver binds this device's own mesh IP on :53 (`dns` flag; own-IP
+      keeps :53 free everywhere and satisfies NRPT) and resolved routes to it because the wg iface is
+      operational (carries its `/32`) — resolved ignores per-link DNS on a non-operational link.
+      macOS `/etc/resolver` is a future backend behind the trait.
 - [x] **Per-OS resolver hookup (Windows)** ✅ (M-win2) — `resolver/windows.rs`: `NrptHook` drives the
       Name Resolution Policy Table via PowerShell (`Add-DnsClientNrptRule -Namespace '.internal'
       -NameServers <ip>` / `Remove-DnsClientNrptRule`). NRPT is namespace-scoped (system-wide), not
       link-scoped — same split-horizon effect as resolved's routing domain. Every rule carries
       `-Comment UnityLAN`, so `install` clears stale rules then re-adds (idempotent) and `revert`
       removes only ours. Two NRPT constraints vs. Linux: nameservers are port-53-only (`install`
-      errors if `dns_bind` isn't on :53), and rules persist across an unclean exit (self-healed by the
+      errors if the resolver isn't on :53 — the daemon always uses :53), and rules persist across an unclean exit (self-healed by the
       clear-on-install). `resolver.rs` split into `resolver/{mod,linux,windows}.rs` mirroring `fw/`;
       `platform_hook()` now selects resolved (Linux) vs NRPT (Windows). Needs elevation.
 - [x] **Multi-homing / cross-network isolation** ✅ — obsolete under **Model B** (design §6): one

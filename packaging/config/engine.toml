@@ -21,8 +21,9 @@ control_socket = "/run/unitylan/control.sock"
 # upnp = true
 
 # --- DNS ---
-# Serve the `.internal` resolver on this address to enable name resolution.
-# dns_bind = "127.0.0.1:5353"
+# The `.unity.internal` resolver (name resolution for `<device>.<user>.unity.internal`) listens on
+# this device's own mesh IP, port 53. On by default; set false to reach peers by IP.
+# dns = false
 # resolver_hook routes `.internal` at the OS resolver (systemd-resolved today; the backend is
 # chosen at runtime, so no reinstall is needed if you switch resolvers). On by default.
 # resolver_hook = true

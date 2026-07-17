@@ -216,7 +216,8 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             zone.write()
                 .await
                 .insert(name.trim_end_matches('.').to_ascii_lowercase(), ip);
-            dns::serve(bind, zone).await
+            let sock = tokio::net::UdpSocket::bind(bind).await?;
+            dns::serve(sock, zone).await
         }
         Some(Cmd::ResolverInstall { iface, server }) => {
             // Dev/test: drive this platform's ResolverHook.

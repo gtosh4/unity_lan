@@ -6,7 +6,7 @@
 //! this just serves correct answers on a UDP socket.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use hickory_proto::op::{Message, OpCode, ResponseCode};
@@ -45,10 +45,9 @@ fn norm(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Serve the zone on `bind` (UDP) until the task is dropped.
-pub async fn serve(bind: SocketAddr, zone: Zone) -> anyhow::Result<()> {
-    let sock = UdpSocket::bind(bind).await?;
-    tracing::info!(%bind, "dns resolver listening");
+/// Serve the zone on an already-bound UDP socket until the task is dropped. The caller binds so it
+/// controls the address/port (the daemon binds this device's own mesh IP, known only after register).
+pub async fn serve(sock: UdpSocket, zone: Zone) -> anyhow::Result<()> {
     let mut buf = [0u8; 512];
     loop {
         let (len, from) = match sock.recv_from(&mut buf).await {
