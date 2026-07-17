@@ -8,7 +8,8 @@ UnityLAN: a WireGuard mesh VPN whose membership is defined by **Discord roles** 
 self-hosted **coordinator** that issues short-lived Ed25519-signed **attestations**. Peers discover
 each other through the coordinator (long-poll) and form **direct P2P WireGuard tunnels**. The
 coordinator is a **control plane only** — it carries no traffic and holds no peer private keys.
-Hostnames: `<nick>.<role>.<guild>.internal`.
+Hostnames: `<device>.<user>.<community>.unity.internal` (a user's primary device is also the bare
+`<user>.<community>.unity.internal`).
 
 Deeper design lives in `docs/design.md` (concepts, trust model, NAT), `docs/technical.md`, and
 `CONTRIBUTING.md` (full local-mesh setup for Linux + Windows). Read those before large changes.
@@ -61,9 +62,11 @@ Four crates (`crates/*`), two planes:
 **Trust model.** A *network* is a Discord role an admin registered (`/unitylan network add`) — an
 ACL group, not a subnet. Networks may overlap; a device has **one IP and one tunnel per co-device**
 regardless of how many networks they share. The coordinator holds one Ed25519 signing key per
-deployment (the trust anchor) and signs short-lived attestations binding
-`user + role + device + ip + wg_pubkey`. Peers verify each other's attestations against the pinned
-anchor — the coordinator never sees peer traffic.
+deployment (the trust anchor) and signs short-lived attestations binding device identity —
+`user + device + ip + wg_pubkey (+ is_primary)`, **not** role. Role/network membership rides
+separately in the snapshot (each peer lists the networks it shares with you); the coordinator gates
+access by only putting peers you share a network with into your snapshot. Peers verify each other's
+attestations against the pinned anchor — the coordinator never sees peer traffic.
 
 **Discovery is coordinator-mediated long-poll, not gossip** (`coordinator/src/api.rs`,
 `engine/src/coord.rs`). Clients long-poll `/register` + `/refresh`; the coordinator holds each
@@ -75,6 +78,13 @@ A membership change bumps a shared `watch` **version**, which wakes every parked
 userspace WireGuard (boringtun) backend is the portable primary; kernel drivers (Linux netlink,
 Windows wireguard-nt via `wireguard.dll`) are per-OS optimizations. Windows is a first-class target
 — keep both sides of every platform split in mind.
+
+**NAT traversal.** Direct P2P isn't free behind NAT. The engine runs a userspace **ICE** agent
+(`engine/src/ice.rs`, `nat.rs`): STUN candidate gathering (the coordinator answers STUN binding
+requests, `coordinator/src/stun.rs`) plus UDP hole-punching, with a ciphertext-only **TURN relay**
+fallback (`engine/src/relay.rs`) for pairs a punch can't connect. The coordinator only **brokers** —
+it exchanges ICE candidates over the long-poll and pairs a relay peer with a stuck client — and
+stays **off the traffic path**: a relay is another *peer*, never the coordinator.
 
 **Discord role source** is behind the `RoleSource` trait (`coordinator/src/roles.rs`):
 `TwilightRoleSource` (live bot token, `discord.rs`) and `FakeRoleSource` (config-seeded, offline
