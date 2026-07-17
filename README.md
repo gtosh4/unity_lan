@@ -135,7 +135,7 @@ Members Intent on) and a place to run it behind HTTPS. Full walkthrough — Disc
 > A self-hosted coordinator's database holds your deployment's signing key. **Back it up.** If you
 > lose it, every enrolled peer's pinned trust anchor breaks and everyone re-enrolls.
 
-Discord app details: [`docs/discord-setup.md`](docs/discord-setup.md).
+Coordinator setup (Discord app, config, admin dashboard): [`docs/coordinator-setup.md`](docs/coordinator-setup.md).
 
 ## Building from source
 
@@ -152,7 +152,7 @@ cargo build --release
 | --- | --- |
 | [`docs/design.md`](docs/design.md) | Concepts, trust model, addressing, NAT strategy, alternatives considered |
 | [`docs/technical.md`](docs/technical.md) | Wire protocols, engine internals, platform splits |
-| [`docs/discord-setup.md`](docs/discord-setup.md) | Creating the Discord app + bot |
+| [`docs/coordinator-setup.md`](docs/coordinator-setup.md) | Standing up a coordinator: Discord app + bot, config, admin dashboard |
 | [`packaging/README.md`](packaging/README.md) | Building packages, hosting the coordinator, releases |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Building, running a local mesh, the checks CI enforces |
 

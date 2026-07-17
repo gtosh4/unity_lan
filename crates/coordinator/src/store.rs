@@ -294,6 +294,29 @@ impl Store {
             .collect())
     }
 
+    /// Total enrolled devices (persistent registrations across all guilds). Devices aren't
+    /// guild-scoped (Model B: one identity across a coordinator's guilds), so this is a single
+    /// deployment-wide count. Powers the admin dashboard's "enrolled" figure.
+    pub async fn count_devices(&self) -> anyhow::Result<u64> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM devices")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(row.get::<i64, _>("n") as u64)
+    }
+
+    /// Guilds this coordinator has ever contacted — one signing-key row is created per guild on
+    /// first use (§3.1). The admin dashboard's "servers installed on" figure; a superset of guilds
+    /// with registered networks (a guild may have a key but no network yet).
+    pub async fn guild_ids(&self) -> anyhow::Result<Vec<u64>> {
+        let rows = sqlx::query("SELECT guild_id FROM guild_signing_keys")
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<i64, _>("guild_id") as u64)
+            .collect())
+    }
+
     // ---- interactive login (OAuth) device binding ----
 
     /// Bind a device pubkey to a user id (set by the OAuth callback). Idempotent.

@@ -106,6 +106,37 @@ impl Presence {
             .map(|(_, e)| e.p.clone())
             .collect()
     }
+
+    /// A point-in-time count of live presence for the admin dashboard, taken under one lock:
+    /// online-device count per `(guild_id, role_id)` plus deployment-wide distinct totals. A device
+    /// present in N networks contributes to N per-network counts but is one `online_device` and its
+    /// owner one `online_user`.
+    pub fn stats(&self) -> PresenceStats {
+        let map = self.map.lock().unwrap();
+        let mut online_per_network: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut devices = std::collections::HashSet::new();
+        let mut users = std::collections::HashSet::new();
+        for ((g, r, pk), e) in map.iter() {
+            *online_per_network.entry((*g, *r)).or_default() += 1;
+            devices.insert(*pk);
+            users.insert(e.p.user_id);
+        }
+        PresenceStats {
+            online_per_network,
+            online_devices: devices.len(),
+            online_users: users.len(),
+        }
+    }
+}
+
+/// A snapshot of live presence counts for the admin dashboard (see [`Presence::stats`]).
+pub struct PresenceStats {
+    /// Online device count keyed by `(guild_id, role_id)`.
+    pub online_per_network: HashMap<(u64, u64), usize>,
+    /// Distinct devices currently online across the deployment.
+    pub online_devices: usize,
+    /// Distinct users currently online across the deployment.
+    pub online_users: usize,
 }
 
 #[cfg(test)]
@@ -157,6 +188,21 @@ mod tests {
         assert_eq!(p.networks_of(&[2; 32]), vec![(1, 2)]);
         // Nothing left to reap → no change reported (no spurious version bump).
         assert!(!p.reap(200, 60));
+    }
+
+    #[test]
+    fn stats_counts_per_network_and_distinct_totals() {
+        let p = Presence::default();
+        // user 42 device A in two networks; user 42 device B in one; user 99 device C in one.
+        p.record(1, 2, mp([1; 32], 42), 0);
+        p.record(1, 3, mp([1; 32], 42), 0);
+        p.record(1, 2, mp([2; 32], 42), 0);
+        p.record(1, 2, mp([3; 32], 99), 0);
+        let s = p.stats();
+        assert_eq!(s.online_per_network[&(1, 2)], 3); // A, B, C
+        assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
+        assert_eq!(s.online_devices, 3); // A, B, C distinct
+        assert_eq!(s.online_users, 2); // 42, 99
     }
 
     #[test]

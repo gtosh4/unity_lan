@@ -48,6 +48,20 @@ pub struct Config {
     /// version notice). Opt-in, so a deployment ships no update offer until the admin fills this in.
     #[serde(default)]
     pub release: Option<ReleaseConfig>,
+    /// Operator admin surface (`/admin` dashboard + `/metrics`). Absent → both routes are disabled
+    /// (return 404). The token is the operator's own secret; there is no shipped default, so an
+    /// instance exposes nothing until its operator opts in — and only they, never upstream, can
+    /// reach it. This surface reads control-plane counts only; it carries no inter-peer traffic.
+    #[serde(default)]
+    pub admin: Option<AdminConfig>,
+}
+
+/// The `[admin]` block: an operator-set bearer token gating `/admin` and `/metrics`.
+#[derive(Debug, Deserialize, Clone)]
+pub struct AdminConfig {
+    /// Bearer token required on `Authorization: Bearer <token>`. Operator-generated; keep it long
+    /// and random. Compared in constant time.
+    pub token: String,
 }
 
 /// The `[release]` block: the version to advertise plus one `[[release.artifact]]` per platform.

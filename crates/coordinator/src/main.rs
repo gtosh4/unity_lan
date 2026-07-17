@@ -263,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         stun_addr,
         release,
+        admin_token: cfg.admin.as_ref().map(|a| a.token.clone()),
     };
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)

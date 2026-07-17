@@ -5,6 +5,14 @@
 bind = "127.0.0.1:8080"
 database = "coordinator.db"
 
+# --- Admin dashboard + Prometheus /metrics (optional, opt-in) ---
+# Set a token to enable the operator monitoring surface: a browser dashboard at /admin and a
+# Prometheus endpoint at /metrics (both bearer-gated by this token; absent = both return 404).
+# Generate a long random secret, e.g. `openssl rand -hex 32`. See docs/coordinator-setup.md.
+#
+# [admin]
+# token = "<long-random-secret>"
+
 # --- Offline dev source (M1). Replace with live [discord]/[oauth] blocks later. ---
 [[fake.guild]]
 id = 111
