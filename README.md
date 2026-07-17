@@ -2,7 +2,7 @@
   <img src="assets/wordmark.svg" alt="UnityLAN" width="360">
 </p>
 
-<p align="center"><strong>A private mesh VPN whose membership is your Discord roles.</strong></p>
+<p align="center"><strong>Turn your Discord roles into a private, encrypted network.</strong></p>
 
 You already have a group of people organized in Discord — a gaming community, a homelab crew, a
 project team. UnityLAN turns those Discord roles into a private, encrypted LAN. Give a role a
@@ -27,7 +27,8 @@ bob@nas       ~ $
 
 - **A WireGuard mesh.** Every online member forms a **direct, peer-to-peer** [WireGuard](https://www.wireguard.com/)
   tunnel to every other member they share a network with. Traffic is end-to-end encrypted and goes
-  straight between machines — it does **not** flow through any server we or you run.
+  straight between machines — there's no exit server and nothing routes through us; this connects
+  *your* machines to each other.
 - **Membership = Discord roles.** An admin registers a Discord role as a *network* with a slash
   command (`/unitylan network add`). Holding the role gets you in; a role change in Discord takes
   effect on the mesh within seconds.
