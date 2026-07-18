@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use common::api::{
     DeviceInfo, Grant, GuildAnchor, GuildAttestation, IceParams, ManageOp, ManageReq, ManageResp,
     NetworkStatus, OauthCompleteReq, ObservedEndpoint, PkceConfigResp, RegisterReq, RegisterResp,
-    Seed, SharedNetwork,
+    RelayInfo, Seed, SharedNetwork,
 };
 use common::netid::sanitize_label;
 use common::update::ReleaseManifest;
@@ -343,6 +343,40 @@ async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Durat
             _ = &mut deadline => return false,
         }
     }
+}
+
+/// An opaque revision of a seed's **peering-relevant** content, for delta sync ([`Seed::rev`]).
+/// Deliberately excludes the attestation blob: its `issued_at`/`expires_at` roll every epoch, and a
+/// rev that churned on refresh would force a full resend each epoch (the renewal herd we're avoiding)
+/// — attestation freshness is the client's own Option-A concern instead. The client treats the value
+/// as opaque, so the hash need only be stable within one coordinator process.
+fn seed_rev(
+    mp: &MemberPresence,
+    endpoint: Option<SocketAddr>,
+    punch: Option<SocketAddr>,
+    networks: &[SharedNetwork],
+    relay: &Option<RelayInfo>,
+    ice: &Option<IceParams>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Serialize the peering-relevant fields to a canonical byte string (struct/vec order is stable)
+    // and hash that — avoids requiring `Hash` on every wire type.
+    let bytes = serde_json::to_vec(&(
+        mp.pubkey,
+        mp.ip.octets(),
+        mp.is_primary,
+        &mp.username,
+        &mp.device_name,
+        endpoint,
+        punch,
+        networks,
+        relay,
+        ice,
+    ))
+    .unwrap_or_default();
+    bytes.hash(&mut h);
+    h.finish()
 }
 
 /// Compute the caller's grant + seeds and record their presence. Bumps the global `version` when
@@ -740,7 +774,9 @@ async fn build_snapshot(
     // forward). If so, a NAT'd peer just dials us and no punch is needed on either side.
     let caller_dialable = req.endpoint.is_some();
     let reflexive = st.reflexive.lock().unwrap().clone();
-    let mut seeds = Vec::new();
+    // (pubkey, seed) pairs — the pubkey (carried inside each attestation, not a top-level Seed field)
+    // is tracked here so the delta filter below can diff against the client's `held` set.
+    let mut all: Vec<([u8; 32], Seed)> = Vec::new();
     for (_pubkey, (mp, networks, shared_guilds)) in by_pubkey {
         let punch = punch_target(
             caller_dialable,
@@ -785,15 +821,46 @@ async fn build_snapshot(
         // The peer's ICE offer for reaching us (if it has run ICE toward this caller): key is
         // (owner=peer, peer=caller). The client feeds it into its agent to run connectivity checks.
         let ice = ice_exchange.get(&(mp.pubkey, req.wg_pubkey)).cloned();
-        seeds.push(Seed {
-            attestations,
-            endpoint: mp.endpoint,
-            punch,
-            networks,
-            relay,
-            ice,
-        });
+        let rev = seed_rev(&mp, mp.endpoint, punch, &networks, &relay, &ice);
+        all.push((
+            mp.pubkey,
+            Seed {
+                attestations,
+                endpoint: mp.endpoint,
+                punch,
+                networks,
+                relay,
+                ice,
+                rev,
+            },
+        ));
     }
+
+    // Delta sync: if the client sent its held set (pubkey → last-seen rev), return only the seeds that
+    // are new or whose rev changed, plus the pubkeys it should drop — collapsing a herd wake from
+    // O(peers) per client to O(changes). An empty `held` (older client, first contact, or a client
+    // forcing an attestation refresh) gets the full set.
+    let (seeds, removed, partial) = if req.held.is_empty() {
+        (
+            all.into_iter().map(|(_, s)| s).collect::<Vec<_>>(),
+            Vec::new(),
+            false,
+        )
+    } else {
+        let held: HashMap<[u8; 32], u64> = req.held.iter().map(|h| (h.pubkey, h.rev)).collect();
+        let current: std::collections::HashSet<[u8; 32]> = all.iter().map(|(pk, _)| *pk).collect();
+        let removed: Vec<[u8; 32]> = held
+            .keys()
+            .filter(|pk| !current.contains(*pk))
+            .copied()
+            .collect();
+        let seeds: Vec<Seed> = all
+            .into_iter()
+            .filter(|(pk, s)| held.get(pk) != Some(&s.rev))
+            .map(|(_, s)| s)
+            .collect();
+        (seeds, removed, true)
+    };
 
     let device_token = st
         .store
@@ -863,6 +930,8 @@ async fn build_snapshot(
             proto: common::PROTOCOL_VERSION,
             server_version: common::VERSION.to_string(),
             release,
+            partial,
+            removed,
         },
         caller_changed,
     ))

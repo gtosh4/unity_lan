@@ -239,6 +239,8 @@ mod tests {
             proto: common::PROTOCOL_VERSION,
             server_version: "9.9.9".into(),
             release: Some(Signed::sign(signer, &manifest).unwrap().to_base64()),
+            partial: false,
+            removed: Vec::new(),
         };
         // Signed by the attacker (matches the response's anchor) → must still be rejected.
         assert!(stage(&base(&attacker), &dir).is_none());

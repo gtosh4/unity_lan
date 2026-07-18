@@ -82,6 +82,12 @@ pub struct SeedPeer {
     /// The peer's ICE offer (ufrag/pwd + candidates) for reaching us (§7.2, M5.5), relayed by the
     /// coordinator. `None` until the peer offers ICE for this pair.
     pub ice: Option<common::api::IceParams>,
+    /// Opaque per-seed revision ([`common::api::Seed::rev`]) — echoed back in the next refresh's
+    /// `held` so the coordinator resends this peer only when it changes (delta sync).
+    pub rev: u64,
+    /// This peer's attestation expiry (unix secs). The daemon forces a **full** refresh (empty
+    /// `held`) once its soonest-expiring peer nears this, so delta-held attestations never lapse.
+    pub expires_at: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -117,6 +123,7 @@ pub async fn register(
         peer_own_devices,
         relay,
         Vec::new(), // no ICE offers at initial register (no peers yet)
+        Vec::new(), // no held peers yet → full snapshot
     )
     .await
 }
@@ -138,6 +145,7 @@ pub async fn refresh(
     peer_own_devices: bool,
     relay: RelayReport,
     ice: Vec<common::api::IceEndpoint>,
+    held: Vec<common::api::HeldPeer>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     post(
         base_url,
@@ -155,6 +163,7 @@ pub async fn refresh(
         peer_own_devices,
         relay,
         ice,
+        held,
     )
     .await
 }
@@ -176,6 +185,7 @@ async fn post(
     peer_own_devices: bool,
     relay: RelayReport,
     ice: Vec<common::api::IceEndpoint>,
+    held: Vec<common::api::HeldPeer>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
     let client = reqwest::Client::builder()
@@ -207,6 +217,7 @@ async fn post(
             ice,
             proto: common::PROTOCOL_VERSION,
             client_version: common::VERSION.to_string(),
+            held,
         })
         .send()
         .await
@@ -393,9 +404,58 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             networks: seed.networks.clone(),
             relay: seed.relay.clone(),
             ice: seed.ice.clone(),
+            rev: seed.rev,
+            expires_at: att.expires_at,
         });
     }
     Ok(peers)
+}
+
+/// Fold a `/refresh` response into the peer set the daemon holds. A **full** response
+/// (`partial == false`) replaces it outright (today's behaviour); a **delta** upserts the verified
+/// changed peers by pubkey, drops the ones in `removed`, and keeps the rest untouched — so an
+/// unchanged peer's attestation and endpoint survive across a delta that didn't mention it.
+pub fn merge_seeds(
+    prev: &[SeedPeer],
+    resp: &RegisterResp,
+    state_dir: &Path,
+) -> anyhow::Result<Vec<SeedPeer>> {
+    let changed = verified_seeds(resp, state_dir)?;
+    if !resp.partial {
+        return Ok(changed);
+    }
+    let dropped: std::collections::HashSet<[u8; 32]> = resp.removed.iter().copied().collect();
+    let mut by_pubkey: std::collections::HashMap<[u8; 32], SeedPeer> = prev
+        .iter()
+        .filter(|p| !dropped.contains(&p.pubkey))
+        .map(|p| (p.pubkey, p.clone()))
+        .collect();
+    for p in changed {
+        by_pubkey.insert(p.pubkey, p);
+    }
+    Ok(by_pubkey.into_values().collect())
+}
+
+/// The `held` set to send on the next refresh: our current peers' `(pubkey, rev)`, so the coordinator
+/// returns only what changed. Returns empty to force a **full** refresh when the soonest-expiring
+/// peer attestation is within `refresh_margin` of lapsing (Option A) — delta responses don't resend
+/// unchanged attestations, so the client pulls a full one before they expire.
+pub fn held_for_refresh(
+    seeds: &[SeedPeer],
+    now: u64,
+    refresh_margin: u64,
+) -> Vec<common::api::HeldPeer> {
+    let soonest = seeds.iter().map(|p| p.expires_at).min();
+    match soonest {
+        Some(exp) if exp <= now + refresh_margin => Vec::new(), // force full to refresh attestations
+        _ => seeds
+            .iter()
+            .map(|p| common::api::HeldPeer {
+                pubkey: p.pubkey,
+                rev: p.rev,
+            })
+            .collect(),
+    }
 }
 
 #[cfg(test)]
@@ -443,6 +503,7 @@ mod tests {
             networks: Vec::new(),
             relay: None,
             ice: None,
+            rev: 0,
         }
     }
 
@@ -466,6 +527,8 @@ mod tests {
             proto: common::PROTOCOL_VERSION,
             server_version: common::VERSION.to_string(),
             release: None,
+            partial: false,
+            removed: Vec::new(),
         }
     }
 
@@ -542,5 +605,73 @@ mod tests {
         assert_eq!(peers[0].ip, Ipv4Addr::new(100, 64, 0, 9));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sp(pubkey: [u8; 32], rev: u64, expires_at: u64) -> SeedPeer {
+        SeedPeer {
+            pubkey,
+            user_id: 1,
+            username: "u".into(),
+            ip: Ipv4Addr::new(100, 64, 0, 1),
+            endpoint: None,
+            punch: None,
+            hostname: "h".into(),
+            primary_alias: None,
+            networks: vec![],
+            relay: None,
+            ice: None,
+            rev,
+            expires_at,
+        }
+    }
+
+    /// Delta sync: a full response replaces the held set; a partial one upserts the changed peers,
+    /// drops the `removed` ones, and leaves everything it didn't mention untouched.
+    #[test]
+    fn merge_seeds_full_replaces_delta_upserts_and_drops() {
+        let dir = temp_state_dir("merge");
+        let honest = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        let a = [9u8; 32]; // matches the pubkey seed_signed_by mints
+        let b = [8u8; 32];
+        let prev = vec![sp(a, 100, 9999), sp(b, 200, 9999)];
+
+        // Full response (partial = false) replaces outright — prev and `removed` are ignored.
+        let full = resp_with_seeds(GUILD, &honest, vec![seed_signed_by(&honest, GUILD)]);
+        let merged = merge_seeds(&prev, &full, &dir).unwrap();
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].pubkey, a);
+
+        // Delta: A changed (resent), B removed, nothing else present → {A'} only.
+        let mut delta = resp_with_seeds(GUILD, &honest, vec![seed_signed_by(&honest, GUILD)]);
+        delta.partial = true;
+        delta.removed = vec![b];
+        let merged = merge_seeds(&prev, &delta, &dir).unwrap();
+        let pks: std::collections::HashSet<_> = merged.iter().map(|p| p.pubkey).collect();
+        assert_eq!(merged.len(), 1);
+        assert!(pks.contains(&a) && !pks.contains(&b));
+
+        // Delta that mentions nothing keeps the whole held set (unchanged peers survive).
+        let mut noop = resp_with_seeds(GUILD, &honest, vec![]);
+        noop.partial = true;
+        let merged = merge_seeds(&prev, &noop, &dir).unwrap();
+        assert_eq!(merged.len(), 2, "an empty delta must not drop held peers");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Option A: normally echo held `(pubkey, rev)`, but return empty (force a full attestation
+    /// refresh) once the soonest-expiring peer is within the margin.
+    #[test]
+    fn held_for_refresh_echoes_then_forces_full_near_expiry() {
+        let now = 1_000;
+        let held = held_for_refresh(&[sp([1; 32], 42, now + 10_000)], now, 900);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].rev, 42);
+        // Within the margin of expiry → empty → full refresh.
+        assert!(held_for_refresh(&[sp([1; 32], 42, now + 100)], now, 900).is_empty());
+        // No peers → nothing to diff → empty (a full is fine).
+        assert!(held_for_refresh(&[], now, 900).is_empty());
     }
 }

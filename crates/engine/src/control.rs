@@ -803,6 +803,8 @@ mod tests {
                 .collect(),
             relay: None,
             ice: None,
+            rev: 0,
+            expires_at: 0,
         }
     }
 

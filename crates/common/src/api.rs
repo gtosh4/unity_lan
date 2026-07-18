@@ -106,6 +106,22 @@ pub struct RegisterReq {
     /// a pre-versioning client.
     #[serde(default)]
     pub client_version: String,
+    /// Delta sync: the peers this client currently holds, each with the opaque `rev` the coordinator
+    /// last minted for that peer's seed ([`Seed::rev`]). The coordinator then returns only seeds that
+    /// are **new or changed** (`rev` differs), plus [`RegisterResp::removed`], instead of the full
+    /// set — collapsing a membership herd from O(peers)·O(clients) to O(changes). Empty — an older
+    /// client, first contact, or one forcing an attestation refresh — requests a **full** snapshot.
+    #[serde(default)]
+    pub held: Vec<HeldPeer>,
+}
+
+/// One peer a client currently holds, for delta sync ([`RegisterReq::held`]): its pubkey and the
+/// opaque per-seed revision the coordinator last minted for it ([`Seed::rev`]). The client treats
+/// `rev` as opaque — it only ever echoes back the value the coordinator gave it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HeldPeer {
+    pub pubkey: [u8; 32],
+    pub rev: u64,
 }
 
 /// ICE session parameters for one (owner → peer) pair (§7.2, M5.5): the owner's short ICE
@@ -234,6 +250,16 @@ pub struct RegisterResp {
     /// artifact for the client's platform. `None` when the deployment has no `[release]` configured.
     #[serde(default)]
     pub release: Option<String>,
+    /// Delta sync: whether `seeds` is a **delta** to merge into the client's held set (add/replace
+    /// the listed peers, drop [`removed`](Self::removed), keep the rest) rather than a **full**
+    /// snapshot to replace it. `false` from a pre-delta coordinator, or when the client sent no
+    /// [`RegisterReq::held`] (→ full).
+    #[serde(default)]
+    pub partial: bool,
+    /// Delta sync: pubkeys the client should drop — peers it listed in [`RegisterReq::held`] that are
+    /// no longer in its snapshot (left, revoked, reaped). Empty on a full response.
+    #[serde(default)]
+    pub removed: Vec<[u8; 32]>,
 }
 
 /// One of a device's networks (a role@guild) and whether this device peers on it.
@@ -366,6 +392,12 @@ pub struct Seed {
     /// peer offers ICE for us. The client feeds these into its ICE agent to run connectivity checks.
     #[serde(default)]
     pub ice: Option<IceParams>,
+    /// Opaque revision of this seed's peering-relevant content (identity, endpoint, punch, networks,
+    /// relay, ICE — but **not** attestation freshness, so an epoch roll doesn't churn it). The client
+    /// stores it and echoes it in [`RegisterReq::held`]; the coordinator resends this seed only when
+    /// it changes. `0` from a pre-delta coordinator (which never diffs, so it always sends full).
+    #[serde(default)]
+    pub rev: u64,
 }
 
 #[cfg(test)]
@@ -407,6 +439,8 @@ mod tests {
             proto: crate::PROTOCOL_VERSION,
             server_version: crate::VERSION.to_string(),
             release: None,
+            partial: false,
+            removed: vec![],
         };
         let round: RegisterResp =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();

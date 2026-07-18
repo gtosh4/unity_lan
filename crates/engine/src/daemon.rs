@@ -535,6 +535,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         localnet.peer_own_devices(),
                         coord::RelayReport::default(),
                         Vec::new(),
+                        Vec::new(), // withdrawing → no held set to diff against
                     );
                     match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
                         Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
@@ -596,6 +597,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     localnet.peer_own_devices(),
                     relay_iter,
                     ice_offers.clone(),
+                    // Delta sync: echo our held peers' revs so the coordinator sends only what
+                    // changed. Empty near attestation expiry (Option A) forces a full refresh.
+                    coord::held_for_refresh(
+                        &last_seeds,
+                        common::now_unix(),
+                        common::LONGPOLL_HOLD_SECS,
+                    ),
                 ) => r,
             };
             match refreshed {
@@ -613,7 +621,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     last_relay_alloc = this_relay_alloc;
                     last_ice_offers = ice_offers; // …and this ICE offer set
                     coord_stun = resp.stun_addr; // the STUN fallback may have (dis)appeared
-                    match coord::verified_seeds(&resp, &cfg.state_dir) {
+                    match coord::merge_seeds(&last_seeds, &resp, &cfg.state_dir) {
                         Ok(seeds) => {
                             last_seeds = seeds;
                             // A grant of `None` means we hold no networks (role revoked): keep the last
