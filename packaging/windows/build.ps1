@@ -31,8 +31,12 @@ $Here = $PSScriptRoot
 $Root = (Resolve-Path (Join-Path $Here '..\..')).Path
 
 # wireguard-nt: pinned upstream release. Its zip holds bin\amd64\wireguard.dll.
+# Pin the SHA-256 too, not just the version — this DLL ends up inside the signed MSI, so a swapped
+# upstream download would otherwise be a silent supply-chain hole. Update both on a version bump
+# (get the hash from https://download.wireguard.com/wireguard-nt/ or `sha256sum` of the zip).
 $WgNtVersion = '0.10.1'
 $WgNtUrl = "https://download.wireguard.com/wireguard-nt/wireguard-nt-$WgNtVersion.zip"
+$WgNtSha256 = '772c0b1463d8d2212716f43f06f4594d880dea4f735165bd68e388fc41b81605'
 
 if (-not $Version) {
     $cargo = Get-Content (Join-Path $Root 'crates\engine\Cargo.toml')
@@ -64,6 +68,10 @@ if (-not (Test-Path $wgDll)) {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "wireguard-nt-$WgNtVersion.zip"
     $extract = Join-Path ([IO.Path]::GetTempPath()) "wireguard-nt-$WgNtVersion"
     Invoke-WebRequest -Uri $WgNtUrl -OutFile $tmp
+    $got = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
+    if ($got -ne $WgNtSha256) {
+        throw "wireguard-nt SHA-256 mismatch: expected $WgNtSha256, got $got — refusing to bundle it"
+    }
     if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
     Expand-Archive -Path $tmp -DestinationPath $extract
     New-Item -ItemType Directory -Force -Path (Split-Path $wgDll) | Out-Null
