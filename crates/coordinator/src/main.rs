@@ -253,6 +253,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         guild_keys,
         sign_cache: Arc::new(crate::signer::SignCache::new()),
+        wakers: Arc::new(api::Wakers::default()),
         roles,
         store,
         presence,

@@ -33,6 +33,10 @@ pub struct AppState {
     /// Reuses signed peer attestations across snapshots so a herd of long-pollers doesn't re-sign
     /// the same viewer-independent attestation once per caller (`N²` Ed25519 signs → `N`).
     pub sign_cache: Arc<SignCache>,
+    /// Per-client targeted-wake registry. Pair-specific updates (a reflexive/relay/ICE report *about*
+    /// one peer) wake only that peer, not the whole herd — the global `version` is reserved for
+    /// membership changes that concern every co-member.
+    pub wakers: Arc<Wakers>,
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
@@ -92,6 +96,55 @@ pub struct RelayReg {
     pub addr: std::net::SocketAddr,
     /// The HMAC secret its TURN server validates minted credentials against.
     pub secret: String,
+}
+
+/// Per-client targeted-wake registry (see [`AppState::wakers`]). A parked `/register` subscribes to
+/// its own pubkey; a pair-specific report *about* that pubkey bumps only its channel, waking that one
+/// client instead of the whole long-poll herd. Entries live only while a client is parked — the
+/// sender-only leftovers are swept periodically — so the map stays bounded to in-flight parks.
+#[derive(Default)]
+pub struct Wakers {
+    inner: Mutex<WakersInner>,
+}
+
+#[derive(Default)]
+struct WakersInner {
+    #[allow(clippy::type_complexity)]
+    map: HashMap<[u8; 32], tokio::sync::watch::Sender<u64>>,
+    /// Subscribe counter gating the amortized sweep (see [`Wakers::subscribe`]).
+    subs: u32,
+}
+
+/// Sweep stale (sender-only) entries once per this many subscribes. Amortizes the `O(map)` sweep so a
+/// herd of `N` subscribes costs `O(N²/GC_EVERY)`, not `O(N²)`, under the lock; at most this many stale
+/// entries accumulate between sweeps.
+const WAKERS_GC_EVERY: u32 = 64;
+
+impl Wakers {
+    /// Register interest for `pk`, returning a receiver that fires on each [`Wakers::wake`].
+    pub fn subscribe(&self, pk: [u8; 32]) -> tokio::sync::watch::Receiver<u64> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.subs = inner.subs.wrapping_add(1);
+        // Amortized GC: don't scan the whole map on every subscribe (that would be O(N²) under a
+        // herd — the exact cost this registry exists to avoid). Sweep sender-only leftovers of
+        // clients whose parks have ended only once per WAKERS_GC_EVERY subscribes.
+        if inner.subs.is_multiple_of(WAKERS_GC_EVERY) {
+            inner.map.retain(|_, tx| tx.receiver_count() > 0);
+        }
+        inner
+            .map
+            .entry(pk)
+            .or_insert_with(|| tokio::sync::watch::channel(0u64).0)
+            .subscribe()
+    }
+
+    /// Wake the client currently parked on `pk`, if any (no-op otherwise). Edge-triggered via a
+    /// version bump, so a wake that races a subscribe is still delivered on the next `changed()`.
+    pub fn wake(&self, pk: &[u8; 32]) {
+        if let Some(tx) = self.inner.lock().unwrap().map.get(pk) {
+            tx.send_modify(|v| *v = v.wrapping_add(1));
+        }
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -206,19 +259,56 @@ async fn register(
             "protocol version mismatch; relying on additive-field compatibility"
         );
     }
-    let resp = build_snapshot(&st, &req).await?;
-    if req.since == Some(resp.version) {
-        let woke_on_change = wait_for_change(&st, resp.version).await;
-        // On a herd wake (the version actually moved) stagger the rebuild by a small per-client
-        // offset, so one membership bump doesn't fan every parked client back into the coordinator
-        // in the same instant — burst-credit protection on a fan-in chokepoint. A hold-elapsed
-        // renewal already spreads across time on each client's own clock, so it gets no jitter.
-        if woke_on_change {
+    // Subscribe to our targeted-wake channel *before* building, so a pair-specific update that
+    // targets us while we build (or decide to park) isn't lost.
+    let mut personal = st.wakers.subscribe(req.wg_pubkey);
+    let (resp, caller_changed) = build_snapshot(&st, &req).await?;
+    // Park only when the client is up to date *and* its own request changed nothing. A request that
+    // reports data (reflexive/relay/ICE) returns immediately so the client can continue its report
+    // loop — exactly as the old global bump made it — but now without waking the herd; the affected
+    // peer is woken by a targeted wake instead.
+    if !caller_changed && req.since == Some(resp.version) {
+        let woke = wait_park(&st, resp.version, &mut personal).await;
+        // Jitter only a herd wake — a membership bump released every parked client at once, so
+        // stagger the rebuilds to flatten the fan-in. A targeted personal wake is a single client
+        // (no fan-in), and a hold-elapsed renewal already spreads over each client's own clock.
+        if matches!(woke, Woke::Herd) {
             tokio::time::sleep(wake_jitter(&req.wg_pubkey)).await;
         }
-        return Ok(Json(build_snapshot(&st, &req).await?));
+        let (resp, _) = build_snapshot(&st, &req).await?;
+        return Ok(Json(resp));
     }
     Ok(Json(resp))
+}
+
+/// Why a parked `/register` woke — [`wait_park`]'s outcome. Only a `Herd` wake (global membership
+/// bump) is jittered; a `Personal` (targeted) wake is one client and needs no fan-in smoothing.
+enum Woke {
+    Herd,
+    Personal,
+    Elapsed,
+}
+
+/// Park until either the global membership `version` moves off `since` (a herd wake), this client's
+/// `personal` targeted-wake channel fires, or the renewal hold elapses.
+async fn wait_park(
+    st: &AppState,
+    since: u64,
+    personal: &mut tokio::sync::watch::Receiver<u64>,
+) -> Woke {
+    let mut g = st.version.subscribe();
+    let hold = tokio::time::sleep(std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS));
+    tokio::pin!(hold);
+    loop {
+        if *g.borrow_and_update() != since {
+            return Woke::Herd;
+        }
+        tokio::select! {
+            r = g.changed() => if r.is_err() { return Woke::Elapsed; },
+            r = personal.changed() => return if r.is_err() { Woke::Elapsed } else { Woke::Personal },
+            _ = &mut hold => return Woke::Elapsed,
+        }
+    }
 }
 
 /// Max stagger applied to a herd wake so a single version bump doesn't release every parked client
@@ -233,20 +323,11 @@ fn wake_jitter(wg_pubkey: &[u8; 32]) -> std::time::Duration {
     std::time::Duration::from_millis(n % WAKE_JITTER_MAX_MS)
 }
 
-/// Park until the membership version moves off `since`, or the client-renewal hold elapses. `watch`
-/// tracks the latest version internally, so a bump between snapshot and subscribe is not lost.
-async fn wait_for_change(st: &AppState, since: u64) -> bool {
-    wait_for_change_until(
-        st,
-        since,
-        std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS),
-    )
-    .await
-}
-
-/// [`wait_for_change`] with a caller-chosen hold. The register path uses the ≈attestation-TTL hold
-/// (a renewal cycle); the admin dashboard passes a short heartbeat so its held request survives
-/// reverse-proxy idle timeouts and its "updated" clock stays fresh, at the cost of a cheap re-poll.
+/// Park until the membership version moves off `since`, or the given hold elapses. `watch` tracks the
+/// latest version internally, so a bump between snapshot and subscribe is not lost. The register path
+/// waits on membership + targeted wakes via [`wait_park`]; the admin dashboard passes a short
+/// heartbeat here so its held request survives reverse-proxy idle timeouts and its "updated" clock
+/// stays fresh, at the cost of a cheap re-poll.
 /// Returns `true` if it woke because the version moved (a real membership change → herd wake),
 /// `false` if the hold elapsed first (a renewal) or the sender was dropped.
 async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Duration) -> bool {
@@ -264,9 +345,16 @@ async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Durat
     }
 }
 
-/// Compute the caller's grant + seeds and record their presence, bumping the version if presence
-/// changed. Re-signs all attestations with the current time (so a rebuild renews them).
-async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp, ApiError> {
+/// Compute the caller's grant + seeds and record their presence. Bumps the global `version` when
+/// **membership** changed (a herd wake) and fires **targeted** wakes for peers named in the caller's
+/// pair-specific reports (reflexive/relay/ICE). Re-signs all attestations with the current time (so a
+/// rebuild renews them). The returned `bool` is `true` when the caller's own request changed
+/// something (membership or a pair table) — the signal for [`register`] to return now rather than
+/// park, so the client can continue its report loop.
+async fn build_snapshot(
+    st: &AppState,
+    req: &RegisterReq,
+) -> Result<(RegisterResp, bool), ApiError> {
     let user_id = resolve_user(st, req).await?;
     let now = common::now_unix();
     let networks = st.store.all_networks().await.map_err(internal)?;
@@ -300,7 +388,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
-    let mut changed = false; // did recording our presence alter the map? → bump version
+    let mut changed = false; // did membership change? → bump global version (herd wake)
+                             // Peers named in this caller's pair-specific reports (reflexive/relay/ICE) — each is woken
+                             // individually instead of bumping the global version, so a NAT-traversal exchange doesn't wake
+                             // the whole herd for a change only the one target cares about.
+    let mut wake_targets: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     // Re-key supersede (design.md §9): a device regenerating its WG key registers under a *new*
     // pubkey, orphaning the old one — its presence would linger (never self-evicted, since its
@@ -549,19 +641,19 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     // you share a network with — and thus have a tunnel to observe. This bounds a spoofed endpoint to
     // the victim's own co-members (the network trust boundary), instead of letting any authenticated
     // member redirect any device's punch target to an attacker-chosen address. A first sighting or a
-    // roam (address change) bumps the version so a parked co-member wakes and picks up the target.
+    // roam (address change) wakes that one observed peer (targeted) so it picks up the punch target.
     // The caller's co-members: every device it shares ≥1 network with. This is the trust boundary
     // for all peer-keyed exchange tables below — the caller may only publish reflexive/relay/ICE
     // state *about a peer it actually meshes with*. Without this gate an authenticated member could
-    // inject entries for arbitrary pubkeys, growing the tables unbounded and (since a novel entry
-    // bumps the version) waking the whole long-poll herd for free.
+    // inject entries for arbitrary pubkeys, growing the tables unbounded and forcing wakes for
+    // arbitrary pubkeys.
     let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
     {
         let mut refl = st.reflexive.lock().unwrap();
         for obs in accepted_reflexives(&req.observed, &comembers) {
             if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
                 refl.insert(obs.pubkey, obs.endpoint);
-                changed = true;
+                wake_targets.insert(obs.pubkey);
             }
         }
     }
@@ -589,39 +681,39 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
     }
 
     // Record this device's TURN relayed addresses (relayed-candidate exchange). A new/changed
-    // relayed address bumps the version so the peer wakes and learns it as its `peer_relayed` — the
+    // relayed address wakes that one peer (targeted) so it learns it as its `peer_relayed` — the
     // second half of the ~2-round relay converge.
     {
         let mut allocs = st.relay_allocs.lock().unwrap();
         for a in &req.relay_allocated {
             // Only accept a relayed address for a peer the caller actually meshes with (mirrors the
-            // reflexive gate) — otherwise the map grows unbounded and each novel entry wakes the herd.
+            // reflexive gate) — otherwise the map grows unbounded.
             if !comembers.contains(&a.peer) {
                 continue;
             }
             if allocs.get(&(req.wg_pubkey, a.peer)) != Some(&a.relayed) {
                 allocs.insert((req.wg_pubkey, a.peer), a.relayed);
-                changed = true;
+                wake_targets.insert(a.peer);
             }
         }
     }
 
     // Record this device's ICE session offers (candidate exchange, M5.5). A new/changed offer (fresh
-    // candidates, or an ICE restart's new ufrag/pwd) bumps the version so the peer wakes, picks up
-    // the candidates as its `Seed::ice`, and runs connectivity checks. The coordinator only relays —
-    // it never runs ICE — so the data path stays peer-to-peer.
+    // candidates, or an ICE restart's new ufrag/pwd) wakes that one peer (targeted) so it picks up
+    // the candidates as its `Seed::ice` and runs connectivity checks — turning ICE exchange into a
+    // targeted ping-pong rather than a herd wake. The coordinator only relays; it never runs ICE.
     {
         let mut ice = st.ice.lock().unwrap();
         for e in &req.ice {
             // Same co-member gate as reflexive/relay: an ICE offer is only accepted for a peer the
-            // caller shares a network with, so the map stays bounded and can't be used to force herd
-            // wakeups for arbitrary pubkeys.
+            // caller shares a network with, so the map stays bounded and can't be used to force
+            // wakes for arbitrary pubkeys.
             if !comembers.contains(&e.peer) {
                 continue;
             }
             if ice.get(&(req.wg_pubkey, e.peer)) != Some(&e.params) {
                 ice.insert((req.wg_pubkey, e.peer), e.params.clone());
-                changed = true;
+                wake_targets.insert(e.peer);
             }
         }
     }
@@ -709,9 +801,14 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         .await
         .map_err(internal)?;
 
-    // Bump the version if our presence changed → wake peers parked in long-poll.
+    // Bump the global version if membership changed → wake every parked co-member (a herd wake).
     if changed {
         st.version.send_modify(|v| *v += 1);
+    }
+    // Fire targeted wakes for the peers named in this caller's pair-specific reports — each learns
+    // its new reflexive/relay/ICE state on its own parked request, without a global herd wake.
+    for t in &wake_targets {
+        st.wakers.wake(t);
     }
 
     tracing::debug!(
@@ -753,18 +850,22 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         _ => None,
     };
 
-    Ok(RegisterResp {
-        anchors,
-        grant,
-        device_token,
-        seeds,
-        version: *st.version.borrow(),
-        networks: networks_status,
-        stun_addr: st.stun_addr,
-        proto: common::PROTOCOL_VERSION,
-        server_version: common::VERSION.to_string(),
-        release,
-    })
+    let caller_changed = changed || !wake_targets.is_empty();
+    Ok((
+        RegisterResp {
+            anchors,
+            grant,
+            device_token,
+            seeds,
+            version: *st.version.borrow(),
+            networks: networks_status,
+            stun_addr: st.stun_addr,
+            proto: common::PROTOCOL_VERSION,
+            server_version: common::VERSION.to_string(),
+            release,
+        },
+        caller_changed,
+    ))
 }
 
 /// `POST /devices/manage`: owner-scoped device ops authenticated by a device bearer token.
@@ -1306,6 +1407,28 @@ mod tests {
     use common::api::{ObservedEndpoint, SharedNetwork};
     use std::net::IpAddr;
     use std::time::Instant;
+
+    #[tokio::test]
+    async fn wakers_fire_only_the_target() {
+        let w = super::Wakers::default();
+        let rx = w.subscribe([1u8; 32]);
+        assert!(!rx.has_changed().unwrap(), "no wake yet");
+        // A pubkey nobody parked on is a silent no-op — and doesn't touch our channel.
+        w.wake(&[2u8; 32]);
+        assert!(
+            !rx.has_changed().unwrap(),
+            "wake for another pubkey must not fire us"
+        );
+        // Waking our pubkey fires our receiver.
+        w.wake(&[1u8; 32]);
+        assert!(
+            rx.has_changed().unwrap(),
+            "targeted wake fires the parked client"
+        );
+        // Dropping the receiver lets the next subscribe sweep the sender-only entry (no leak).
+        drop(rx);
+        let _rx2 = w.subscribe([1u8; 32]);
+    }
 
     #[test]
     fn wake_jitter_bounded_deterministic_and_spread() {
