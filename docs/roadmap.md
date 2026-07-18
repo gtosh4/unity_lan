@@ -594,6 +594,71 @@ elevated box. macOS `/etc/resolver` still deferred.
       ciphertext relay is the planned follow-on (M5.4, design.md §7.2), not a GA blocker. System
       already degrades cleanly; no code change for the v1 diagnostic.
 
+## GA release checklist
+From a 2026-07-18 readiness review (docs · roadmap · code quality · security · packaging). Code and
+the crypto/trust core are in good shape (all 4 CI gates green — fmt/clippy/114 tests; pinned-anchor
+TOFU invariant enforced + test-covered end to end; no code-quality blockers). The gating work is
+release plumbing, distribution docs, and a deliberate version decision — not broken functionality.
+
+### GA-blockers
+- [ ] **Fix `docs/coordinator-setup.md`** — it's factually wrong: says live Discord/OAuth is "not
+      wired yet" (it shipped), and describes the wrong OAuth model (confidential client + secret +
+      `:8080/callback`). Reality is a **public PKCE client**, loopback redirect `127.0.0.1:8765/callback`,
+      `client_id`-only coordinator config (see `packaging/README.md`, which is correct). The two setup
+      docs describe mutually exclusive auth flows; only one is real → a first-time host is misled.
+- [ ] **Add `SECURITY.md`** — a crypto/networking tool with signing keys and firewall rules has no
+      vulnerability-disclosure policy or channel. Standard/expected for security-software GA.
+- [ ] **Reconcile the install path** — `README.md` routes end users to prebuilt packages on
+      `../../releases`, but `git tag` is empty: no release, no tag, no published `.deb`/`.rpm`/MSI/GHCR
+      image. Either cut a release or stop the docs overstating availability.
+- [ ] **No code signing anywhere** (`.github/workflows/release.yml`) — MSI is unsigned (a LocalSystem
+      service installer → SmartScreen "unknown publisher" + UAC); `.deb`/`.rpm`/`SHA256SUMS` unsigned
+      too. Unsigned Windows especially is a hard "download and run" blocker.
+- [ ] **Rehearse the release pipeline** — it has never run (`git tag` empty; CI does fmt/clippy/test
+      only, never invokes `build.sh`/nfpm/WiX/Docker). Cut a `v0.x.0-rc1` pre-release tag to exercise
+      the whole path (build all artifacts, install on clean Linux + a real Windows box) before the GA tag.
+- [ ] **Linux desktop GUI can't reach the engine out of the box** — root owns
+      `/run/unitylan/control.sock` (`RuntimeDirectoryMode=0750`); the GUI runs unprivileged and the
+      group-readable socket is "not yet wired." The `unitylan-desktop` package installs a GUI that
+      can't connect. Wire a `unitylan` group + socket group-ownership.
+- [ ] **Version decision** — workspace is `0.1.0` (`Cargo.toml`). 0.x signals unstable API under
+      SemVer and README self-describes as "young/pre-1.0". Either bump to `1.0.0` or deliberately ship
+      GA as 0.x and reconcile the positioning. (Note: tagged-artifact version can drift from the
+      compiled-in crate version if the bump is forgotten — `build.sh` takes VERSION from the git tag.)
+
+### Should-fix (not blocking)
+- [ ] **Windows is compile-verified only, never run on real hardware** (wg-nt backend, NRPT resolver,
+      firewall, service, tray, MSI self-update apply). If GA claims Windows support → needs live
+      sign-off; otherwise ship **Linux-first, Windows beta**.
+- [ ] **Defense-in-depth: validate seed `wg_ip` against the signed `wg_net`** — `engine/src/coord.rs`
+      accepts `att.wg_ip` and `daemon.rs` installs it as a `/32` allowed-IP with no check that it falls
+      inside the signed mesh CIDR. `wg_net` is signed precisely to bound this; enforce
+      `wg_net.contains(wg_ip)` at admission (cheap; the exact check the signed field exists for).
+- [ ] **Narrow systemd `ReadWritePaths=/usr/bin`** (`packaging/init/systemd/unitylan-engine.service`)
+      — a network-facing root service that can overwrite all of `/usr/bin` (e.g. `sudo`) is a
+      persistence/privesc vector. Install the engine under a dedicated dir and scope the writable path.
+- [ ] **Add a dependency-vuln gate** — `cargo-audit`/`cargo-deny` not installed and not in CI. Add
+      it and run against `Cargo.lock` before GA.
+- [ ] **Remove the dead `RELAXED_DACL`** (`crates/engine/src/service.rs` `sc.exe sdset`) — GUI
+      start/stop was removed, so nothing uses the relaxed DACL, yet the service still grants
+      unprivileged start of a LocalSystem service. Unnecessary privilege surface.
+- [ ] **Pin the wireguard-nt DLL by SHA-256** — `packaging/windows/build.ps1` fetches it over the
+      network, version-pinned only → supply-chain gap into a signed MSI.
+- [ ] **Add a commented live `[discord]`/`[oauth]` block to `coordinator.example.toml`** and drop the
+      "replace later / M1" language — the in-repo example has no live template today.
+- [ ] **Fix the stale scope note** `crates/gui/src/main.rs` claiming network toggles / expose / OAuth
+      login are "deferred" — all three shipped (M4/M7).
+- [ ] arm64 + macOS targets; apt/dnf repo or `curl | sh` one-liner; `CHANGELOG.md`; multi-arch
+      coordinator image (`docker/coordinator.Dockerfile` sets no `platforms:`).
+
+### Accepted-risk (document, don't block)
+- Engine runs uid 0 with no in-process privsep (deferred, security audit backlog #9) — substantially
+  mitigated by the systemd capability-bounding + sandbox.
+- Attestation replay within its 30-min TTL is harmless (only re-adds a legitimate peer; WireGuard has
+  its own handshake crypto).
+- write-then-chmod window on key files (`keys.rs`, `store.rs` write then `0600`) — low risk under the
+  `0700` state dir; optional `OpenOptions` mode-at-create tidy-up.
+
 ## Post-GA
 - [→] Symmetric-NAT-both relay — **promoted to M5.4** (now the planned next NAT increment, not
       Post-GA): data-plane forward through a common mesh peer, ciphertext-only, backend-agnostic.
