@@ -23,13 +23,16 @@ use common::update::ReleaseManifest;
 use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
-use crate::signer::GuildKeys;
+use crate::signer::{GuildKeys, SignCache};
 use crate::store::{match_device_by_name, DeviceMatch, Store};
 
 #[derive(Clone)]
 pub struct AppState {
     /// Per-guild signing keys (design.md §3.1), created lazily on first contact with a guild.
     pub guild_keys: Arc<GuildKeys>,
+    /// Reuses signed peer attestations across snapshots so a herd of long-pollers doesn't re-sign
+    /// the same viewer-independent attestation once per caller (`N²` Ed25519 signs → `N`).
+    pub sign_cache: Arc<SignCache>,
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
@@ -646,20 +649,23 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<RegisterResp
         // key. The client admits the peer once any one verifies against the matching pinned anchor.
         let mut attestations = Vec::with_capacity(shared_guilds.len());
         for &g in &shared_guilds {
-            let key = st.guild_keys.get(g).await.map_err(internal)?;
-            let signed = key
-                .signer
-                .sign_attestation(
+            let blob = st
+                .sign_cache
+                .attestation(
+                    &st.guild_keys,
+                    g,
                     mp.user_id,
-                    mp.username.clone(),
-                    mp.device_name.clone(),
+                    &mp.username,
+                    &mp.device_name,
                     mp.is_primary,
                     mp.ip,
                     mp.pubkey,
+                    now,
                 )
+                .await
                 .map_err(internal)?;
             attestations.push(GuildAttestation {
-                attestation: signed.to_base64(),
+                attestation: blob.to_string(),
                 community_name: community_cache.get(&g).cloned().unwrap_or_default(),
             });
         }

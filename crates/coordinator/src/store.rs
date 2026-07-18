@@ -95,6 +95,19 @@ impl Store {
         Ok(store)
     }
 
+    /// A private in-memory store for tests (single connection, so the `:memory:` db is shared).
+    #[cfg(test)]
+    pub(crate) async fn memory() -> Self {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let store = Self { pool };
+        store.migrate().await.unwrap();
+        store
+    }
+
     async fn migrate(&self) -> anyhow::Result<()> {
         sqlx::query(
             r#"
