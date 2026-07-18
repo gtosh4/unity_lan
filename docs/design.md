@@ -204,8 +204,8 @@ sequenceDiagram
     C->>B: register (enrollment key / OAuth) + report endpoint
     B-->>C: own attestation + anchor + seeds [{attestation, endpoint_hint}]
     Note over C: verify signatures, pin anchor
-    C->>P: WG handshake to each seed (pubkey+wg_ip signed; endpoint from hint) → mesh
-    Note over P,B: Bob was long-polling; Charlie's join bumps the version
+    C->>P: WG handshake to each seed (pubkey+wg_ip signed, endpoint from hint) → mesh
+    Note over P,B: Bob was long-polling, Charlie's join bumps the version
     B-->>P: refresh returns at once with Charlie's attestation
     P->>C: WG handshake back → tunnel reciprocal
     loop steady state
