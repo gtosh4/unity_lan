@@ -4,6 +4,14 @@
 # Bypass a single commit with:  git commit --no-verify
 set -euo pipefail
 
+# Skip the cargo gates when the commit touches no Rust build inputs (docs, scripts,
+# assets, etc.). Anything under a source tree or that changes the build is in scope.
+if ! git diff --cached --name-only --diff-filter=ACMR \
+    | grep -Eq '\.rs$|(^|/)Cargo\.(toml|lock)$|(^|/)rust-toolchain'; then
+  echo "pre-commit: no Rust changes staged, skipping cargo gates"
+  exit 0
+fi
+
 echo "pre-commit: cargo fmt --all --check"
 cargo fmt --all --check
 
