@@ -515,6 +515,32 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 // interface, tear down the firewall, revert the resolver. (UPnP unmaps via its own
                 // shutdown-aware task.)
                 _ = shutdown.wait() => {
+                    // Best-effort: tell the coordinator we're leaving so co-members prune us within
+                    // seconds instead of waiting out the presence reaper (~31 min). A paused refresh
+                    // evicts our presence from every network and bumps the version, waking parked
+                    // long-polls. Bounded to 3s so an unreachable coordinator can't stall shutdown;
+                    // reaches the coordinator over the internet, so tearing the WG iface below is
+                    // independent. A crash/power-loss can't send this — the reaper is the backstop.
+                    let withdraw = coord::refresh(
+                        &cfg.coordinator,
+                        &cfg.state_dir,
+                        wg_pub,
+                        cfg.device_name(),
+                        endpoint,
+                        cfg.enrollment_key.clone(),
+                        None, // no long-poll hold: return as soon as the eviction is applied
+                        Vec::new(),
+                        Vec::new(),
+                        true, // paused → evict from all networks
+                        localnet.peer_own_devices(),
+                        coord::RelayReport::default(),
+                        Vec::new(),
+                    );
+                    match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
+                        Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
+                        Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
+                        Err(_) => tracing::debug!("shutdown withdraw timed out"),
+                    }
                     if let Err(e) = backend.down() {
                         tracing::warn!("interface down on shutdown: {e:#}");
                     }
