@@ -124,7 +124,11 @@ async fn main() -> anyhow::Result<()> {
     let deployment_seed = store.load_or_create_deployment_seed().await?;
     let mesh_cidr = resolve_mesh_cidr(&cfg, &deployment_seed)?;
     tracing::info!(cidr = %mesh_cidr, "mesh address range");
-    let guild_keys = Arc::new(GuildKeys::new(store.clone(), mesh_cidr));
+    let guild_keys = Arc::new(GuildKeys::new(
+        store.clone(),
+        mesh_cidr,
+        cfg.attestation_ttl_secs,
+    ));
 
     // Seed the network registry from config (test convenience; prod uses slash commands).
     for n in &cfg.network_seeds {
@@ -252,8 +256,11 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState {
         guild_keys,
-        sign_cache: Arc::new(crate::signer::SignCache::new()),
+        sign_cache: Arc::new(crate::signer::SignCache::new(cfg.attestation_ttl_secs)),
         wakers: Arc::new(api::Wakers::default()),
+        // Hold a renewal long-poll ≈ half the attestation TTL, so a client's own attestation is
+        // refreshed (on poll return) well before it expires.
+        longpoll_hold_secs: (cfg.attestation_ttl_secs / 2).max(1),
         roles,
         store,
         presence,

@@ -8,8 +8,8 @@ use std::sync::{Arc, RwLock};
 
 use common::attestation::Attestation;
 use common::crypto::{CoordinatorKey, WgPublicKey};
+use common::now_unix;
 use common::wire::Signed;
-use common::{now_unix, ATTESTATION_TTL_SECS};
 use ipnet::Ipv4Net;
 
 use crate::store::Store;
@@ -20,14 +20,17 @@ pub struct Signer {
     guild_id: u64,
     /// The deployment's mesh CIDR, stamped into every attestation (see `Attestation::wg_net`).
     wg_net: Ipv4Net,
+    /// Attestation validity window (seconds) — the deployment's revocation window (config).
+    ttl: u64,
 }
 
 impl Signer {
-    pub fn from_seed(seed: &[u8; 32], guild_id: u64, wg_net: Ipv4Net) -> Self {
+    pub fn from_seed(seed: &[u8; 32], guild_id: u64, wg_net: Ipv4Net, ttl: u64) -> Self {
         Self {
             key: CoordinatorKey::from_seed(seed),
             guild_id,
             wg_net,
+            ttl,
         }
     }
 
@@ -57,7 +60,7 @@ impl Signer {
             wg_net: self.wg_net,
             wg_pubkey,
             issued_at: now,
-            expires_at: now + ATTESTATION_TTL_SECS,
+            expires_at: now + self.ttl,
         };
         Ok(Signed::sign(&self.key, &att)?)
     }
@@ -83,14 +86,17 @@ pub struct GuildKey {
 pub struct GuildKeys {
     store: Arc<Store>,
     wg_net: Ipv4Net,
+    /// Attestation TTL (seconds) stamped into every signed attestation (deployment config).
+    ttl: u64,
     cache: tokio::sync::Mutex<HashMap<u64, Arc<GuildKey>>>,
 }
 
 impl GuildKeys {
-    pub fn new(store: Arc<Store>, wg_net: Ipv4Net) -> Self {
+    pub fn new(store: Arc<Store>, wg_net: Ipv4Net, ttl: u64) -> Self {
         Self {
             store,
             wg_net,
+            ttl,
             cache: tokio::sync::Mutex::new(HashMap::new()),
         }
     }
@@ -107,7 +113,7 @@ impl GuildKeys {
             return Ok(key.clone());
         }
         let seed = self.store.load_or_create_seed(guild_id).await?;
-        let signer = Signer::from_seed(&seed, guild_id, self.wg_net);
+        let signer = Signer::from_seed(&seed, guild_id, self.wg_net, self.ttl);
         let rotation_chain = self.store.rotation_chain(guild_id).await?;
         let key = Arc::new(GuildKey {
             signer,
@@ -118,10 +124,11 @@ impl GuildKeys {
     }
 }
 
-/// How long a cached signed attestation is reused before it's re-signed. Bounds the worst-case
-/// remaining life of a served attestation to `ATTESTATION_TTL_SECS - SIGN_CACHE_TTL_SECS` (25 min
-/// here), comfortably above the client's renewal interval so a reused blob never lands expired.
-const SIGN_CACHE_TTL_SECS: u64 = 300;
+/// Default cap on how long a cached signed attestation is reused before it's re-signed. The actual
+/// window is `min(this, attestation_ttl / 2)` — it **must** stay below the attestation TTL, or the
+/// cache would serve an already-expired blob (peers reject it). For the default 30-min TTL the cap
+/// wins (reuse 5 min → served blobs keep ≥25 min of life); a short configured TTL shrinks it.
+const SIGN_CACHE_REUSE_CAP_SECS: u64 = 300;
 
 /// A signed attestation held for reuse, plus the peer identity it was signed for. An attestation
 /// binds only peer identity + guild (never the caller), so the *same* base64 blob is valid in every
@@ -139,9 +146,12 @@ struct CachedAtt {
 /// Per-`(guild, device-pubkey)` cache of signed peer attestations. Without it `build_snapshot` signs
 /// each viewer-independent attestation once **per caller** — a herd of `N` long-pollers over `N`
 /// shared peers costs `N²` Ed25519 signs. Here each attestation is signed once per
-/// `SIGN_CACHE_TTL_SECS` and fanned out to every snapshot, collapsing that to `N`.
+/// its reuse window and fanned out to every snapshot, collapsing that to `N`.
 pub struct SignCache {
     inner: RwLock<SignCacheInner>,
+    /// How long a cached blob is reused before re-signing — `min(SIGN_CACHE_REUSE_CAP_SECS,
+    /// attestation_ttl / 2)`, kept below the attestation TTL so a reused blob is never expired.
+    reuse_secs: u64,
     /// Serializes the sign-on-miss path so a herd that all misses the same entry signs it **once**
     /// (the winner inserts; the rest re-check and hit) instead of every caller signing in parallel.
     /// A `tokio` mutex because it's held across the async guild-key load + sign. The warm-cache read
@@ -152,17 +162,20 @@ pub struct SignCache {
 struct SignCacheInner {
     map: HashMap<(u64, [u8; 32]), CachedAtt>,
     /// Last time stale entries (departed devices) were swept. Sweeping is `O(size)`, so it's
-    /// time-gated to ~once per `SIGN_CACHE_TTL_SECS` rather than run on every insert.
+    /// time-gated to ~once per reuse window rather than run on every insert.
     last_prune: u64,
 }
 
 impl SignCache {
-    pub fn new() -> Self {
+    /// `attestation_ttl` is the deployment's configured attestation lifetime; the reuse window is
+    /// derived from it (and capped) so a cached blob is always re-signed well before it expires.
+    pub fn new(attestation_ttl: u64) -> Self {
         Self {
             inner: RwLock::new(SignCacheInner {
                 map: HashMap::new(),
                 last_prune: 0,
             }),
+            reuse_secs: (attestation_ttl / 2).clamp(1, SIGN_CACHE_REUSE_CAP_SECS),
             sign_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -204,10 +217,10 @@ impl SignCache {
         )?;
         let blob: Arc<str> = Arc::from(signed.to_base64());
         let mut inner = self.inner.write().unwrap();
-        if now.saturating_sub(inner.last_prune) >= SIGN_CACHE_TTL_SECS {
+        if now.saturating_sub(inner.last_prune) >= self.reuse_secs {
             inner
                 .map
-                .retain(|_, v| now.saturating_sub(v.signed_at) < SIGN_CACHE_TTL_SECS);
+                .retain(|_, v| now.saturating_sub(v.signed_at) < self.reuse_secs);
             inner.last_prune = now;
         }
         inner.map.insert(
@@ -237,18 +250,12 @@ impl SignCache {
     ) -> Option<Arc<str>> {
         let inner = self.inner.read().unwrap();
         let e = inner.map.get(key)?;
-        (now.saturating_sub(e.signed_at) < SIGN_CACHE_TTL_SECS
+        (now.saturating_sub(e.signed_at) < self.reuse_secs
             && e.ip == ip
             && e.is_primary == is_primary
             && e.username == username
             && e.device_name == device_name)
             .then(|| e.blob.clone())
-    }
-}
-
-impl Default for SignCache {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -259,7 +266,7 @@ mod tests {
 
     async fn keys() -> GuildKeys {
         let store = Arc::new(Store::memory().await);
-        GuildKeys::new(store, "100.72.0.0/16".parse().unwrap())
+        GuildKeys::new(store, "100.72.0.0/16".parse().unwrap(), 1800)
     }
 
     fn ip(s: &str) -> Ipv4Addr {
@@ -269,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn caches_identical_blob_and_invalidates_on_change() {
         let keys = keys().await;
-        let cache = SignCache::new();
+        let cache = SignCache::new(1800);
         let pk = [7u8; 32];
         let addr = ip("100.72.0.5");
         let sign = |name: &'static str, primary: bool, now: u64| {
@@ -291,7 +298,7 @@ mod tests {
         assert_ne!(a.as_ref(), renamed.as_ref());
 
         // Crossing the cache TTL re-signs even with identical identity (fresh issued_at).
-        let later = sign("laptop", false, 1_000 + SIGN_CACHE_TTL_SECS)
+        let later = sign("laptop", false, 1_000 + SIGN_CACHE_REUSE_CAP_SECS)
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&a, &later));
@@ -300,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn distinct_peers_and_guilds_are_separate_entries() {
         let keys = keys().await;
-        let cache = SignCache::new();
+        let cache = SignCache::new(1800);
         let g1_pk1 = cache
             .attestation(&keys, 1, 1, "a", "d", false, ip("100.72.0.1"), [1u8; 32], 0)
             .await

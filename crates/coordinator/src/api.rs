@@ -37,6 +37,10 @@ pub struct AppState {
     /// one peer) wake only that peer, not the whole herd — the global `version` is reserved for
     /// membership changes that concern every co-member.
     pub wakers: Arc<Wakers>,
+    /// How long a `/register` long-poll is held before a renewal rebuild (≈ attestation TTL / 2, from
+    /// config). A client refreshes its own attestation when its poll returns, so this bounds how stale
+    /// a served attestation can get — it must stay below the attestation TTL.
+    pub longpoll_hold_secs: u64,
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
@@ -297,7 +301,7 @@ async fn wait_park(
     personal: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Woke {
     let mut g = st.version.subscribe();
-    let hold = tokio::time::sleep(std::time::Duration::from_secs(common::LONGPOLL_HOLD_SECS));
+    let hold = tokio::time::sleep(std::time::Duration::from_secs(st.longpoll_hold_secs));
     tokio::pin!(hold);
     loop {
         if *g.borrow_and_update() != since {

@@ -55,6 +55,17 @@ pub struct Config {
     /// reach it. This surface reads control-plane counts only; it carries no inter-peer traffic.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
+    /// How long a signed attestation is valid (seconds). Default 30 min. This is the **revocation
+    /// window**: a member who loses a role keeps mesh access until their last attestation expires
+    /// (peers drop them on expiry — `docs/gossip-refresh.md` — and the coordinator stops re-issuing).
+    /// Shorter = tighter revocation but more refresh churn; longer = the reverse. Also the base for
+    /// the client's renewal/gossip cadence. Lowered in tests to exercise expiry quickly.
+    #[serde(default = "default_attestation_ttl")]
+    pub attestation_ttl_secs: u64,
+}
+
+fn default_attestation_ttl() -> u64 {
+    common::ATTESTATION_TTL_SECS
 }
 
 /// The `[admin]` block: an operator-set bearer token gating `/admin` and `/metrics`.
