@@ -282,6 +282,36 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             _ => None,
         };
 
+        // Peer-direct attestation refresh (docs/gossip-refresh.md, stage 1): serve our own
+        // coordinator-minted attestations to meshed co-members over the tunnel, so the mesh can keep
+        // credentials fresh without the coordinator fanning them out. Off unless `gossip` is set; the
+        // coordinator stays the fallback. Bound to our mesh /32 (now on the interface), torn down with
+        // it. `own_atts` is refreshed from the grant on every register below.
+        let own_atts = crate::p2p::OwnAttestations::default();
+        let p2p_task = cfg.gossip.then(|| {
+            own_atts.set(
+                resp.grant
+                    .as_ref()
+                    .map(|g| g.attestations.clone())
+                    .unwrap_or_default(),
+            );
+            let bind = SocketAddr::new(device.wg_ip.into(), common::p2p::P2P_PORT);
+            let own = own_atts.clone();
+            tokio::spawn(async move {
+                match tokio::net::UdpSocket::bind(bind).await {
+                    Ok(sock) => {
+                        tracing::info!(%bind, "p2p attestation service listening");
+                        if let Err(e) = crate::p2p::serve(sock, own).await {
+                            tracing::warn!("p2p service ended: {e:#}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("p2p bind {bind} failed ({e}); peer-direct refresh off")
+                    }
+                }
+            })
+        });
+
         // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
         // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
         let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
@@ -558,6 +588,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     if let Some(t) = &dns_task {
                         t.abort();
                     }
+                    if let Some(t) = &p2p_task {
+                        t.abort();
+                    }
                     tracing::info!("shutting down");
                     return Ok(());
                 }
@@ -621,6 +654,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     last_relay_alloc = this_relay_alloc;
                     last_ice_offers = ice_offers; // …and this ICE offer set
                     coord_stun = resp.stun_addr; // the STUN fallback may have (dis)appeared
+                    if cfg.gossip {
+                        // Keep the p2p service handing out our freshest attestations (delta responses
+                        // may carry a refreshed grant even when nothing else changed).
+                        own_atts.set(
+                            resp.grant
+                                .as_ref()
+                                .map(|g| g.attestations.clone())
+                                .unwrap_or_default(),
+                        );
+                    }
                     match coord::merge_seeds(&last_seeds, &resp, &cfg.state_dir) {
                         Ok(seeds) => {
                             last_seeds = seeds;
@@ -697,6 +740,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             }
         }
         if let Some(t) = &dns_task {
+            t.abort();
+        }
+        if let Some(t) = &p2p_task {
             t.abort();
         }
         // Discard the local key + token so the next register re-keys and reports not-logged-in.

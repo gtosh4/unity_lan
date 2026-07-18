@@ -12,6 +12,7 @@ mod keys;
 mod nat;
 mod netcfg;
 mod oauth;
+mod p2p;
 mod ping;
 mod relay;
 mod resolver;

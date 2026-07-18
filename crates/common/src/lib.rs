@@ -7,6 +7,7 @@ pub mod attestation;
 pub mod control;
 pub mod crypto;
 pub mod netid;
+pub mod p2p;
 pub mod relay;
 pub mod rotation;
 pub mod update;

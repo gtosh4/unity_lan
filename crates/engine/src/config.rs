@@ -108,6 +108,12 @@ pub struct Config {
     /// escape hatch and how the M5.4 relay path is exercised on Linux. No effect on kernel backends.
     #[serde(default = "default_true")]
     pub ice: bool,
+    /// Peer-direct attestation refresh (`docs/gossip-refresh.md`). When on, the engine serves its own
+    /// coordinator-minted attestation to meshed co-members over the WG tunnel, so the mesh can keep
+    /// credentials fresh without the coordinator fanning them out. **Off by default** — additive and
+    /// experimental; the coordinator remains the always-present source of truth and fallback.
+    #[serde(default)]
+    pub gossip: bool,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.
