@@ -3,8 +3,10 @@
 #   docker build -f packaging/docker/coordinator.Dockerfile -t unitylan-coordinator .
 # Run (bind = "0.0.0.0:8080", database = "/data/coordinator.db" in your config):
 #   docker run -p 8080:8080 \
-#     -v $PWD/coordinator.toml:/etc/unitylan/coordinator.toml:ro \
+#     -v $PWD/config:/etc/unitylan:ro \
 #     -v unitylan-data:/data unitylan-coordinator
+# Mount the config DIRECTORY, not the file: a single-file bind mount pins the host inode, so an
+# atomic-save editor (temp + rename: vim, sed -i) swaps it and the container serves stale config.
 
 # Alpine/musl: a static build lets the runtime be a tiny alpine (no glibc, no shared libs).
 # build-base supplies the C toolchain the bundled sqlite (libsqlite3-sys) and ring need.

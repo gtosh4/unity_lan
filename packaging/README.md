@@ -85,14 +85,40 @@ seeds are needed in production. Omit the `[fake]` block entirely (that's offline
 ```sh
 docker run -d --name unitylan-coordinator --restart unless-stopped \
   -p 8080:8080 \
-  -v $PWD/coordinator.toml:/etc/unitylan/coordinator.toml:ro \
+  -v $PWD/config:/etc/unitylan:ro \
   -v unitylan-data:/data \
   ghcr.io/<owner>/unitylan-coordinator:v0.1.0
 ```
 
+Put `coordinator.toml` in a `./config` **directory** and mount the directory, not the file
+(`ENTRYPOINT` reads `/etc/unitylan/coordinator.toml`). **Mount the dir, not the file:** a single-file
+bind mount pins the host file's inode, so an editor that saves atomically (writes a temp file and
+`rename()`s it over the original — vim, most editors, `sed -i`) swaps the inode and the container
+keeps serving the **old** bytes. A directory mount resolves the path fresh on each open and picks up
+the new inode. Either way the running process only re-reads config on restart or SIGHUP
+(`docker kill -s HUP unitylan-coordinator` re-reads the `[release]` block; a `bind`/`[discord]`
+change needs `docker restart`).
+
 The container runs unprivileged and carries no traffic (control plane only). The `unitylan-data`
 named volume persists `/data/coordinator.db` — **this holds the deployment's Ed25519 trust anchor
 (signing key); back it up and never rebuild it**, or every enrolled peer's pinned anchor breaks.
+
+**Or with Compose** (`docker compose up -d`):
+
+```yaml
+services:
+  coordinator:
+    image: ghcr.io/<owner>/unitylan-coordinator:v0.1.0
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/etc/unitylan:ro   # dir, not file — see above
+      - unitylan-data:/data         # holds the Ed25519 signing key — back it up
+
+volumes:
+  unitylan-data:
+```
 
 **4. TLS / reverse proxy.** The coordinator speaks plain HTTP; front it with a reverse proxy
 (Caddy / nginx / Traefik) terminating TLS on 443 and proxying to `:8080`. Engines pin the anchor,
