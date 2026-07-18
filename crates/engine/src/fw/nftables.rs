@@ -79,6 +79,13 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> Strin
     s.push_str(&format!(
         "add rule {TABLE} input icmp type echo-request accept\n"
     ));
+    // Peer-direct attestation refresh (docs/gossip-refresh.md): co-members pull our own attestation
+    // from this UDP port over the tunnel. Mesh infrastructure — only an authenticated WG peer reaches
+    // the iface at all — so it's allowed by default like icmp; inert when gossip is off (no listener).
+    s.push_str(&format!(
+        "add rule {TABLE} input udp dport {} accept\n",
+        common::p2p::P2P_PORT
+    ));
 
     // Unscoped exposes (any peer — only peers reach the wg iface at all), grouped per proto.
     let tcp = unscoped_ports(exposed, Proto::Tcp);
@@ -199,6 +206,7 @@ mod tests {
         assert!(rs.contains("iifname != \"unl0\" accept"));
         assert!(rs.contains("ct state established,related accept"));
         assert!(rs.contains("icmp type echo-request accept"));
+        assert!(rs.contains(&format!("udp dport {} accept", common::p2p::P2P_PORT)));
         assert!(rs.contains("tcp dport { 25565 } accept"));
         assert!(rs.contains("udp dport { 34197 } accept"));
         assert!(rs.trim_end().ends_with("input drop"));

@@ -600,8 +600,17 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // relay request, or a freshly-allocated relayed address the peer is waiting to learn).
             let relay_changed =
                 this_relay_need != last_relay_need || this_relay_alloc != last_relay_alloc;
-            // Report immediately (no hold) when our view changed; else hold for membership.
-            let poll_since = if changed || relay_changed || ice_changed {
+            // Our own grant is refreshed only when a poll *completes*; the idle re-poll above keeps
+            // cancelling the held request, so near expiry we must force a completing (non-held) poll —
+            // otherwise our own attestation goes stale and peers refreshing it from us (gossip) reject
+            // it. One such renewal per attestation lifetime (it jumps the expiry a full TTL forward).
+            let own_grant_stale = last_device
+                .as_ref()
+                .map(|d| d.grant_expires_at <= common::now_unix() + common::LONGPOLL_HOLD_SECS)
+                .unwrap_or(false);
+            // Report immediately (no hold) when our view changed or our grant needs renewing; else
+            // hold for membership.
+            let poll_since = if changed || relay_changed || ice_changed || own_grant_stale {
                 None
             } else {
                 since

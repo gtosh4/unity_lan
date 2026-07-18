@@ -39,6 +39,10 @@ pub struct SelfDevice {
     pub wg_net: ipnet::Ipv4Net,
     pub hostname: String,
     pub is_primary: bool,
+    /// Our own grant attestation's expiry (unix secs). The daemon forces a *completing* coordinator
+    /// renewal before this, so our served attestation (peer-direct refresh) never goes stale — only a
+    /// completed poll refreshes the grant, and the idle re-poll otherwise keeps cancelling the park.
+    pub grant_expires_at: u64,
     /// `<user>.unity.internal` if we're the owner's primary device.
     pub primary_alias: Option<String>,
     /// Every network our roles grant (role@guild) with per-device enabled state — for the toggle.
@@ -187,11 +191,15 @@ async fn post(
     ice: Vec<common::api::IceEndpoint>,
     held: Vec<common::api::HeldPeer>,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    // Timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held request.
+    // Total timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held
+    // request. The connect timeout is short, though: an unreachable coordinator should fail fast so
+    // the daemon loop keeps ticking (peer-direct refresh, cache) instead of hanging on a dead TCP
+    // connect — the OS default is ~130s, long enough to starve the mesh's own freshness path.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             common::LONGPOLL_HOLD_SECS + 60,
         ))
+        .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .context("building http client")?;
     let url = format!("{base_url}/{path}");
@@ -249,6 +257,7 @@ async fn post(
                 wg_net: att.wg_net,
                 hostname,
                 is_primary: att.is_primary,
+                grant_expires_at: att.expires_at,
                 primary_alias,
                 networks_status: resp.networks.clone(),
             })

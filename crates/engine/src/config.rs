@@ -108,11 +108,13 @@ pub struct Config {
     /// escape hatch and how the M5.4 relay path is exercised on Linux. No effect on kernel backends.
     #[serde(default = "default_true")]
     pub ice: bool,
-    /// Peer-direct attestation refresh (`docs/gossip-refresh.md`). When on, the engine serves its own
-    /// coordinator-minted attestation to meshed co-members over the WG tunnel, so the mesh can keep
-    /// credentials fresh without the coordinator fanning them out. **Off by default** — additive and
-    /// experimental; the coordinator remains the always-present source of truth and fallback.
-    #[serde(default)]
+    /// Peer-direct attestation refresh (`docs/gossip-refresh.md`). The engine serves its own
+    /// coordinator-minted attestation to meshed co-members over the WG tunnel and refreshes held
+    /// peers from them, so the mesh keeps credentials fresh (and drops a peer whose attestation lapses
+    /// with no source — revocation survives a coordinator outage) without the coordinator fanning
+    /// attestations out. **On by default**; the coordinator remains the source of truth and fallback.
+    /// Set `false` to disable (revert to coordinator-only refresh + coordinator-snapshot revocation).
+    #[serde(default = "default_true")]
     pub gossip: bool,
 }
 
