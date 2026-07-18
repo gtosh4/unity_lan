@@ -600,54 +600,48 @@ the crypto/trust core are in good shape (all 4 CI gates green — fmt/clippy/114
 TOFU invariant enforced + test-covered end to end; no code-quality blockers). The gating work is
 release plumbing, distribution docs, and a deliberate version decision — not broken functionality.
 
+> **Progress (2026-07-18 fix pass).** Items marked `[x]` below landed on branch `worktree-ga-prep`.
+> The still-open blockers all need release infrastructure or hardware you own (code signing, a
+> release rehearsal, live Windows validation) — none are code defects.
+
 ### GA-blockers
-- [ ] **Fix `docs/coordinator-setup.md`** — it's factually wrong: says live Discord/OAuth is "not
-      wired yet" (it shipped), and describes the wrong OAuth model (confidential client + secret +
-      `:8080/callback`). Reality is a **public PKCE client**, loopback redirect `127.0.0.1:8765/callback`,
-      `client_id`-only coordinator config (see `packaging/README.md`, which is correct). The two setup
-      docs describe mutually exclusive auth flows; only one is real → a first-time host is misled.
-- [ ] **Add `SECURITY.md`** — a crypto/networking tool with signing keys and firewall rules has no
-      vulnerability-disclosure policy or channel. Standard/expected for security-software GA.
-- [ ] **Reconcile the install path** — `README.md` routes end users to prebuilt packages on
-      `../../releases`, but `git tag` is empty: no release, no tag, no published `.deb`/`.rpm`/MSI/GHCR
-      image. Either cut a release or stop the docs overstating availability.
+- [x] **Fix `docs/coordinator-setup.md`** — rewrote sections C/F/G to the real model: **public PKCE
+      client**, loopback redirect `127.0.0.1:8765/callback`, `client_id`-only coordinator config; dropped
+      the "live mode not wired yet" falsehood.
+- [x] **Add `SECURITY.md`** — private disclosure via GitHub advisories, scope + trust-boundary notes,
+      linked from the README.
+- [~] **Reconcile the install path** — added a **pre-release note** to the README pointing users to
+      build-from-source until the first tag. Full fix = actually cut a release (below).
 - [ ] **No code signing anywhere** (`.github/workflows/release.yml`) — MSI is unsigned (a LocalSystem
       service installer → SmartScreen "unknown publisher" + UAC); `.deb`/`.rpm`/`SHA256SUMS` unsigned
-      too. Unsigned Windows especially is a hard "download and run" blocker.
+      too. Unsigned Windows especially is a hard "download and run" blocker. **(needs signing certs)**
 - [ ] **Rehearse the release pipeline** — it has never run (`git tag` empty; CI does fmt/clippy/test
       only, never invokes `build.sh`/nfpm/WiX/Docker). Cut a `v0.x.0-rc1` pre-release tag to exercise
       the whole path (build all artifacts, install on clean Linux + a real Windows box) before the GA tag.
-- [ ] **Linux desktop GUI can't reach the engine out of the box** — root owns
-      `/run/unitylan/control.sock` (`RuntimeDirectoryMode=0750`); the GUI runs unprivileged and the
-      group-readable socket is "not yet wired." The `unitylan-desktop` package installs a GUI that
-      can't connect. Wire a `unitylan` group + socket group-ownership.
-- [ ] **Version decision** — workspace is `0.1.0` (`Cargo.toml`). 0.x signals unstable API under
-      SemVer and README self-describes as "young/pre-1.0". Either bump to `1.0.0` or deliberately ship
-      GA as 0.x and reconcile the positioning. (Note: tagged-artifact version can drift from the
-      compiled-in crate version if the bump is forgotten — `build.sh` takes VERSION from the git tag.)
+- [x] **Linux desktop GUI can't reach the engine out of the box** — packaging now creates a `unitylan`
+      group, the systemd unit runs the engine `Group=unitylan` (so `/run/unitylan` + the socket are
+      group-owned), engine.toml sets `control_group`, and postinstall guides `usermod -aG`.
+- [x] **Version decision** — **shipping GA as 0.x** (deliberate; API still evolving). No code change;
+      the README's "young/pre-1.0" framing is consistent with this.
 
 ### Should-fix (not blocking)
 - [ ] **Windows is compile-verified only, never run on real hardware** (wg-nt backend, NRPT resolver,
       firewall, service, tray, MSI self-update apply). If GA claims Windows support → needs live
-      sign-off; otherwise ship **Linux-first, Windows beta**.
-- [ ] **Defense-in-depth: validate seed `wg_ip` against the signed `wg_net`** — `engine/src/coord.rs`
-      accepts `att.wg_ip` and `daemon.rs` installs it as a `/32` allowed-IP with no check that it falls
-      inside the signed mesh CIDR. `wg_net` is signed precisely to bound this; enforce
-      `wg_net.contains(wg_ip)` at admission (cheap; the exact check the signed field exists for).
-- [ ] **Narrow systemd `ReadWritePaths=/usr/bin`** (`packaging/init/systemd/unitylan-engine.service`)
-      — a network-facing root service that can overwrite all of `/usr/bin` (e.g. `sudo`) is a
-      persistence/privesc vector. Install the engine under a dedicated dir and scope the writable path.
-- [ ] **Add a dependency-vuln gate** — `cargo-audit`/`cargo-deny` not installed and not in CI. Add
-      it and run against `Cargo.lock` before GA.
-- [ ] **Remove the dead `RELAXED_DACL`** (`crates/engine/src/service.rs` `sc.exe sdset`) — GUI
-      start/stop was removed, so nothing uses the relaxed DACL, yet the service still grants
-      unprivileged start of a LocalSystem service. Unnecessary privilege surface.
-- [ ] **Pin the wireguard-nt DLL by SHA-256** — `packaging/windows/build.ps1` fetches it over the
-      network, version-pinned only → supply-chain gap into a signed MSI.
-- [ ] **Add a commented live `[discord]`/`[oauth]` block to `coordinator.example.toml`** and drop the
-      "replace later / M1" language — the in-repo example has no live template today.
-- [ ] **Fix the stale scope note** `crates/gui/src/main.rs` claiming network toggles / expose / OAuth
-      login are "deferred" — all three shipped (M4/M7).
+      sign-off; otherwise ship **Linux-first, Windows beta**. **(needs a Windows box)**
+- [x] **Defense-in-depth: validate seed `wg_ip` against the signed `wg_net`** — `verified_seeds` now
+      skips any peer whose signed `wg_ip` falls outside its signed `wg_net` (+regression test).
+- [x] **Narrow systemd `ReadWritePaths`** — engine installs to `/usr/lib/unitylan/unitylan-engine`
+      (symlinked onto PATH); the writable grant is scoped to that dir, not all of `/usr/bin`.
+- [x] **Add a dependency-vuln gate** — `cargo audit` in CI + a conditional pre-commit step, with a
+      documented ignore-list (`.cargo/audit.toml`) for the current GUI-only advisories.
+- [x] **Remove the dead `RELAXED_DACL`** — dropped the const, `relax_acl()`, and the `sc.exe sdset`
+      call; the service keeps the SCM default DACL. WiX + README comments updated.
+- [x] **Pin the wireguard-nt DLL by SHA-256** — `build.ps1` now verifies the download hash and refuses
+      to bundle on mismatch.
+- [x] **Add a commented live `[discord]`/`[oauth]` block to `coordinator.example.toml`** — done; dropped
+      the "replace later / M1" language.
+- [x] **Fix the stale scope note** `crates/gui/src/main.rs` — network toggles / expose / OAuth login are
+      now described as shipped surfaces.
 - [ ] arm64 + macOS targets; apt/dnf repo or `curl | sh` one-liner; `CHANGELOG.md`; multi-arch
       coordinator image (`docker/coordinator.Dockerfile` sets no `platforms:`).
 
