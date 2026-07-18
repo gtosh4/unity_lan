@@ -217,15 +217,18 @@ build.sh                               binaries + all four packages
 ```sh
 sudo apt install ./dist/unitylan_<ver>_amd64.deb      # or: rpm -i dist/unitylan-<ver>.x86_64.rpm
 sudoedit /etc/unitylan/engine.toml                    # set coordinator + enrollment_key
+sudo usermod -aG unitylan $USER                       # drive the engine without root (re-login after)
 sudo systemctl enable --now unitylan-engine
 ```
 
 Runtime deps (`iproute2`, `nftables`) install automatically. The daemon runs as root with
 `CAP_NET_ADMIN` for the userspace WireGuard interface, the nftables firewall, and `resolvectl`.
 
-> **Note — GUI ↔ daemon socket.** The daemon runs as root and owns `/run/unitylan/control.sock`;
-> the GUI runs as your desktop user. Group-readable socket access is not yet wired up, so the
-> launcher currently assumes you can reach that socket. Tracked separately from packaging.
+> **GUI ↔ daemon socket.** The daemon runs as root and owns `/run/unitylan/control.sock` (mode 660,
+> `root:unitylan`). The postinstall creates the `unitylan` group and the systemd unit runs the engine
+> with `Group=unitylan`, so `/run/unitylan` and the socket are group-owned by `unitylan`. Add your
+> desktop user to that group (the `usermod` step above) and log back in — then the GUI/CLI connect
+> without root.
 
 ## Install & run (Windows)
 

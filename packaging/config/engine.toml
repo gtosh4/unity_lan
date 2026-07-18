@@ -7,6 +7,9 @@ coordinator = "https://coordinator.unitylan.com"
 # Managed by the systemd unit (StateDirectory / RuntimeDirectory). Leave these as-is.
 state_dir = "/var/lib/unitylan"
 control_socket = "/run/unitylan/control.sock"
+# The control socket is owned root:unitylan mode 660; add your desktop user to the `unitylan` group
+# (`sudo usermod -aG unitylan <you>`, then re-login) so the GUI/CLI can drive the engine without root.
+control_group = "unitylan"
 
 # One-time enrollment key that binds this device to its owner on first register.
 # enrollment_key = "..."

@@ -13,10 +13,17 @@ ExecStart=/usr/lib/unitylan/unitylan-engine run /etc/unitylan/engine.toml
 Restart=always
 RestartSec=5
 
-# /var/lib/unitylan (0700 root) — WG private key + pinned trust anchor. State survives restarts.
+# Run as root (User unset) but with the `unitylan` group, so RuntimeDirectory (/run/unitylan) and
+# the control socket the engine binds there are group-owned by `unitylan`. Members of that group
+# (the desktop user, added at install) reach the socket without root — no chown needed, so no
+# CAP_CHOWN in the bounding set below. The group is created by the package postinstall.
+Group=unitylan
+
+# /var/lib/unitylan (0700 root:unitylan — group has no access) — WG private key + pinned trust
+# anchor. State survives restarts.
 StateDirectory=unitylan
 StateDirectoryMode=0700
-# /run/unitylan — holds the control socket the CLI/GUI connect to.
+# /run/unitylan — root:unitylan 0750 so `unitylan` group members can traverse to the control socket.
 RuntimeDirectory=unitylan
 RuntimeDirectoryMode=0750
 
