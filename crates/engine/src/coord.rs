@@ -369,6 +369,18 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             }
         }
         let att = verified.context("seed has no attestation signed by a pinned guild anchor")?;
+        // Defence in depth: the signed `wg_net` exists to bound `wg_ip` (attestation.rs). Refuse to
+        // route a `/32` that falls outside it, so a compromised or buggy guild key can't get a
+        // co-member's allowed-IPs pointed at an off-mesh address (a LAN gateway, a public host).
+        // Skip just this peer rather than failing the batch — the bogus route is never installed
+        // either way, and one bad attestation shouldn't deny peering with everyone else.
+        if !att.wg_net.contains(&att.wg_ip) {
+            tracing::warn!(
+                peer_ip = %att.wg_ip, wg_net = %att.wg_net,
+                "seed attestation wg_ip is outside its signed wg_net — skipping peer"
+            );
+            continue;
+        }
         peers.push(SeedPeer {
             pubkey: att.wg_pubkey,
             user_id: att.user_id,
@@ -402,6 +414,12 @@ mod tests {
 
     /// A seed with one attestation for `guild_id`, signed by `key` (attacker or honest coordinator).
     fn seed_signed_by(key: &CoordinatorKey, guild_id: u64) -> Seed {
+        seed_with_ip(key, guild_id, Ipv4Addr::new(100, 64, 0, 9), "100.64.0.0/10")
+    }
+
+    /// Like `seed_signed_by`, but with an explicit signed `wg_ip` / `wg_net` (to exercise the
+    /// off-mesh-`/32` guard).
+    fn seed_with_ip(key: &CoordinatorKey, guild_id: u64, wg_ip: Ipv4Addr, wg_net: &str) -> Seed {
         let now = now_unix();
         let att = Attestation {
             guild_id,
@@ -409,8 +427,8 @@ mod tests {
             username: "eve".into(),
             device_name: "box".into(),
             is_primary: false,
-            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
-            wg_net: "100.64.0.0/10".parse().unwrap(),
+            wg_ip,
+            wg_net: wg_net.parse().unwrap(),
             wg_pubkey: [9u8; 32],
             issued_at: now,
             expires_at: now + common::ATTESTATION_TTL_SECS,
@@ -492,6 +510,36 @@ mod tests {
             verified_seeds(&forged, &dir).is_err(),
             "an attestation signed by a different guild's key must be rejected"
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Defence in depth: a seed whose signature verifies but whose signed `wg_ip` falls outside its
+    /// signed `wg_net` is dropped (not routed) — a compromised/buggy guild key can't point a
+    /// co-member's `/32` at an off-mesh address. The in-net peer in the same batch still admits.
+    #[test]
+    fn seed_wg_ip_outside_signed_net_is_dropped() {
+        let dir = temp_state_dir("wg-ip-oob");
+        let honest = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        let resp = resp_with_seeds(
+            GUILD,
+            &honest,
+            vec![
+                seed_with_ip(
+                    &honest,
+                    GUILD,
+                    Ipv4Addr::new(100, 64, 0, 9),
+                    "100.64.0.0/10",
+                ),
+                // 10.0.0.1 is not inside the signed 100.64.0.0/10 → must be skipped.
+                seed_with_ip(&honest, GUILD, Ipv4Addr::new(10, 0, 0, 1), "100.64.0.0/10"),
+            ],
+        );
+        let peers = verified_seeds(&resp, &dir).unwrap();
+        assert_eq!(peers.len(), 1, "only the in-mesh peer is admitted");
+        assert_eq!(peers[0].ip, Ipv4Addr::new(100, 64, 0, 9));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
