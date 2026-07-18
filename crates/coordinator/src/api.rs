@@ -208,15 +208,34 @@ async fn register(
     }
     let resp = build_snapshot(&st, &req).await?;
     if req.since == Some(resp.version) {
-        wait_for_change(&st, resp.version).await;
+        let woke_on_change = wait_for_change(&st, resp.version).await;
+        // On a herd wake (the version actually moved) stagger the rebuild by a small per-client
+        // offset, so one membership bump doesn't fan every parked client back into the coordinator
+        // in the same instant — burst-credit protection on a fan-in chokepoint. A hold-elapsed
+        // renewal already spreads across time on each client's own clock, so it gets no jitter.
+        if woke_on_change {
+            tokio::time::sleep(wake_jitter(&req.wg_pubkey)).await;
+        }
         return Ok(Json(build_snapshot(&st, &req).await?));
     }
     Ok(Json(resp))
 }
 
+/// Max stagger applied to a herd wake so a single version bump doesn't release every parked client
+/// into the coordinator at the same instant.
+const WAKE_JITTER_MAX_MS: u64 = 1000;
+
+/// A deterministic per-client wake offset in `[0, WAKE_JITTER_MAX_MS)`, derived from the client's
+/// (uniformly distributed) pubkey — spreads a herd across the window without pulling in an RNG, and
+/// keeps a given client's slot stable across successive wakes.
+fn wake_jitter(wg_pubkey: &[u8; 32]) -> std::time::Duration {
+    let n = u64::from_le_bytes(wg_pubkey[..8].try_into().unwrap());
+    std::time::Duration::from_millis(n % WAKE_JITTER_MAX_MS)
+}
+
 /// Park until the membership version moves off `since`, or the client-renewal hold elapses. `watch`
 /// tracks the latest version internally, so a bump between snapshot and subscribe is not lost.
-async fn wait_for_change(st: &AppState, since: u64) {
+async fn wait_for_change(st: &AppState, since: u64) -> bool {
     wait_for_change_until(
         st,
         since,
@@ -228,17 +247,19 @@ async fn wait_for_change(st: &AppState, since: u64) {
 /// [`wait_for_change`] with a caller-chosen hold. The register path uses the ≈attestation-TTL hold
 /// (a renewal cycle); the admin dashboard passes a short heartbeat so its held request survives
 /// reverse-proxy idle timeouts and its "updated" clock stays fresh, at the cost of a cheap re-poll.
-async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Duration) {
+/// Returns `true` if it woke because the version moved (a real membership change → herd wake),
+/// `false` if the hold elapsed first (a renewal) or the sender was dropped.
+async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Duration) -> bool {
     let mut rx = st.version.subscribe();
     let deadline = tokio::time::sleep(hold);
     tokio::pin!(deadline);
     loop {
         if *rx.borrow_and_update() != since {
-            return;
+            return true;
         }
         tokio::select! {
-            r = rx.changed() => if r.is_err() { return; },
-            _ = &mut deadline => return,
+            r = rx.changed() => if r.is_err() { return false; },
+            _ = &mut deadline => return false,
         }
     }
 }
@@ -1285,6 +1306,15 @@ mod tests {
     use common::api::{ObservedEndpoint, SharedNetwork};
     use std::net::IpAddr;
     use std::time::Instant;
+
+    #[test]
+    fn wake_jitter_bounded_deterministic_and_spread() {
+        let a = super::wake_jitter(&[7u8; 32]);
+        assert_eq!(a, super::wake_jitter(&[7u8; 32]), "same pubkey → same slot");
+        assert!((a.as_millis() as u64) < super::WAKE_JITTER_MAX_MS);
+        // Distinct pubkeys land in distinct slots → the herd spreads across the window.
+        assert_ne!(a, super::wake_jitter(&[8u8; 32]));
+    }
 
     #[test]
     fn rate_limiter_per_ip_and_window_reset() {
