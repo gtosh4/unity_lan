@@ -42,18 +42,6 @@ const SERVICE_NAME: &str = common::control::WINDOWS_SERVICE_NAME;
 const DISPLAY_NAME: &str = "UnityLAN Engine";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
-/// DACL applied to the service at install so the *unprivileged* GUI can start it without a UAC
-/// prompt. Grants: SYSTEM standard service control, Administrators full control (so `uninstall` and
-/// `services.msc` keep working), and Interactive users (`IU` = the logged-on desktop user) query +
-/// **start** (`RP`) only. Interactive-only is deliberate — remote/network logons don't get it. Stop
-/// is *not* granted: day-to-day on/off is a mesh connect/disconnect over the control socket (no SCM
-/// access), and the GUI's only SCM affordance is *start* (bootstrap from a stopped engine), so `WP`
-/// (`SERVICE_STOP`) is unneeded — dropping it is least-privilege (stopping a service only ever tears
-/// down the mesh, never opens the host, but the interactive user has no reason to hold the right).
-const RELAXED_DACL: &str = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)\
-    (A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)\
-    (A;;CCLCSWRPLOCRRC;;;IU)";
-
 /// Dispatch the `service` subcommand (called from `main` outside any tokio runtime).
 pub fn main() -> Result<()> {
     match std::env::args().nth(2).unwrap_or_default().as_str() {
@@ -105,40 +93,15 @@ fn install(config: Option<String>) -> Result<()> {
         "UnityLAN mesh engine: WireGuard mesh, host firewall, and .unity.internal DNS resolver.",
     );
 
-    // Relax the DACL so the unprivileged GUI can start/stop without UAC. Best-effort: on failure the
-    // service still works, just controllable only from an elevated shell.
-    let acl = match relax_acl() {
-        Ok(()) => "GUI can start/stop it without elevation",
-        Err(e) => {
-            eprintln!("warning: could not relax service permissions ({e:#}); the GUI will need an elevated shell to start/stop");
-            "control needs an elevated shell"
-        }
-    };
-
+    // The service keeps the SCM default DACL (control needs elevation). The GUI never drives the
+    // SCM — its only on/off is a mesh connect/disconnect over the control socket — so no DACL relax
+    // is needed.
     println!("Installed service '{SERVICE_NAME}' (auto-start at boot).");
     println!("  config: {}", config.display());
-    println!("  perms:  {acl}");
     println!("  start now:  sc.exe start {SERVICE_NAME}    (or reboot)");
     println!(
         "  ensure the wireguard-nt DLL is at resources-windows\\binaries\\wireguard-amd64.dll next to the engine executable."
     );
-    Ok(())
-}
-
-/// Apply [`RELAXED_DACL`] to the service via `sc.exe sdset` (matches the shell-out pattern used by
-/// the firewall/NRPT backends; the `windows-service` crate doesn't expose the security descriptor).
-fn relax_acl() -> Result<()> {
-    let out = std::process::Command::new("sc.exe")
-        .args(["sdset", SERVICE_NAME, RELAXED_DACL])
-        .output()
-        .context("spawning sc.exe")?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "sc.exe sdset failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stdout).trim()
-        );
-    }
     Ok(())
 }
 

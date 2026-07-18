@@ -31,8 +31,7 @@ The script builds the release exes, fetches the pinned wireguard-nt DLL (not com
 under `resources-windows\binaries\`, and runs `wix build` → `packaging\dist\unitylan-<ver>-x64.msi`.
 
 The MSI installs the engine + GUI under `Program Files\UnityLAN`, drops a Start-menu shortcut, and
-registers the `UnityLANEngine` LocalSystem service by calling the engine's own `service install`
-(which also relaxes the service DACL so the unprivileged GUI can start it). See
+registers the `UnityLANEngine` LocalSystem service by calling the engine's own `service install`. See
 [Windows install & run](#install--run-windows) below.
 
 ## Build the coordinator image
@@ -237,9 +236,9 @@ sc.exe start UnityLANEngine                 # or reboot; the service is auto-sta
 ```
 
 The MSI registers `UnityLANEngine` as a **LocalSystem auto-start service** by invoking the engine's
-own `service install`, which relaxes the service DACL so the desktop user can start it without a UAC
-prompt. Launch the GUI from the **UnityLAN** Start-menu shortcut; it connects to the engine over the
-`\\.\pipe\unitylan-control` named pipe.
+own `service install`; it starts at boot (or start it now from an elevated shell with
+`sc.exe start UnityLANEngine`). Launch the GUI from the **UnityLAN** Start-menu shortcut; it connects
+to the engine over the `\\.\pipe\unitylan-control` named pipe.
 
 The wireguard-nt DLL ships inside the MSI at
 `Program Files\UnityLAN\resources-windows\binaries\wireguard-amd64.dll` — defguard loads it by that

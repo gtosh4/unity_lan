@@ -1,8 +1,9 @@
 //! Coordinator configuration (TOML). A coordinator may serve multiple guilds.
 //!
-//! M1 supports an offline `[fake]` role source. Live `[discord]`/`[oauth]` blocks land later.
-//! The `[[network]]` seeds pre-populate the registry (simulating admin slash commands) —
-//! useful in the test config; in production networks are managed via `/unitylan network`.
+//! Two role sources: the live `[discord]` + `[oauth]` blocks, or an offline `[fake]` source for
+//! dev/tests (mutually exclusive). The `[[network]]` seeds pre-populate the registry (simulating
+//! admin slash commands) — useful in the test config; in production networks are managed via
+//! `/unitylan network`.
 
 use std::path::PathBuf;
 

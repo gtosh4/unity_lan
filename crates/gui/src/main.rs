@@ -4,8 +4,8 @@
 //! window closes — this is a viewer/controller, not the engine.
 //!
 //! Usage: `unitylan-gui [control.sock]` (default: `control.sock` in the working directory).
-//! Scope note: network toggles / expose / OAuth login are deferred until the engine exposes
-//! them over the control socket.
+//! Also surfaces per-network peering toggles, port expose/unexpose, and Discord OAuth login —
+//! all over the same control socket.
 
 // Release Windows builds detach from the console so launching the GUI (shortcut/Explorer) doesn't
 // flash a terminal. Debug keeps the console for logs.

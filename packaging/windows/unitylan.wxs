@@ -7,7 +7,7 @@
     - drops a Start-menu shortcut to the GUI,
     - installs a default engine.toml (never overwritten on upgrade so edits survive),
     - registers + removes the LocalSystem service by calling the engine's own `service install`/
-      `service uninstall`, which also relaxes the DACL so the unprivileged GUI can start it.
+      `service uninstall`.
 
   Build (see build.ps1) supplies these preprocessor vars via `wix build -d`:
     Version, EngineExe, GuiExe, WgDll, EngineToml
@@ -69,9 +69,9 @@
     </Feature>
 
     <!-- Register/unregister the service via the engine's own installer path. Deferred + no
-         impersonation => runs as LocalSystem, which the service create + `sc sdset` (DACL relax)
-         need. `service install` with no config arg uses engine.toml next to the exe (which we just
-         installed); it canonicalizes that path, so CWD does not matter. -->
+         impersonation => runs as LocalSystem, which the service create needs. `service install`
+         with no config arg uses engine.toml next to the exe (which we just installed); it
+         canonicalizes that path, so CWD does not matter. -->
     <CustomAction Id="InstallService" FileRef="EngineExe" ExeCommand="service install"
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="UninstallService" FileRef="EngineExe" ExeCommand="service uninstall"
