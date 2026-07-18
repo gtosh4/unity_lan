@@ -23,10 +23,14 @@ Deeper design lives in `docs/design.md` (concepts, trust model, NAT), `docs/tech
 cargo build                                        # whole workspace (debug)
 cargo build -p unitylan-engine                     # one crate
 
-# The three gates CI enforces (a pre-commit hook in .githooks runs exactly these):
+# The three gates CI enforces (a pre-commit hook in .githooks runs these):
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+# CI also runs a dependency-vuln gate (cargo audit, ignore-list in .cargo/audit.toml). The hook
+# runs it too, but only when a commit changes Cargo.lock (and only if cargo-audit is installed):
+cargo audit
 
 cargo test -p unitylan-coordinator                 # one crate's tests
 cargo test -p unitylan-coordinator rename_and       # single test by name substring

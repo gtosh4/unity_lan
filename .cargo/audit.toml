@@ -1,0 +1,16 @@
+# cargo-audit ignore-list. The gate blocks NEW advisories in the engine/coordinator dependency
+# trees; the entries below are advisories triaged as not affecting UnityLAN's threat model. All are
+# in the Linux desktop GUI's transitive deps (iced → winit → Wayland/GTK stack) — none reach the
+# engine or coordinator, which carry the crypto/network/privileged surface. Revisit on an iced bump.
+[advisories]
+ignore = [
+    # quick-xml DoS (quadratic attr scan / unbounded ns alloc). Pulled only by `wayland-scanner`, a
+    # BUILD-TIME proc-macro parsing the crate's own bundled Wayland protocol XML — never runtime,
+    # never attacker-supplied. Can't move without bumping winit/iced. GUI-only.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # glib / lru unsoundness — Linux GUI stack (glib via GTK bindings, lru via the renderer). Not on
+    # any UnityLAN code path; no fixed release reachable under the current iced tree.
+    "RUSTSEC-2024-0429",
+    "RUSTSEC-2026-0002",
+]

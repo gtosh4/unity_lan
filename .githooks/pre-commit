@@ -21,4 +21,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 echo "pre-commit: cargo test --workspace"
 cargo test --workspace
 
+# Dependency-vuln audit — only when this commit touches Cargo.lock (deps are all it checks), so it
+# stays off the hot path of everyday commits. Skipped if cargo-audit isn't installed.
+if git diff --cached --name-only | grep -qx 'Cargo.lock'; then
+    if command -v cargo-audit >/dev/null 2>&1; then
+        echo "pre-commit: cargo audit (Cargo.lock changed)"
+        cargo audit
+    else
+        echo "pre-commit: Cargo.lock changed but cargo-audit not installed — skipping (cargo install cargo-audit)"
+    fi
+fi
+
 echo "pre-commit: OK"

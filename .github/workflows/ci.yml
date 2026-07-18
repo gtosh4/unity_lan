@@ -39,3 +39,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+
+  # Dependency-vulnerability gate. Reads the ignore-list in .cargo/audit.toml (triaged, non-
+  # applicable advisories, all in the GUI's transitive deps) and fails on any new advisory in the
+  # engine/coordinator trees.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: cargo audit
+        run: cargo audit
