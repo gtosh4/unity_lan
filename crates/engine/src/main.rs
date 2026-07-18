@@ -176,7 +176,10 @@ fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                // boringtun WARN-spams HANDSHAKE(REKEY_TIMEOUT) every ~5s while retrying a handshake
+                // with a peer whose device is down — not actionable; reachability is surfaced in status.
+                .unwrap_or_else(|_| "info,defguard_boringtun::noise::timers=error".into()),
         )
         .init();
 

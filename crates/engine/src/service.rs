@@ -333,7 +333,8 @@ fn init_service_logging() {
             .with_ansi(false)
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "info".into()),
+                    // Silence boringtun's HANDSHAKE(REKEY_TIMEOUT) WARN spam for down peers (see main.rs).
+                    .unwrap_or_else(|_| "info,defguard_boringtun::noise::timers=error".into()),
             )
             .with_writer(move || file.try_clone().expect("clone service log fd"))
             .try_init();
