@@ -110,6 +110,10 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
 
 ## Try it / install
 
+> **Pre-release:** no packaged release is published yet. Until the first tagged release, build from
+> source (see [Building from source](#building-from-source)). The package flow described here is what
+> that first release ships.
+
 Prebuilt packages are attached to each [GitHub Release](../../releases); build instructions and the
 full install steps live in [`packaging/README.md`](packaging/README.md).
 
@@ -175,7 +179,7 @@ handles cryptographic keys. A few things worth knowing:
   afford to have go wrong, same as you would any young security tool.
 
 The goal is to be upfront rather than quietly ship and hope nobody asks. Bug reports and reviews
-are welcome.
+are welcome. Found a security issue? Please report it privately — see [SECURITY.md](SECURITY.md).
 
 ## License
 
