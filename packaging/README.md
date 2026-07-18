@@ -158,8 +158,9 @@ long-poll. Each engine verifies it against its **pinned** anchor and, if the ver
 artifact matches its platform, the GUI shows an **Update** button. Applying it downloads the
 artifact, re-checks the SHA-256 against the signed manifest, then:
 
-- **Linux** — self-replaces `/usr/bin/unitylan-engine` in place and exits; systemd (`Restart=always`,
-  with `ReadWritePaths=/usr/bin`) relaunches onto the new binary. The GUI is updated via the package
+- **Linux** — self-replaces the engine binary (`/usr/lib/unitylan/unitylan-engine`, symlinked onto
+  PATH) in place and exits; systemd (`Restart=always`, with `ReadWritePaths=/usr/lib/unitylan`)
+  relaunches onto the new binary. The GUI is updated via the package
   manager as usual (the engine self-update keeps the resident daemon current).
 - **Windows** — runs the signed `.msi`; its `MajorUpgrade` stops the service, replaces engine + GUI +
   DLL, and restarts.

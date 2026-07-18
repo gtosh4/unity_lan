@@ -24,10 +24,16 @@ recommends:
   - systemd-resolved
 
 contents:
+  # The real binary lives in a private dir so the service's ReadWritePaths (needed by the signed
+  # self-update, which rewrites the running binary in place) can be scoped to just this dir rather
+  # than all of /usr/bin. Symlinks below keep `unitylan-engine`/`unitylan` on PATH.
   - src: ../../target/release/unitylan-engine
+    dst: /usr/lib/unitylan/unitylan-engine
+  - src: /usr/lib/unitylan/unitylan-engine
     dst: /usr/bin/unitylan-engine
+    type: symlink
   # CLI ergonomics: docs/help refer to `unitylan ctl ...`.
-  - src: /usr/bin/unitylan-engine
+  - src: /usr/lib/unitylan/unitylan-engine
     dst: /usr/bin/unitylan
     type: symlink
   - src: ../init/systemd/unitylan-engine.service

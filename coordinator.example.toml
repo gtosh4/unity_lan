@@ -13,7 +13,18 @@ database = "coordinator.db"
 # [admin]
 # token = "<long-random-secret>"
 
-# --- Offline dev source (M1). Replace with live [discord]/[oauth] blocks later. ---
+# --- Live source: real Discord + OAuth (see docs/coordinator-setup.md) ---
+# Uncomment these two blocks (and delete the [fake...] / [[network]] seeds below) for a live
+# deployment. The engine is a public PKCE client, so the [oauth] block holds only the public
+# client_id — no client_secret, no redirect (the engine owns the loopback redirect).
+#
+# [discord]
+# bot_token = "<your bot token>"
+#
+# [oauth]
+# client_id = "<your app client id>"
+
+# --- Offline dev source: fake Discord, no bot/OAuth/network needed ---
 [[fake.guild]]
 id = 111
 name = "My Community"

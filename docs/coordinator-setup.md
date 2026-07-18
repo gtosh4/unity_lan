@@ -16,11 +16,13 @@ are needed only for the **live** coordinator; `fake` mode (bottom) needs none of
 3. **Privileged Gateway Intents** → enable **Server Members Intent** (required — reads roles +
    nicknames). **Save**. (Leave *Presence Intent* off.)
 
-## C. OAuth2 client secret + redirect
+## C. OAuth2 public client + loopback redirect
 1. Left sidebar → **OAuth2**.
-2. Copy the **Client Secret** (Reset Secret if needed).
-3. Under **Redirects**, add exactly `http://localhost:8080/oauth/callback`
-   (Discord allows `http` for localhost; must match the coordinator config's bind/port). **Save**.
+2. Enable the **Public Client** flag. The engine runs OAuth2 **auth-code + PKCE** as a public
+   client, so **there is no client secret** — none is generated for or stored on the coordinator.
+3. Under **Redirects**, add exactly `http://127.0.0.1:8765/callback` (Discord allows `http` for
+   loopback). The **engine** binds this fixed loopback listener itself and does the code exchange,
+   so login works from any host/VM even when the browser can't reach the coordinator URL. **Save**.
 
 ## D. Invite the bot to a test server
 Open (fill in your App ID), pick the guild, Authorize. Include `applications.commands` so the
@@ -52,13 +54,9 @@ role is renamed.
 ## F. Coordinator config (`coordinator.toml`)
 
 Because the coordinator is multi-tenant and networks are registered via slash commands, the
-live config needs only the **bot token**, **OAuth credentials**, and where to **listen**.
-Guild IDs and role IDs are **not** config — the bot serves every guild it's invited to, and
-networks are registered in Discord with `/unitylan network add`.
-
-> Target schema for **live** mode. Not wired yet — the code currently runs the offline
-> `[fake]` source (see below). The `[discord]`/`[oauth]` blocks activate when the live
-> Discord + OAuth path is implemented.
+live config needs only the **bot token**, the **public OAuth client ID**, and where to
+**listen**. Guild IDs and role IDs are **not** config — the bot serves every guild it's invited
+to, and networks are registered in Discord with `/unitylan network add`.
 
 ```toml
 bind = "127.0.0.1:8080"       # 127.0.0.1 for local; a public bind + TLS for real deploys
@@ -68,17 +66,17 @@ database = "coordinator.db"
 bot_token = "..."             # B.2
 
 [oauth]
-client_id = "..."             # A.2  (= Application ID)
-client_secret = "..."         # C.2
-redirect = "http://localhost:8080/oauth/callback"   # MUST match the redirect from C.3
+client_id = "..."             # A.2  (= Application ID) — public client_id only; no secret/redirect
 ```
+
+The engine is a **public PKCE client** — it holds no secret, and it owns the loopback redirect
+(`http://127.0.0.1:8765/callback`, C.3) and the token exchange. So the coordinator config carries
+**only** the public `client_id`; there is no `client_secret` or `redirect` key.
 
 | Value | From | Config key |
 |---|---|---|
 | Bot Token | B.2 | `discord.bot_token` |
 | Client ID | A.2 | `oauth.client_id` |
-| Client Secret | C.2 | `oauth.client_secret` |
-| Redirect URI | C.3 | `oauth.redirect` (must match exactly) |
 
 **Not in config** (discovered or registered, not pasted):
 - **Guild ID** — the bot serves every guild it's invited to (D).
@@ -94,9 +92,10 @@ For the optional monitoring surface (`[admin]` block → dashboard + Prometheus 
 ## G. Anything else?
 - **Create roles** in Discord (E) and **register** them with `/unitylan network add` — that's
   what makes a role a network. Not config.
-- **Reachability**: clients *and* Discord's OAuth redirect must reach the coordinator. Local
-  testing → `localhost` is fine. Real deploy → a public host/domain with **TLS**; put that
-  real callback URL in **both** the Discord **Redirects** list (C.3) and `oauth.redirect`.
+- **Reachability**: only **clients** need to reach the coordinator (for `/register` and the token
+  hand-off). The OAuth redirect is **loopback to the engine** (`127.0.0.1:8765`, C.3), so Discord
+  never redirects to the coordinator — login works even when the browser can't reach it. Local
+  testing → `localhost` is fine. Real deploy → a public host/domain with **TLS** for the client API.
 - Nothing else Discord-side. Intents (B) + `applications.commands` invite (D) cover it.
 
 ---
@@ -155,7 +154,7 @@ Exposed gauges: `unitylan_guilds`, `unitylan_networks`, `unitylan_devices_enroll
 ---
 
 ## Offline `fake` mode (no Discord needed)
-For development and the M1 verify, run the coordinator with a `[fake]` config block that
+For development and offline tests, run the coordinator with a `[fake]` config block that
 supplies members/roles directly — no bot token, OAuth, or network. See
 `coordinator.example.toml`. Swap to the live `[discord]`/`[oauth]` blocks once the app above
 is set up.
