@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 
 use anyhow::{bail, Context};
-use common::api::{Grant, NetworkRef, RegisterReq, RegisterResp};
+use common::api::{Grant, GuildAttestation, NetworkRef, RegisterReq, RegisterResp};
 use common::attestation::{verify_attestation, Attestation};
 use common::crypto::{anchor_from_bytes, WgPublicKey};
 use common::now_unix;
@@ -305,6 +305,48 @@ fn verify_grant(
         }
     }
     bail!("no grant attestation verified against a pinned guild anchor")
+}
+
+/// Verify a peer's self-served attestations (from a p2p pull, `docs/gossip-refresh.md`) against our
+/// pinned anchors — the same trust gate as the coordinator path, so a pull establishes no new trust.
+/// Returns the attestation for `expected_pubkey` iff one verifies, its `wg_ip` is inside its signed
+/// `wg_net`, and it is strictly fresher than `current_expiry`. Binding `expected_pubkey` stops a peer
+/// from serving a (validly-signed) attestation for a *different* device.
+pub fn verify_pulled(
+    blobs: &[GuildAttestation],
+    expected_pubkey: [u8; 32],
+    current_expiry: u64,
+    state_dir: &Path,
+    now: u64,
+) -> Option<Attestation> {
+    let pinned = keys::load_all_pinned(state_dir);
+    for ga in blobs {
+        let Ok(signed) = Signed::from_base64(&ga.attestation) else {
+            continue;
+        };
+        if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
+            if att.wg_pubkey == expected_pubkey
+                && att.wg_net.contains(&att.wg_ip)
+                && att.expires_at > current_expiry
+            {
+                return Some(att);
+            }
+        }
+    }
+    None
+}
+
+/// Fold a peer-direct-verified attestation into a held seed: advance its expiry and re-derive the
+/// attestation-scoped identity fields. Leaves the coordinator-brokered transport fields (endpoint,
+/// punch, networks, relay, ice, rev) untouched — a peer serves only its own identity, not the
+/// pair-state the coordinator brokers.
+pub fn apply_pulled(seed: &mut SeedPeer, att: &Attestation) {
+    seed.user_id = att.user_id;
+    seed.username = att.username.clone();
+    seed.ip = att.wg_ip;
+    seed.hostname = att.hostname();
+    seed.primary_alias = att.primary_alias();
+    seed.expires_at = att.expires_at;
 }
 
 /// Fetch the public PKCE config (Discord `client_id`, fake-mode flag) so the engine can run the
@@ -673,5 +715,98 @@ mod tests {
         assert!(held_for_refresh(&[sp([1; 32], 42, now + 100)], now, 900).is_empty());
         // No peers → nothing to diff → empty (a full is fine).
         assert!(held_for_refresh(&[], now, 900).is_empty());
+    }
+
+    /// A raw `GuildAttestation` for `pubkey` signed by `key` for `guild`, expiring at `expires_at`.
+    fn signed_att(
+        key: &CoordinatorKey,
+        guild: u64,
+        pubkey: [u8; 32],
+        expires_at: u64,
+    ) -> GuildAttestation {
+        let att = Attestation {
+            guild_id: guild,
+            user_id: 5,
+            username: "neo".into(),
+            device_name: "box".into(),
+            is_primary: false,
+            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
+            wg_pubkey: pubkey,
+            issued_at: 0,
+            expires_at,
+        };
+        GuildAttestation {
+            attestation: Signed::sign(key, &att).unwrap().to_base64(),
+            community_name: "c".into(),
+        }
+    }
+
+    /// Peer-direct pull verification: adopt only a pinned-anchor-valid attestation for the *expected*
+    /// pubkey that is strictly fresher than what we hold. Reject wrong pubkey, non-fresher, unpinned.
+    #[test]
+    fn verify_pulled_adopts_only_fresher_valid_for_expected_pubkey() {
+        let dir = temp_state_dir("pulled");
+        let honest = CoordinatorKey::generate();
+        let attacker = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+        let pk = [7u8; 32];
+        let now = 1_000;
+        let fresh = signed_att(&honest, GUILD, pk, now + 1800);
+
+        // Valid, right pubkey, fresher than what we hold (0) → adopted.
+        let att =
+            verify_pulled(std::slice::from_ref(&fresh), pk, 0, &dir, now).expect("should adopt");
+        assert_eq!(att.wg_pubkey, pk);
+        assert_eq!(att.expires_at, now + 1800);
+
+        // Not strictly fresher than what we already hold → nothing to adopt.
+        assert!(verify_pulled(std::slice::from_ref(&fresh), pk, now + 1800, &dir, now).is_none());
+        // A peer serving a valid attestation for a *different* device → rejected (pubkey binding).
+        assert!(verify_pulled(std::slice::from_ref(&fresh), [8u8; 32], 0, &dir, now).is_none());
+        // Signed by a non-pinned (attacker) key → rejected.
+        assert!(verify_pulled(
+            &[signed_att(&attacker, GUILD, pk, now + 1800)],
+            pk,
+            0,
+            &dir,
+            now
+        )
+        .is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `apply_pulled` advances expiry + identity from the verified attestation but leaves the
+    /// coordinator-brokered transport fields (endpoint here) untouched.
+    #[test]
+    fn apply_pulled_advances_expiry_keeps_transport() {
+        let mut seed = sp([7; 32], 42, 100);
+        seed.endpoint = Some("203.0.113.9:51820".parse().unwrap());
+        let att = Attestation {
+            guild_id: GUILD,
+            user_id: 5,
+            username: "trinity".into(),
+            device_name: "box".into(),
+            is_primary: false,
+            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
+            wg_pubkey: [7u8; 32],
+            issued_at: 0,
+            expires_at: 9_999,
+        };
+        apply_pulled(&mut seed, &att);
+        assert_eq!(seed.expires_at, 9_999);
+        assert_eq!(seed.username, "trinity");
+        assert_eq!(seed.ip, Ipv4Addr::new(100, 64, 0, 9));
+        assert_eq!(
+            seed.rev, 42,
+            "rev is coordinator-owned, not touched by a pull"
+        );
+        assert_eq!(
+            seed.endpoint,
+            Some("203.0.113.9:51820".parse().unwrap()),
+            "transport fields stay — a peer serves only its own identity"
+        );
     }
 }

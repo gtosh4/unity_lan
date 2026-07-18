@@ -32,6 +32,14 @@ const HANDSHAKE_FRESH: Duration = Duration::from_secs(180);
 /// so there's nothing to tune. The `dns` config flag only toggles the resolver on/off.
 const DNS_PORT: u16 = 53;
 
+/// Peer-direct attestation refresh (`docs/gossip-refresh.md`, stage 2): start pulling a held peer's
+/// fresh attestation once it's within this of expiry, renewing a live peer's credential before it
+/// lapses. Set to the long-poll interval so a coordinator-up client still gets a peer-direct attempt
+/// each cycle before Option A would fetch a full from the coordinator (the fallback).
+const P2P_REFRESH_MARGIN: u64 = common::LONGPOLL_HOLD_SECS;
+/// How long to wait on a peer-direct pull before giving up on that peer (the coordinator covers it).
+const P2P_PULL_TIMEOUT: Duration = Duration::from_secs(2);
+
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
@@ -378,6 +386,64 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             }
         };
         loop {
+            // Peer-direct attestation refresh (docs/gossip-refresh.md, stage 2): before polling the
+            // coordinator, renew any held peer whose attestation is near expiry by pulling a fresh one
+            // straight from that peer over the tunnel (verified against our pinned anchor — no new
+            // trust). What a pull can't cover falls through to the coordinator (`held_for_refresh`
+            // returns empty → full) below. A peer whose attestation then lapses with no source — it
+            // went offline, or was revoked and can no longer be issued a fresh one — is dropped and its
+            // tunnel torn down, so revocation propagates via expiry even while the coordinator is
+            // unreachable.
+            if cfg.gossip {
+                let now_secs = common::now_unix();
+                for seed in last_seeds.iter_mut() {
+                    if seed.expires_at > now_secs + P2P_REFRESH_MARGIN {
+                        continue;
+                    }
+                    let target = SocketAddr::from((seed.ip, common::p2p::P2P_PORT));
+                    match crate::p2p::pull(target, P2P_PULL_TIMEOUT).await {
+                        Ok(blobs) => {
+                            if let Some(att) = coord::verify_pulled(
+                                &blobs,
+                                seed.pubkey,
+                                seed.expires_at,
+                                &cfg.state_dir,
+                                now_secs,
+                            ) {
+                                coord::apply_pulled(seed, &att);
+                                tracing::debug!(peer = %seed.hostname, "attestation refreshed peer-direct");
+                            }
+                        }
+                        Err(e) => tracing::debug!(
+                            peer = %seed.hostname,
+                            "peer-direct refresh failed ({e:#}); coordinator will cover it"
+                        ),
+                    }
+                }
+                let before = last_seeds.len();
+                last_seeds.retain(|s| s.expires_at > now_secs);
+                if last_seeds.len() != before {
+                    tracing::info!(
+                        dropped = before - last_seeds.len(),
+                        "dropped peers with lapsed attestations (revocation via expiry)"
+                    );
+                    apply_state(
+                        backend.as_ref(),
+                        &fw,
+                        &zone,
+                        &status,
+                        &localnet,
+                        &last_device,
+                        &last_seeds,
+                        &mut peers,
+                        coord_online,
+                        &relay_eps,
+                        &ice_eps,
+                    )
+                    .await?;
+                }
+            }
+
             // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
             // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
             // hole-punch. The reflexive appears only after a peer handshakes — later than a long-poll

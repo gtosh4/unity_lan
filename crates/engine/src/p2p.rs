@@ -8,7 +8,9 @@
 //! coordinator stays the always-present fallback. Stage 2 adds the peer-direct *pull* + fallback that
 //! consumes this endpoint.
 
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context;
 use common::api::GuildAttestation;
@@ -50,6 +52,38 @@ pub async fn serve(sock: UdpSocket, own: OwnAttestations) -> anyhow::Result<()> 
         if let Ok(bytes) = serde_json::to_vec(&resp) {
             let _ = sock.send_to(&bytes, from).await;
         }
+    }
+}
+
+/// Pull a peer's own current attestations directly over the tunnel. Returns the raw blobs; the caller
+/// verifies them against the pinned anchor (the same gate as the coordinator path), so this
+/// establishes no trust on its own. Bounded by `timeout` so a silent or older peer falls back to the
+/// coordinator quickly.
+pub async fn pull(target: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<GuildAttestation>> {
+    let bind: SocketAddr = if target.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let sock = UdpSocket::bind(bind).await.context("p2p client bind")?;
+    let req = P2pRequest {
+        proto: common::PROTOCOL_VERSION,
+        body: ReqBody::GetAttestations,
+    };
+    sock.send_to(&serde_json::to_vec(&req)?, target)
+        .await
+        .context("p2p send")?;
+    let mut buf = vec![0u8; P2P_MAX_DATAGRAM];
+    let (n, _) = tokio::time::timeout(timeout, sock.recv_from(&mut buf))
+        .await
+        .context("p2p pull timed out")?
+        .context("p2p recv")?;
+    match serde_json::from_slice::<P2pResponse>(&buf[..n])
+        .context("decoding p2p response")?
+        .body
+    {
+        RespBody::Attestations(a) => Ok(a),
+        RespBody::Unsupported => anyhow::bail!("peer does not support attestation pull"),
     }
 }
 

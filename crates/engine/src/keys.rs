@@ -81,13 +81,27 @@ pub fn load_anchor(state_dir: &Path, guild_id: u64) -> anyhow::Result<[u8; 32]> 
 /// Every pinned guild anchor's bytes. Used where the signing guild isn't known up front — the
 /// release manifest is signed by one guild key the caller holds, so the verifier tries each pin.
 pub fn load_all_anchors(state_dir: &Path) -> Vec<[u8; 32]> {
+    load_all_pinned(state_dir)
+        .into_iter()
+        .map(|(_, a)| a)
+        .collect()
+}
+
+/// Every pinned `(guild_id, anchor)`, the guild id parsed from the `{guild_id}.pub` filename. Used to
+/// verify an attestation whose signing guild isn't known from a coordinator response — a peer-direct
+/// (p2p) pull, where `verify_against_pinned` needs the guild id to bind the signature.
+pub fn load_all_pinned(state_dir: &Path) -> Vec<(u64, [u8; 32])> {
     let Ok(entries) = std::fs::read_dir(state_dir.join("anchors")) else {
         return Vec::new();
     };
     entries
         .filter_map(|e| e.ok())
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .filter_map(|e| {
+            let path = e.path();
+            let guild_id: u64 = path.file_stem()?.to_str()?.parse().ok()?;
+            let anchor = <[u8; 32]>::try_from(std::fs::read(&path).ok()?.as_slice()).ok()?;
+            Some((guild_id, anchor))
+        })
         .collect()
 }
 
