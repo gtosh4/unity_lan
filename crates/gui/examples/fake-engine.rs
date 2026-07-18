@@ -282,17 +282,19 @@ fn fixture_peers() -> Vec<PeerStatus> {
 }
 
 fn fixture_networks() -> Vec<NetworkStatus> {
-    let n = |role_id: u64, name: &str, enabled: bool| NetworkStatus {
-        guild_id: 900_100,
+    let n = |guild_id: u64, guild: &str, role_id: u64, name: &str, enabled: bool| NetworkStatus {
+        guild_id,
         role_id,
         name: name.into(),
-        guild_name: "Acme".into(),
+        guild_name: guild.into(),
         enabled,
     };
+    // Two guilds so the Networks tab shows its guild grouping — mirroring the communities the peer
+    // hovers list (`acme` / `playhouse`), so a network reads the same in both places.
     vec![
-        n(7001, "Engineering", true),
-        n(7002, "Gaming", true),
-        n(7003, "Ops", false),
+        n(900_100, "acme", 7001, "Engineering", true),
+        n(900_100, "acme", 7003, "Ops", false),
+        n(900_200, "playhouse", 7002, "Gaming", true),
     ]
 }
 

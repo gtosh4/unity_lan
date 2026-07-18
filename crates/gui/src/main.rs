@@ -1282,7 +1282,15 @@ impl App {
         // Hostname carries two hovers' worth of context without cluttering the row: the dot shows WG
         // liveness (last handshake), the name shows which shared networks the peer is reachable over
         // (the ACL intersection). The kebab at the end opens the action menu.
-        let net_hover = if p.networks.is_empty() {
+        // Own devices carry every network the owner is in (they peer regardless of ACL), so listing
+        // them is noise — just say it's one of ours.
+        let is_own = p
+            .networks
+            .iter()
+            .any(|n| n.name == common::control::OWN_DEVICES_LABEL);
+        let net_hover = if is_own {
+            "one of my devices".to_string()
+        } else if p.networks.is_empty() {
             "no shared networks".to_string()
         } else {
             format!(
@@ -1457,31 +1465,53 @@ impl App {
         if nets.is_empty() {
             list = list.push(muted("No other networks discovered yet."));
         } else {
+            // Group by guild the same way the peer hover does (`shared_networks_by_community`), so a
+            // network reads the same in both places: a guild heading with its roles beneath. Guilds
+            // and roles keep first-seen (coordinator snapshot) order.
+            let mut groups: Vec<(&str, Vec<&common::api::NetworkStatus>)> = Vec::new();
             for n in nets {
-                let title = if n.guild_name.is_empty() {
-                    n.name.clone()
+                match groups.iter_mut().find(|(g, _)| *g == n.guild_name.as_str()) {
+                    Some((_, v)) => v.push(n),
+                    None => groups.push((n.guild_name.as_str(), vec![n])),
+                }
+            }
+            for (guild, members) in groups {
+                let mut roles = Column::new().spacing(6);
+                for n in members {
+                    // A switch (not a button): flipping it applies immediately, and its position
+                    // shows the current state — no separate on/off label needed. Switch on the left
+                    // so the controls line up in one column with the policy checkbox above.
+                    let (guild_id, role_id) = (n.guild_id, n.role_id);
+                    roles = roles.push(
+                        row![
+                            toggler(n.enabled)
+                                .width(Length::Shrink)
+                                .on_toggle(move |enabled| {
+                                    Message::ToggleNetwork {
+                                        guild_id,
+                                        role_id,
+                                        enabled,
+                                    }
+                                }),
+                            text(n.name.clone()).size(14).width(Length::Fill),
+                        ]
+                        .spacing(8)
+                        .align_y(Vertical::Center),
+                    );
+                }
+                // A guild heading over its indented roles; guildless rows (shouldn't occur for real
+                // networks) sit flush like the "My devices" row above.
+                if guild.is_empty() {
+                    list = list.push(roles);
                 } else {
-                    format!("{} @ {}", n.name, n.guild_name)
-                };
-                // A switch (not a button): flipping it applies immediately, and its position shows
-                // the current state — no separate on/off label needed. Switch on the left so the
-                // interactive controls line up in one column with the policy checkbox above.
-                let (guild_id, role_id) = (n.guild_id, n.role_id);
-                let r = row![
-                    toggler(n.enabled)
-                        .width(Length::Shrink)
-                        .on_toggle(move |enabled| {
-                            Message::ToggleNetwork {
-                                guild_id,
-                                role_id,
-                                enabled,
-                            }
-                        }),
-                    text(title).size(14).width(Length::Fill),
-                ]
-                .spacing(8)
-                .align_y(Vertical::Center);
-                list = list.push(r);
+                    list = list.push(
+                        column![
+                            muted(guild.to_string()),
+                            roles.padding(iced::padding::left(16))
+                        ]
+                        .spacing(6),
+                    );
+                }
             }
         }
         column![header("networks"), policy, list].spacing(8).into()

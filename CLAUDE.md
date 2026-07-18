@@ -62,6 +62,12 @@ Four crates (`crates/*`), two planes:
 | `engine` | `unitylan-engine` | **data plane**, privileged daemon: WireGuard, host firewall, DNS resolver, control socket |
 | `gui` | `unitylan-gui` | unprivileged iced desktop app, drives the engine over its control socket |
 
+**GUI screenshots are docs.** When a GUI change alters what the app looks like, regenerate the
+README images — `assets/demo.gif`, `assets/peers.png`, `assets/networks.png` — with
+`scripts/readme-demo.sh` (fake-engine canned fixtures + scripted tour + screencast). Keep the
+fixtures in `crates/gui/examples/fake-engine.rs` representative of the feature being shown, or the
+regenerated stills won't demonstrate it.
+
 **Trust model.** A *network* is a Discord role an admin registered (`/unitylan network add`) — an
 ACL group, not a subnet. Networks may overlap; a device has **one IP and one tunnel per co-device**
 regardless of how many networks they share. The coordinator holds **one Ed25519 signing key per

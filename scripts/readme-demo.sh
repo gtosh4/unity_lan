@@ -81,10 +81,12 @@ VF="fps=$FPS,scale=$WIDTH:-1:flags=lanczos"
 ffmpeg -y -v error -i "$WORK/tour.mkv" -vf "$VF,palettegen=max_colors=128" "$WORK/palette.png"
 ffmpeg -y -v error -i "$WORK/tour.mkv" -i "$WORK/palette.png" \
   -lavfi "$VF[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" "$OUT/demo.gif"
-# Stills from stable tour marks (recording starts a couple seconds into the tour): Networks near
-# the start, a clean Peers list in the menu-closed window (tour ~18-22s).
-ffmpeg -y -v error -ss 1 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
+# Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
+# list in the menu-closed window (tour ~18-22s), and Networks from the tour's end (it returns to
+# the Networks tab at tour t=27 and dwells there — the initial Networks view is gone before the
+# recording starts).
 ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/peers.png"
+ffmpeg -y -v error -ss 26 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
 ls -la "$OUT/demo.gif" "$OUT/peers.png" "$OUT/networks.png"
