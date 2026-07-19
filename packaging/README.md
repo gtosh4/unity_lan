@@ -24,7 +24,7 @@ so there is no per-distro build environment.
 ## Build the Windows installer
 
 ```powershell
-packaging\windows\build.ps1            # needs Rust + WiX (dotnet tool install --global wix)
+packaging\windows\build.ps1            # needs Rust + WiX (dotnet tool install --global wix --version 5.0.2; v6+ needs the OSMF EULA)
 ```
 
 The script builds the release exes, fetches the pinned wireguard-nt DLL (not committed), stages it

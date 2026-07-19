@@ -39,7 +39,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install WiX
-        run: dotnet tool install --global wix
+        # Pinned: WiX v6+ requires accepting the Open Source Maintenance Fee EULA (WIX7015), and
+        # unitylan.wxs targets the v4/v5 schema.
+        run: dotnet tool install --global wix --version 5.0.2
       - name: Build MSI
         shell: pwsh
         run: packaging/windows/build.ps1 -Version ($env:GITHUB_REF_NAME -replace '^v', '')

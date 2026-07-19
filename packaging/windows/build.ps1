@@ -8,7 +8,8 @@
 
   Prerequisites:
     - Rust (stable) with the x86_64-pc-windows-msvc toolchain.
-    - WiX v4/v5 CLI:  dotnet tool install --global wix
+    - WiX v4/v5 CLI:  dotnet tool install --global wix --version 5.0.2
+      (v6+ is gated behind the Open Source Maintenance Fee EULA and errors with WIX7015)
 
 .PARAMETER Version
   MSI ProductVersion (x.y.z). Defaults to the engine crate version.
