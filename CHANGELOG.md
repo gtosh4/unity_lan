@@ -3,6 +3,38 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## v0.2.0
+
+**Breaking: wire protocol 3 → 4.** Clients and coordinator must be upgraded together — a v0.1.0
+client talking to a v0.2.0 coordinator (or the reverse) is rejected on version mismatch.
+
+### Changed
+
+- **STUN: the coordinator advertises a port, not an address.** It can't know its own
+  client-reachable address behind a container bridge or a cloud NAT, so `stun_bind` doing double
+  duty as both the UDP bind and the advertised address left no working value. The coordinator now
+  sends only the port (`RegisterResp.stun_port`), and the client pairs it with the coordinator
+  hostname it already dials — reachable by construction, and the right host regardless since STUN
+  is UDP and no HTTP proxy can front it.
+
+### Fixed
+
+- **Engine on non-domain Windows hosts.** Secret ACL restriction granted access to the process
+  account by name; as a LocalSystem service that's `WORKGROUP\<HOST>$`, which `icacls` can't
+  resolve on a workgroup machine — so every secret write (`wg.key`, token, relay secret) failed
+  and the daemon exited right after login. The redundant machine-account grant is gone; the
+  service reads its secrets via the already-granted SYSTEM SID.
+- **Admin dashboard graph labels.** Network nodes labelled with the bare role name collided when
+  the same name was registered in more than one guild; they now read `guild: role`. The role table
+  drops its separate id column, moving the id into a chip beside the name.
+- **Release CI.** The announce job read a webhook secret under the wrong name and exited 3.
+
+### Internal
+
+- Coordinator container image builds with BuildKit cache mounts for dependency compilation.
+- The engine logs the STUN bootstrap address it resolved, and `scripts/dev-run.sh` forwards
+  `RUST_LOG` through `sudo env` so debug logging is reachable on the normal dev path.
+
 ## v0.1.0 — first release
 
 The first tagged release of UnityLAN: a WireGuard mesh VPN whose membership is defined by **Discord

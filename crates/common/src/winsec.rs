@@ -10,6 +10,7 @@
 //!
 //! On non-Windows this is a no-op — Unix call sites apply `0600` themselves and never call here.
 
+#[cfg(windows)]
 use std::ffi::OsString;
 use std::path::Path;
 
