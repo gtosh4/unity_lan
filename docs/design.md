@@ -236,7 +236,13 @@ sequenceDiagram
   (O(changes)), not the whole roster — collapsing a membership herd from O(N) per client to
   O(changes), and a login-storm from O(N³) to O(N²). Empty `held` (first contact, or a client
   forcing an attestation refresh) still gets a full snapshot. Additive: `PROTOCOL_VERSION` = 3.
-- **Targeted wakeups**: the global version is reserved for **membership** changes that concern every
+- **Scoped versions**: a client's `version` covers only the scopes it participates in — each guild it
+  holds a role in, plus its own user scope (own-device peering crosses guilds). A membership change
+  bumps just the scopes it touched, so a join in one guild never wakes a disjoint guild's clients.
+  This matters most for the expected deployment shape — one coordinator hosting many small,
+  mutually-disjoint communities — where a deployment-wide counter would make *every* device rebuild
+  its snapshot on *every* membership event anywhere, almost always to learn nothing.
+- **Targeted wakeups**: membership scopes are reserved for changes that concern every
   co-member. **Pair-specific** updates (a peer's reflexive/relay/ICE report is *for* one target) wake
   **only that target** over a per-pubkey channel, not the whole herd — so NAT-traversal exchanges
   (the frequent, bursty case) never fan out. ICE becomes a targeted ping-pong.

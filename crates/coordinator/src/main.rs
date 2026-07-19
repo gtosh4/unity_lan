@@ -13,6 +13,7 @@ mod rotate;
 mod signer;
 mod store;
 mod stun;
+mod versions;
 
 use std::sync::Arc;
 
@@ -160,33 +161,32 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let presence = Arc::new(crate::presence::Presence::default());
-    let version = Arc::new(tokio::sync::watch::channel(0u64).0);
+    let versions = Arc::new(crate::versions::Versions::default());
 
     // Live Discord: run the gateway for `/unitylan` slash commands + role-revocation events.
     if let Some(d) = &discord {
         let token = d.bot_token.clone();
         let store = store.clone();
         let presence = presence.clone();
-        let version = version.clone();
+        let versions = versions.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::commands::run_gateway(token, store, presence, version).await {
+            if let Err(e) = crate::commands::run_gateway(token, store, presence, versions).await {
                 tracing::error!("gateway task ended: {e:#}");
             }
         });
     }
 
     // Presence reaper: evict devices that stopped refreshing (crashed/dropped client, or the old
-    // pubkey a re-keyed device abandoned). Bumps the version so co-members prune the dead peer.
+    // pubkey a re-keyed device abandoned). Bumps the scopes it actually reaped from, so co-members
+    // prune the dead peer while unaffected guilds stay parked.
     {
         let presence = presence.clone();
-        let version = version.clone();
+        let versions = versions.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tick.tick().await;
-                if presence.reap(common::now_unix(), common::PRESENCE_TTL_SECS) {
-                    version.send_modify(|v| *v += 1);
-                }
+                versions.bump_all(presence.reap(common::now_unix(), common::PRESENCE_TTL_SECS));
             }
         });
     }
@@ -264,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
         roles,
         store,
         presence,
-        version,
+        versions,
         oauth,
         reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

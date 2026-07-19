@@ -4,9 +4,11 @@
 //!
 //! Keyed by (guild, role, device pubkey) so a user's multiple devices don't collide.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
+
+use crate::versions::Scope;
 
 #[derive(Clone, PartialEq)]
 pub struct MemberPresence {
@@ -89,23 +91,29 @@ impl Presence {
     /// Evict every entry not refreshed within `max_age` seconds, across **both** the per-network and
     /// per-user (own-device) sets. Catches devices that vanished without a clean drop: a crashed
     /// client, or one that **re-keyed** and abandoned this pubkey (its owner now refreshes under a
-    /// new key, so this entry is never self-evicted). Returns `true` if anything was removed → the
-    /// caller bumps the version so co-members prune the dead peer instead of carrying it until
-    /// coordinator restart.
-    pub fn reap(&self, now: u64, max_age: u64) -> bool {
+    /// new key, so this entry is never self-evicted). Returns the [`Scope`]s it removed something
+    /// from → the caller bumps exactly those, so co-members prune the dead peer without waking
+    /// clients of guilds the reap never touched.
+    pub fn reap(&self, now: u64, max_age: u64) -> BTreeSet<Scope> {
         let fresh = |e: &Entry| now.saturating_sub(e.last_seen) <= max_age;
-        let mut changed = false;
+        let mut changed = BTreeSet::new();
         {
             let mut map = self.map.lock().unwrap();
-            let before = map.len();
-            map.retain(|_, e| fresh(e));
-            changed |= map.len() != before;
+            map.retain(|(g, _, _), e| {
+                fresh(e) || {
+                    changed.insert(Scope::Guild(*g));
+                    false
+                }
+            });
         }
         {
             let mut sm = self.self_map.lock().unwrap();
-            let before = sm.len();
-            sm.retain(|_, e| fresh(e));
-            changed |= sm.len() != before;
+            sm.retain(|(uid, _), e| {
+                fresh(e) || {
+                    changed.insert(Scope::User(*uid));
+                    false
+                }
+            });
         }
         changed
     }
@@ -233,11 +241,12 @@ mod tests {
         p.record(1, 2, mp([1; 32], 42), 100); // last seen t=100
         p.record(1, 2, mp([2; 32], 99), 150); // last seen t=150
                                               // At t=200 with max_age 60: entry A (age 100) is stale, B (age 50) is fresh.
-        assert!(p.reap(200, 60));
+                                              // Only guild 1's scope is reported — no other guild's clients are woken.
+        assert_eq!(p.reap(200, 60), [Scope::Guild(1)].into_iter().collect());
         assert!(p.networks_of(&[1; 32]).is_empty());
         assert_eq!(p.networks_of(&[2; 32]), vec![(1, 2)]);
-        // Nothing left to reap → no change reported (no spurious version bump).
-        assert!(!p.reap(200, 60));
+        // Nothing left to reap → no scopes reported (no spurious version bump).
+        assert!(p.reap(200, 60).is_empty());
     }
 
     #[test]
@@ -275,8 +284,12 @@ mod tests {
         assert!(p.evict_self(42, &[2; 32]));
         assert!(!p.evict_self(42, &[2; 32]));
         assert!(p.others_of_user(42, &[1; 32]).is_empty());
-        // Reap ages out the per-user set too: at t=400, max_age 60, A (last seen 100) is stale.
-        assert!(p.reap(400, 60));
+        // Reap ages out the per-user set too: at t=400, max_age 60, A (last seen 100) is stale —
+        // and it reports the *user* scope, since own-device peering crosses guilds.
+        assert_eq!(
+            p.reap(400, 60),
+            [Scope::User(42), Scope::User(99)].into_iter().collect()
+        );
         assert!(p.others_of_user(99, &[0; 32]).is_empty());
     }
 
@@ -286,7 +299,7 @@ mod tests {
         assert!(p.record(1, 2, mp([1; 32], 42), 100)); // new → changed
         assert!(!p.record(1, 2, mp([1; 32], 42), 300)); // identical → no wake, but re-stamped
                                                         // The re-stamp at t=300 keeps it alive: at t=340, age 40 ≤ 60, survives.
-        assert!(!p.reap(340, 60));
+        assert!(p.reap(340, 60).is_empty());
         assert_eq!(p.networks_of(&[1; 32]), vec![(1, 2)]);
     }
 }

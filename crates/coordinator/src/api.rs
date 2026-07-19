@@ -25,6 +25,7 @@ use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
 use crate::signer::{GuildKeys, SignCache};
 use crate::store::{match_device_by_name, DeviceMatch, Store};
+use crate::versions::{Scope, Versions};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,8 +35,8 @@ pub struct AppState {
     /// the same viewer-independent attestation once per caller (`N²` Ed25519 signs → `N`).
     pub sign_cache: Arc<SignCache>,
     /// Per-client targeted-wake registry. Pair-specific updates (a reflexive/relay/ICE report *about*
-    /// one peer) wake only that peer, not the whole herd — the global `version` is reserved for
-    /// membership changes that concern every co-member.
+    /// one peer) wake only that peer, not the whole herd — the scoped `versions` are reserved for
+    /// membership changes that concern every co-member of a guild.
     pub wakers: Arc<Wakers>,
     /// How long a `/register` long-poll is held before a renewal rebuild (≈ attestation TTL / 2, from
     /// config). A client refreshes its own attestation when its poll returns, so this bounds how stale
@@ -44,9 +45,11 @@ pub struct AppState {
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
-    /// Monotonic membership version (the long-poll ETag). Bumped whenever presence changes;
-    /// parked `/refresh` handlers subscribe and wake on any bump. `watch` has no lost wakeups.
-    pub version: Arc<tokio::sync::watch::Sender<u64>>,
+    /// Per-scope membership counters behind the long-poll ETag. A change is scoped to the guild (or,
+    /// for own-device peering, the user) it happened in, and a caller's wire `version` covers only
+    /// its own scopes — so a membership change in one guild leaves clients of every other guild
+    /// parked. `watch` has no lost wakeups.
+    pub versions: Arc<Versions>,
     /// Interactive-login provider (Discord OAuth, or a fake in tests); `None` disables login.
     pub oauth: Option<Arc<dyn OauthProvider>>,
     /// Peer-observed reflexive endpoints: device pubkey → the `ip:port` a peer last saw it send
@@ -266,21 +269,24 @@ async fn register(
     // Subscribe to our targeted-wake channel *before* building, so a pair-specific update that
     // targets us while we build (or decide to park) isn't lost.
     let mut personal = st.wakers.subscribe(req.wg_pubkey);
-    let (resp, caller_changed) = build_snapshot(&st, &req).await?;
+    let Built {
+        resp,
+        caller_changed,
+        scopes,
+    } = build_snapshot(&st, &req).await?;
     // Park only when the client is up to date *and* its own request changed nothing. A request that
     // reports data (reflexive/relay/ICE) returns immediately so the client can continue its report
     // loop — exactly as the old global bump made it — but now without waking the herd; the affected
     // peer is woken by a targeted wake instead.
     if !caller_changed && req.since == Some(resp.version) {
-        let woke = wait_park(&st, resp.version, &mut personal).await;
+        let woke = wait_park(&st, &scopes, resp.version, &mut personal).await;
         // Jitter only a herd wake — a membership bump released every parked client at once, so
         // stagger the rebuilds to flatten the fan-in. A targeted personal wake is a single client
         // (no fan-in), and a hold-elapsed renewal already spreads over each client's own clock.
         if matches!(woke, Woke::Herd) {
             tokio::time::sleep(wake_jitter(&req.wg_pubkey)).await;
         }
-        let (resp, _) = build_snapshot(&st, &req).await?;
-        return Ok(Json(resp));
+        return Ok(Json(build_snapshot(&st, &req).await?.resp));
     }
     Ok(Json(resp))
 }
@@ -293,26 +299,54 @@ enum Woke {
     Elapsed,
 }
 
-/// Park until either the global membership `version` moves off `since` (a herd wake), this client's
-/// `personal` targeted-wake channel fires, or the renewal hold elapses.
+/// Park until the caller's aggregate membership version moves off `since` (a herd wake — but a herd
+/// bounded to one guild, not the deployment), this client's `personal` targeted-wake channel fires,
+/// or the renewal hold elapses.
+///
+/// Subscribes to each of the caller's own [`Scope`]s — its user scope plus the guilds it holds a
+/// network in, so typically 2–4 receivers. A bump in any other scope never reaches it.
 async fn wait_park(
     st: &AppState,
+    scopes: &BTreeSet<Scope>,
     since: u64,
     personal: &mut tokio::sync::watch::Receiver<u64>,
 ) -> Woke {
-    let mut g = st.version.subscribe();
+    let mut rxs: Vec<_> = scopes.iter().map(|s| st.versions.subscribe(*s)).collect();
     let hold = tokio::time::sleep(std::time::Duration::from_secs(st.longpoll_hold_secs));
     tokio::pin!(hold);
     loop {
-        if *g.borrow_and_update() != since {
+        // Mark every receiver seen *before* re-reading the aggregate, so a bump that lands in the
+        // gap is still pending on its receiver and fires immediately below (no lost wakeup).
+        for rx in rxs.iter_mut() {
+            rx.borrow_and_update();
+        }
+        if st.versions.aggregate(scopes) != since {
             return Woke::Herd;
         }
         tokio::select! {
-            r = g.changed() => if r.is_err() { return Woke::Elapsed; },
+            r = any_changed(&mut rxs) => if r.is_err() { return Woke::Elapsed; },
             r = personal.changed() => return if r.is_err() { Woke::Elapsed } else { Woke::Personal },
             _ = &mut hold => return Woke::Elapsed,
         }
     }
+}
+
+/// Resolve when any of `rxs` changes. `tokio::select!` needs a statically known arm count and the
+/// scope set is dynamic, so poll each receiver by hand — polling all of them registers all their
+/// wakers, which is exactly what a select does.
+async fn any_changed(
+    rxs: &mut [tokio::sync::watch::Receiver<u64>],
+) -> Result<(), tokio::sync::watch::error::RecvError> {
+    let mut futs: Vec<_> = rxs.iter_mut().map(|rx| Box::pin(rx.changed())).collect();
+    std::future::poll_fn(|cx| {
+        for f in futs.iter_mut() {
+            if let std::task::Poll::Ready(r) = std::future::Future::poll(f.as_mut(), cx) {
+                return std::task::Poll::Ready(r);
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 /// Max stagger applied to a herd wake so a single version bump doesn't release every parked client
@@ -327,15 +361,16 @@ fn wake_jitter(wg_pubkey: &[u8; 32]) -> std::time::Duration {
     std::time::Duration::from_millis(n % WAKE_JITTER_MAX_MS)
 }
 
-/// Park until the membership version moves off `since`, or the given hold elapses. `watch` tracks the
-/// latest version internally, so a bump between snapshot and subscribe is not lost. The register path
-/// waits on membership + targeted wakes via [`wait_park`]; the admin dashboard passes a short
-/// heartbeat here so its held request survives reverse-proxy idle timeouts and its "updated" clock
-/// stays fresh, at the cost of a cheap re-poll.
-/// Returns `true` if it woke because the version moved (a real membership change → herd wake),
-/// `false` if the hold elapsed first (a renewal) or the sender was dropped.
+/// Park until the **global** membership version moves off `since`, or the given hold elapses.
+/// `watch` tracks the latest version internally, so a bump between snapshot and subscribe is not
+/// lost. Only the admin dashboard uses this: it renders the whole deployment, so it genuinely wants
+/// every scope's bumps (clients use the scoped [`wait_park`] instead). It passes a short heartbeat
+/// so its held request survives reverse-proxy idle timeouts and its "updated" clock stays fresh, at
+/// the cost of a cheap re-poll.
+/// Returns `true` if it woke because the version moved, `false` if the hold elapsed first or the
+/// sender was dropped.
 async fn wait_for_change_until(st: &AppState, since: u64, hold: std::time::Duration) -> bool {
-    let mut rx = st.version.subscribe();
+    let mut rx = st.versions.subscribe_global();
     let deadline = tokio::time::sleep(hold);
     tokio::pin!(deadline);
     loop {
@@ -383,16 +418,23 @@ fn seed_rev(
     h.finish()
 }
 
-/// Compute the caller's grant + seeds and record their presence. Bumps the global `version` when
-/// **membership** changed (a herd wake) and fires **targeted** wakes for peers named in the caller's
-/// pair-specific reports (reflexive/relay/ICE). Re-signs all attestations with the current time (so a
-/// rebuild renews them). The returned `bool` is `true` when the caller's own request changed
-/// something (membership or a pair table) — the signal for [`register`] to return now rather than
-/// park, so the client can continue its report loop.
-async fn build_snapshot(
-    st: &AppState,
-    req: &RegisterReq,
-) -> Result<(RegisterResp, bool), ApiError> {
+/// What [`build_snapshot`] produced for one caller.
+struct Built {
+    resp: RegisterResp,
+    /// `true` when the caller's own request changed something (membership or a pair table) — the
+    /// signal for [`register`] to return now rather than park, so the client can continue its
+    /// report loop.
+    caller_changed: bool,
+    /// The scopes whose membership this caller cares about: its own user scope (own-device peering)
+    /// plus every guild it holds a network role in. Backs both the wire `version` and [`wait_park`].
+    scopes: BTreeSet<Scope>,
+}
+
+/// Compute the caller's grant + seeds and record their presence. Bumps the **scoped** membership
+/// versions for the guilds (and users) whose membership actually changed — waking only clients of
+/// those scopes — and fires **targeted** wakes for peers named in the caller's pair-specific reports
+/// (reflexive/relay/ICE). Re-signs all attestations with the current time (so a rebuild renews them).
+async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiError> {
     let user_id = resolve_user(st, req).await?;
     let now = common::now_unix();
     let networks = st.store.all_networks().await.map_err(internal)?;
@@ -426,10 +468,13 @@ async fn build_snapshot(
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
-    let mut changed = false; // did membership change? → bump global version (herd wake)
-                             // Peers named in this caller's pair-specific reports (reflexive/relay/ICE) — each is woken
-                             // individually instead of bumping the global version, so a NAT-traversal exchange doesn't wake
-                             // the whole herd for a change only the one target cares about.
+                                                // Scopes whose membership this request changed → bumped at the end, waking the clients of those
+                                                // scopes only. A presence change in a guild is scoped to that guild; an own-device (`*_self`)
+                                                // change crosses guilds, so it's scoped to the owning user instead.
+    let mut changed: BTreeSet<Scope> = BTreeSet::new();
+    // Peers named in this caller's pair-specific reports (reflexive/relay/ICE) — each is woken
+    // individually instead of bumping a membership scope, so a NAT-traversal exchange doesn't wake
+    // a whole guild for a change only the one target cares about.
     let mut wake_targets: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
     // Re-key supersede (design.md §9): a device regenerating its WG key registers under a *new*
@@ -452,11 +497,15 @@ async fn build_snapshot(
                     .await
                     .map_err(internal)?;
                 for (g, r) in st.presence.networks_of(&old_pubkey) {
-                    changed |= st.presence.evict(g, r, &old_pubkey);
+                    if st.presence.evict(g, r, &old_pubkey) {
+                        changed.insert(Scope::Guild(g));
+                    }
                 }
                 // …and from the per-user own-device set, so a re-keyed device's siblings prune the
                 // retired pubkey immediately rather than waiting for the reaper.
-                changed |= st.presence.evict_self(owner, &old_pubkey);
+                if st.presence.evict_self(owner, &old_pubkey) {
+                    changed.insert(Scope::User(owner));
+                }
             }
         }
     }
@@ -549,8 +598,8 @@ async fn build_snapshot(
         // Record the device as present in this network (for others' seeds) — unless it has locally
         // disconnected (`paused`), in which case we still build its grant + seeds (so it can
         // re-mesh instantly on reconnect) but advertise no presence, so co-members prune it.
-        if !req.paused {
-            changed |= st.presence.record(
+        if !req.paused
+            && st.presence.record(
                 net.guild_id,
                 net.role_id,
                 MemberPresence {
@@ -563,7 +612,9 @@ async fn build_snapshot(
                     endpoint: req.endpoint,
                 },
                 now,
-            );
+            )
+        {
+            changed.insert(Scope::Guild(net.guild_id));
         }
         held.push((net.guild_id, net.role_id));
     }
@@ -572,8 +623,8 @@ async fn build_snapshot(
     // (role revoked) — or from *every* network while disconnected (`paused`). Peers pick this up
     // on their next (long-poll-woken) refresh and prune us.
     for (g, r) in st.presence.networks_of(&req.wg_pubkey) {
-        if req.paused || !held.contains(&(g, r)) {
-            changed |= st.presence.evict(g, r, &req.wg_pubkey);
+        if (req.paused || !held.contains(&(g, r))) && st.presence.evict(g, r, &req.wg_pubkey) {
+            changed.insert(Scope::Guild(g));
         }
     }
 
@@ -583,8 +634,8 @@ async fn build_snapshot(
     // is issued below; without one there's no anchor to attest a sibling under). Evict in every other
     // case so an opt-out / pause / role-loss withdraws this device from its siblings' seeds.
     let has_identity = !networks_status.is_empty();
-    if req.peer_own_devices && !req.paused && has_identity {
-        changed |= st.presence.record_self(
+    let self_changed = if req.peer_own_devices && !req.paused && has_identity {
+        st.presence.record_self(
             user_id,
             MemberPresence {
                 pubkey: req.wg_pubkey,
@@ -596,9 +647,14 @@ async fn build_snapshot(
                 endpoint: req.endpoint,
             },
             now,
-        );
+        )
     } else {
-        changed |= st.presence.evict_self(user_id, &req.wg_pubkey);
+        st.presence.evict_self(user_id, &req.wg_pubkey)
+    };
+    // Own-device peering ignores networks, so this wakes the owner's *other* devices wherever they
+    // are — the user scope, not any guild.
+    if self_changed {
+        changed.insert(Scope::User(user_id));
     }
 
     // Every guild the caller holds a role in (enabled or not). Drives the self-grant attestations
@@ -872,20 +928,29 @@ async fn build_snapshot(
         .await
         .map_err(internal)?;
 
-    // Bump the global version if membership changed → wake every parked co-member (a herd wake).
-    if changed {
-        st.version.send_modify(|v| *v += 1);
-    }
+    // Bump each scope whose membership changed → wake every parked client *of that scope*. A guild's
+    // co-members wake; an unrelated guild's clients stay parked and cost nothing.
+    st.versions.bump_all(changed.iter().copied());
     // Fire targeted wakes for the peers named in this caller's pair-specific reports — each learns
     // its new reflexive/relay/ICE state on its own parked request, without a global herd wake.
     for t in &wake_targets {
         st.wakers.wake(t);
     }
 
+    // The caller's own scopes: its user scope (own-device peering) plus every guild it holds a role
+    // in. Its wire `version` aggregates exactly these, so nothing outside them can wake it. A
+    // network registered in a guild the caller has no role in is therefore picked up on its next
+    // renewal rather than instantly — that's an admin-rare event, unlike presence churn.
+    let scopes: BTreeSet<Scope> = std::iter::once(Scope::User(user_id))
+        .chain(grant_guilds.iter().map(|&g| Scope::Guild(g)))
+        .collect();
+    let version = st.versions.aggregate(&scopes);
+
     tracing::debug!(
         user = user_id,
         since = ?req.since,
-        version = *st.version.borrow(),
+        version,
+        scopes = ?scopes,
         held_networks = networks_status.len(),
         networks = ?networks_status
             .iter()
@@ -921,14 +986,15 @@ async fn build_snapshot(
         _ => None,
     };
 
-    let caller_changed = changed || !wake_targets.is_empty();
-    Ok((
-        RegisterResp {
+    Ok(Built {
+        caller_changed: !changed.is_empty() || !wake_targets.is_empty(),
+        scopes,
+        resp: RegisterResp {
             anchors,
             grant,
             device_token,
             seeds,
-            version: *st.version.borrow(),
+            version,
             networks: networks_status,
             stun_addr: st.stun_addr,
             proto: common::PROTOCOL_VERSION,
@@ -937,8 +1003,7 @@ async fn build_snapshot(
             partial,
             removed,
         },
-        caller_changed,
-    ))
+    })
 }
 
 /// `POST /devices/manage`: owner-scoped device ops authenticated by a device bearer token.
@@ -977,14 +1042,18 @@ async fn manage(
             // The store row is gone, but the device's presence would linger under its pubkey until
             // the reaper ages it out — long enough that a device logging out (un-enroll + re-key)
             // keeps showing up as a stale peer to everyone, including its own re-keyed self. Evict
-            // it now and bump the version so parked long-pollers wake and prune it.
-            let mut changed = false;
+            // it now and bump each affected guild so its parked long-pollers wake and prune it.
+            let mut changed = BTreeSet::new();
             for (g, r) in st.presence.networks_of(&pk) {
-                changed |= st.presence.evict(g, r, &pk);
+                if st.presence.evict(g, r, &pk) {
+                    changed.insert(Scope::Guild(g));
+                }
             }
-            if changed {
-                st.version.send_modify(|v| *v += 1);
+            // The device also leaves its owner's own-device set, which no guild covers.
+            if st.presence.evict_self(user_id, &pk) {
+                changed.insert(Scope::User(user_id));
             }
+            st.versions.bump_all(changed);
             format!("removed {}", sanitize_label(&device_name))
         }
     };
@@ -1244,8 +1313,8 @@ async fn gather_stats(st: &AppState) -> Result<AdminStats, ApiError> {
         online_devices: pres.online_devices,
         online_users: pres.online_users,
         enrolled_devices,
-        longpoll_waiters: st.version.receiver_count(),
-        version: *st.version.borrow(),
+        longpoll_waiters: st.versions.waiters(),
+        version: st.versions.global(),
     })
 }
 
@@ -1311,7 +1380,7 @@ async fn admin_stats(
     Query(q): Query<StatsQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     admin_auth(&st, &headers)?;
-    let version = *st.version.borrow();
+    let version = st.versions.global();
     if q.since == Some(version) {
         wait_for_change_until(
             &st,

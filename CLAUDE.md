@@ -119,10 +119,12 @@ goal** — and specifically how it behaves under a burst, because the coordinato
 chokepoint: one membership change can wake every client at once, and one deployment serves many
 clients across possibly-many guilds.
 
-- **Fan-in (thundering herd on version bump).** `wait_for_change` parks *all* long-pollers on one
-  shared version (`api.rs`). Anything that bumps it — roles changing, a presence eviction, an
-  enrollment — releases every parked client at once, each re-running `build_snapshot`. Bump the
-  version only when membership actually changed; keep the wake path cheap since a herd multiplies it.
+- **Fan-in (thundering herd on version bump).** `wait_park` parks long-pollers on the membership
+  versions of their own **scopes** — the guilds they hold a role in, plus their user scope for
+  own-device peering (`versions.rs`). A bump releases every client of that scope at once, each
+  re-running `build_snapshot`. So: bump a version only when membership actually changed, bump the
+  **narrowest scope** that covers who cares (a deployment-wide bump would wake every disjoint guild
+  for nothing), and keep the wake path cheap since a herd multiplies it.
 - **Fan-out (per-request external calls).** `build_snapshot` runs per client per renewal (≈ every
   `LONGPOLL_HOLD_SECS`, *plus* on every herd wake). Any Discord REST call inside it is multiplied by
   client count, and Discord rate-limits per route/bucket (e.g. `GET guild roles` is a **per-guild**

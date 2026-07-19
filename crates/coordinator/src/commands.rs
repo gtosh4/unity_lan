@@ -6,7 +6,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::watch;
 use twilight_gateway::{Event, EventTypeFlags, Intents, Shard, ShardId, StreamExt as _};
 use twilight_model::application::command::CommandType;
 use twilight_model::application::interaction::application_command::{
@@ -25,15 +24,17 @@ use twilight_util::builder::InteractionResponseDataBuilder;
 
 use crate::presence::Presence;
 use crate::store::{match_device_by_name, DeviceMatch, Store};
+use crate::versions::{Scope, Versions};
 
 /// Connect the gateway and handle `/unitylan` interactions + role-revocation events until the
-/// process exits. `presence`/`version` let member-role changes evict presence immediately (and
-/// wake parked long-polls), so losing a role cuts a member off without waiting for the TTL.
+/// process exits. `presence`/`versions` let member-role changes evict presence immediately (and
+/// wake the affected guild's parked long-polls), so losing a role cuts a member off without waiting
+/// for the TTL.
 pub async fn run_gateway(
     token: String,
     store: Arc<Store>,
     presence: Arc<Presence>,
-    version: Arc<watch::Sender<u64>>,
+    versions: Arc<Versions>,
 ) -> anyhow::Result<()> {
     let http = twilight_http::Client::new(token.clone());
     let app_id = http.current_user_application().await?.model().await?.id;
@@ -65,7 +66,7 @@ pub async fn run_gateway(
                 Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
             },
             Event::InteractionCreate(interaction) => {
-                handle_interaction(&http, app_id, &store, &version, interaction.0).await;
+                handle_interaction(&http, app_id, &store, &versions, interaction.0).await;
             }
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
@@ -73,7 +74,7 @@ pub async fn run_gateway(
                 revoke(
                     &store,
                     &presence,
-                    &version,
+                    &versions,
                     m.guild_id.get(),
                     m.user.id.get(),
                     &held,
@@ -85,7 +86,7 @@ pub async fn run_gateway(
                 revoke(
                     &store,
                     &presence,
-                    &version,
+                    &versions,
                     m.guild_id.get(),
                     m.user.id.get(),
                     &HashSet::new(),
@@ -99,11 +100,12 @@ pub async fn run_gateway(
 }
 
 /// Evict a member from every registered network in `guild` whose role is not in `held`, bumping
-/// the membership version if anything changed so parked long-polls wake and prune the peer.
+/// that guild's membership version if anything changed so its parked long-polls wake and prune the
+/// peer. Scoped to the guild: a revocation here is invisible to every other guild's clients.
 async fn revoke(
     store: &Store,
     presence: &Presence,
-    version: &watch::Sender<u64>,
+    versions: &Versions,
     guild_id: u64,
     user_id: u64,
     held: &HashSet<u64>,
@@ -122,7 +124,7 @@ async fn revoke(
         }
     }
     if changed {
-        version.send_modify(|v| *v += 1);
+        versions.bump(Scope::Guild(guild_id));
         tracing::info!(
             guild = guild_id,
             user = user_id,
@@ -171,7 +173,7 @@ async fn handle_interaction(
     http: &twilight_http::Client,
     app_id: Id<ApplicationMarker>,
     store: &Store,
-    version: &watch::Sender<u64>,
+    versions: &Versions,
     interaction: Interaction,
 ) {
     let Some(InteractionData::ApplicationCommand(data)) = interaction.data.clone() else {
@@ -180,7 +182,7 @@ async fn handle_interaction(
     if data.name != "unitylan" {
         return;
     }
-    let content = process(http, store, version, &interaction, &data).await;
+    let content = process(http, store, versions, &interaction, &data).await;
 
     let response = InteractionResponse {
         kind: InteractionResponseType::ChannelMessageWithSource,
@@ -203,7 +205,7 @@ async fn handle_interaction(
 async fn process(
     http: &twilight_http::Client,
     store: &Store,
-    version: &watch::Sender<u64>,
+    versions: &Versions,
     interaction: &Interaction,
     data: &CommandData,
 ) -> String {
@@ -219,7 +221,7 @@ async fn process(
             if !is_admin(interaction) {
                 return "You need the Manage Server permission.".to_string();
             }
-            handle_network(http, store, version, guild_id.get(), subs).await
+            handle_network(http, store, versions, guild_id.get(), subs).await
         }
         // /unitylan enroll — any member mints a one-time key for their own headless device.
         ("enroll", CommandOptionValue::SubCommand(_)) => {
@@ -320,7 +322,7 @@ fn is_admin(interaction: &Interaction) -> bool {
 async fn handle_network(
     http: &twilight_http::Client,
     store: &Store,
-    version: &watch::Sender<u64>,
+    versions: &Versions,
     guild_id: u64,
     subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
 ) -> String {
@@ -354,13 +356,15 @@ async fn handle_network(
                 .unwrap_or_else(|| format!("role-{role}"));
             match store.upsert_network(guild_id, role.get(), &name).await {
                 Ok(()) => {
-                    // Wake parked long-polls so clients pick up the new network immediately.
-                    version.send_modify(|v| *v += 1);
+                    // Wake the guild's parked long-polls so its clients pick up the new network
+                    // immediately. A member who holds *no* other network in this guild isn't
+                    // subscribed to it yet and picks the new one up on its next renewal instead —
+                    // acceptable for an admin-rare event, unlike presence churn.
+                    versions.bump(Scope::Guild(guild_id));
                     tracing::info!(
                         guild = guild_id,
                         role = role.get(),
                         %name,
-                        version = *version.borrow(),
                         "network add: upserted + bumped membership version"
                     );
                     format!("Registered <@&{role}> as network **{name}**.")
@@ -374,12 +378,11 @@ async fn handle_network(
             };
             match store.remove_network(guild_id, role.get()).await {
                 Ok(()) => {
-                    // Wake parked long-polls so clients drop the removed network immediately.
-                    version.send_modify(|v| *v += 1);
+                    // Wake the guild's parked long-polls so its clients drop the network now.
+                    versions.bump(Scope::Guild(guild_id));
                     tracing::info!(
                         guild = guild_id,
                         role = role.get(),
-                        version = *version.borrow(),
                         "network remove: removed + bumped membership version"
                     );
                     format!("Unregistered <@&{role}>.")

@@ -205,11 +205,21 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
    O(changes). `PROTOCOL_VERSION = 3` (additive; a pre-delta client sends no `held` → full).
 3. If `since == current version` and the caller's own request changed nothing, park on a
    `tokio::watch` via `wait_park` for up to `longpoll_hold_secs` (≈ `attestation_ttl/2`), then return
-   a fresh snapshot (renewal piggybacks the hold). A **membership** change bumps the global version
-   and wakes parked clients; each rebuild is jittered by a small per-client offset (`wake_jitter`) to
-   flatten the fan-in.
-4. **Targeted wakeups.** Pair-specific reports (reflexive/relay/ICE — *for* one peer) don't bump the
-   global version; they wake **only the target** via a per-pubkey `Wakers` registry. The reporter
+   a fresh snapshot (renewal piggybacks the hold). A **membership** change wakes parked clients; each
+   rebuild is jittered by a small per-client offset (`wake_jitter`) to flatten the fan-in.
+4. **Scoped versions** (`versions.rs`). The `version` is *not* one deployment-wide counter — it's a
+   hash over the caller's own `Scope`s: `Guild(g)` for each guild it holds a network role in, plus
+   `User(u)` for own-device peering (which crosses guilds). A membership change bumps only the scopes
+   it touched, so a change in guild A leaves every disjoint guild's clients parked instead of making
+   all `T` deployed devices rebuild an O(peers) snapshot to learn nothing. This is the dominant
+   control-plane cost for a coordinator hosting many small, mutually disjoint guilds. `wait_park`
+   subscribes to the caller's scopes (typically 2–4 receivers); the wire type is still an opaque
+   `u64`, so no protocol change. `/admin/stats` + `/metrics` keep a deployment-wide counter — the
+   operator view genuinely wants every bump. Caveat: a network registered in a guild where the caller
+   holds *no* other role isn't in its scope set, so it lands on the next renewal rather than
+   instantly — an admin-rare event, unlike presence churn.
+5. **Targeted wakeups.** Pair-specific reports (reflexive/relay/ICE — *for* one peer) don't bump any
+   membership scope; they wake **only the target** via a per-pubkey `Wakers` registry. The reporter
    still returns immediately (`build_snapshot` reports `caller_changed`) to keep its report loop.
 5. Presence is tracked in-memory (`presence.rs`) with a reaper at `PRESENCE_TTL_SECS`
    (`2×hold + 60s`); `paused`/`Logout`/`supersede` withdraw a device explicitly.
