@@ -77,3 +77,31 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:latest
+
+  # Announce the release in Discord #changelog once all artifacts are built and attached.
+  announce:
+    needs: [packages, windows, image]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post release to Discord
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          NOTES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || echo "")
+          NOTES=${NOTES:-"Release $TAG"}
+          DESC=$(jq -Rs '.[:4000]' <<< "$NOTES")
+          curl -fsSL -X POST "$DISCORD_WEBHOOK" \
+            -H "Content-Type: application/json" \
+            -d @- <<JSON
+          {
+            "username": "UnityLAN Releases",
+            "embeds": [{
+              "title": "$TAG",
+              "url": "https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG",
+              "description": $DESC,
+              "color": 5793522
+            }]
+          }
+          JSON
