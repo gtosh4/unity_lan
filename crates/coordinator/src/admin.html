@@ -210,7 +210,8 @@ function tickUpdated(){
 }
 setInterval(tickUpdated, 1000);
 
-// ---- network graph: fetched anonymized, laid out with a small force sim, pan/zoom/drag ----
+// ---- network graph: guilds/networks named, users anonymized server-side; laid out with a
+// ---- small force sim, pan/zoom/drag ----
 const Graph = (() => {
   const SVGNS = "http://www.w3.org/2000/svg";
   const svg = $("#graph"), vp = $("#graphViewport");
@@ -222,6 +223,13 @@ const Graph = (() => {
 
   const size = () => ({w: svg.clientWidth || 800, h: 480});
   const el = (n, a) => { const e = document.createElementNS(SVGNS, n); for(const k in a) e.setAttribute(k, a[k]); return e; };
+
+  // Guild hues walk the color wheel *minus* a guard band around the accent that user nodes use
+  // (--accent is indigo, ~244°). Without the reservation a 3-guild deployment lands its third
+  // guild right on the accent and its networks read as user nodes. Guilds therefore share the
+  // remaining arc, starting just past the band.
+  const USER_HUE = 244, GUARD = 40, ARC = 360 - 2*GUARD;
+  const guildHue = (i, n) => Math.round((USER_HUE + GUARD + ARC*i/Math.max(1,n)) % 360);
   const guildColor = g => `hsl(${hue.get(g)??210} 55% 55%)`;
 
   function applyView(){ vp.setAttribute("transform", `translate(${view.tx} ${view.ty}) scale(${view.k})`); }
@@ -231,13 +239,15 @@ const Graph = (() => {
   function build(d){
     data = d;
     const guilds = d.guilds || [];
-    hue = new Map(guilds.map((g,i) => [g, Math.round(360*i/Math.max(1,guilds.length))]));
+    hue = new Map(guilds.map((g,i) => [g.id, guildHue(i, guilds.length)]));
     // Keep positions of nodes that persist across a refresh, so the layout doesn't jump.
     const prev = byId; byId = new Map();
     const {w,h} = size();
     nodes = d.nodes.map(n => {
       const o = prev.get(n.id);
-      const nd = { id:n.id, kind:n.kind, guild:n.guild||null,
+      // Users have no `label` — their `id` is the server-side anonymized token, and that is the
+      // only thing we ever draw for them.
+      const nd = { id:n.id, kind:n.kind, guild:n.guild||null, label:n.label||n.id,
         x: o ? o.x : (Math.random()-0.5)*w*0.6, y: o ? o.y : (Math.random()-0.5)*h*0.6,
         vx:0, vy:0, pinned:false };
       byId.set(n.id, nd); return nd;
@@ -258,7 +268,7 @@ const Graph = (() => {
       const g = el("g", {class:"nd " + (n.kind==="user"?"user":"net")});
       if(n.kind==="user"){ g.appendChild(el("circle", {r:7})); }
       else { g.appendChild(el("rect", {x:-9,y:-7,width:18,height:14,rx:4, fill:guildColor(n.guild)})); }
-      const t = el("text", {x:0, y:-11, "text-anchor":"middle"}); t.textContent = n.id;
+      const t = el("text", {x:0, y:-11, "text-anchor":"middle"}); t.textContent = n.label;
       g.appendChild(t);
       g.addEventListener("pointerdown", ev => startNodeDrag(ev, n));
       n.el = g; nLayer.appendChild(g);
@@ -307,7 +317,7 @@ const Graph = (() => {
   function renderLegend(guilds){
     const parts = [
       `<span class="k"><span class="sw" style="background:var(--accent)"></span>user</span>`,
-      ...guilds.map(g => `<span class="k"><span class="sw" style="background:${guildColor(g)}"></span>${esc(g)}</span>`),
+      ...guilds.map(g => `<span class="k"><span class="sw" style="background:${guildColor(g.id)}"></span>${esc(g.label)}</span>`),
     ];
     $("#graphLegend").innerHTML = guilds.length ? parts.join("") : "";
   }
@@ -356,16 +366,19 @@ const Graph = (() => {
     svg.addEventListener("pointermove", move); svg.addEventListener("pointerup", up);
   }
 
-  // ---- Graphviz DOT export (built from the already-anonymized data) ----
+  // ---- Graphviz DOT export. Guild/network names are carried through as display labels; user
+  // ---- nodes export as their anonymized id, same as on screen. ----
   function toDot(){
     if(!data) return "graph unitylan {}\n";
     const safe = s => s.replace(/[^A-Za-z0-9_]/g, "_");
+    const q = s => String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    const guildLabel = new Map((data.guilds||[]).map(g => [g.id, g.label]));
     let s = "graph unitylan {\n  graph [layout=neato, overlap=false, splines=true];\n  node [fontsize=10, fontname=\"sans-serif\"];\n\n";
     const byGuild = new Map();
-    for(const n of data.nodes) if(n.kind==="network"){ if(!byGuild.has(n.guild)) byGuild.set(n.guild, []); byGuild.get(n.guild).push(n.id); }
+    for(const n of data.nodes) if(n.kind==="network"){ if(!byGuild.has(n.guild)) byGuild.set(n.guild, []); byGuild.get(n.guild).push(n); }
     for(const [g,list] of byGuild){
-      s += `  subgraph cluster_${safe(g)} {\n    label="${g}"; style="rounded"; color="#8888aa";\n`;
-      for(const id of list) s += `    "${id}" [shape=box, style="rounded,filled", fillcolor="#dbe4ff"];\n`;
+      s += `  subgraph cluster_${safe(g)} {\n    label="${q(guildLabel.get(g) ?? g)}"; style="rounded"; color="#8888aa";\n`;
+      for(const n of list) s += `    "${n.id}" [label="${q(n.label ?? n.id)}", shape=box, style="rounded,filled", fillcolor="#dbe4ff"];\n`;
       s += "  }\n";
     }
     for(const n of data.nodes) if(n.kind==="user") s += `  "${n.id}" [shape=ellipse];\n`;
