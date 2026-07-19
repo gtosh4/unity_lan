@@ -26,7 +26,8 @@ jobs:
 
   # Dev happens mostly on Linux, so the Windows-only modules (wg/fw/resolver/windows.rs,
   # service.rs) never compile in the `check` job. Build + test them here so drift surfaces on
-  # every PR instead of only at release time.
+  # every PR instead of only at release time. The coordinator is a Linux-only server binary — it
+  # never ships to Windows, so exclude it rather than impose a Windows-compile constraint on it.
   windows:
     runs-on: windows-latest
     steps:
@@ -36,9 +37,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --exclude unitylan-coordinator --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude unitylan-coordinator
 
   # Dependency-vulnerability gate. Reads the ignore-list in .cargo/audit.toml (triaged, non-
   # applicable advisories, all in the GUI's transitive deps) and fails on any new advisory in the
