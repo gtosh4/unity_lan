@@ -188,12 +188,13 @@ function render(d){
   $("#guilds").innerHTML = d.guilds.map(g => {
     const name = g.name ? esc(g.name) : `<span style="color:var(--muted)">guild ${esc(g.id)}</span>`;
     const rows = g.networks.length ? `
-      <table><thead><tr><th>role</th><th class="num">online</th></tr></thead><tbody>
+      <table><thead><tr><th>role</th><th class="num">users</th><th class="num">devices</th></tr></thead><tbody>
       ${g.networks.map(n => {
         const z = n.online === 0 ? " zero" : "";
-        // Name + id chip, same shape as the guild heading above.
+        // Users are the distinct people online; devices counts each of their machines separately.
         return `<tr><td>${esc(n.name)} <span class="chip">${esc(n.role_id)}</span></td>
-          <td class="num"><span class="onl${z}"><span class="d"></span>${n.online.toLocaleString()}</span></td></tr>`;
+          <td class="num"><span class="onl${z}"><span class="d"></span>${(n.users ?? 0).toLocaleString()}</span></td>
+          <td class="num"><span class="onl${z}">${n.online.toLocaleString()}</span></td></tr>`;
       }).join("")}
       </tbody></table>` : `<div class="empty">no networks registered</div>`;
     return `<section class="guild"><div class="ghead"><h2>${name}</h2><span class="chip">${esc(g.id)}</span></div>${rows}</section>`;

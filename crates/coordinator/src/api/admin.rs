@@ -10,11 +10,13 @@ use axum::Json;
 use super::wake::wait_for_change_until;
 use super::{internal, ApiError, AppState};
 
-/// One network's live count within a guild.
+/// One network's live counts within a guild. `online` is devices; `users` is the distinct owners
+/// behind them (a user with three devices in the network is one user, three devices).
 struct NetStat {
     role_id: u64,
     name: String,
     online: usize,
+    users: usize,
 }
 
 /// One guild's admin view: display name (falls back to the id) and its networks.
@@ -60,6 +62,11 @@ async fn gather_stats(st: &AppState) -> Result<AdminStats, ApiError> {
                 name: n.name.clone(),
                 online: pres
                     .online_per_network
+                    .get(&(id, n.role_id))
+                    .copied()
+                    .unwrap_or(0),
+                users: pres
+                    .users_per_network
                     .get(&(id, n.role_id))
                     .copied()
                     .unwrap_or(0),
@@ -181,6 +188,7 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
                         "role_id": n.role_id.to_string(),
                         "name": n.name,
                         "online": n.online,
+                        "users": n.users,
                     })
                 })
                 .collect();
@@ -614,6 +622,7 @@ mod tests {
                     role_id: 11,
                     name: "gamers".into(),
                     online: 2,
+                    users: 1,
                 }],
             }],
             total_networks: 1,
@@ -656,11 +665,13 @@ mod tests {
                             role_id: 11,
                             name: "gamers".into(),
                             online: 2,
+                            users: 1,
                         },
                         NetStat {
                             role_id: 12,
                             name: "empty-net".into(),
                             online: 0,
+                            users: 0,
                         },
                     ],
                 },
@@ -671,6 +682,7 @@ mod tests {
                         role_id: 31,
                         name: "ghost-town".into(),
                         online: 0,
+                        users: 0,
                     }],
                 },
             ],
@@ -690,7 +702,7 @@ mod tests {
             serde_json::json!([{
                 "id": "100",
                 "name": "Some Server",
-                "networks": [{"role_id": "11", "name": "gamers", "online": 2}],
+                "networks": [{"role_id": "11", "name": "gamers", "online": 2, "users": 1}],
             }])
         );
 

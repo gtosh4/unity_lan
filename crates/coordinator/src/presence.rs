@@ -166,21 +166,32 @@ impl Presence {
     }
 
     /// A point-in-time count of live presence for the admin dashboard, taken under one lock:
-    /// online-device count per `(guild_id, role_id)` plus deployment-wide distinct totals. A device
-    /// present in N networks contributes to N per-network counts but is one `online_device` and its
-    /// owner one `online_user`.
+    /// online device *and* distinct-user counts per `(guild_id, role_id)`, plus deployment-wide
+    /// distinct totals. A device present in N networks contributes to N per-network counts but is
+    /// one `online_device` and its owner one `online_user`; a user with several devices in the
+    /// same network counts once in that network's user count.
     pub fn stats(&self) -> PresenceStats {
         let map = self.map.lock().unwrap();
         let mut online_per_network: HashMap<(u64, u64), usize> = HashMap::new();
+        let mut users_by_network: HashMap<(u64, u64), std::collections::HashSet<u64>> =
+            HashMap::new();
         let mut devices = std::collections::HashSet::new();
         let mut users = std::collections::HashSet::new();
         for ((g, r, pk), e) in map.iter() {
             *online_per_network.entry((*g, *r)).or_default() += 1;
+            users_by_network
+                .entry((*g, *r))
+                .or_default()
+                .insert(e.p.user_id);
             devices.insert(*pk);
             users.insert(e.p.user_id);
         }
         PresenceStats {
             online_per_network,
+            users_per_network: users_by_network
+                .into_iter()
+                .map(|(k, v)| (k, v.len()))
+                .collect(),
             online_devices: devices.len(),
             online_users: users.len(),
         }
@@ -204,6 +215,9 @@ impl Presence {
 pub struct PresenceStats {
     /// Online device count keyed by `(guild_id, role_id)`.
     pub online_per_network: HashMap<(u64, u64), usize>,
+    /// Distinct online *users* keyed by `(guild_id, role_id)` — a user's several devices in one
+    /// network collapse to one.
+    pub users_per_network: HashMap<(u64, u64), usize>,
     /// Distinct devices currently online across the deployment.
     pub online_devices: usize,
     /// Distinct users currently online across the deployment.
@@ -273,6 +287,8 @@ mod tests {
         let s = p.stats();
         assert_eq!(s.online_per_network[&(1, 2)], 3); // A, B, C
         assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
+        assert_eq!(s.users_per_network[&(1, 2)], 2); // 42 (A+B collapse), 99
+        assert_eq!(s.users_per_network[&(1, 3)], 1); // 42 only
         assert_eq!(s.online_devices, 3); // A, B, C distinct
         assert_eq!(s.online_users, 2); // 42, 99
     }
