@@ -1,8 +1,12 @@
 # UnityLAN — Peer-direct attestation refresh
 
-**Status:** design draft. Offloads the coordinator's per-refresh attestation fan-out to the mesh,
-without weakening the trust model. Realizes the "gossip/lazy-peering/deltas as the >~1k escape
-hatch" named in `roadmap.md` item 7 and `design.md` §5.
+**Status: implemented** (stages 1–2, §10; stage 3 optional and not yet built). This is the
+**design/reference doc** for the peer-direct attestation-refresh feature — the code points back
+here: `common::p2p` (wire envelope), `engine::p2p` (serve + pull), `engine::daemon` (refresh loop),
+`engine::coord::verify_pulled`, and `scripts/gossip-test.sh` (end-to-end). It offloads the
+coordinator's per-refresh attestation fan-out to the mesh without weakening the trust model, and
+realizes the "gossip/lazy-peering/deltas as the >~1k escape hatch" named in `roadmap.md` item 7 and
+`design.md` §5.
 
 **Relationship to M3b (deferred gossip).** M3b prototyped *epidemic discovery gossip* and reverted
 it, finding: gossip runs over WG tunnels, WG needs **reciprocal** peer knowledge, so a node can only
@@ -233,28 +237,36 @@ Net: **cache** (O(N) minting) + **gossip** (job 1 off-coordinator) + **simple de
 
 ## 10. Build plan (incremental — each stage is a safe no-op-if-off addition)
 
-1. **Serve-own endpoint** — engine binds the mesh-IP UDP service with the typed envelope (§5.1) and
-   its first request type `GetAttestations`; answers with its own `Vec<GuildAttestation>`. Off by
-   default behind a flag. (Build the envelope, not a one-off endpoint — later types are added
+1. ✅ **Serve-own endpoint** — engine binds the mesh-IP UDP service with the typed envelope (§5.1) and
+   its first request type `GetAttestations`; answers with its own `Vec<GuildAttestation>`. Behind the
+   `gossip` flag (default on). (Build the envelope, not a one-off endpoint — later types are added
    variants.)
-2. **Peer-direct pull + fallback** — daemon, on a held peer entering the refresh window, pulls from
+2. ✅ **Peer-direct pull + fallback** — daemon, on a held peer entering the refresh window, pulls from
    that peer; verifies vs pinned anchor; adopts or falls back to the coordinator.
-3. **Lengthen coordinator renewal** — once peer-direct refresh carries freshness, the client's
-   coordinator `/refresh` can back off (membership-driven wakes + a long safety renewal), cutting
-   idle coordinator polling further.
+3. ◻ **Lengthen coordinator renewal** (optional, not yet built) — once peer-direct refresh carries
+   freshness, the client's coordinator `/refresh` can back off (membership-driven wakes + a long
+   safety renewal), cutting idle coordinator polling further.
 
-**Verify.** Extend `scripts/mesh-test.sh`: bring up A+B via coordinator, then **block A→coordinator**
-and confirm A refreshes B's attestation directly and the mesh stays up past one attestation TTL;
-unblock and confirm fallback still works. Add engine unit tests for the serve/verify path
-(malformed/expired/wrong-pubkey replies rejected).
+**Verify.** ✅ `scripts/gossip-test.sh`: brings up A+B via coordinator, **blocks A→coordinator**, and
+confirms A refreshes B's attestation directly and the mesh stays up past one attestation TTL, then
+unblocks and confirms coordinator fallback still works. Plus engine unit tests for the serve/verify
+path (malformed/expired/wrong-pubkey replies rejected).
 
 ## 11. Open questions
 
-- Concrete port + serde framing for the envelope (§5.1) — reuse an existing wire framing or a minimal
-  custom one? Datagram size ceiling before a bulk type forces chunking/stream.
-- Refresh-window sizing vs. the sign-cache epoch so peer-served blobs never land within the client's
-  own fallback window (avoid double-fetch).
+Resolved as the feature shipped:
+
+- ✅ **Port + envelope framing** — UDP `common::p2p::P2P_PORT` (51830) bound to the mesh `/32`; a
+  serde internally-tagged `ReqBody`/`RespBody` enum with a `proto` version field and an
+  `Unknown`/`Unsupported` degrade path; `P2P_MAX_DATAGRAM` (16 KiB) caps a datagram, above which a
+  future bulk type must chunk/stream.
+- ✅ **Refresh-window vs. sign-cache epoch** — the client refreshes a peer within a window before
+  expiry driven by the same clock as the coordinator fallback (§4), so peer-served blobs and the
+  fallback share one trigger instead of double-fetching.
+
+Still open:
+
 - Whether to also serve a peer's *endpoint/ICE* freshness here, or keep those coordinator-brokered
   (they're pair-specific; likely leave them until a concrete need — M3b's "marginal" caveat applies
   to endpoint-only gossip).
-- Backoff schedule for coordinator `/refresh` once stage 2 lands (stage 3).
+- Backoff schedule for coordinator `/refresh` (stage 3, §10).
