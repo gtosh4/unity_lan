@@ -18,4 +18,8 @@ coordinator.toml
 *.key
 # Local engine dev state (WG key, device token, control socket) + local config
 /engine-state
+/engine-state-local
+/engine-state-prod
 /engine.toml
+/engine.local.toml
+/engine.prod.toml

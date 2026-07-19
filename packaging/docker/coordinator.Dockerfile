@@ -14,7 +14,13 @@ FROM rust:1.96-alpine AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY . .
-RUN cargo build --release -p unitylan-coordinator
+# Cache mounts keep the registry + target/ across builds, so a rebuild only recompiles what changed.
+# The binary must be copied OUT inside this RUN: target/ is a cache mount and vanishes when it ends,
+# so a later `COPY --from=build /src/target/...` would not find it.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    cargo build --release -p unitylan-coordinator \
+    && cp target/release/unitylan-coordinator /unitylan-coordinator
 
 FROM alpine:3.20
 # ca-certificates: outbound TLS to Discord (rustls-native-certs reads the system trust store).
@@ -22,7 +28,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates \
     && adduser -S -D -H -h /data unitylan \
     && install -d -o unitylan /data
-COPY --from=build /src/target/release/unitylan-coordinator /usr/bin/unitylan-coordinator
+COPY --from=build /unitylan-coordinator /usr/bin/unitylan-coordinator
 
 # Run unprivileged: the coordinator carries no traffic and needs no root. `unitylan` owns /data so
 # a fresh named volume (Docker seeds volume ownership from the mountpoint dir) is writable.

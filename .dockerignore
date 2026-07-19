@@ -18,8 +18,8 @@
 /secrets
 *.key
 coordinator.toml
-/engine-state
-/engine.toml
+/engine-state*/
+/engine.*.toml
 
 # Windows WG runtime DLL, staged per-machine.
 /resources-windows
