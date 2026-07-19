@@ -179,7 +179,7 @@ pub struct ExposedPort {
 }
 
 /// A snapshot of the daemon's live mesh state: this device plus the peers it has meshed with.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusReport {
     pub device: Option<DeviceStatus>,
     pub peers: Vec<PeerStatus>,
@@ -290,6 +290,34 @@ pub struct BlockedUser {
     pub username: String,
 }
 
+/// Written out rather than derived: four fields carry `#[serde(default = "default_true")]`, so a
+/// derived `Default` would disagree with how the same struct decodes off the wire — and, for
+/// `disable_new_networks`, would hand a caller the *permissive* posture the field's own docs call
+/// insecure. `Default` here means "nothing specified yet", matching the serde defaults exactly.
+/// Container-level `#[serde(default)]` is deliberately absent, so this impl never affects decoding;
+/// it exists only for Rust callers building a report with `..Default::default()`.
+impl Default for StatusReport {
+    fn default() -> Self {
+        Self {
+            device: None,
+            peers: Vec::new(),
+            networks: Vec::new(),
+            needs_login: false,
+            connected: true,
+            disable_new_networks: true,
+            peer_own_devices: true,
+            identity: None,
+            coordinator_online: true,
+            blocked: Vec::new(),
+            engine_version: String::new(),
+            update_available: None,
+            update_ready: false,
+            lan_overlap: None,
+            directive: None,
+        }
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -373,7 +401,29 @@ pub fn classify_reach(punched: bool, connected: bool, punch_age_secs: u64) -> Pe
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_reach, PeerReach};
+    use super::{classify_reach, PeerReach, StatusReport};
+
+    /// `Default` and the wire must agree on what "unspecified" means. A derived `Default` would
+    /// give `false` for the four `default_true` fields — including `disable_new_networks`, whose
+    /// permissive value is the insecure posture — so a caller writing `..Default::default()` would
+    /// silently get a report that no daemon would ever have sent.
+    #[test]
+    fn default_matches_the_wire_defaults() {
+        // Only the two fields without a serde default have to be present.
+        let decoded: StatusReport =
+            serde_json::from_str(r#"{"device":null,"peers":[]}"#).expect("decodes");
+        let d = StatusReport::default();
+        assert_eq!(decoded.connected, d.connected);
+        assert_eq!(decoded.disable_new_networks, d.disable_new_networks);
+        assert_eq!(decoded.peer_own_devices, d.peer_own_devices);
+        assert_eq!(decoded.coordinator_online, d.coordinator_online);
+        assert_eq!(decoded.needs_login, d.needs_login);
+        // Spelled out so the secure posture is asserted, not just self-consistency.
+        assert!(
+            d.disable_new_networks,
+            "new networks must default to opted out"
+        );
+    }
 
     #[test]
     fn reach_classification() {

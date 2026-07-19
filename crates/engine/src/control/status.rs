@@ -71,6 +71,13 @@ pub fn set_coord_online(shared: &Shared, online: bool) {
 pub fn set_logged_out(shared: &Shared) {
     shared.send_replace(StatusReport {
         needs_login: true,
+        // Spelled out because logged-out genuinely differs from `Default`'s "nothing specified yet":
+        // there is no mesh to be connected to and no coordinator session to be online with. The
+        // policy flags (`disable_new_networks`, `peer_own_devices`) are left at their secure
+        // defaults — the persisted values in `LocalNet` are the real ones, and they're restored on
+        // the next `update` after re-registering.
+        connected: false,
+        coordinator_online: false,
         ..Default::default()
     });
 }
@@ -83,7 +90,18 @@ pub type Shared = Arc<tokio::sync::watch::Sender<StatusReport>>;
 pub fn shared() -> Shared {
     // The initial receiver is dropped; `Watch` streams create their own via `subscribe()`. A
     // `watch::Sender` keeps working (send_* never errors) with zero receivers.
-    Arc::new(tokio::sync::watch::channel(StatusReport::default()).0)
+    //
+    // `connected`/`coordinator_online` are spelled out as `false`: this is the pre-startup snapshot,
+    // before the mesh is up or the coordinator has been reached, so reporting either as live would
+    // be a claim the daemon hasn't earned yet. Both are overwritten by the first `update`.
+    Arc::new(
+        tokio::sync::watch::channel(StatusReport {
+            connected: false,
+            coordinator_online: false,
+            ..Default::default()
+        })
+        .0,
+    )
 }
 
 /// Rebuild the status snapshot from the current device + seed peers. `disabled` is the local
