@@ -235,7 +235,8 @@ sequenceDiagram
   `removed` list, instead of the full set. So a single join sends each woken client just the joiner
   (O(changes)), not the whole roster — collapsing a membership herd from O(N) per client to
   O(changes), and a login-storm from O(N³) to O(N²). Empty `held` (first contact, or a client
-  forcing an attestation refresh) still gets a full snapshot. Additive: `PROTOCOL_VERSION` = 3.
+  forcing an attestation refresh) still gets a full snapshot. Additive — a pre-delta client sends no
+  `held` and gets a full snapshot — so it needed no protocol bump (technical.md §3.6).
 - **Scoped versions**: a client's `version` covers only the scopes it participates in — each guild it
   holds a role in, plus its own user scope (own-device peering crosses guilds). A membership change
   bumps just the scopes it touched, so a join in one guild never wakes a disjoint guild's clients.

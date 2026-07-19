@@ -140,14 +140,18 @@ git tag v0.1.0 && git push origin v0.1.0
 The package version comes from the tag (`VERSION=<tag without v> build.sh`). For arm64, add a
 matrix leg that builds via [`cross`](https://github.com/cross-rs/cross).
 
-Alongside the packages, the Linux job attaches the raw `unitylan-engine-linux-amd64` binary and a
+Alongside the packages, the Linux job attaches `unitylan-linux-amd64.tar.gz` (engine + GUI) and a
 `SHA256SUMS`; the Windows job attaches `SHA256SUMS-windows.txt`. These feed the auto-update below.
 
 ## Signed auto-update
 
-All crates share one version (`[workspace.package] version` in the root `Cargo.toml`), and the wire
-protocol has a `PROTOCOL_VERSION` (`common`) advertised on every register/refresh so a mixed-version
-mesh degrades to a warning, never a crash.
+All crates share one version (`[workspace.package] version` in the root `Cargo.toml`). The wire
+protocol carries a **negotiated range**: every client advertises `[MIN_PROTOCOL_VERSION,
+PROTOCOL_VERSION]` (`common`) on register/refresh, the coordinator answers with the highest version
+both speak, and only a range with **no overlap** is refused — `426 Upgrade Required`, naming both
+ranges and which side is stale. The support window is **current + one previous**, so a client always
+has a full release cycle to update before a coordinator stops answering it. Features that don't
+require a break ride capability flags (`caps`) instead of a version bump.
 
 Updates are **opt-in per deployment** and reuse the coordinator's existing Ed25519 trust anchor — no
 new signing key. Add a `[release]` block to the coordinator config (see `coordinator.example.toml`)
@@ -157,10 +161,15 @@ long-poll. Each engine verifies it against its **pinned** anchor and, if the ver
 artifact matches its platform, the GUI shows an **Update** button. Applying it downloads the
 artifact, re-checks the SHA-256 against the signed manifest, then:
 
-- **Linux** — self-replaces the engine binary (`/usr/lib/unitylan/unitylan-engine`, symlinked onto
-  PATH) in place and exits; systemd (`Restart=always`, with `ReadWritePaths=/usr/lib/unitylan`)
-  relaunches onto the new binary. The GUI is updated via the package
-  manager as usual (the engine self-update keeps the resident daemon current).
+- **Linux** — unpacks the `.tar.gz`, self-replaces the engine binary
+  (`/usr/lib/unitylan/unitylan-engine`, symlinked onto PATH) in place, replaces the GUI at
+  `/usr/bin/unitylan-gui` if one is installed, and exits; systemd (`Restart=always`, with
+  `ReadWritePaths=/usr/lib/unitylan`) relaunches onto the new binary. **Both** binaries, because the
+  GUI↔engine control protocol carries no version of its own — updating the engine alone left an
+  older GUI talking to a newer daemon. A headless install (no GUI present) updates the engine only,
+  and a bare (non-gzip) artifact is still accepted as the engine binary so manifests published
+  before this change keep working. A GUI process already running when the swap happens shows a
+  "relaunch to finish" notice, since replacing the file can't update a live process.
 - **Windows** — runs the signed `.msi`; its `MajorUpgrade` stops the service, replaces engine + GUI +
   DLL, and restarts.
 

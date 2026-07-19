@@ -138,20 +138,120 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
     Ok(buf)
 }
 
-/// Linux: the artifact is the raw `unitylan-engine` binary. Write it beside the target (same
-/// filesystem, for an atomic replace), mark it executable, swap the running executable in place, and
-/// exit(0) so the service manager (`Restart=always`) relaunches the new binary.
+/// Linux: the artifact is a `.tar.gz` carrying **both** `unitylan-engine` and `unitylan-gui`.
+///
+/// Both, because the GUI drives the engine over a control protocol that carries no version of its
+/// own: replacing only the engine (as this used to) left an older GUI talking to a newer daemon, and
+/// a field it didn't know was a dropped connection, not a clean error. Windows never had this
+/// problem — its MSI `MajorUpgrade` replaces engine + GUI + DLL together — so this restores the same
+/// on-disk lockstep on Linux.
+///
+/// A bare (non-gzip) artifact is still accepted as the engine binary alone, so a manifest published
+/// before this change keeps applying.
 #[cfg(unix)]
 fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = state_dir.join("unitylan-engine.update");
-    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-        .context("chmod +x on staged binary")?;
-    self_replace::self_replace(&tmp).context("replacing the running engine binary")?;
-    let _ = std::fs::remove_file(&tmp);
+    let engine = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let bundle = unpack_bundle(bytes, state_dir)?;
+        // Best-effort: a headless install has no GUI to replace, and failing the engine update over
+        // that would be worse than the skew we're preventing.
+        if let Some(gui) = bundle.gui {
+            match replace_gui(&gui) {
+                Ok(Some(at)) => tracing::info!(path = %at.display(), "replaced the GUI binary"),
+                Ok(None) => tracing::info!("no installed GUI found; updating the engine only"),
+                Err(e) => tracing::warn!("could not replace the GUI binary: {e:#}"),
+            }
+        }
+        bundle
+            .engine
+            .context("update archive has no unitylan-engine")?
+    } else {
+        let tmp = state_dir.join("unitylan-engine.update");
+        std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+        make_executable(&tmp)?;
+        tmp
+    };
+    self_replace::self_replace(&engine).context("replacing the running engine binary")?;
+    let _ = std::fs::remove_file(&engine);
     tracing::info!("engine binary replaced; exiting for service restart onto the new version");
     std::process::exit(0);
+}
+
+/// The staged files extracted from an update bundle.
+#[cfg(unix)]
+struct Bundle {
+    engine: Option<std::path::PathBuf>,
+    gui: Option<std::path::PathBuf>,
+}
+
+/// Extract the two known binaries from the `.tar.gz` into `state_dir`. Entries are matched by file
+/// name and everything else is ignored — so a path-traversal entry (`../../etc/passwd`) can never
+/// escape, because we never join an archive-supplied path onto the destination.
+#[cfg(unix)]
+fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
+    let mut bundle = Bundle {
+        engine: None,
+        gui: None,
+    };
+    let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    for entry in ar.entries().context("reading update archive")? {
+        let mut entry = entry.context("reading update archive entry")?;
+        let path = entry.path().context("update archive entry path")?;
+        let slot = match path.file_name().and_then(|n| n.to_str()) {
+            Some("unitylan-engine") => &mut bundle.engine,
+            Some("unitylan-gui") => &mut bundle.gui,
+            _ => continue,
+        };
+        let out = state_dir.join(format!(
+            "{}.update",
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .expect("matched above")
+        ));
+        let mut f =
+            std::fs::File::create(&out).with_context(|| format!("writing {}", out.display()))?;
+        std::io::copy(&mut entry, &mut f)
+            .with_context(|| format!("extracting {}", out.display()))?;
+        drop(f);
+        make_executable(&out)?;
+        *slot = Some(out);
+    }
+    Ok(bundle)
+}
+
+/// Overwrite the installed GUI with `staged`, returning where it landed (or `None` if this host has
+/// no GUI installed — a headless server, which is a normal deployment, not an error).
+///
+/// Only ever replaces a path that already holds a GUI: an update must not *install* a component the
+/// operator chose not to have.
+#[cfg(unix)]
+fn replace_gui(staged: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    // Alongside the running engine first (a self-contained/dev layout), then the packaged location
+    // — the .deb/.rpm put the engine in /usr/lib/unitylan but the GUI in /usr/bin.
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("unitylan-gui")));
+    let mut candidates = beside
+        .into_iter()
+        .chain([std::path::PathBuf::from("/usr/bin/unitylan-gui")]);
+    let Some(target) = candidates.find(|p| p.exists()) else {
+        return Ok(None);
+    };
+    // Replace via rename so a running GUI keeps its open inode and the swap is atomic. Same
+    // filesystem is not guaranteed, so fall back to a copy.
+    if std::fs::rename(staged, &target).is_err() {
+        std::fs::copy(staged, &target)
+            .with_context(|| format!("copying the GUI to {}", target.display()))?;
+        let _ = std::fs::remove_file(staged);
+    }
+    make_executable(&target)?;
+    Ok(Some(target))
+}
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .with_context(|| format!("chmod +x on {}", path.display()))
 }
 
 /// Windows: the artifact is the signed MSI. Write it out and launch `msiexec`; the MSI's
@@ -180,6 +280,76 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a `.tar.gz` in memory with the given (name, contents) entries.
+    ///
+    /// Names are written straight into the header rather than through `append_data`, because the
+    /// `tar` builder refuses to *emit* a `..` path — and a hostile archive is exactly what we need to
+    /// hand the reader here.
+    #[cfg(unix)]
+    fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut tarball = Vec::new();
+        {
+            let mut b = tar::Builder::new(&mut tarball);
+            for (name, data) in entries {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(data.len() as u64);
+                h.set_mode(0o755);
+                let bytes = name.as_bytes();
+                h.as_gnu_mut().unwrap().name[..bytes.len()].copy_from_slice(bytes);
+                h.set_cksum();
+                b.append(&h, *data).unwrap();
+            }
+            b.finish().unwrap();
+        }
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        std::io::Write::write_all(&mut gz, &tarball).unwrap();
+        gz.finish().unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_extracts_both_binaries() {
+        let dir = crate::testutil::TempDir::new("su-bundle");
+        let bytes = targz(&[
+            ("unitylan-engine", b"ENGINE" as &[u8]),
+            ("unitylan-gui", b"GUI"),
+        ]);
+        let b = unpack_bundle(&bytes, &dir).unwrap();
+        // Both must land — replacing only the engine is the skew this bundle exists to prevent.
+        assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
+        assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+    }
+
+    /// An archive entry naming a path outside the destination must not be able to write there. We
+    /// never join the archive's path onto the destination — only its file name, and only for the two
+    /// names we expect — so traversal has nowhere to land.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_ignores_traversal_and_unexpected_entries() {
+        let dir = crate::testutil::TempDir::new("su-traversal");
+        let bytes = targz(&[
+            // Traversal whose file name is one we *do* accept — the dangerous shape. It must land
+            // inside `dir` as the staged engine, never at the archive's chosen path.
+            ("../../../../../../tmp/unitylan-engine", b"EVIL" as &[u8]),
+            ("nested/evil.sh", b"EVIL"),
+            ("unitylan-engine", b"ENGINE"),
+        ]);
+        let b = unpack_bundle(&bytes, &dir).unwrap();
+        // The later real entry wins; either way the bytes came from inside `dir`.
+        assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
+        assert!(b.gui.is_none(), "no GUI in this archive");
+        assert!(
+            !std::path::Path::new("/tmp/unitylan-engine").exists(),
+            "a traversal entry escaped the destination"
+        );
+        // Only the staged engine was written — the unexpected entries were skipped entirely.
+        let written: Vec<_> = std::fs::read_dir(&*dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(written, vec!["unitylan-engine.update"]);
+    }
 
     #[test]
     fn is_newer_gates_strictly_and_safely() {

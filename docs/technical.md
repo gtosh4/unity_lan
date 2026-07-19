@@ -111,6 +111,7 @@ around a `Signed` are JSON, but the signed bytes inside are always postcard.
 **Model B: the signed unit is a device.** No `role_id`, no `nick`.
 ```rust
 struct Attestation {
+    schema:      u32,        // ATTESTATION_SCHEMA — first field; see §3.6
     guild_id:    u64,        // scoped guild; signed by THAT guild's per-guild key (§4)
     user_id:     u64,        // Discord snowflake (owner)
     username:    String,     // global @handle, sanitized DNS label  → the <user>
@@ -123,8 +124,10 @@ struct Attestation {
     expires_at:  u64,        // issued_at + ATTESTATION_TTL_SECS (30 min)
 }
 ```
-**Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild)`: signature
-valid under the **pinned per-guild anchor**, **AND** `guild_id == expected_guild`, **AND** unexpired.
+**Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild)`: `schema ==
+ATTESTATION_SCHEMA` (checked **first** — the other fields only mean anything if we agree on the
+layout they were decoded from), **AND** signature valid under the **pinned per-guild anchor**,
+**AND** `guild_id == expected_guild`, **AND** unexpired.
 The `guild_id` check is load-bearing defence-in-depth even with per-guild keys (design §4.1).
 Hostname = `<device>.<user>.unity.internal`; primary alias = `<user>.unity.internal`
 (`is_primary` only). The `unity` label is the coordinator's namespace (fixed while
@@ -161,6 +164,53 @@ fn sanitize_label(&str) -> String;                          // [a-z0-9-], ≤63,
 - **One /32 per device**, keyed by device **pubkey** (not user, not role). Deterministic hint,
   coordinator resolves collisions. Same IP in every network the device is in. **No per-role /24s.**
 
+### 3.6 Compatibility policy — what forces a bump, and what doesn't
+
+The coordinator and its clients upgrade on **independent schedules**, so the wire has to tolerate
+skew rather than assume a flag day. Three mechanisms, in the order you should reach for them:
+
+1. **An additive field** — `#[serde(default)]`, no bump. Nothing in the workspace uses
+   `deny_unknown_fields`, so a newer peer's extra fields are ignored by an older one. This covers
+   most changes (delta sync shipped this way). Note the direction it *doesn't* cover: removing a
+   field, or changing what an existing one means, is a break even though it compiles.
+2. **A capability flag** — `caps: Vec<String>` on both `RegisterReq` and `RegisterResp`, from
+   `common::CAPABILITIES`. Each side advertises what it implements and the other gates behavior on
+   the set, so a feature needing real negotiation still ships without a bump. Unknown flags are
+   simply absent from our set — never a decode error. An empty set means "infer from `proto`".
+3. **A version bump** — last resort, because it costs every client in the mesh a coordinated
+   upgrade. `PROTOCOL_VERSION` is the ceiling this build speaks; `MIN_PROTOCOL_VERSION` is the floor.
+
+**Negotiation.** The client sends `[proto_min, proto]`; the coordinator picks the highest version
+both speak and echoes it as `RegisterResp.proto`. Only a **non-overlapping** range is refused —
+`426 Upgrade Required`, with a message naming both ranges and which side is stale. The engine treats
+that as terminal rather than transient: it backs off to `PROTO_MISMATCH_BACKOFF` (5 min) instead of
+`refresh_secs`, and the GUI shows it in red. `proto == 0` is a pre-versioning peer and is served
+without negotiation. The same window gates the in-tunnel P2P channel, where an out-of-window peer
+gets `Unsupported` and the caller falls back to the coordinator.
+
+**Support window: current + one previous** (`MIN_PROTOCOL_VERSION == PROTOCOL_VERSION - 1`, asserted
+by a test). Each bump moves the floor to the version being retired, so a client gets a full release
+cycle to auto-update before a coordinator stops answering it. This is a promise that costs code:
+every break needs a shim keeping the previous version working, plus a **golden fixture** in
+`api.rs`'s tests — a literal JSON message as the old version sends it — that must keep decoding.
+Without the fixture the floor is just a number.
+
+**Postcard is positional.** Signed payloads (`Signed`, §3.1) are postcard, which encodes by position
+and variant index, not by name — so adding, removing, or reordering a field silently changes how
+every existing blob decodes, and a mismatched build can read *wrong values* rather than failing.
+Two consequences:
+
+- `Attestation` carries a leading `schema` tag, checked before anything else. Breaking it is cheap
+  because `ATTESTATION_TTL_SECS` is 30 minutes: the whole signed corpus turns over on its own.
+- `RotationCert` (§3.4) and `ReleaseManifest`'s enums are **frozen** — rotation chains are walked
+  forever from a client's original pin, so every cert ever issued must still decode. Only append new
+  enum variants; never edit those layouts in place.
+
+**Peer failures are isolated, not fatal.** `verified_seeds` skips a seed it can't verify instead of
+failing the batch, so one co-member running an unreadable build can't deny peering with everyone
+else. Still fail-closed per peer — an unverified seed is never routed — and every seed failing logs
+at error level, since that is the signature of a substitution attack rather than skew.
+
 ## 4. Coordinator
 
 ### 4.1 HTTP API (axum) — `api.rs::router`
@@ -184,9 +234,10 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
 **Request/response** (`common::api`): `RegisterReq` carries `wg_pubkey`, `device_name`,
 `enrollment_key?`, `endpoint?`, `since?` (long-poll ETag), `disabled_networks`, `observed`,
 `supersede?`, `paused`, relay-capability fields, `need_relay`, `relay_allocated`, `ice`, `proto`,
-`client_version`. `RegisterResp` returns `anchors` (one `GuildAnchor` per referenced guild),
-`grant?` (own attestation(s) + names), `device_token?`, `seeds`, `version`, `networks`,
-`stun_port?`, `proto`, `server_version`, `release?`. All version/relay/ICE fields are
+`proto_min`, `caps`, `client_version`. `RegisterResp` returns `anchors` (one `GuildAnchor` per
+referenced guild), `grant?` (own attestation(s) + names), `device_token?`, `seeds`, `version`,
+`networks`, `stun_port?`, `proto` (the **selected** version), `proto_min`/`proto_max` (the
+coordinator's own window), `caps`, `server_version`, `release?`. All version/relay/ICE fields are
 `#[serde(default)]` for forward-compat with pre-versioning peers.
 
 **A device that participates in N guilds carries N attestations** — `Grant.attestations` /
@@ -203,7 +254,7 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
    per-seed revision the coordinator minted, hashing the peer's peering-relevant content but **not**
    attestation freshness). `build_snapshot` returns only new/`rev`-changed `seeds` + a `removed` list
    (`partial = true`); empty `held` → full snapshot. Collapses a herd wake from O(N)/client to
-   O(changes). `PROTOCOL_VERSION = 3` (additive; a pre-delta client sends no `held` → full).
+   O(changes). Additive — a pre-delta client sends no `held` → full — so it needed no version bump.
 3. If `since == current version` and the caller's own request changed nothing, park on a
    `tokio::watch` via `wait_park` for up to `longpoll_hold_secs` (≈ `attestation_ttl/2`), then return
    a fresh snapshot (renewal piggybacks the hold). A **membership** change wakes parked clients; each
@@ -261,7 +312,8 @@ endpoint cache are **in-memory**, lost on restart (repopulate via refresh).
 ## 5. Client — Engine (§5.1–5.7) + GUI (§5.8)
 
 The privileged engine owns all mesh state and the coordinator session; the iced GUI is a thin
-front-end over the engine's control socket (`common::control`, postcard-framed over `interprocess`).
+front-end over the engine's control socket (`common::control`, newline-delimited JSON over
+`interprocess`; postcard is used only for signed payloads, `common::wire`).
 
 ### 5.1 Auth / enrollment (`oauth.rs`, `coord.rs`)
 Two enrollment paths (design §3.3):

@@ -280,6 +280,26 @@ impl App {
             .spacing(8)
             .align_y(Vertical::Center)
         });
+        // The engine updated underneath us. Replacing the binaries on disk restores lockstep for the
+        // *next* launch, but this process is still the old GUI talking to the new daemon — and the
+        // control protocol carries no version, so a field we don't know is a parse error, not a
+        // clean failure. Tell the user to relaunch rather than let it fail obscurely.
+        let relaunch_line = status
+            .map(|s| s.engine_version.as_str())
+            .filter(|v| !v.is_empty() && *v != common::VERSION)
+            .map(|v| {
+                row![
+                    dot(AMBER),
+                    text(format!(
+                        "engine updated to v{v} (this window is v{}) — relaunch to finish",
+                        common::VERSION
+                    ))
+                    .size(14)
+                    .width(Length::Fill),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center)
+            });
         // Update-available signal: the coordinator advertised a newer release than we're running.
         // When a verified, platform-matching artifact is staged (`update_ready`) the strip shows the
         // Update button; here it's the descriptive notice (also the only surface when notice-only).
@@ -310,6 +330,7 @@ impl App {
         column![header("account")]
             .push_maybe(identity)
             .push_maybe(proto_line)
+            .push_maybe(relaunch_line)
             .push_maybe(coord_line)
             .push_maybe(update_line)
             .push_maybe(version_line)

@@ -32,9 +32,15 @@ for cfg in engine desktop; do
     done
 done
 
-# Raw engine binary for the signed auto-update path (the Linux artifact a release manifest points
-# at; the engine self-replaces its own binary with it). Named by platform to match Platform::LinuxAmd64.
-cp "$ROOT/target/release/unitylan-engine" "$DIST/unitylan-engine-linux-$ARCH"
+# Bundle for the signed auto-update path (the Linux artifact a release manifest points at). It
+# carries **both** binaries because the engine and GUI speak an unversioned control protocol: an
+# update that replaced only the engine would leave an older GUI talking to a newer daemon. Named by
+# platform to match Platform::LinuxAmd64.
+#
+# The engine also still accepts a bare binary here (it sniffs gzip magic), so a manifest pointing at
+# an older release's raw artifact keeps working.
+tar -czf "$DIST/unitylan-linux-$ARCH.tar.gz" \
+    -C "$ROOT/target/release" unitylan-engine unitylan-gui
 
 # SHA256SUMS over every artifact — the admin pastes the relevant hash into the coordinator's
 # [release] config so clients can verify the download against the signed manifest.

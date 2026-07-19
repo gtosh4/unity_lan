@@ -202,11 +202,19 @@ fn negotiate(req: &RegisterReq) -> Result<u32, ApiError> {
             server_proto_min = common::MIN_PROTOCOL_VERSION,
             "rejecting client on protocol version: {advice}"
         );
+        // Report the floor we actually negotiated against: a client that sent none speaks exactly
+        // `proto`, and printing the raw `0` would read as "speaks 0..=3" — which is not what we
+        // decided, and not something an operator can act on.
+        let client_min = if req.proto_min == 0 {
+            req.proto
+        } else {
+            req.proto_min
+        };
         ApiError::new(
             StatusCode::UPGRADE_REQUIRED,
             format!(
                 "wire protocol mismatch: client speaks {}..={}, coordinator speaks {}..={} — {advice}",
-                req.proto_min, req.proto, common::MIN_PROTOCOL_VERSION, common::PROTOCOL_VERSION
+                client_min, req.proto, common::MIN_PROTOCOL_VERSION, common::PROTOCOL_VERSION
             ),
         )
     })
@@ -1141,6 +1149,18 @@ mod tests {
         assert_eq!(err.status, StatusCode::UPGRADE_REQUIRED);
         assert!(
             err.message.contains("coordinator is too old"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn message_reports_the_floor_we_negotiated_against() {
+        // A client that named no floor speaks exactly `proto`. The message must say "3..=3", not
+        // the raw "0..=3" — the latter isn't the range we judged, and can't be acted on.
+        let err = negotiate(&req_speaking(r#""proto":3"#)).unwrap_err();
+        assert!(
+            err.message.contains("client speaks 3..=3"),
             "{}",
             err.message
         );

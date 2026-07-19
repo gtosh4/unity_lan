@@ -42,6 +42,10 @@ if-addrs = "0.13"
 libc = "0.2"
 # In-place swap of the running engine binary on auto-update (the Windows path uses msiexec instead).
 self-replace = "1"
+# Unpack the auto-update bundle: the Linux artifact is a .tar.gz carrying the engine + GUI together,
+# so both are replaced in lockstep. Windows gets the same effect from the MSI's MajorUpgrade.
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

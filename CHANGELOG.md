@@ -3,10 +3,49 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+**Wire protocol 4 → 5, and versioning that actually does something.** `PROTOCOL_VERSION` was
+advertised but never enforced: the coordinator logged a warning and served the request anyway, and
+the engine never read the coordinator's version at all — so a bump was a comment, not a gate. (The
+note under v0.2.0 below claimed a mismatch was rejected; it never was. Corrected there.)
+
+Clients now advertise a **range** and the coordinator picks the highest version both speak,
+refusing only a non-overlapping one with `426 Upgrade Required` — naming both ranges and which side
+is stale. The support window is **current + one previous**, so a client has a full release cycle to
+auto-update before a coordinator stops answering it, and coordinator and clients no longer have to
+be upgraded in lockstep. Features that need no break ride **capability flags** instead of a bump.
+
+The 4 → 5 bump itself is the P2P response envelope gaining an unknown-variant fallback (below).
+
+### Changed
+
+- **Linux auto-update ships engine + GUI together** (`.tar.gz`, was the bare engine binary). The
+  GUI↔engine control protocol carries no version, so updating only the engine left an older GUI
+  talking to a newer daemon. Windows already did this via the MSI's `MajorUpgrade`. A bare artifact
+  is still accepted, so manifests published before this change keep working.
+- The engine treats a protocol refusal as terminal rather than transient: a 5-minute backoff instead
+  of hammering at `refresh_secs`, and a red banner in the GUI carrying the coordinator's message.
+
+### Fixed
+
+- **A newer peer's P2P reply broke older peers.** The request envelope degraded an unknown type to
+  `Unsupported`, but the *response* envelope had no such fallback, so a future reply variant was a
+  decode failure on an older caller. Extensibility now runs both directions.
+- **One unverifiable peer could deny the whole mesh.** Seed verification failed the entire batch on a
+  single bad attestation; it now skips that peer (still fail-closed — never routed) and logs at error
+  level only when *every* seed fails, which is the signature of a substitution attack rather than
+  version skew.
+- **Attestations had no schema tag.** They're signed as postcard, which is positional and not
+  self-describing, so a layout change could decode to wrong values rather than erroring. A leading
+  schema field now makes that a clean rejection — free here, since the 30-minute TTL turns the signed
+  corpus over on its own. `RotationCert` is documented frozen: its chains are walked forever.
+
 ## v0.2.0
 
-**Breaking: wire protocol 3 → 4.** Clients and coordinator must be upgraded together — a v0.1.0
-client talking to a v0.2.0 coordinator (or the reverse) is rejected on version mismatch.
+**Wire protocol 3 → 4.** The bump covered the STUN change below — a coordinator that advertises
+`stun_port` where a v0.1.0 client expects `stun_addr`, which degrades to "no STUN" rather than
+breaking. Nothing enforced the version in this release; see Unreleased above.
 
 ### Changed
 
