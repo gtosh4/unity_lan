@@ -186,6 +186,17 @@ handles cryptographic keys. A few things worth knowing:
 The goal is to be upfront rather than quietly ship and hope nobody asks. Bug reports and reviews
 are welcome. Found a security issue? Please report it privately — see [SECURITY.md](SECURITY.md).
 
+## Support the project
+
+UnityLAN is free and open source, built in spare time. If it's useful to you and you'd like to help
+keep it going, you can buy me a coffee — every bit is appreciated and entirely optional.
+
+<p align="center">
+  <a href="https://ko-fi.com/gtosh4">
+    <img src="https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support UnityLAN on Ko-fi">
+  </a>
+</p>
+
 ## License
 
 [MIT](LICENSE).
