@@ -175,8 +175,9 @@ Actual routes:
 | `GET`  | `/oauth/pkce-config` | Discord `client_id` + `fake` flag for the engine's PKCE flow |
 | `POST` | `/oauth/complete` | engine hands over the access token; coordinator binds pubkey → user |
 
-STUN is a **separate UDP responder** (`stun.rs`), not an axum route; its address is advertised in
-`RegisterResp.stun_addr`. There is **no `/oauth/start`, `/oauth/callback`, or `/tombstones`** — the
+STUN is a **separate UDP responder** (`stun.rs`), not an axum route; its **port** is advertised in
+`RegisterResp.stun_port` and the client pairs it with the coordinator hostname it already dials
+(the coordinator can't know its own reachable address behind a container bridge or cloud NAT). There is **no `/oauth/start`, `/oauth/callback`, or `/tombstones`** — the
 engine owns the OAuth loopback itself (§5.1), and revocation is presence-driven (no tombstone
 endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enrollment_key`.
 
@@ -185,7 +186,7 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
 `supersede?`, `paused`, relay-capability fields, `need_relay`, `relay_allocated`, `ice`, `proto`,
 `client_version`. `RegisterResp` returns `anchors` (one `GuildAnchor` per referenced guild),
 `grant?` (own attestation(s) + names), `device_token?`, `seeds`, `version`, `networks`,
-`stun_addr?`, `proto`, `server_version`, `release?`. All version/relay/ICE fields are
+`stun_port?`, `proto`, `server_version`, `release?`. All version/relay/ICE fields are
 `#[serde(default)]` for forward-compat with pre-versioning peers.
 
 **A device that participates in N guilds carries N attestations** — `Grant.attestations` /
@@ -321,8 +322,8 @@ Most-direct-first (design §7.2):
 - **`nat.rs`** — UPnP-IGD maps an external UDP port → local WG `listen_port`.
 - **`ice.rs`** — userspace **ICE** agent (`webrtc-ice`): host + STUN server-reflexive candidate
   gathering + hole-punch. Candidates exchanged over the coordinator long-poll (`RegisterReq.ice` →
-  `Seed.ice`), never run by the coordinator. STUN server = a relay co-member or the coordinator's
-  `stun_addr`.
+  `Seed.ice`), never run by the coordinator. STUN server = a relay co-member or the coordinator
+  host at its advertised `stun_port`.
 - **`relay.rs`** — embedded **TURN** server (`turn` crate) + client: a **ciphertext-only** relay for
   pairs a punch can't connect (symmetric/CGNAT/UDP-blocked). Relay eligibility is opt-in
   (`relay_capable`); the coordinator mints short-lived HMAC TURN creds (`common::relay`,

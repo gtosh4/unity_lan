@@ -345,7 +345,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // keeps the M5.4 relay above). `coord_stun` is the coordinator's STUN bootstrap fallback.
         let ice_enabled = backend.is_userspace() && cfg.ice;
         let mut ice = crate::ice::IceManager::new();
-        let mut coord_stun = resp.stun_addr;
+        let mut coord_stun = coord::stun_addr(&cfg.coordinator, resp.stun_port).await;
         let mut ice_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
         apply_state(
             backend.as_ref(),
@@ -756,7 +756,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     last_relay_need = this_relay_need; // …and this relay need/allocation set
                     last_relay_alloc = this_relay_alloc;
                     last_ice_offers = ice_offers; // …and this ICE offer set
-                    coord_stun = resp.stun_addr; // the STUN fallback may have (dis)appeared
+                                                  // the STUN fallback may have (dis)appeared
+                    coord_stun = coord::stun_addr(&cfg.coordinator, resp.stun_port).await;
                     if cfg.gossip {
                         // Keep the p2p service handing out our freshest attestations (delta responses
                         // may carry a refreshed grant even when nothing else changed).

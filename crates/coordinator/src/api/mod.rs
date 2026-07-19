@@ -81,9 +81,9 @@ pub struct AppState {
     /// snapshot the coordinator hands `(owner, peer)` back as `peer`'s [`common::api::Seed::ice`] for
     /// reaching `owner`. Last write wins; lost on restart (repopulated as peers refresh).
     pub ice: Arc<Mutex<IceExchange>>,
-    /// The coordinator-hosted STUN Binding responder's client-reachable address (M5.5 ICE bootstrap
-    /// fallback), advertised in every `RegisterResp`. `None` when no responder is configured.
-    pub stun_addr: Option<std::net::SocketAddr>,
+    /// The UDP port of the coordinator-hosted STUN Binding responder (M5.5 ICE bootstrap fallback),
+    /// advertised in every `RegisterResp`. `None` when no responder is configured.
+    pub stun_port: Option<u16>,
     /// The parsed auto-update manifest, signed per-request with a guild key the caller holds and
     /// served in `RegisterResp.release` (design.md §3.1: no deployment-wide key, so the manifest is
     /// signed under a guild the client has pinned). Loaded from `[release]` at startup and swapped on
@@ -798,7 +798,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
             seeds,
             version,
             networks: networks_status,
-            stun_addr: st.stun_addr,
+            stun_port: st.stun_port,
             proto: common::PROTOCOL_VERSION,
             server_version: common::VERSION.to_string(),
             release,

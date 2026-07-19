@@ -362,8 +362,10 @@ falls back to a responder on the coordinator host when none is online.
 - [x] **Stage 2 — STUN fallback responder** ✅ — `coordinator/src/stun.rs`: a stateless,
       unauthenticated UDP STUN Binding responder (answers with the caller's `XOR-MAPPED-ADDRESS`,
       the exact reflexive a relay node's `turn::server` already returns). Config `stun_bind`
-      (`Option<SocketAddr>`, default off) starts it as a detached task; its address is advertised in
-      `RegisterResp.stun_addr` so the ICE agent can use it as the server-reflexive fallback when no
+      (`Option<SocketAddr>`, default off) starts it as a detached task; its **port** is advertised in
+      `RegisterResp.stun_port` — the client pairs it with the coordinator hostname it already dials,
+      since behind a container bridge or cloud NAT the coordinator can't know its own reachable
+      address — so the ICE agent can use it as the server-reflexive fallback when no
       relay co-member is online to STUN. Off the data path (control-plane-only). 2 unit tests
       (echoes reflexive + transaction id; ignores non-Binding). Client-side gather (relay-first,
       coord fallback) is built into the agent config in stage 3.

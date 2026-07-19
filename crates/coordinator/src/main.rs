@@ -206,10 +206,11 @@ async fn main() -> anyhow::Result<()> {
         (None, false) => None,
     };
 
-    // STUN Binding responder (M5.5 ICE bootstrap fallback), when configured. Advertised to clients
-    // via RegisterResp.stun_addr; carries no traffic, so it runs as a detached background task.
-    let stun_addr = cfg.stun_bind;
-    if let Some(bind) = stun_addr {
+    // STUN Binding responder (M5.5 ICE bootstrap fallback), when configured. Only the port goes out
+    // to clients (RegisterResp.stun_port) — they pair it with our hostname, since behind NAT we
+    // can't know our own reachable address. Carries no traffic, so it's a detached background task.
+    let stun_port = cfg.stun_bind.map(|a| a.port());
+    if let Some(bind) = cfg.stun_bind {
         tokio::spawn(async move {
             if let Err(e) = crate::stun::serve(bind).await {
                 tracing::error!("STUN responder exited: {e:#}");
@@ -272,7 +273,7 @@ async fn main() -> anyhow::Result<()> {
         relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relay_allocs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        stun_addr,
+        stun_port,
         release,
         admin_token: cfg.admin.as_ref().map(|a| a.token.clone()),
     };

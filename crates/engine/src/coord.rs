@@ -358,6 +358,17 @@ pub fn apply_pulled(seed: &mut SeedPeer, att: &Attestation) {
     seed.expires_at = att.expires_at;
 }
 
+/// Resolve the coordinator's STUN responder address from the port it advertises: its host is the
+/// one we already dial for the API. The coordinator publishes only a port because behind NAT (a
+/// container bridge, a cloud VM whose public IP is NAT'd to the interface) it can't know its own
+/// reachable address — but the URL the admin configured here is reachable by construction.
+///
+/// `None` if the port is unset, the URL has no host, or resolution finds no address.
+pub async fn stun_addr(base_url: &str, port: Option<u16>) -> Option<SocketAddr> {
+    let host = reqwest::Url::parse(base_url).ok()?.host_str()?.to_string();
+    tokio::net::lookup_host((host, port?)).await.ok()?.next()
+}
+
 /// Fetch the public PKCE config (Discord `client_id`, fake-mode flag) so the engine can run the
 /// authorization-code + PKCE flow itself.
 pub async fn pkce_config(base_url: &str) -> anyhow::Result<common::api::PkceConfigResp> {

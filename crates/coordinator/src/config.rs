@@ -49,11 +49,11 @@ pub struct Config {
     /// Community slugs to seed on startup (admin config; default is the guild name).
     #[serde(default, rename = "community")]
     pub community_seeds: Vec<CommunitySeed>,
-    /// UDP address for the STUN Binding responder (M5.5 ICE bootstrap fallback). When set, the
-    /// coordinator serves reflexive-address lookups here and advertises it to clients as the
-    /// coordinator-host STUN fallback (used when no relay co-member is online to STUN). Must be a
-    /// client-reachable address (admin sets its public `ip:port`, like a relay's `relay_addr`).
-    /// Absent → no fallback (clients rely on relay-node STUN only).
+    /// UDP address the STUN Binding responder binds (M5.5 ICE bootstrap fallback). When set, the
+    /// coordinator serves reflexive-address lookups here and advertises **only its port** to
+    /// clients, which pair it with the coordinator hostname they already dial (see
+    /// `RegisterResp::stun_port`) — so `0.0.0.0:3478` is the normal value behind a container
+    /// bridge or cloud NAT. Absent → no fallback (clients rely on relay-node STUN only).
     #[serde(default)]
     pub stun_bind: Option<std::net::SocketAddr>,
     /// Auto-update release manifest (design phase 3). When set, the coordinator signs it with its

@@ -232,11 +232,17 @@ pub struct RegisterResp {
     /// ones (so they can be re-enabled); disabled networks are excluded from `grant`/`seeds`.
     #[serde(default)]
     pub networks: Vec<NetworkStatus>,
-    /// The coordinator-hosted STUN Binding responder's address (§7.2, M5.5), if configured — the
-    /// ICE agent's server-reflexive fallback when no relay co-member is online to STUN. `None`
+    /// The UDP port of the coordinator-hosted STUN Binding responder (§7.2, M5.5), if configured —
+    /// the ICE agent's server-reflexive fallback when no relay co-member is online to STUN. `None`
     /// disables the fallback (clients rely on relay-node STUN only).
+    ///
+    /// Only the port: the responder always lives on the coordinator's own host (STUN is UDP, so no
+    /// HTTP proxy fronts it), and behind NAT — a container bridge, or a cloud VM whose public IP is
+    /// NAT'd to the interface rather than assigned to it — the coordinator can't know its own
+    /// reachable address anyway. The client pairs this with the coordinator hostname it already
+    /// dials, which is reachable by construction.
     #[serde(default)]
-    pub stun_addr: Option<SocketAddr>,
+    pub stun_port: Option<u16>,
     /// Wire protocol version the coordinator speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
     /// pre-versioning coordinator.
     #[serde(default)]

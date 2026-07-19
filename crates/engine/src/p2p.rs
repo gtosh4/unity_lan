@@ -118,7 +118,11 @@ mod tests {
         tokio::spawn(serve(sock, own.clone()));
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let req = br#"{"proto":3,"body":{"type":"GetAttestations"}}"#;
+        let req = format!(
+            r#"{{"proto":{},"body":{{"type":"GetAttestations"}}}}"#,
+            common::PROTOCOL_VERSION
+        );
+        let req = req.as_bytes();
         match round_trip(&client, addr, req).await.body {
             RespBody::Attestations(a) => {
                 assert_eq!(a.len(), 2);
@@ -143,9 +147,12 @@ mod tests {
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         // A body tag this build doesn't know → #[serde(other)] Unknown → Unsupported.
-        let raw = br#"{"proto":3,"body":{"type":"SomeFutureType"}}"#;
+        let raw = format!(
+            r#"{{"proto":{},"body":{{"type":"SomeFutureType"}}}}"#,
+            common::PROTOCOL_VERSION
+        );
         assert!(matches!(
-            round_trip(&client, addr, raw).await.body,
+            round_trip(&client, addr, raw.as_bytes()).await.body,
             RespBody::Unsupported
         ));
     }
