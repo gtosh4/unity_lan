@@ -161,7 +161,17 @@ pub enum ExposeOp {
     Remove {
         proto: Proto,
         port: u16,
+        scope: RemoveScope,
     },
+}
+
+/// Which exposure(s) a `Remove` closes. `All` drops every scope of that (proto, port); `Exact`
+/// drops just the one whose `net` matches — so closing `8082 → net:minecraft` leaves an
+/// all-peers `8082` alone (and vice versa).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RemoveScope {
+    All,
+    Exact(Option<String>),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -176,6 +186,10 @@ pub struct ExposedPort {
     pub port: u16,
     /// The network this port is scoped to, or `None` for all peers.
     pub net: Option<String>,
+    /// Whether the exposure is currently reachable. A `--net`-scoped port whose network has no
+    /// online peers has an empty source set, so nothing can reach it even though it stays
+    /// exposed; unscoped ports are always active.
+    pub active: bool,
 }
 
 /// A snapshot of the daemon's live mesh state: this device plus the peers it has meshed with.

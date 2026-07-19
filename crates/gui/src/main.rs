@@ -24,7 +24,8 @@ use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
-    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, StatusReport,
+    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, RemoveScope,
+    StatusReport,
 };
 use iced::window;
 use iced::{Subscription, Task, Theme};
@@ -207,6 +208,8 @@ enum Message {
     Unexpose {
         proto: Proto,
         port: u16,
+        /// The scope of the row being closed (`None` = the all-peers exposure).
+        net: Option<String>,
     },
     /// Toggle this device's peering on a network (role@guild).
     ToggleNetwork {
@@ -405,11 +408,20 @@ impl App {
                 }
                 Err(e) => self.error = Some(e),
             },
-            Message::Unexpose { proto, port } => {
+            Message::Unexpose { proto, port, net } => {
                 return Task::perform(
-                    ctl::expose(self.socket.clone(), ExposeOp::Remove { proto, port }),
+                    ctl::expose(
+                        self.socket.clone(),
+                        ExposeOp::Remove {
+                            proto,
+                            port,
+                            // Close exactly the row the user clicked, so an all-peers exposure of
+                            // the same port survives closing its `--net`-scoped sibling.
+                            scope: RemoveScope::Exact(net),
+                        },
+                    ),
                     Message::ExposesFetched,
-                )
+                );
             }
             Message::ToggleNetwork {
                 guild_id,
@@ -818,6 +830,7 @@ mod tests {
                 proto: Proto::Tcp,
                 port: 25565,
                 net: Some("mesh".into()),
+                active: true,
             }],
         };
         let _ = a.update(Message::ExposesFetched(Ok(resp)));

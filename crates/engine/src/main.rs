@@ -127,6 +127,9 @@ enum CtlCmd {
     Unexpose {
         config: String,
         port: String,
+        /// Close only the exposure scoped to this network; omit to close every scope of the port.
+        #[arg(long)]
+        net: Option<String>,
     },
     Exposes {
         #[arg(default_value = "engine.toml")]
@@ -507,12 +510,16 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                 .await?,
             )
         }
-        CtlCmd::Unexpose { config, port } => {
+        CtlCmd::Unexpose { config, port, net } => {
             let (proto, port) = parse_port(&port)?;
+            let scope = match net {
+                Some(n) => common::control::RemoveScope::Exact(Some(n)),
+                None => common::control::RemoveScope::All,
+            };
             print_exposed(
                 control::client_expose(
                     &socket_for(&config)?,
-                    common::control::ExposeOp::Remove { proto, port },
+                    common::control::ExposeOp::Remove { proto, port, scope },
                 )
                 .await?,
             )
@@ -643,7 +650,8 @@ fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
             .as_deref()
             .map(|n| format!(" (net: {n})"))
             .unwrap_or_default();
-        println!("  {}/{}{}", e.proto.as_str(), e.port, scope);
+        let idle = if e.active { "" } else { "  [no peers online]" };
+        println!("  {}/{}{}{}", e.proto.as_str(), e.port, scope, idle);
     }
     Ok(())
 }

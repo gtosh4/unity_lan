@@ -378,10 +378,16 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
                 fw.expose(proto, port, net)?,
             )
         }
-        ExposeOp::Remove { proto, port } => (
-            format!("closed {}/{port}", proto.as_str()),
-            fw.unexpose(proto, port)?,
-        ),
+        ExposeOp::Remove { proto, port, scope } => {
+            let label = match &scope {
+                common::control::RemoveScope::Exact(Some(n)) => format!(" (net: {n})"),
+                _ => String::new(),
+            };
+            (
+                format!("closed {}/{port}{label}", proto.as_str()),
+                fw.unexpose(proto, port, scope)?,
+            )
+        }
     };
     Ok(ExposeResp { message, exposed })
 }

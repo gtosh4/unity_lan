@@ -695,13 +695,17 @@ impl App {
                     .as_deref()
                     .map(|n| format!("  → net: {n}"))
                     .unwrap_or_default();
+                // A scoped port with no online peers is open in the ruleset but unreachable —
+                // say so, or the row reads as working.
+                let idle = if e.active { "" } else { "  (no peers online)" };
                 let r = row![
-                    text(format!("{}/{}{}", e.proto.as_str(), e.port, scope))
+                    text(format!("{}/{}{}{}", e.proto.as_str(), e.port, scope, idle))
                         .size(14)
                         .width(Length::Fill),
                     button(text("unexpose").size(13)).on_press(Message::Unexpose {
                         proto: e.proto,
-                        port: e.port
+                        port: e.port,
+                        net: e.net.clone(),
                     }),
                 ]
                 .spacing(8)

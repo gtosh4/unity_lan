@@ -87,10 +87,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 net: None,
             })
             .collect();
-        let f = Arc::new(Firewall::new(
+        let f = Arc::new(Firewall::load(
             fw::default_backend(),
             cfg.iface.clone(),
             seeds,
+            &cfg.state_dir,
         ));
         f.init()
             .context("installing firewall (default-deny); set `firewall = false` to disable")?;

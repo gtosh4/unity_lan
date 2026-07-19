@@ -103,11 +103,13 @@ impl State {
                     proto: Proto::Tcp,
                     port: 8080,
                     net: None,
+                    active: true,
                 },
                 ExposedPort {
                     proto: Proto::Udp,
                     port: 51820,
                     net: Some("Engineering".into()),
+                    active: true,
                 },
             ],
             blocked: Vec::new(),
@@ -346,10 +348,15 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                 ExposeOp::List => "exposed".into(),
                 ExposeOp::Add { proto, port, net } => {
                     s.exposed.retain(|e| !(e.proto == proto && e.port == port));
-                    s.exposed.push(ExposedPort { proto, port, net });
+                    s.exposed.push(ExposedPort {
+                        proto,
+                        port,
+                        net,
+                        active: true,
+                    });
                     format!("exposed {}/{port}", proto.as_str())
                 }
-                ExposeOp::Remove { proto, port } => {
+                ExposeOp::Remove { proto, port, .. } => {
                     s.exposed.retain(|e| !(e.proto == proto && e.port == port));
                     format!("unexposed {}/{port}", proto.as_str())
                 }
