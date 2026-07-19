@@ -43,6 +43,15 @@ Unit tests need no privilege or network. `cargo test` is platform-aware: on Wind
 with `git commit --no-verify` — but note the hook runs `fmt --all`, so a pre-existing formatting
 issue anywhere in the tree blocks every commit until fixed.
 
+**Every user-visible feature or fix also updates `CHANGELOG.md`**, under an `## Unreleased` heading
+(create one if the top section is an already-tagged release). Write it for the person running
+UnityLAN, not the person who wrote the patch: lead with the symptom or the new ability, then the
+why — match the prose style of the existing entries rather than pasting the commit subject. Internal
+work with no effect on users (refactors, test harnesses, CI) stays out of it. Release CI lifts the
+notes straight from the section whose heading matches the tag (`## v1.2.3`), so at release time the
+`Unreleased` heading is renamed to the version — an unrenamed one ships a release with generic
+notes.
+
 ### Running a local mesh (offline, no real Discord)
 
 ```sh
