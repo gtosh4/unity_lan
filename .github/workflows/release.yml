@@ -72,9 +72,52 @@ jobs:
         # Pinned: WiX v6+ requires accepting the Open Source Maintenance Fee EULA (WIX7015), and
         # unitylan.wxs targets the v4/v5 schema.
         run: dotnet tool install --global wix --version 5.0.2
+      # Guard first, because the build step below deliberately does NOT pass -Version: letting
+      # build.ps1 derive it is what keeps its own version detection exercised (that path read a
+      # crate Cargo.toml that inherits `version.workspace = true`, so a bare local run died with a
+      # null-index error — invisible here for as long as CI passed -Version explicitly). Deriving is
+      # only safe once the tag and the workspace version are known to agree.
+      - name: Check the workspace version matches the tag
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          $m = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $m) { throw "no [workspace.package] version in Cargo.toml" }
+          $ws = $m.Matches[0].Groups[1].Value
+          if ($ws -ne $tag) {
+            throw "tag v$tag disagrees with [workspace.package] version $ws - bump Cargo.toml before tagging"
+          }
+          Write-Host "workspace version $ws matches tag"
       - name: Build MSI
         shell: pwsh
-        run: packaging/windows/build.ps1 -Version ($env:GITHUB_REF_NAME -replace '^v', '')
+        run: packaging/windows/build.ps1
+      # `wix build` defaults to x86, and in a 32-bit package the .wxs's ProgramFiles64Folder folds
+      # to `C:\Program Files (x86)` - so a dropped `-arch x64` silently ships a 64-bit payload into
+      # the 32-bit tree. That shipped in every release through v0.3.0 because nothing checked, and
+      # the filename says x64 either way. Assert the package's real platform, not its name.
+      - name: Verify the MSI is a 64-bit package
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem packaging/dist/*.msi | Select-Object -First 1
+          if (-not $msi) { throw "no .msi produced" }
+          $inst = New-Object -ComObject WindowsInstaller.Installer
+          $si = $inst.GetType().InvokeMember('SummaryInformation','GetProperty',$null,$inst,@($msi.FullName,0))
+          $template = $si.GetType().InvokeMember('Property','GetProperty',$null,$si,@(7))
+          Write-Host "$($msi.Name): Summary Information template = $template"
+          if ($template -notmatch '^x64') {
+            throw "MSI is not a 64-bit package (template '$template') - restore -arch x64 in packaging/windows/build.ps1"
+          }
+          # The version must survive into the package too, which is what proves the derive path
+          # above actually worked rather than silently defaulting.
+          $tag = $env:GITHUB_REF_NAME -replace '^v', ''
+          $db = $inst.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$inst,@($msi.FullName,0))
+          $vw = $db.GetType().InvokeMember('OpenView','InvokeMethod',$null,$db,@("SELECT Value FROM Property WHERE Property = 'ProductVersion'"))
+          $vw.GetType().InvokeMember('Execute','InvokeMethod',$null,$vw,@($null))
+          $rec = $vw.GetType().InvokeMember('Fetch','InvokeMethod',$null,$vw,@())
+          if (-not $rec) { throw "MSI has no ProductVersion property" }
+          $pv = $rec.GetType().InvokeMember('StringData','GetProperty',$null,$rec,@(1))
+          if ($pv -ne $tag) { throw "MSI ProductVersion '$pv' does not match tag '$tag'" }
+          Write-Host "ProductVersion $pv matches tag"
       - name: Checksums
         shell: pwsh
         run: |
