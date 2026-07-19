@@ -167,5 +167,10 @@ fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
+    // Windows has no mode bits: restrict to owner + SYSTEM/Administrators and strip inherited ACEs
+    // so the key isn't left group/world-readable (e.g. under a ProgramData state dir).
+    #[cfg(windows)]
+    common::winsec::restrict_to_owner(path)
+        .with_context(|| format!("restricting permissions on {}", path.display()))?;
     Ok(())
 }

@@ -11,6 +11,7 @@ pub mod p2p;
 pub mod relay;
 pub mod rotation;
 pub mod update;
+pub mod winsec;
 pub mod wire;
 
 use std::time::{SystemTime, UNIX_EPOCH};
