@@ -346,6 +346,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let ice_enabled = backend.is_userspace() && cfg.ice;
         let mut ice = crate::ice::IceManager::new();
         let mut coord_stun = coord::stun_addr(&cfg.coordinator, resp.stun_port).await;
+        tracing::debug!(?coord_stun, port = ?resp.stun_port, "coordinator STUN bootstrap");
         let mut ice_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
         apply_state(
             backend.as_ref(),

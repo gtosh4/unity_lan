@@ -13,7 +13,8 @@ cd "$ROOT"
 [ -x "$ENG" ] && [ -x "$GUI" ] || { echo "build first: cargo build"; exit 1; }
 
 # Engine needs root for the WireGuard interface. No arg → engine bootstraps ./engine.toml.
-sudo "$ENG" run ${1:+"$1"} &
+# sudo scrubs the environment, so pass RUST_LOG through explicitly when it's set and non-empty.
+sudo env ${RUST_LOG:+RUST_LOG="$RUST_LOG"} "$ENG" run ${1:+"$1"} &
 ENG_PID=$!
 trap 'sudo kill $ENG_PID 2>/dev/null; kill $(jobs -p) 2>/dev/null' EXIT
 
