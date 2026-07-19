@@ -5,6 +5,7 @@ use anyhow::Context;
 use common::api::{ManageOp, ManageResp};
 use common::control::{
     ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, NetworkResp, StatusReport,
+    UpdateResp,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -82,6 +83,15 @@ pub async fn client_set_connected(
     expect_resp!(
         request(endpoint, &ControlRequest::SetConnected { connected }).await?,
         ControlResponse::Connected
+    )
+}
+
+/// Client: apply the staged auto-update. Fails if no verified update is staged; on success the
+/// daemon acks and restarts, so this socket drops.
+pub async fn client_apply_update(endpoint: &str) -> anyhow::Result<UpdateResp> {
+    expect_resp!(
+        request(endpoint, &ControlRequest::ApplyUpdate).await?,
+        ControlResponse::Update
     )
 }
 

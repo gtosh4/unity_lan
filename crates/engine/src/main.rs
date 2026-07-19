@@ -152,6 +152,12 @@ enum CtlCmd {
         #[arg(default_value = "engine.toml")]
         config: String,
     },
+    /// Apply the staged auto-update (download → verify → swap → restart). Headless equivalent of
+    /// the GUI's update button; errors if no verified update is staged.
+    Update {
+        #[arg(default_value = "engine.toml")]
+        config: String,
+    },
     Net {
         config: String,
         action: String,
@@ -471,6 +477,14 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
                     println!("networks: {}", d.networks.join(", "));
                 }
             }
+            if let Some(v) = &report.update_available {
+                let staged = if report.update_ready {
+                    " (staged — run `unitylan ctl update`)"
+                } else {
+                    ""
+                };
+                println!("update:  v{v} available{staged}");
+            }
             println!("peers ({}):", report.peers.len());
             for p in &report.peers {
                 let ep = p
@@ -557,6 +571,11 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
         CtlCmd::Connect { config } => {
             let resp = control::client_set_connected(&socket_for(&config)?, true).await?;
             println!("{}", resp.message);
+            Ok(())
+        }
+        CtlCmd::Update { config } => {
+            let resp = control::client_apply_update(&socket_for(&config)?).await?;
+            println!("{} (v{})", resp.message, resp.version);
             Ok(())
         }
         CtlCmd::Disconnect { config } => {

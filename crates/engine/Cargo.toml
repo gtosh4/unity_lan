@@ -9,6 +9,13 @@ rust-version.workspace = true
 name = "unitylan-engine"
 path = "src/main.rs"
 
+[features]
+# Test-only: accept an invalid/self-signed TLS cert when downloading an update artifact. The update
+# client trusts only the compiled-in webpki roots, so an offline e2e test (scripts/update-test.sh)
+# can't otherwise serve the artifact over the mandatory HTTPS from a local host. NEVER enable in a
+# shipped build — it disables certificate validation on the update channel. Default off.
+test-insecure-tls = []
+
 [dependencies]
 unitylan-common.workspace = true
 serde.workspace = true

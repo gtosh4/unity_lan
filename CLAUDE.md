@@ -53,7 +53,9 @@ scripts/dev-run.sh                                           # engine (via sudo)
 `scripts/*.sh` are Linux-only end-to-end tests over network namespaces (a fake Discord/OAuth
 coordinator + `nft`/`veth`). `mesh-test.sh`, `nat-test.sh`, `expose-net-test.sh`,
 `net-toggle-test.sh`, `rotation-test.sh`, `own-device-test.sh` are the ones that exercise the coordinator↔engine path;
-prefer running the relevant one to verify a behavior change end-to-end.
+prefer running the relevant one to verify a behavior change end-to-end. `update-test.sh` covers the
+signed auto-update path (manifest → verify → download → swap → restart onto the new version); it
+temporarily patches the workspace version to build a fake-old client, and restores it after.
 
 **Privilege: almost none of them need `sudo`.** Most re-exec themselves under
 `unshare -Urnm --map-root-user`, so they get root *inside a user namespace* and run fine as an
@@ -64,6 +66,7 @@ unprivileged user. Run them directly — `sudo` is unnecessary and, in a Claude 
 | --- | --- |
 | `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
 | `oauth-test.sh`, `rotation-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG) |
+| `update-test.sh` | directly, self-unshares — `timeout 420 scripts/update-test.sh` (builds twice; needs `openssl` + `python3`) |
 | `resolver-hook-test.sh` | **real host root** — needs a live `systemd-resolved`, a userns won't do |
 | `dev-run.sh` | **real host root** — engine builds a real `wg` interface on the host |
 | `readme-demo.sh` | **interactive desktop** — needs a Wayland screencast portal, not headless-able |

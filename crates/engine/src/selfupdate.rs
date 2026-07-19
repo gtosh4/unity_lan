@@ -110,10 +110,13 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
     if !artifact.url.starts_with("https://") {
         anyhow::bail!("refusing non-HTTPS update URL: {}", artifact.url);
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .context("building update http client")?;
+    let builder = reqwest::Client::builder().timeout(Duration::from_secs(300));
+    // Test-only (feature off in every shipped build): trust a self-signed cert so the offline e2e
+    // harness can serve the artifact over the mandatory HTTPS from a local host. See the crate
+    // feature's doc in Cargo.toml.
+    #[cfg(feature = "test-insecure-tls")]
+    let builder = builder.danger_accept_invalid_certs(true);
+    let client = builder.build().context("building update http client")?;
     let mut resp = client
         .get(&artifact.url)
         .send()
