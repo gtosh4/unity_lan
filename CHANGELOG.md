@@ -3,6 +3,22 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Added
+
+- **`unitylan ctl update`** applies a staged auto-update from the command line, and `ctl status` now
+  reports whether one is available and staged. Only the GUI could trigger an update before, which
+  left a headless install able to see a release but not take it.
+
+### Fixed
+
+- **A quiet mesh could sit half an attestation TTL on an old version.** A published release was
+  staged only when a `/refresh` long-poll returned — but a device whose membership never changes
+  (a solo install, or any idle mesh) parks that request for the full hold, ~15 minutes at the
+  default TTL, so no update offer appeared until then. The register response carries the same
+  signed manifest, so it is staged from there too and an offer now appears at startup.
+
 ## v0.3.0
 
 **Wire protocol 4 → 5, and versioning that actually does something.** `PROTOCOL_VERSION` was
