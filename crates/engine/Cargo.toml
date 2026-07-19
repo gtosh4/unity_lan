@@ -34,13 +34,14 @@ async-trait = "0.1"
 surge-ping = "0.8"
 futures = "0.3"
 semver = "1"
-self-replace = "1"
 ipnet = "2"
 if-addrs = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.
 libc = "0.2"
+# In-place swap of the running engine binary on auto-update (the Windows path uses msiexec instead).
+self-replace = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
