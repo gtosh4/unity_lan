@@ -671,21 +671,9 @@ mod tests {
         "100.72.0.0/16".parse().unwrap()
     }
 
-    async fn mem_store() -> Store {
-        // Each :memory: db is private to its single connection.
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
-        let store = Store { pool };
-        store.migrate().await.unwrap();
-        store
-    }
-
     #[tokio::test]
     async fn guild_seeds_are_independent_and_stable() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         // First use generates + persists a seed; re-loading returns the same one (stable per guild).
         let a1 = st.load_or_create_seed(1).await.unwrap();
         let a2 = st.load_or_create_seed(1).await.unwrap();
@@ -701,7 +689,7 @@ mod tests {
 
     #[tokio::test]
     async fn enrollment_key_is_one_time_and_binds_device() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         st.create_enrollment_key("k", 42, None).await.unwrap();
         let dev_a = [1u8; 32];
         let dev_b = [2u8; 32];
@@ -718,7 +706,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_key_rejected() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         st.create_enrollment_key("k", 7, Some(100)).await.unwrap();
         assert!(st
             .consume_enrollment_key("k", &[3u8; 32], 100)
@@ -734,7 +722,7 @@ mod tests {
 
     #[tokio::test]
     async fn primary_auto_assigns_then_reassigns() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
         st.allocate_device(tnet(), &a, 9, "laptop").await.unwrap();
@@ -761,7 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_auth_rename_and_remove_autopromote() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
         st.allocate_device(tnet(), &a, 5, "laptop").await.unwrap();
@@ -812,7 +800,7 @@ mod tests {
 
     #[tokio::test]
     async fn device_ip_is_stable_per_pubkey() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         let (a, _) = st
             .allocate_device(tnet(), &[1u8; 32], 1, "laptop")
             .await
@@ -832,7 +820,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_device_names_are_auto_suffixed() {
-        let st = mem_store().await;
+        let st = Store::memory().await;
         let a = [1u8; 32];
         let b = [2u8; 32];
         let c = [3u8; 32];
