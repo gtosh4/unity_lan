@@ -52,6 +52,7 @@ impl App {
         // dismissible, and every successful fetch already clears `self.error`.
         let body = Column::new()
             .spacing(12)
+            .push_maybe(self.relaunch_banner())
             .push_maybe(self.error.as_deref().map(error_banner))
             .push(sections)
             .padding(20);
@@ -187,6 +188,37 @@ impl App {
     /// dotted items, a connect/disconnect toggle, and (when offered) the update button. The verbose
     /// account/version detail lives in the Manage tab's [`account_section`](Self::account_section)
     /// instead, so this stays one line.
+    /// A prominent top-of-window banner shown once the engine is already running a newer version than
+    /// this GUI process — the update swapped both binaries on disk but this window is still the old
+    /// code, and the control protocol carries no version, so an unknown field reads as a parse error
+    /// rather than a clean failure. One click re-execs onto the swapped-in binary ([`Message::Relaunch`]),
+    /// so we surface it loudly rather than leave it as a line buried in the Manage tab.
+    fn relaunch_banner(&self) -> Option<Element<'_, Message>> {
+        let v = self.status.as_ref().map(|s| s.engine_version.as_str())?;
+        if v.is_empty() || v == common::VERSION {
+            return None;
+        }
+        let content = row![
+            dot(AMBER),
+            text(format!(
+                "update installed (v{v}) — restart to finish (this window is still v{})",
+                common::VERSION
+            ))
+            .size(14)
+            .width(Length::Fill),
+            button(text("restart now").size(13)).on_press(Message::Relaunch),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center);
+        Some(
+            container(content)
+                .padding(12)
+                .width(Length::Fill)
+                .style(container::bordered_box)
+                .into(),
+        )
+    }
+
     fn status_strip(&self) -> Option<Element<'_, Message>> {
         let status = self.status.as_ref()?;
         let connected = status.connected;
@@ -223,8 +255,8 @@ impl App {
         ]
         .spacing(6)
         .align_y(Vertical::Center);
-        // Update button rides the strip when a verified, applyable artifact is staged (otherwise the
-        // notice-only line lives in the account section).
+        // Update button rides the strip when a verified, applyable artifact is staged; the account
+        // section carries the matching descriptive notice. Nothing staged → no update surface at all.
         if status.update_available.is_some() && status.update_ready {
             strip = strip.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
         }
@@ -280,48 +312,29 @@ impl App {
             .spacing(8)
             .align_y(Vertical::Center)
         });
-        // The engine updated underneath us. Replacing the binaries on disk restores lockstep for the
-        // *next* launch, but this process is still the old GUI talking to the new daemon — and the
-        // control protocol carries no version, so a field we don't know is a parse error, not a
-        // clean failure. Tell the user to relaunch rather than let it fail obscurely.
-        let relaunch_line = status
-            .map(|s| s.engine_version.as_str())
-            .filter(|v| !v.is_empty() && *v != common::VERSION)
-            .map(|v| {
-                row![
-                    dot(AMBER),
-                    text(format!(
-                        "engine updated to v{v} (this window is v{}) — relaunch to finish",
-                        common::VERSION
-                    ))
-                    .size(14)
-                    .width(Length::Fill),
-                ]
-                .spacing(8)
-                .align_y(Vertical::Center)
-            });
-        // Update-available signal: the coordinator advertised a newer release than we're running.
-        // When a verified, platform-matching artifact is staged (`update_ready`) the strip shows the
-        // Update button; here it's the descriptive notice (also the only surface when notice-only).
+        // The post-update version-skew prompt is now the top-of-window [`relaunch_banner`], not a line
+        // buried here — see that method.
+        // Update-available signal — only shown when actionable, i.e. a verified, platform-matching
+        // artifact is staged (`update_ready`). A coordinator merely running ahead of us without a
+        // rolled `[release]` (or with no artifact for this platform) is intentional and leaves the
+        // user nothing to do, so we stay silent rather than nag.
         let update_line = status
+            .filter(|s| s.update_ready)
             .and_then(|s| {
                 s.update_available
                     .as_deref()
-                    .map(|v| (v, s.engine_version.clone(), s.update_ready))
+                    .map(|v| (v, s.engine_version.clone()))
             })
-            .map(|(v, running, ready)| {
-                let mut r = row![
+            .map(|(v, running)| {
+                row![
                     dot(AMBER),
                     text(format!("update available: v{v} (running v{running})"))
                         .size(14)
                         .width(Length::Fill),
+                    button(text("update").size(13)).on_press(Message::ApplyUpdate),
                 ]
                 .spacing(8)
-                .align_y(Vertical::Center);
-                if ready {
-                    r = r.push(button(text("update").size(13)).on_press(Message::ApplyUpdate));
-                }
-                r
+                .align_y(Vertical::Center)
             });
         let version_line = status
             .map(|s| s.engine_version.as_str())
@@ -330,7 +343,6 @@ impl App {
         column![header("account")]
             .push_maybe(identity)
             .push_maybe(proto_line)
-            .push_maybe(relaunch_line)
             .push_maybe(coord_line)
             .push_maybe(update_line)
             .push_maybe(version_line)

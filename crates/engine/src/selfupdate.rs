@@ -142,9 +142,9 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
 ///
 /// Both, because the GUI drives the engine over a control protocol that carries no version of its
 /// own: replacing only the engine (as this used to) left an older GUI talking to a newer daemon, and
-/// a field it didn't know was a dropped connection, not a clean error. Windows never had this
-/// problem — its MSI `MajorUpgrade` replaces engine + GUI + DLL together — so this restores the same
-/// on-disk lockstep on Linux.
+/// a field it didn't know was a dropped connection, not a clean error. Windows solves the same skew
+/// through its MSI (which ships the new GUI, applied via `swap_in_staged_gui` when the exe is in
+/// use) — so this restores the same on-disk lockstep on Linux.
 ///
 /// A bare (non-gzip) artifact is still accepted as the engine binary alone, so a manifest published
 /// before this change keeps applying.
@@ -255,13 +255,18 @@ fn make_executable(path: &Path) -> anyhow::Result<()> {
 }
 
 /// Windows: the artifact is the signed MSI. Write it out and launch `msiexec`; the MSI's
-/// `MajorUpgrade` tears down the old service, replaces the files (engine + GUI + DLL), re-registers
+/// `MajorUpgrade` tears down the old service, replaces the files (engine + DLL), re-registers
 /// the service, and starts it again (the `StartService` custom action, gated on `NOT Installed`,
 /// true for the new product on an upgrade). We run `/quiet`, so the MSI's install wizard — including
 /// the ExitDialog that would otherwise launch the GUI — is suppressed: an auto-update just swaps
 /// files and restarts the daemon, it does not pop the GUI. We `exit(0)` first so the running engine
 /// releases the service and its files before the upgrade removes them. `msiexec` is a detached
 /// child, so it survives our exit and completes the swap + relaunch on its own.
+///
+/// The GUI is the exception: if it's open, its `unitylan-gui.exe` is locked and the upgrade
+/// reboot-defers it. The MSI sidesteps that by also laying down an always-writable
+/// `unitylan-gui.new.exe`; the running GUI renames that into place and relaunches itself in-session
+/// once the user clicks "restart" (see the GUI's `swap_in_staged_gui`), so no reboot is needed.
 #[cfg(windows)]
 fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     let msi = state_dir.join("unitylan-update.msi");

@@ -51,6 +51,14 @@
                     Description="Mesh status and device management" Advertise="no" />
         </File>
       </Component>
+      <!-- A second, identical copy of the GUI under a name that is never in use. On a /quiet
+           MajorUpgrade the real unitylan-gui.exe is locked whenever the GUI is open, so the installer
+           reboot-defers it; this copy replaces cleanly (no lock), giving the running GUI the new bytes
+           it renames into place to finish the update in-session without a reboot (App::relaunch ->
+           swap_in_staged_gui). It's consumed (renamed) by that swap and re-laid by the next install. -->
+      <Component>
+        <File Id="GuiExeStaged" Name="unitylan-gui.new.exe" Source="$(GuiExe)" KeyPath="yes" />
+      </Component>
       <!-- Default config. NeverOverwrite keeps a user's edited coordinator/enrollment_key across
            upgrades. Removed on uninstall (not Permanent). -->
       <Component NeverOverwrite="yes">

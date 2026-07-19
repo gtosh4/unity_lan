@@ -18,7 +18,7 @@ mod widgets;
 
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -83,6 +83,8 @@ fn window_settings() -> window::Settings {
 }
 
 fn main() -> iced::Result {
+    #[cfg(windows)]
+    clean_stale_gui();
     let socket = PathBuf::from(
         std::env::args()
             .nth(1)
@@ -105,6 +107,53 @@ fn main() -> iced::Result {
             let init = Task::batch([open, app.reload()]);
             (app, init)
         })
+}
+
+/// Launch a fresh GUI process onto the updated binary (the caller then exits, handing over). Passes
+/// the same socket argument this instance runs with, so the successor talks to the same engine.
+///
+/// On Unix the update already swapped `unitylan-gui` in place at apply time, so this is a plain
+/// re-exec of our own path. On Windows the running exe can't be overwritten, so the update left the
+/// new bytes beside us as `unitylan-gui.new.exe`; [`swap_in_staged_gui`] moves them into place first.
+fn relaunch_successor(socket: &Path) -> std::io::Result<()> {
+    let exe = std::env::current_exe()?;
+    #[cfg(windows)]
+    swap_in_staged_gui(&exe)?;
+    std::process::Command::new(&exe).arg(socket).spawn()?;
+    Ok(())
+}
+
+/// Finish a Windows auto-update by promoting the staged `unitylan-gui.new.exe` to the real name.
+/// Windows forbids overwriting a running image but *permits renaming it*, so we rename ourselves
+/// aside and move the staged copy in — leaving the path we're about to relaunch pointing at the new
+/// bytes. A no-op when nothing is staged (a normal launch, or an installer too old to ship the copy),
+/// so we simply relaunch the current binary.
+#[cfg(windows)]
+fn swap_in_staged_gui(exe: &Path) -> std::io::Result<()> {
+    let Some(dir) = exe.parent() else {
+        return Ok(());
+    };
+    let staged = dir.join("unitylan-gui.new.exe");
+    if !staged.exists() {
+        return Ok(());
+    }
+    // The prior update's renamed-aside image was in use then and couldn't be deleted; it's free now.
+    let old = dir.join("unitylan-gui.old.exe");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(exe, &old)?;
+    std::fs::rename(&staged, exe)?;
+    Ok(())
+}
+
+/// Best-effort cleanup of the image a previous update renamed aside (see [`swap_in_staged_gui`]) —
+/// only deletable once we're no longer running from it, i.e. from the successor at startup.
+#[cfg(windows)]
+fn clean_stale_gui() {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let _ = std::fs::remove_file(dir.join("unitylan-gui.old.exe"));
+        }
+    }
 }
 
 struct App {
@@ -228,6 +277,9 @@ enum Message {
     ApplyUpdate,
     /// The apply request was acked (or failed) — the engine restarts shortly after on success.
     UpdateStarted(Result<String, String>),
+    /// Close this window and re-exec our (now-swapped) binary, finishing an update that already
+    /// replaced the engine + GUI on disk. Only offered once we detect the engine runs a newer version.
+    Relaunch,
     /// Open a URL in the default browser (re-open the authorize link on demand).
     OpenUrl(String),
     /// Copy arbitrary text to the clipboard (an authorize link, a peer's hostname + IP).
@@ -469,6 +521,14 @@ impl App {
                 // On success the engine restarts shortly (socket drops → the poll reconnects onto the
                 // new version). Surface only a failure; success needs no banner.
                 self.error = res.err();
+            }
+            Message::Relaunch => {
+                // Launch a fresh GUI onto the new binary, then exit this old process. Best-effort — if
+                // it fails, keep the window up and report it rather than quitting into nothing.
+                match relaunch_successor(&self.socket) {
+                    Ok(()) => return iced::exit(),
+                    Err(e) => self.error = Some(format!("could not relaunch: {e}")),
+                }
             }
             Message::OpenUrl(url) => {
                 if !cfg!(test) {
