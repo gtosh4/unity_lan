@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Build the UnityLAN Windows installer (.msi).
 
@@ -40,8 +40,14 @@ $WgNtUrl = "https://download.wireguard.com/wireguard-nt/wireguard-nt-$WgNtVersio
 $WgNtSha256 = '772c0b1463d8d2212716f43f06f4594d880dea4f735165bd68e388fc41b81605'
 
 if (-not $Version) {
-    $cargo = Get-Content (Join-Path $Root 'crates\engine\Cargo.toml')
-    $Version = ($cargo | Select-String '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+    # Every crate sets `version.workspace = true`, so the single source of truth is the root
+    # Cargo.toml's [workspace.package] version — same place packaging/build.sh reads. (Reading the
+    # engine crate's own Cargo.toml found no literal `version = "..."` and failed with a null-index
+    # error; release CI always passes -Version explicitly, so only local builds ever hit this.)
+    $cargo = Get-Content (Join-Path $Root 'Cargo.toml')
+    $match = $cargo | Select-String '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $match) { throw "could not read [workspace.package] version from Cargo.toml" }
+    $Version = $match.Matches[0].Groups[1].Value
 }
 if (-not $Output) {
     $dist = Join-Path $Root 'packaging\dist'
@@ -99,8 +105,13 @@ if (-not (wix extension list -g | Select-String -SimpleMatch 'WixToolset.UI.wixe
     if ($LASTEXITCODE -ne 0) { throw "wix extension add failed" }
 }
 
+# `-arch x64` is required, not cosmetic: `wix build` defaults to x86, and in a 32-bit package the
+# .wxs's ProgramFiles64Folder folds to `C:\Program Files (x86)` — so the 64-bit engine, GUI, and
+# wireguard-nt DLL all landed under the 32-bit tree (every release through v0.3.0 shipped this way,
+# with a Summary Information template of `Intel` despite the `-x64.msi` name).
 Write-Host ">> wix build -> $Output" -ForegroundColor Cyan
 wix build (Join-Path $Here 'unitylan.wxs') `
+    -arch x64 `
     -ext WixToolset.UI.wixext `
     -d "Version=$Version" `
     -d "EngineExe=$engineExe" `

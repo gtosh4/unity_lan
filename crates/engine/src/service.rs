@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use windows_service::service::{
-    ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-    ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    Service, ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl,
+    ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
 };
 use windows_service::service_control_handler::{
     self, ServiceControlHandlerResult, ServiceStatusHandle,
@@ -41,6 +41,33 @@ const SERVICE_NAME: &str = common::control::WINDOWS_SERVICE_NAME;
 /// Friendly name shown in `services.msc`.
 const DISPLAY_NAME: &str = "UnityLAN Engine";
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
+const SERVICE_DESCRIPTION: &str =
+    "UnityLAN mesh engine: WireGuard mesh, host firewall, and .unity.internal DNS resolver.";
+
+/// `CreateService` failed because a service of this name is already registered.
+const ERROR_SERVICE_EXISTS: i32 = 1073;
+/// `CreateService` failed because the name is still reserved by a service that has been deleted but
+/// whose last SCM handle hasn't closed yet. Transient — it clears on its own.
+const ERROR_SERVICE_MARKED_FOR_DELETE: i32 = 1072;
+
+/// How long to wait for a service to reach `Stopped`, and for a marked-for-delete name to free up.
+/// Matches the stop wait hint `run_service` reports to the SCM, since a clean stop tears down the
+/// interface, firewall, and NRPT resolver first.
+const STOP_WAIT: Duration = Duration::from_secs(30);
+const MARKED_FOR_DELETE_WAIT: Duration = Duration::from_secs(30);
+const POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+/// The raw Win32 code behind a `windows_service` error, when it came from a winapi call.
+///
+/// Extracted rather than matched on a message so the caller can branch on the specific SCM states
+/// that are recoverable ([`ERROR_SERVICE_EXISTS`], [`ERROR_SERVICE_MARKED_FOR_DELETE`]) instead of
+/// treating every failure alike.
+fn winapi_code(err: &windows_service::Error) -> Option<i32> {
+    match err {
+        windows_service::Error::Winapi(io) => io.raw_os_error(),
+        _ => None,
+    }
+}
 
 /// Dispatch the `service` subcommand (called from `main` outside any tokio runtime).
 pub fn main() -> Result<()> {
@@ -86,12 +113,7 @@ fn install(config: Option<String>) -> Result<()> {
         account_name: None, // None ⇒ LocalSystem
         account_password: None,
     };
-    let service = manager
-        .create_service(&info, ServiceAccess::CHANGE_CONFIG)
-        .context("creating the service (already installed? run `service uninstall` first)")?;
-    let _ = service.set_description(
-        "UnityLAN mesh engine: WireGuard mesh, host firewall, and .unity.internal DNS resolver.",
-    );
+    create_or_adopt(&manager, &info)?;
 
     // The service keeps the SCM default DACL (control needs elevation). The GUI never drives the
     // SCM — its only on/off is a mesh connect/disconnect over the control socket — so no DACL relax
@@ -102,6 +124,96 @@ fn install(config: Option<String>) -> Result<()> {
     println!(
         "  ensure the wireguard-nt DLL is at resources-windows\\binaries\\wireguard-amd64.dll next to the engine executable."
     );
+    Ok(())
+}
+
+/// Register the service, tolerating the two SCM states an upgrade legitimately produces.
+///
+/// `CreateService` is not idempotent, and the MSI's upgrade path deletes the old service and
+/// recreates it under the same name inside one transaction — so both of these are normal here, not
+/// errors:
+///
+/// - **`ERROR_SERVICE_EXISTS`** — a previous registration survived (its uninstall failed, or the
+///   user re-ran `service install`). Adopt it and rewrite its config to point at the
+///   newly-installed exe, which is what a fresh create would have produced anyway. It's stopped
+///   first, because a service left *running* would otherwise keep executing the previous binary —
+///   the config change only takes effect on next start, and the MSI's `service start` skips a
+///   service that is already running.
+/// - **`ERROR_SERVICE_MARKED_FOR_DELETE`** — the old service was deleted moments ago but a
+///   still-open SCM handle keeps the name reserved. This clears by itself, so wait for it.
+///
+/// Both used to abort with a non-zero exit, and the MSI runs this action with `Return="check"` — so
+/// a transient SCM state rolled the whole installer back (error 1722 → 1603) and left the machine
+/// with a registered-but-broken product that then blocked every later install. Never fail an
+/// install for a condition that resolves itself.
+fn create_or_adopt(manager: &ServiceManager, info: &ServiceInfo) -> Result<()> {
+    let deadline = Instant::now() + MARKED_FOR_DELETE_WAIT;
+    loop {
+        match manager.create_service(info, ServiceAccess::CHANGE_CONFIG) {
+            Ok(service) => {
+                let _ = service.set_description(SERVICE_DESCRIPTION);
+                return Ok(());
+            }
+            Err(e) if winapi_code(&e) == Some(ERROR_SERVICE_EXISTS) => {
+                let service = manager
+                    .open_service(
+                        SERVICE_NAME,
+                        ServiceAccess::QUERY_STATUS
+                            | ServiceAccess::STOP
+                            | ServiceAccess::CHANGE_CONFIG,
+                    )
+                    .context("opening the already-registered service to reconfigure it")?;
+                stop_and_wait(&service)?;
+                service
+                    .change_config(info)
+                    .context("repointing the existing service at this installation")?;
+                let _ = service.set_description(SERVICE_DESCRIPTION);
+                println!("Service '{SERVICE_NAME}' already existed; repointed it at this install.");
+                return Ok(());
+            }
+            // Transient: the name frees up once the last handle to the deleted service closes.
+            Err(e)
+                if winapi_code(&e) == Some(ERROR_SERVICE_MARKED_FOR_DELETE)
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            Err(e) => {
+                let msg = match winapi_code(&e) {
+                    // Only reachable once the deadline above has passed, so say what actually
+                    // helps: something is still holding a handle to the deleted service.
+                    Some(ERROR_SERVICE_MARKED_FOR_DELETE) => format!(
+                        "service '{SERVICE_NAME}' was still marked for deletion after {}s — \
+                         close services.msc or any tool holding it open, then retry (a reboot \
+                         always clears it)",
+                        MARKED_FOR_DELETE_WAIT.as_secs()
+                    ),
+                    _ => format!("creating service '{SERVICE_NAME}' (needs an elevated shell)"),
+                };
+                return Err(anyhow::Error::new(e).context(msg));
+            }
+        }
+    }
+}
+
+/// Ask the service to stop and wait for it to actually reach `Stopped`, bounded by [`STOP_WAIT`].
+///
+/// Shared by `uninstall` (so `delete` doesn't hit a running service — that only marks it for
+/// deletion until the next reboot) and by [`create_or_adopt`] (so an adopted service isn't left
+/// running the previous binary). Best-effort: a service that won't stop in the window is left to
+/// the caller rather than failing the install.
+fn stop_and_wait(service: &Service) -> Result<()> {
+    if service.query_status()?.current_state == ServiceState::Stopped {
+        return Ok(());
+    }
+    let _ = service.stop();
+    let deadline = Instant::now() + STOP_WAIT;
+    while Instant::now() < deadline {
+        if service.query_status()?.current_state == ServiceState::Stopped {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
     Ok(())
 }
 
@@ -119,21 +231,10 @@ fn uninstall() -> Result<()> {
         )
         .context("opening the service (is it installed?)")?;
 
-    // Ask it to stop, then wait for it to actually stop so `delete` doesn't hit a still-running
-    // service (which marks it for deletion until the next reboot — and then blocks a reinstall's
-    // `service install` with ERROR_SERVICE_MARKED_FOR_DELETE). The window matches the stop wait hint
-    // the service reports (see `run_service`), since a clean stop tears down the interface, firewall,
-    // and NRPT resolver first.
-    if service.query_status()?.current_state != ServiceState::Stopped {
-        let _ = service.stop();
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
-            if service.query_status()?.current_state == ServiceState::Stopped {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(300));
-        }
-    }
+    // Stop before deleting: deleting a still-running service only marks it for deletion until the
+    // next reboot, which then blocks a reinstall's `service install` with
+    // ERROR_SERVICE_MARKED_FOR_DELETE.
+    stop_and_wait(&service)?;
 
     service.delete().context("deleting the service")?;
     println!("Uninstalled service '{SERVICE_NAME}'.");
@@ -310,4 +411,43 @@ fn default_config_path() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("engine.toml")))
         .unwrap_or_else(|| PathBuf::from("engine.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `create_or_adopt` branches entirely on this classification: misread the code and a
+    /// recoverable SCM state becomes a failed custom action, which the MSI (`Return="check"`) turns
+    /// into a rolled-back install. Pin that the code survives the `windows_service::Error` wrapper.
+    #[test]
+    fn winapi_code_extracts_recoverable_scm_states() {
+        let exists =
+            windows_service::Error::Winapi(std::io::Error::from_raw_os_error(ERROR_SERVICE_EXISTS));
+        assert_eq!(winapi_code(&exists), Some(ERROR_SERVICE_EXISTS));
+
+        let marked = windows_service::Error::Winapi(std::io::Error::from_raw_os_error(
+            ERROR_SERVICE_MARKED_FOR_DELETE,
+        ));
+        assert_eq!(winapi_code(&marked), Some(ERROR_SERVICE_MARKED_FOR_DELETE));
+
+        // An unrelated winapi failure classifies as itself, so it falls through to the error arm
+        // rather than being silently retried or adopted.
+        let denied = windows_service::Error::Winapi(std::io::Error::from_raw_os_error(5));
+        assert_eq!(winapi_code(&denied), Some(5));
+
+        // A non-winapi variant has no code — must not be mistaken for a recoverable state.
+        assert_eq!(
+            winapi_code(&windows_service::Error::LaunchArgumentsNotSupported),
+            None
+        );
+    }
+
+    /// The two constants are Win32 contract values, not arbitrary picks — a typo here would silently
+    /// disable the recovery this module exists to provide.
+    #[test]
+    fn scm_error_constants_match_win32() {
+        assert_eq!(ERROR_SERVICE_EXISTS, 1073);
+        assert_eq!(ERROR_SERVICE_MARKED_FOR_DELETE, 1072);
+    }
 }

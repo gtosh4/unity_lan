@@ -13,11 +13,39 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **A failed Windows install could leave the machine unable to install UnityLAN again.** Registering
+  the engine service was all-or-nothing: if the service name was already taken, or was still held by
+  a just-deleted service the SCM hadn't finished releasing, `service install` failed — and because
+  the MSI treats that step as fatal, the whole install rolled back (error 1722 → 1603). An
+  interrupted uninstall was enough to trigger it, and the half-removed product it left behind then
+  broke every later attempt, including the auto-update's. Both states are now expected: an existing
+  service is stopped and repointed at the new install, and a name still being released is waited out.
+- **The Windows installer put a 64-bit build under `C:\Program Files (x86)`.** The MSI was being
+  built as a 32-bit package despite its `-x64.msi` name, so the engine, GUI, and wireguard-nt driver
+  DLL all installed into the 32-bit program folder. Fresh installs now land in `C:\Program Files\
+  UnityLAN`; an existing install is moved there on upgrade — see the note below if you edited
+  `engine.toml`.
 - **A quiet mesh could sit half an attestation TTL on an old version.** A published release was
   staged only when a `/refresh` long-poll returned — but a device whose membership never changes
   (a solo install, or any idle mesh) parks that request for the full hold, ~15 minutes at the
   default TTL, so no update offer appeared until then. The register response carries the same
   signed manifest, so it is staged from there too and an offer now appears at startup.
+
+### Upgrade note (Windows)
+
+Because the install folder moves from `C:\Program Files (x86)\UnityLAN` to
+`C:\Program Files\UnityLAN`, this upgrade replaces the old installation rather than updating it in
+place — **a hand-edited `engine.toml` is not carried across**, and the new location gets the shipped
+default. If you self-host a coordinator, re-apply your `coordinator` (and `enrollment_key`) settings
+in the new folder and restart the service:
+
+```powershell
+notepad "$env:ProgramFiles\UnityLAN\engine.toml"
+sc.exe stop UnityLANEngine; sc.exe start UnityLANEngine
+```
+
+Device identity is unaffected — keys, token, and pinned anchors live in `%ProgramData%\UnityLAN`,
+which this does not touch, so the device keeps its IP and hostname.
 
 ## v0.3.0
 
