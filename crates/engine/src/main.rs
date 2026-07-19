@@ -40,6 +40,11 @@ struct Cli {
     cmd: Option<Cmd>,
     /// Bare invocation (register-once): config path (defaults to engine.toml).
     config: Option<String>,
+    /// One-time enrollment key, overriding `enrollment_key` in the config. Lets a headless box
+    /// enroll without writing the bearer secret to disk (e.g. pass it once via a systemd unit
+    /// `ExecStart`, an env-substituted arg, or an interactive first run).
+    #[arg(long, global = true, value_name = "KEY")]
+    token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -205,7 +210,14 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
-    match cli.cmd {
+    // `--token` is a global arg; pull it out so every config-loading arm can override the config's
+    // `enrollment_key` with it. Each match arm is exclusive, so moving `token` into an arm is fine.
+    let Cli {
+        cmd,
+        config: bare_config,
+        token,
+    } = cli;
+    match cmd {
         Some(Cmd::WgSmoke { ifname }) => wg_smoke(&ifname),
         Some(Cmd::WgKeygen) => {
             let (priv_k, pub_k) = common::crypto::gen_wg_keypair();
@@ -252,7 +264,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             hook.revert(&iface)
         }
         Some(Cmd::Run { config }) => {
-            let cfg = load_config(config)?;
+            let cfg = load_config(config, token)?;
             // Latch the shutdown signal so the daemon runs its teardown (revert interface/firewall/
             // DNS, withdraw presence) rather than being hard-killed: Ctrl-C (SIGINT) everywhere, plus
             // SIGTERM on unix — what `systemctl stop` / a container runtime sends.
@@ -265,10 +277,10 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         }
         Some(Cmd::Ctl { sub }) => ctl(sub).await,
         Some(Cmd::Uninstall { config, purge }) => {
-            uninstall(load_config(Some(config))?, purge).await
+            uninstall(load_config(Some(config), token)?, purge).await
         }
-        Some(Cmd::Login { config }) => login(load_config(config)?).await,
-        None => register_once(cli.config).await,
+        Some(Cmd::Login { config }) => login(load_config(config, token)?).await,
+        None => register_once(bare_config, token).await,
     }
 }
 
@@ -302,8 +314,8 @@ async fn wait_for_shutdown_signal() {
 
 /// Bare invocation (register-once): register with the coordinator, verify + pin the trust anchor,
 /// and print the resulting IP + hostname.
-async fn register_once(config: Option<String>) -> anyhow::Result<()> {
-    let cfg = load_config(config)?;
+async fn register_once(config: Option<String>, token: Option<String>) -> anyhow::Result<()> {
+    let cfg = load_config(config, token)?;
 
     let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
 
@@ -372,14 +384,20 @@ async fn uninstall(cfg: Config, purge: bool) -> anyhow::Result<()> {
 
 /// Load config from an optional CLI path. An explicit path must exist; the default `engine.toml`
 /// is created with starter values on first run so a bare `run`/`login` bootstraps a dev config.
-fn load_config(arg: Option<String>) -> anyhow::Result<Config> {
-    match arg {
+fn load_config(arg: Option<String>, token_override: Option<String>) -> anyhow::Result<Config> {
+    let mut cfg = match arg {
         Some(p) => {
-            Config::load(std::path::Path::new(&p)).with_context(|| format!("loading config {p}"))
+            Config::load(std::path::Path::new(&p)).with_context(|| format!("loading config {p}"))?
         }
         None => Config::load_or_init(std::path::Path::new("engine.toml"))
-            .with_context(|| "loading config engine.toml".to_string()),
+            .with_context(|| "loading config engine.toml".to_string())?,
+    };
+    // A `--token` on the command line wins over the config file, so a headless box can enroll
+    // without persisting the bearer secret to disk.
+    if let Some(t) = token_override {
+        cfg.enrollment_key = Some(t);
     }
+    Ok(cfg)
 }
 
 /// `login <config.toml>` — interactive Discord login. Prints the authorize URL to open, then

@@ -149,6 +149,57 @@ Members Intent on) and a place to run it behind HTTPS. Full walkthrough — Disc
 
 Coordinator setup (Discord app, config, admin dashboard): [`docs/coordinator-setup.md`](docs/coordinator-setup.md).
 
+## Set up a headless device
+
+A game server or other box with no browser enrolls with a **one-time key** — no Discord client on
+the box, only HTTP to the coordinator.
+
+1. **Mint a key.** From any already-authed device, in a Discord channel where the bot is present, run
+
+   ```
+   /unitylan enroll
+   ```
+
+   The bot replies (only to you) with a key like `unl_a1b2…`. It is **single-use** and **short-lived
+   (~15 min)** — mint it right before you need it, and don't paste it into a shared channel. If it
+   expires before the box registers, just run `/unitylan enroll` again for a fresh one.
+
+2. **Install the engine on the box.** Install the `unitylan` package (engine + CLI, no graphics
+   libs), then write `/etc/unitylan/engine.toml` — at minimum the coordinator URL and a state dir.
+   Use [`engine.example.toml`](engine.example.toml) as a template:
+
+   ```toml
+   coordinator = "https://coordinator.unitylan.com"
+   state_dir = "/var/lib/unitylan"
+   device_name = "gameserver"   # optional; defaults to the system hostname
+   ```
+
+3. **Enroll.** Hand the key to the engine one of two ways:
+
+   - **Off disk (recommended):** pass it on the command line — it never gets written to the config.
+
+     ```sh
+     sudo unitylan-engine run --token unl_a1b2… /etc/unitylan/engine.toml
+     ```
+
+   - **In the config:** add `enrollment_key = "unl_a1b2…"` to `engine.toml`, then start the service:
+
+     ```sh
+     sudo systemctl enable --now unitylan-engine
+     ```
+
+   The first register binds the box's WireGuard public key to your Discord user and consumes the key;
+   from then on the box is known by its pubkey and the key no longer matters (you can delete it from
+   the config). The box joins as `gameserver.<you>.unity.internal`.
+
+4. **Check it's on the mesh and share a port.** The mesh firewall drops all inbound by default, so
+   expose the service's port — optionally scoped to one network's members:
+
+   ```sh
+   sudo unitylan-engine ctl status /etc/unitylan/engine.toml
+   sudo unitylan-engine ctl expose /etc/unitylan/engine.toml 25565 minecraft
+   ```
+
 ## Building from source
 
 It's a Rust workspace (four crates). To build and run a full offline mesh with a fake Discord — no

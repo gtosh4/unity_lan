@@ -229,11 +229,16 @@ async fn process(
                 return "Could not determine your user.".to_string();
             };
             let key = common::crypto::gen_enrollment_key();
-            match store.create_enrollment_key(&key, user.get(), None).await {
+            let expires_at = common::now_unix() + common::ENROLLMENT_KEY_TTL_SECS;
+            match store
+                .create_enrollment_key(&key, user.get(), Some(expires_at))
+                .await
+            {
                 Ok(()) => format!(
-                    "Your one-time enrollment key:\n`{key}`\n\nOn the headless device, set \
-                     `enrollment_key = \"{key}\"` in its config. It binds to the first device \
-                     that registers with it."
+                    "Your one-time enrollment key (expires in {} min):\n`{key}`\n\nOn the headless \
+                     device, set `enrollment_key = \"{key}\"` in its config (or pass \
+                     `--token {key}`). It binds to the first device that registers with it.",
+                    common::ENROLLMENT_KEY_TTL_SECS / 60
                 ),
                 Err(e) => format!("Error: {e}"),
             }

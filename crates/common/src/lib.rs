@@ -60,6 +60,12 @@ pub const DNS_SUFFIX: &str = "unity.internal";
 /// expire mid-session; the relay's TURN server rejects an allocation past this.
 pub const RELAY_CRED_TTL_SECS: u64 = 3600;
 
+/// One-time enrollment-key lifetime (design.md §3.3): a headless-device key is a **bearer secret**,
+/// so besides being single-use it is short-lived — a key leaked out-of-band (the main exposure is
+/// pasting it through Discord/chat) can't be redeemed indefinitely. The window only needs to cover
+/// carrying the key to the box, pasting it into the config, and its first register.
+pub const ENROLLMENT_KEY_TTL_SECS: u64 = 15 * 60;
+
 /// Current unix time in seconds.
 pub fn now_unix() -> u64 {
     SystemTime::now()
