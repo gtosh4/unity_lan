@@ -195,9 +195,7 @@ mod tests {
         use common::crypto::CoordinatorKey;
         use common::update::{Platform, ReleaseArtifact, ReleaseManifest};
 
-        let dir = std::env::temp_dir().join(format!("unitylan-su-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::TempDir::new("su-test");
         let honest = CoordinatorKey::generate();
         let attacker = CoordinatorKey::generate();
         const GUILD: u64 = 42;
@@ -230,23 +228,16 @@ mod tests {
                 pubkey: attacker.anchor_bytes(),
                 rotation_chain: Vec::new(),
             }],
-            grant: None,
-            device_token: None,
-            seeds: Vec::new(),
             version: 1,
-            networks: Vec::new(),
-            stun_addr: None,
             proto: common::PROTOCOL_VERSION,
             server_version: "9.9.9".into(),
             release: Some(Signed::sign(signer, &manifest).unwrap().to_base64()),
-            partial: false,
-            removed: Vec::new(),
+            ..Default::default()
         };
         // Signed by the attacker (matches the response's anchor) → must still be rejected.
         assert!(stage(&base(&attacker), &dir).is_none());
         // Signed by the pinned (honest) anchor → stages, proving the gate keys on the pin.
         assert!(stage(&base(&honest), &dir).is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A tampered/oversized/short artifact must be rejected before apply. We drive `download_verified`

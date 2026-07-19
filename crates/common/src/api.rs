@@ -206,7 +206,10 @@ pub struct GuildAnchor {
 }
 
 /// `POST /register` or `/refresh` response.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// Every field is `#[serde(default)]`, so [`Default`] is exactly what a caller gets from decoding
+/// `{}` — an empty response. Handy for building one field-by-field (`RegisterResp { seeds, ..Default::default() }`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RegisterResp {
     /// One trust anchor per guild referenced anywhere in this response (the caller's own guilds and
     /// every peer's). The client pins each independently and re-pins via its `rotation_chain`.
@@ -429,18 +432,10 @@ mod tests {
     #[test]
     fn register_resp_roundtrips_version_fields() {
         let resp = RegisterResp {
-            anchors: vec![],
-            grant: None,
-            device_token: None,
-            seeds: vec![],
             version: 7,
-            networks: vec![],
-            stun_addr: None,
             proto: crate::PROTOCOL_VERSION,
             server_version: crate::VERSION.to_string(),
-            release: None,
-            partial: false,
-            removed: vec![],
+            ..Default::default()
         };
         let round: RegisterResp =
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
