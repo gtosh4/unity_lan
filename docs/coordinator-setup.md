@@ -96,6 +96,12 @@ For the optional monitoring surface (`[admin]` block → dashboard + Prometheus 
   hand-off). The OAuth redirect is **loopback to the engine** (`127.0.0.1:8765`, C.3), so Discord
   never redirects to the coordinator — login works even when the browser can't reach it. Local
   testing → `localhost` is fine. Real deploy → a public host/domain with **TLS** for the client API.
+- **Open-file limit**: every connected device parks a long-poll, so each one holds an open socket —
+  the concurrent-device ceiling is an fd count. The coordinator raises its own soft limit to the hard
+  limit at startup (no privilege needed) and logs what it got: `raised the open-file soft limit
+  from=1024 to=1048576`. Normally there is nothing to do. Only if the log shows a low *hard* limit
+  (or a warning that it couldn't raise) does an operator need to lift it — `LimitNOFILE=` in the
+  systemd unit, or `--ulimit nofile=` / `default-ulimits` for a container.
 - Nothing else Discord-side. Intents (B) + `applications.commands` invite (D) cover it.
 
 ---

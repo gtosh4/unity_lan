@@ -112,6 +112,8 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::load(std::path::Path::new(&config_path))
         .with_context(|| format!("loading config {config_path}"))?;
 
+    raise_fd_limit();
+
     let store = Arc::new(Store::open(&cfg.database).await?);
 
     if let Some(guild_id) = rotate_guild {
@@ -287,6 +289,63 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     Ok(())
 }
+
+/// Raise the open-file soft limit to the hard limit.
+///
+/// Every parked long-poll is a held connection, so the coordinator's client ceiling is an fd count:
+/// with a soft limit of 1024 (the systemd/glibc default on most distros) it stops accepting at ~1000
+/// devices, well below what its CPU and memory can serve. Raising the *soft* limit up to the hard
+/// limit needs no privilege, so the process does it for itself rather than relying on every operator
+/// to remember a `LimitNOFILE=` / `--ulimit`.
+///
+/// Best-effort: a failure is logged, not fatal — the coordinator still runs, just with a lower
+/// ceiling. Raising past the **hard** limit does need privilege; if that ceiling is the binding one
+/// the logged numbers are what tells an operator to lift it in the unit file or container runtime.
+#[cfg(unix)]
+fn raise_fd_limit() {
+    // SAFETY: both calls take a valid, fully initialized `rlimit` for a real resource and are
+    // documented to only read/write through it.
+    unsafe {
+        let mut lim = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            tracing::warn!("could not read the open-file limit: {}", errno());
+            return;
+        }
+        if lim.rlim_cur >= lim.rlim_max {
+            tracing::debug!(
+                limit = lim.rlim_cur,
+                "open-file limit already at its maximum"
+            );
+            return;
+        }
+        let was = lim.rlim_cur;
+        lim.rlim_cur = lim.rlim_max;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) != 0 {
+            tracing::warn!(
+                soft = was,
+                hard = lim.rlim_max,
+                "could not raise the open-file limit: {}; concurrent clients are capped by it",
+                errno()
+            );
+            return;
+        }
+        tracing::info!(
+            from = was,
+            to = lim.rlim_max,
+            "raised the open-file soft limit (each parked long-poll holds one)"
+        );
+    }
+}
+
+#[cfg(unix)]
+fn errno() -> std::io::Error {
+    std::io::Error::last_os_error()
+}
+
+/// Windows has no `RLIMIT_NOFILE`; its socket ceiling is governed by the OS, not a per-process soft
+/// limit, so there's nothing to raise.
+#[cfg(not(unix))]
+fn raise_fd_limit() {}
 
 /// Build the signed auto-update manifest from the `[release]` config, or `None` if unconfigured.
 /// Signs with the coordinator anchor so clients verify it against their pinned key. Shared by the

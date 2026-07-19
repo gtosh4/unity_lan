@@ -30,3 +30,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 twilight-gateway = "0.17"
 twilight-util = { version = "0.17", features = ["builder"] }
 stun = "0.17"
+
+# Raising RLIMIT_NOFILE at startup (each parked long-poll holds an fd).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
