@@ -20,3 +20,9 @@ state_dir = "engine-state"
 # newly-seen network out of peering until you enable it in the GUI; false auto-enrols new networks.
 # Seeds the initial policy on first run; the GUI toggle is the source of truth thereafter.
 # disable_new_networks = true
+
+# Peer-direct attestation refresh (docs/gossip-refresh.md). On by default: the engine keeps peers'
+# attestations fresh directly over the tunnels and drops a peer whose attestation lapses with no
+# source, so revocation survives a coordinator outage. The coordinator stays the fallback. Set false
+# to revert to coordinator-only refresh + coordinator-snapshot revocation.
+# gossip = false

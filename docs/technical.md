@@ -28,17 +28,18 @@ unitylan/
 │   │   ├── netid.rs       # per-device /32 allocation math, mesh-CIDR default, label sanitize
 │   │   ├── rotation.rs    # RotationCert (prev→new anchor rotation chain)
 │   │   ├── relay.rs       # TURN credential (HMAC) helpers shared by engine + coordinator
+│   │   ├── p2p.rs         # peer-direct refresh channel: typed UDP envelope (gossip-refresh)
 │   │   └── update.rs      # signed ReleaseManifest (auto-update)
 │   ├── coordinator/      # the multi-tenant bot (binary), serves 1..N guilds — control plane
 │   │   ├── main.rs
 │   │   ├── config.rs      # TOML: bind, db path, [fake] source / live discord+oauth, [release], cidr
-│   │   ├── api.rs         # axum HTTP API + long-poll (build_snapshot / wait_for_change)
+│   │   ├── api.rs         # axum HTTP API + long-poll (build_snapshot, delta, wait_park, Wakers)
 │   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
 │   │   ├── discord.rs     # twilight: bot-token role/nick reads + per-guild role-name TTL cache
 │   │   ├── commands.rs    # /unitylan network add|remove|list|revoke slash handler + gateway events
 │   │   ├── oauth.rs       # Discord OAuth2 PKCE config + token verify (binds pubkey→user)
 │   │   ├── presence.rs    # in-memory presence table + reaper (PRESENCE_TTL_SECS)
-│   │   ├── signer.rs      # per-guild Ed25519 attestation signing, TTL
+│   │   ├── signer.rs      # per-guild Ed25519 attestation signing, configurable TTL, SignCache
 │   │   ├── rotate.rs      # offline `rotate-key` subcommand (mints prev→new cert)
 │   │   ├── stun.rs        # STUN Binding responder (UDP; server-reflexive for ICE)
 │   │   └── store.rs       # SQLite: per-guild signing keys, network registry, device allocations…
@@ -53,6 +54,7 @@ unitylan/
 │   │   ├── resolver/{mod,linux,windows}.rs # *.unity.internal split-DNS hookup
 │   │   ├── dns.rs        # local .internal zone built from verified attestations
 │   │   ├── nat.rs        # UPnP-IGD port mapping
+│   │   ├── p2p.rs        # peer-direct attestation serve + pull (gossip-refresh, docs/gossip-refresh.md)
 │   │   ├── ice.rs        # userspace ICE agent (webrtc-ice): STUN gather + hole-punch
 │   │   ├── relay.rs      # embedded TURN server (ciphertext relay) + client
 │   │   ├── ping.rs      # peer reachability probing (surge-ping)
@@ -65,8 +67,9 @@ unitylan/
 ```
 
 There is **no separate CLI crate** yet; the CLI surface is folded into the engine binary's
-subcommands. `common` also carries no `gossip`/`EndpointRecord` type — discovery is long-poll (§5),
-not gossip.
+subcommands. **Discovery** is coordinator long-poll (§5), not gossip; `common::p2p` is the
+peer-direct attestation **refresh** channel (keeping *known* peers fresh, `docs/gossip-refresh.md`) —
+a distinct concern from discovering *unknown* peers, which stays on the coordinator.
 
 ## 2. Key Dependencies
 
@@ -192,12 +195,23 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
 **Not gossip.** Clients long-poll `/register`+`/refresh` carrying their last-seen `version`
 (`since`). The handler:
 1. `build_snapshot` — assemble the caller's grant + `seeds` (every co-member sharing ≥1 enabled
-   network), re-signing/reusing cached attestations.
-2. If `since == current version`, park on a `tokio::watch` via `wait_for_change` for up to
-   `LONGPOLL_HOLD_SECS` (≈ TTL/2 = 15 min), then return a fresh re-signed snapshot (renewal
-   piggybacks the hold). Any membership change bumps the version and **wakes every parked client at
-   once** (the fan-in herd — see CLAUDE.md's coordinator-load guidance).
-3. Presence is tracked in-memory (`presence.rs`) with a reaper at `PRESENCE_TTL_SECS`
+   network). Attestations come from the **`SignCache`** (`signer.rs`): an attestation binds only peer
+   identity + guild (never the caller), so its blob is identical in every snapshot that includes the
+   peer — signed once per reuse window and fanned out. **O(N) signs/epoch, not O(N²).**
+2. **Delta sync.** The client echoes its held peers as `held: [(pubkey, rev)]` (`rev` = an opaque
+   per-seed revision the coordinator minted, hashing the peer's peering-relevant content but **not**
+   attestation freshness). `build_snapshot` returns only new/`rev`-changed `seeds` + a `removed` list
+   (`partial = true`); empty `held` → full snapshot. Collapses a herd wake from O(N)/client to
+   O(changes). `PROTOCOL_VERSION = 3` (additive; a pre-delta client sends no `held` → full).
+3. If `since == current version` and the caller's own request changed nothing, park on a
+   `tokio::watch` via `wait_park` for up to `longpoll_hold_secs` (≈ `attestation_ttl/2`), then return
+   a fresh snapshot (renewal piggybacks the hold). A **membership** change bumps the global version
+   and wakes parked clients; each rebuild is jittered by a small per-client offset (`wake_jitter`) to
+   flatten the fan-in.
+4. **Targeted wakeups.** Pair-specific reports (reflexive/relay/ICE — *for* one peer) don't bump the
+   global version; they wake **only the target** via a per-pubkey `Wakers` registry. The reporter
+   still returns immediately (`build_snapshot` reports `caller_changed`) to keep its report loop.
+5. Presence is tracked in-memory (`presence.rs`) with a reaper at `PRESENCE_TTL_SECS`
    (`2×hold + 60s`); `paused`/`Logout`/`supersede` withdraw a device explicitly.
 
 ### 4.3 Discord integration (`roles.rs`, `discord.rs`, `commands.rs`)
@@ -212,7 +226,10 @@ endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enroll
   first use — **not** derived from a shared master. `replace_seed` + `append_rotation_cert` back the
   offline `rotate-key` subcommand (`rotate.rs`). A separate `deployment_seed` (id=1) is **not a
   signing key** — it only picks the default mesh `/16`.
-- Attestation `expires_at = now + ATTESTATION_TTL_SECS` (30 min); renewal at ≈ hold (15 min).
+- Attestation `expires_at = now + attestation_ttl_secs` (config, default 30 min = the revocation
+  window); the register long-poll hold and renewal cadence derive from it (≈ TTL/2). The `SignCache`
+  reuse window is `min(300s, ttl/2)` — always below the TTL, so a reused blob is never served
+  expired.
 
 ### 4.5 Storage (`store.rs`, SQLite) — implemented
 ```
@@ -263,9 +280,21 @@ trait WgBackend { ensure_iface, set_peer, remove_peer, gen_keypair, ... }
 `nftables.rs` (Linux) / `windows.rs` (PowerShell) enforce **default-deny on `unl0`** — a second gate
 beyond role membership. Both sides of the platform split are tested (arg-construction unit tests).
 
-### 5.4 Discovery client (`coord.rs`, `daemon.rs`)
+### 5.4 Discovery client (`coord.rs`, `daemon.rs`, `p2p.rs`)
 Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned
-guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`. **No gossip module.**
+guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`. **Delta merge**
+(`merge_seeds`): a partial response upserts changed peers by pubkey, drops `removed`, keeps the rest
+untouched; the client echoes `held: [(pubkey, rev)]` and forces a full refresh (empty `held`) when
+its soonest-expiring peer attestation nears expiry (Option A).
+
+**Peer-direct attestation refresh (`p2p.rs`, gossip — `docs/gossip-refresh.md`, default on).** The
+engine serves its own coordinator-minted attestation to co-members over the WG tunnel (a small typed
+UDP service on the mesh `/32`, envelope in `common::p2p`), and refreshes a held peer nearing expiry by
+pulling straight from that peer (`p2p::pull`), verifying against the pinned anchor (`verify_pulled`)
+exactly as the coordinator path — no new trust. A peer whose attestation lapses with **no** source
+(peer offline, or revoked → can't be re-issued) is dropped on expiry, so revocation propagates via
+expiry even during a coordinator outage. The coordinator stays the fallback (`held_for_refresh` →
+empty → full) and the only path for bootstrap/introductions.
 
 ### 5.5 NAT traversal (`nat.rs`, `ice.rs`, `relay.rs`, `ping.rs`) — connectivity ladder
 Most-direct-first (design §7.2):

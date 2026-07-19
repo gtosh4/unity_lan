@@ -86,8 +86,10 @@ Being upfront so you can decide before installing:
    once.
 
 The design goal throughout is **decentralization**: the coordinator is a lightweight control plane,
-not a relay. Once tunnels are up, the mesh keeps running with the coordinator barely involved, and
-any online member can help a new person bootstrap in.
+not a relay. Once tunnels are up, the mesh keeps running with the coordinator barely involved — peers
+even keep each other's short-lived attestations fresh **directly over their tunnels** (the
+coordinator's job is minting, not fanning out), so an established mesh survives a coordinator outage,
+and any online member can help a new person bootstrap in.
 
 Want the real depth — trust model, NAT strategy, why not fully serverless? See
 [`docs/design.md`](docs/design.md) and [`docs/technical.md`](docs/technical.md).
@@ -100,7 +102,10 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
   and verify every peer against it — a compromised or forged key's blast radius is a single guild,
   never across guilds.
 - **Attestations are short-lived** and re-issued on a TTL, so revoking a Discord role revokes mesh
-  access without waiting for anything to expire on its own schedule.
+  access promptly — the coordinator drops the member from everyone's snapshot. And because peers only
+  keep each other fresh while the coordinator keeps re-issuing, a revoked member is dropped on expiry
+  **even if the coordinator is unreachable**; the revocation window is the (configurable) attestation
+  TTL.
 - **Nothing on your machine is exposed by default.** Joining a network does *not* open your box up.
   The engine installs a host firewall that, on the mesh interface, **drops all inbound** except what
   you explicitly share — a peer can ping you and nothing else. To let peers reach a service you run

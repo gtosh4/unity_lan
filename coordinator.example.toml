@@ -5,6 +5,11 @@
 bind = "127.0.0.1:8080"
 database = "coordinator.db"
 
+# Attestation lifetime (seconds) = the revocation window: a member who loses a role keeps mesh
+# access until their last attestation expires. The client renewal/gossip cadence and the long-poll
+# hold derive from it. Shorter = tighter revocation, more refresh churn. Default 1800 (30 min).
+# attestation_ttl_secs = 1800
+
 # --- Admin dashboard + Prometheus /metrics (optional, opt-in) ---
 # Set a token to enable the operator monitoring surface: a browser dashboard at /admin and a
 # Prometheus endpoint at /metrics (both bearer-gated by this token; absent = both return 404).

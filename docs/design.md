@@ -180,14 +180,21 @@ your pubkey ⇒ no member adds you ⇒ no tunnel. A client adds a peer only if i
 unexpired attestation for that peer in a shared network.
 
 ### 4.4 Revocation ✅
-- **Primary: TTL.** Lose the role → coordinator stops re-signing → the attestation expires
-  within the TTL → peers drop the pubkey. Eventual, bounded, simple.
-- **Optional: tombstone.** For immediate kicks, the coordinator publishes a signed
-  `{user_id, role_id, revoked_at}` tombstone; peers drop the pubkey at once. **Retention (MUST):**
-  a tombstone is **retained and re-served in every register/refresh snapshot until the revoked
-  attestation would have expired anyway** (≤ TTL), so a peer that was **offline at the instant of
-  the kick** learns it on reconnect instead of re-admitting the pubkey. On coordinator outage
-  tombstone delivery stops and revocation falls back to TTL expiry.
+- **Prompt: coordinator snapshot.** Lose the role → the coordinator drops you from every
+  co-member's snapshot → their next `/refresh` (woken at once by the version bump) omits you
+  (delta `removed`, §5) → peers prune the pubkey within a poll cycle. This is the fast path while
+  the coordinator is reachable.
+- **Fail-safe: TTL expiry, client-enforced.** Attestations are short-lived (`attestation_ttl_secs`,
+  default 30 min). A peer whose attestation lapses **and can't be refreshed** — the owner lost the
+  role so the coordinator stops re-signing, and (with gossip, §5) it can no longer serve a fresh one
+  peer-direct — is **dropped by every co-member on expiry**. Because peers keep credentials fresh
+  from each other (§5, `docs/gossip-refresh.md`), this bound holds **even if the coordinator is
+  unreachable**: revocation propagates through the mesh via expiry, not only via coordinator
+  snapshots. Shorter `attestation_ttl_secs` = tighter revocation.
+- **Optional: signed tombstone (unbuilt).** For sub-TTL immediate kicks the coordinator could
+  publish a signed `{user_id, role_id, revoked_at}` tombstone, retained in snapshots until the
+  revoked attestation would have expired. Not implemented — the snapshot-omission path above covers
+  the common case; a tombstone would only shave the window below one poll cycle.
 
 ## 5. Discovery — Coordinator-mediated long-poll ✅
 
@@ -220,46 +227,59 @@ sequenceDiagram
 - **Long-poll + version (ETag)**: each client holds a `/refresh` carrying its last-seen
   **version**. The coordinator returns **immediately** when relevant membership changed (a
   monotonic version bumps on any presence change) or after a **hold ≈ TTL/2** otherwise. So a
-  join **wakes every parked peer at once** (near-instant propagation), while idle steady-state
-  moves **~zero bytes** (held connections, no periodic re-query). No lost wakeups
-  (`tokio::watch`); on reconnect a stale `since` returns immediately.
+  membership change **wakes parked peers** (near-instant propagation), while idle steady-state
+  moves **~zero bytes**. No lost wakeups (`tokio::watch`); a stale `since` returns immediately.
+- **Delta sync (`held` / `rev`)**: the client echoes the peers it holds as `(pubkey, rev)` — `rev`
+  is an opaque per-seed revision the coordinator minted (it hashes the peer's peering-relevant
+  content, **not** attestation freshness). The coordinator returns only **new/changed** seeds plus a
+  `removed` list, instead of the full set. So a single join sends each woken client just the joiner
+  (O(changes)), not the whole roster — collapsing a membership herd from O(N) per client to
+  O(changes), and a login-storm from O(N³) to O(N²). Empty `held` (first contact, or a client
+  forcing an attestation refresh) still gets a full snapshot. Additive: `PROTOCOL_VERSION` = 3.
+- **Targeted wakeups**: the global version is reserved for **membership** changes that concern every
+  co-member. **Pair-specific** updates (a peer's reflexive/relay/ICE report is *for* one target) wake
+  **only that target** over a per-pubkey channel, not the whole herd — so NAT-traversal exchanges
+  (the frequent, bursty case) never fan out. ICE becomes a targeted ping-pong.
+- **Sign-cache**: an attestation binds only peer identity + guild, never the caller, so its signed
+  blob is identical in every snapshot that includes the peer. The coordinator signs each once per
+  reuse window and fans it out — **O(N) Ed25519 signs per epoch, not O(N²)**. A herd wake concatenates
+  cached blobs rather than re-signing.
+- **Herd jitter**: a version bump releases every parked client at once; each rebuild is staggered by
+  a small deterministic per-client offset so the fan-in flattens instead of spiking (burst-credit
+  protection on a fan-in chokepoint).
 - **Renewal piggybacks the hold**: the hold-timeout return re-issues fresh (re-signed)
-  attestations before they expire, so peers' cached seeds never age past TTL — no extra
-  renewal traffic beyond the once-per-hold return.
+  attestations before they expire, so peers' cached seeds never age past TTL.
 - **Why not gossip / P2P**: the WireGuard **reciprocity wall** — a new device's first packet
   to an established member is dropped (unknown pubkey), so an existing member must learn the
   newcomer's pubkey **out-of-band** before any tunnel exists. The coordinator, already holding
   everyone's long-poll, is that out-of-band channel. Attestations are signed + verified
   offline, so **trust** never needs the coordinator — only **transport** does.
-- **Offloading the fan-in herd (planned)**: today a join bumps the version and **wakes every parked
-  peer at once** to re-learn membership. An alternative pushes that onto the mesh: the **sponsor**
-  that bootstrapped the newcomer gossips the newcomer's **signed** attestation across live tunnels,
-  so existing members learn it **without** a coordinator wake. **Safe by construction** — trust
-  rides in the Ed25519 signature, verified offline against the pinned anchor (§4.1), so the
-  transport is untrusted either way. A malicious/absent sponsor can only **withhold** (liveness
-  only — falls back to the coordinator long-poll) or **replay** a stale attestation (rejected on
-  `expires_at`; tombstones (§4.4) stay the authoritative immediate-revocation path) — it cannot
-  forge or inject a peer. Promotable ahead of the >~1k escape hatch below, since it targets the
-  fan-in chokepoint directly, not just flat-network scale.
+- **Peer-direct attestation refresh (gossip, ✅)**: keeping known peers' attestations *fresh* is
+  moved off the coordinator entirely (`docs/gossip-refresh.md`). Each device pulls only its **own**
+  coordinator-minted attestation (O(1)) and **serves it** to co-members over the WG tunnel; a device
+  refreshes a known peer by pulling straight from that peer, verifying against the pinned anchor
+  exactly as on the coordinator path. **Single-hop authoritative pull, not epidemic gossip** (each
+  device is the authority for its own credential) — so it sidesteps the reciprocity wall (it only
+  ever talks to already-meshed peers) and the convergence bugs of the earlier gossip attempt. The
+  coordinator's O(N²) attestation *fan-out* becomes O(N) mints; the coordinator stays the source of
+  truth and the always-present fallback for what the mesh can't do itself (bootstrap, introductions,
+  a peer that's unreachable). It also makes revocation **coordinator-independent** (§4.4): a peer
+  whose attestation lapses with no source is dropped on expiry even during a coordinator outage.
 - **Scale (target: ≤~100 devices/role, a user in a few roles → a few hundred peers/node)**:
-  **eager peering** (one WG `[Peer]` per co-device) is comfortable to ~1–2k peers/node in
-  boringtun; a few hundred is mid-range. Steady coordinator cost = **O(N) re-signs per TTL** — one
-  signature **per member per renewal window**, cached and assembled into every client's snapshot
-  rather than re-signed per client, so even a **herd wake concatenates cached blobs** instead of
-  re-signing (a few signatures/sec even at thousands of devices) + N held connections; idle
-  propagation ≈ 0. The coordinator is a control plane, self-hostable on modest hardware.
-- **Escape hatch (unbuilt, only past ~1k devices in one network)**: (a) **delta** propagation
-  instead of full seed snapshots; (b) **lazy / on-demand peering** — know all pubkeys, bring
-  up tunnels only for pairs actually talking, to cap active tunnels below O(N²); (c) P2P
-  side-channel introductions or sponsor+gossip fan-out to drop existing-node polling entirely.
-  None needed at target scale — the full-mesh data plane (O(N²) tunnels, rekey/keepalive
-  storm), not the coordinator, is what bounds a single flat network, and it only bites in the
-  thousands-per-network.
-- **Coordinator resilience**: a brief outage doesn't break an established mesh (attestations
-  valid until TTL; peers keep their peer-set). Only an outage **> TTL** stops refresh; new
-  joins always need the coordinator (it's the membership authority). **TTL = 30 min**
-  (default): bounds both outage-tolerance and worst-case revocation latency; tombstones give
-  immediate kicks.
+  **eager peering** (one WG `[Peer]` per co-device) is comfortable to ~1–2k peers/node in boringtun.
+  Coordinator steady cost is now well below O(N) per TTL: signing is **O(N)/epoch** (sign-cache),
+  membership deltas are **O(changes)**, NAT exchanges are **targeted** (no herd), and *freshness* is
+  carried peer-to-peer. The coordinator is a lean control plane, self-hostable on modest hardware
+  (a `t3.micro`-class box handles low thousands of devices).
+- **Remaining escape hatch (past ~1k devices in one network)**: **lazy / on-demand peering** — know
+  all pubkeys, bring up tunnels only for pairs actually talking, to cap active tunnels below O(N²).
+  The full-mesh **data plane** (O(N²) tunnels, rekey/keepalive storm), not the coordinator, is what
+  bounds a single flat network, and it only bites in the thousands-per-network.
+- **Coordinator resilience**: a brief outage doesn't break an established mesh — peers keep their
+  peer-set **and** keep credentials fresh from each other (peer-direct refresh), so an established
+  mesh survives an outage **longer than one TTL**. Only new joins/introductions always need the
+  coordinator (it's the membership authority). `attestation_ttl_secs` (default 30 min) bounds
+  outage-tolerance vs. revocation latency — shorter is tighter revocation.
 
 ## 6. Device model, Addressing & DNS ✅ (Model B)
 
@@ -558,11 +578,14 @@ flowchart TB
   surfaced anchor **fingerprint** (§9) still lets a user catch a bad-URL pin out-of-band. Removes
   onboarding friction; revisit for onboarding UX.
 
-_Decided:_ TTL = 30 min (§5); PSK deferred to post-v1 (§9); **one WG interface** spans all a
-client's networks/guilds (§6.2). Discovery = **coordinator-mediated long-poll + version/ETag**
-(§5), hold ≈ TTL/2, renewal piggybacks the hold; **eager peering** at target scale; gossip /
-lazy-peering / deltas are the >~1k-per-network escape hatch, unbuilt (§5). **Per-guild signing
-keys** with a client-side `guild_id`-match **MUST** (§3.1, §4.1); tombstone **retention** to TTL
-(§4.4); endpoint records + ICE candidates **signed by a per-member identity key** (§4.2); anchor
+_Decided:_ attestation TTL configurable, default 30 min (§5); PSK deferred to post-v1 (§9); **one WG
+interface** spans all a client's networks/guilds (§6.2). Discovery = **coordinator-mediated long-poll
++ version/ETag** (§5), hold ≈ TTL/2, renewal piggybacks the hold; **eager peering** at target scale.
+Coordinator scale work **shipped** (§5): sign-cache (O(N) signs), **delta sync**, **targeted
+wakeups**, herd jitter, and **peer-direct attestation refresh** (gossip — freshness carried
+peer-to-peer, coordinator-independent revocation; `docs/gossip-refresh.md`); only **lazy-peering**
+remains as the >~1k-per-network escape hatch (§5). **Per-guild signing keys** with a client-side
+`guild_id`-match **MUST** (§3.1, §4.1); coordinator-snapshot omission + client-enforced TTL expiry
+for revocation (tombstones unbuilt, §4.4); endpoint records + ICE candidates **signed by a per-member identity key** (§4.2); anchor
 **fingerprint surfaced** for OOB verify, key-**compromise** recovery is OOB re-pin (§9); signing
 key **`0600` now, encrypted-at-rest end-state** (§9).
