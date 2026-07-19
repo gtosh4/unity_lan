@@ -125,7 +125,8 @@ full install steps live in [`packaging/README.md`](packaging/README.md).
 - **Desktop (Linux):** install the `unitylan-desktop` package — it pulls in the engine, CLI, and
   GUI. `sudo systemctl enable --now unitylan-engine`, then log in from the GUI.
 - **Desktop (Windows):** run the `.msi` — it installs the engine + GUI, bundles the WireGuard
-  driver, and registers the service. Log in from the Start-menu app.
+  driver, registers and starts the service, and (via the "Launch UnityLAN now" checkbox on the last
+  wizard page) opens the app so you can log in. Re-open it any time from the Start-menu shortcut.
 - **Headless game server:** install the `unitylan` package (engine + CLI, no graphics libs) and
   enroll with a one-time key — no Discord client needed on the box.
 

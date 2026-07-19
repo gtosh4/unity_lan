@@ -233,15 +233,25 @@ Runtime deps (`iproute2`, `nftables`) install automatically. The daemon runs as 
 ## Install & run (Windows)
 
 ```powershell
-msiexec /i unitylan-<ver>-x64.msi          # installs to Program Files\UnityLAN, registers the service
-notepad "$env:ProgramFiles\UnityLAN\engine.toml"   # set coordinator + enrollment_key (as admin)
-sc.exe start UnityLANEngine                 # or reboot; the service is auto-start
+msiexec /i unitylan-<ver>-x64.msi          # installs to Program Files\UnityLAN, registers + starts the service
+# Self-hosting? Repoint the coordinator first, then restart the service:
+# notepad "$env:ProgramFiles\UnityLAN\engine.toml"   # set coordinator (+ enrollment_key) as admin
+# sc.exe stop UnityLANEngine; sc.exe start UnityLANEngine
 ```
 
-The MSI registers `UnityLANEngine` as a **LocalSystem auto-start service** by invoking the engine's
-own `service install`; it starts at boot (or start it now from an elevated shell with
-`sc.exe start UnityLANEngine`). Launch the GUI from the **UnityLAN** Start-menu shortcut; it connects
-to the engine over the `\\.\pipe\unitylan-control` named pipe.
+The MSI registers `UnityLANEngine` as a **LocalSystem auto-start service** (via the engine's own
+`service install`) and **starts it immediately** — no reboot needed. On an interactive install the
+final wizard page has a **"Launch UnityLAN now"** checkbox (checked by default) that opens the GUI in
+your desktop session so you can log in straight away; the GUI connects to the engine over the
+`\\.\pipe\unitylan-control` named pipe. Re-open it any time from the **UnityLAN** Start-menu shortcut.
+
+The shipped `engine.toml` points at the hosted coordinator, so a hosted-coordinator user is meshing
+after login with no config edit. A **self-hoster** should repoint `coordinator` in `engine.toml`
+(elevated) and restart the service — the first auto-start harmlessly fails to enroll against the
+wrong coordinator (the start action is best-effort and never blocks the install).
+
+> The silent auto-update path (`msiexec /quiet`) shows none of this wizard UI: it swaps the files and
+> restarts the service, but does **not** pop the GUI.
 
 The wireguard-nt DLL ships inside the MSI at
 `Program Files\UnityLAN\resources-windows\binaries\wireguard-amd64.dll` — defguard loads it by that

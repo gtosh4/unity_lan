@@ -114,8 +114,10 @@ This is pre-1.0 software. It works end to end on Linux and Windows, but treat it
 
 - Linux `.deb` / `.rpm`: `unitylan` (engine + CLI, headless) and `unitylan-desktop` (adds the GUI).
   Installation creates a `unitylan` group so the desktop GUI can reach the engine socket.
-- Windows `.msi`: engine + GUI, bundles the WireGuard driver (pinned by SHA-256), registers the
-  service.
+- Windows `.msi`: engine + GUI, bundles the WireGuard driver (pinned by SHA-256), registers **and
+  starts** the service, and offers a "Launch UnityLAN now" checkbox on the final wizard page so a
+  first install lands the user straight in the app to log in. (The silent auto-update path stays
+  quiet — swaps files and restarts the service without popping the GUI.)
 - Coordinator container image (Alpine).
 - CI gates every change on `cargo fmt`, `clippy -D warnings`, the full test suite, and `cargo audit`.
 

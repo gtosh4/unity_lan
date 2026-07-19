@@ -75,23 +75,92 @@
                   Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="UninstallService" FileRef="EngineExe" ExeCommand="service uninstall"
                   Execute="deferred" Impersonate="no" Return="ignore" />
-    <!-- Start the freshly-installed service, but ONLY when this install is a major upgrade
-         (WIX_UPGRADE_DETECTED is set by MajorUpgrade when it finds an older version). That is the
-         auto-update path: the running engine launched msiexec and exited, so without this the new
-         service is registered auto-start but stays stopped until reboot, leaving the mesh down. A
-         first-time install deliberately does NOT auto-start — engine.toml is unconfigured, so we
-         leave the "start now / reboot" hint from `service install` instead of launching a daemon
-         that would just fail. Return=ignore so a start hiccup never fails/rolls back the upgrade. -->
+    <!-- Start the freshly-installed service on any install that lays it down — both a first-time
+         install and a major upgrade (see the NOT Installed condition below; `Installed` is false for
+         the new product in both cases). The upgrade case is the auto-update path: the running engine
+         launched msiexec and exited, so without this the new service stays stopped until reboot,
+         leaving the mesh down. The first-install case shipped engine.toml already points at a real
+         coordinator (packaging\windows\engine.toml), and enrollment is interactive via the GUI, so
+         the daemon comes up "not enrolled" and the just-launched GUI prompts login — no reboot, no
+         manual `sc.exe start`. Return=ignore so a start hiccup (e.g. a self-hoster who hasn't yet
+         repointed `coordinator`) never fails/rolls back the install; they edit config and restart. -->
     <CustomAction Id="StartService" FileRef="EngineExe" ExeCommand="service start"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+
+    <!-- Launch the GUI when the user finishes an INTERACTIVE install, via the ExitDialog's
+         "Launch UnityLAN now" checkbox (wired up in the UI block below). Immediate + impersonated =>
+         runs in the installing user's desktop session, not the LocalSystem/session-0 context the
+         service CAs use, so the window actually appears. asyncNoWait: fire and forget, don't block
+         Finish. A silent install (/quiet — the auto-update path) shows no ExitDialog, so this never
+         fires there; the upgrade just swaps files and restarts the service. -->
+    <CustomAction Id="LaunchGui" FileRef="GuiExe" ExeCommand="" Execute="immediate"
+                  Impersonate="yes" Return="asyncNoWait" />
 
     <InstallExecuteSequence>
       <!-- Remove the service while the exe is still on disk. -->
       <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
       <!-- Create it once the files are in place. -->
       <Custom Action="InstallService" After="InstallFiles" Condition="NOT Installed" />
-      <!-- On upgrade, relaunch it so the auto-update comes back up without a reboot. -->
-      <Custom Action="StartService" After="InstallService" Condition="WIX_UPGRADE_DETECTED" />
+      <!-- Start it on install and on upgrade (NOT Installed covers both), but not on repair/remove. -->
+      <Custom Action="StartService" After="InstallService" Condition="NOT Installed" />
     </InstallExecuteSequence>
+
+    <!-- Custom minimal wizard: WelcomeDlg (a plain welcome — NO license/EULA page) -> progress ->
+         ExitDialog. Adapted from the stock WixUI_Minimal
+         (github.com/wixtoolset/wix, src/ext/UI/wixlib/WixUI_Minimal.wxs) by dropping its license
+         welcome (WelcomeEulaDlg): AGPL-3.0 is a permission grant, not a EULA — GPLv3 §9 ("Acceptance
+         Not Required for Having Copies") means running the program requires no acceptance — so the
+         install must not gate on "I accept". WelcomeDlg's Next begins the install directly. Every
+         other publish is copied verbatim from upstream (maintenance + patch flows). The stock
+         dialogs come from the UI extension via WixUI_Common. The only reason a UI exists at all is
+         the ExitDialog's "Launch UnityLAN now" checkbox (checked by default), which fires LaunchGui
+         on Finish so a first-time user lands straight in the app. The /quiet auto-update path shows
+         none of this. -->
+    <UI Id="UnityLanUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="WelcomeDlg" />
+
+      <!-- Finish button: launch the GUI (async, fire-and-forget) if the box is ticked, then close.
+           Order matters — the DoAction must run before the EndDialog that dismisses the wizard. -->
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchGui"
+               Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <!-- First-time install: Next begins the install straight away (this is what WelcomeEulaDlg's
+           Install button did upstream, minus the license). -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="EndDialog" Value="Return"
+               Condition="NOT Installed" />
+
+      <!-- Maintenance (repair/remove) flow — verbatim from WixUI_Minimal. -->
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" />
+
+      <!-- Patch flow (Installed AND PATCH) — verbatim from WixUI_Minimal. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg"
+               Condition="Installed AND PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg"
+               Order="2" Condition="Installed AND PATCH" />
+
+      <Property Id="ARPNOMODIFY" Value="1" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch UnityLAN now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
   </Package>
 </Wix>

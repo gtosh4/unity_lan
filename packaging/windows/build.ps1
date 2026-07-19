@@ -84,8 +84,19 @@ if (-not (Test-Path $wgDll)) {
 foreach ($f in @($engineExe, $guiExe, $engineToml, $wgDll)) {
     if (-not (Test-Path $f)) { throw "missing input: $f" }
 }
+
+# The installer's dialogs (WelcomeDlg + the launch-on-finish ExitDialog) come from the WixUI stock
+# dialog library in the UI extension. Add it globally to the wix tool if it isn't already present
+# (idempotent — a second add is a no-op warning we ignore).
+if (-not (wix extension list -g | Select-String -SimpleMatch 'WixToolset.UI.wixext')) {
+    Write-Host ">> adding WiX UI extension" -ForegroundColor Cyan
+    wix extension add -g WixToolset.UI.wixext
+    if ($LASTEXITCODE -ne 0) { throw "wix extension add failed" }
+}
+
 Write-Host ">> wix build -> $Output" -ForegroundColor Cyan
 wix build (Join-Path $Here 'unitylan.wxs') `
+    -ext WixToolset.UI.wixext `
     -d "Version=$Version" `
     -d "EngineExe=$engineExe" `
     -d "GuiExe=$guiExe" `
