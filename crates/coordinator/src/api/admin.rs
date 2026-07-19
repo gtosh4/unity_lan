@@ -276,7 +276,8 @@ async fn build_graph(st: &AppState) -> Result<serde_json::Value, ApiError> {
 /// with no networks. The registry supplies display names and the authoritative role→guild mapping
 /// for the networks that survive.
 ///
-/// Guild and network nodes carry their real snowflake as `id` and their real name as `label`.
+/// Guild and network nodes carry their real snowflake as `id` and their real name as `label` (a
+/// network's is qualified `guild: role`, since the same role name can exist in several guilds).
 /// User nodes carry only a seed-keyed opaque label and have no `label` field — there is no user
 /// name, id, or device name anywhere in the output. Ordering is deterministic (BTree-backed) so
 /// the graph and its DOT export are stable between renders.
@@ -307,30 +308,36 @@ fn graph_json(
         .map(|n| (n.role_id, n.name.as_str()))
         .collect();
 
+    // Guild display label, id as fallback. Shared by the guild nodes and the `guild: role` network
+    // labels below.
+    let guild_label = |g: u64| {
+        guild_names
+            .get(&g)
+            .cloned()
+            .unwrap_or_else(|| g.to_string())
+    };
+
     let guilds: Vec<serde_json::Value> = net_guild
         .values()
         .copied()
         .collect::<BTreeSet<u64>>()
         .into_iter()
-        .map(|g| {
-            let label = guild_names
-                .get(&g)
-                .cloned()
-                .unwrap_or_else(|| g.to_string());
-            serde_json::json!({ "id": guild(g), "label": label })
-        })
+        .map(|g| serde_json::json!({ "id": guild(g), "label": guild_label(g) }))
         .collect();
     let users: BTreeSet<String> = membership.iter().map(|(_, _, u)| user(*u)).collect();
 
     let mut nodes: Vec<serde_json::Value> = net_guild
         .iter()
         .map(|(r, g)| {
-            let label = net_names
+            // `guild: role` — the same name can be registered in several guilds, so the guild
+            // qualifies it (the guild colour alone can't disambiguate two identical labels).
+            let name = net_names
                 .get(r)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| r.to_string());
             serde_json::json!({
-                "id": net(*r), "kind": "network", "guild": guild(*g), "label": label,
+                "id": net(*r), "kind": "network", "guild": guild(*g),
+                "label": format!("{}: {name}", guild_label(*g)),
             })
         })
         .collect();
@@ -569,7 +576,7 @@ mod tests {
             .find(|n| n["id"] == serde_json::json!("net-11"))
             .unwrap();
         assert_eq!(node11["guild"], serde_json::json!("guild-100"));
-        assert_eq!(node11["label"], serde_json::json!("gamers"));
+        assert_eq!(node11["label"], serde_json::json!("Some Server: gamers"));
 
         // Deterministic: same inputs → byte-identical JSON.
         assert_eq!(g, f.graph());
@@ -591,7 +598,7 @@ mod tests {
             .find(|n| n["kind"] == "network")
             .unwrap()
             .clone();
-        assert_eq!(node["label"], serde_json::json!("11"));
+        assert_eq!(node["label"], serde_json::json!("100: 11"));
     }
 
     /// Policy guard: user identity never reaches an operator surface. `/admin/stats` and
