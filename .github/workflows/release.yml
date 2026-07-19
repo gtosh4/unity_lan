@@ -79,6 +79,11 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:latest
+          # image.source is what links the GHCR package to this repo (repo Packages sidebar,
+          # "Source" link on the package page). Without it the package only shows on the profile.
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
 
   # Announce the release in Discord #changelog once all artifacts are built and attached.
   announce:
