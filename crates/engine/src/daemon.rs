@@ -40,6 +40,11 @@ const P2P_REFRESH_MARGIN: u64 = common::LONGPOLL_HOLD_SECS;
 /// How long to wait on a peer-direct pull before giving up on that peer (the coordinator covers it).
 const P2P_PULL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How often the mesh loop re-reads **local** WG stats to notice a freshly-learned reflexive endpoint
+/// (one only appears after a handshake — later than a long-poll hold would return). Local only: it
+/// never cancels the held `/refresh`, so idle clients still park for the full hold.
+const STATS_RECHECK: Duration = Duration::from_secs(2);
+
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
@@ -361,6 +366,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // hold (~TTL/2) elapses, then returns a fresh snapshot + new version. Near-zero idle traffic;
         // a co-member joining wakes this call at once. `since` echoes the last version we applied.
         let mut since = Some(resp.version);
+        // The in-flight `/refresh`, held **across** loop iterations. The loop re-reads local WG stats
+        // every RECHECK to notice a freshly-learned reflexive, but that re-check must not cancel a
+        // held long-poll — otherwise an idle client re-polls every RECHECK instead of parking for the
+        // hold (measured: 30 req/min/client, and each poll costs the coordinator an O(peers) snapshot
+        // build). So the request lives here and is dropped only when we actually have something new
+        // to report (or the local opt-out state changed), which is exactly when it's stale anyway.
+        let mut pending_refresh = None;
         // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
         let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
         // The last relay need/allocations we reported — a change must break the long-poll hold too,
@@ -608,13 +620,42 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|d| d.grant_expires_at <= common::now_unix() + common::LONGPOLL_HOLD_SECS)
                 .unwrap_or(false);
-            // Report immediately (no hold) when our view changed or our grant needs renewing; else
-            // hold for membership.
-            let poll_since = if changed || relay_changed || ice_changed || own_grant_stale {
-                None
-            } else {
-                since
-            };
+            // Anything new to tell the coordinator (a reflexive/relay/ICE report) or a grant that
+            // needs renewing means the currently-held request is stale: drop it so the re-issue below
+            // carries the report and returns immediately (no hold). Otherwise keep holding the
+            // existing request — the local re-check below must not cost a coordinator round-trip.
+            let have_report = changed || relay_changed || ice_changed || own_grant_stale;
+            if have_report {
+                pending_refresh = None;
+            }
+            if pending_refresh.is_none() {
+                let poll_since = if have_report { None } else { since };
+                pending_refresh = Some(Box::pin(coord::refresh(
+                    &cfg.coordinator,
+                    &cfg.state_dir,
+                    wg_pub,
+                    cfg.device_name(),
+                    endpoint,
+                    cfg.enrollment_key.clone(),
+                    poll_since,
+                    localnet.as_refs(),
+                    observed.clone(),
+                    localnet.is_paused(),
+                    localnet.peer_own_devices(),
+                    relay_iter,
+                    ice_offers.clone(),
+                    // Delta sync: echo our held peers' revs so the coordinator sends only what
+                    // changed. Empty near attestation expiry (Option A) forces a full refresh.
+                    coord::held_for_refresh(
+                        &last_seeds,
+                        common::now_unix(),
+                        common::LONGPOLL_HOLD_SECS,
+                    ),
+                )));
+            }
+            // Set by arms that invalidate the held request; applied after the select, since the arms
+            // can't assign to `pending_refresh` while the refresh arm holds it borrowed.
+            let mut drop_pending = false;
             let refreshed = tokio::select! {
                 // Clean shutdown: reverse every host mutation so a stop leaves no trace — destroy the
                 // interface, tear down the firewall, revert the resolver. (UPnP unmaps via its own
@@ -684,36 +725,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     apply_state(
                         backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps,
                     ).await?;
-                    continue;
+                    // The held request carries the *old* opt-out/paused state — re-issue it.
+                    drop_pending = true;
+                    None
                 }
-                // Re-check peer endpoints every couple seconds (a freshly-learned reflexive gets
-                // reported on the next loop). Only while unchanged — a change goes straight to a report.
-                _ = tokio::time::sleep(Duration::from_secs(2)), if !changed && !relay_changed && !ice_changed => {
-                    continue;
-                }
-                r = coord::refresh(
-                    &cfg.coordinator,
-                    &cfg.state_dir,
-                    wg_pub,
-                    cfg.device_name(),
-                    endpoint,
-                    cfg.enrollment_key.clone(),
-                    poll_since,
-                    localnet.as_refs(),
-                    observed.clone(),
-                    localnet.is_paused(),
-                    localnet.peer_own_devices(),
-                    relay_iter,
-                    ice_offers.clone(),
-                    // Delta sync: echo our held peers' revs so the coordinator sends only what
-                    // changed. Empty near attestation expiry (Option A) forces a full refresh.
-                    coord::held_for_refresh(
-                        &last_seeds,
-                        common::now_unix(),
-                        common::LONGPOLL_HOLD_SECS,
-                    ),
-                ) => r,
+                // Re-read local WG stats every couple seconds so a freshly-learned reflexive is
+                // noticed promptly (it only appears after a handshake — later than a hold would
+                // return). Purely local: the held request above keeps waiting, so an idle client
+                // costs the coordinator one request per hold, not one per re-check.
+                _ = tokio::time::sleep(STATS_RECHECK) => None,
+                r = pending_refresh.as_mut().expect("a request is always in flight here") => Some(r),
             };
+            if drop_pending {
+                pending_refresh = None;
+            }
+            // No result yet (local re-check / local toggle) — loop round and re-evaluate.
+            let Some(refreshed) = refreshed else { continue };
+            pending_refresh = None; // this request completed
             match refreshed {
                 Ok((resp, dev)) => {
                     coord_online = true;

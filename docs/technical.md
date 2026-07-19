@@ -282,7 +282,17 @@ beyond role membership. Both sides of the platform split are tested (arg-constru
 
 ### 5.4 Discovery client (`coord.rs`, `daemon.rs`, `p2p.rs`)
 Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned
-guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`. **Delta merge**
+guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`.
+
+**The held request must outlive the local re-check** (`pending_refresh` in `daemon.rs`). The mesh loop
+re-reads local WG stats every `STATS_RECHECK` (2s) to notice a freshly-learned reflexive — one only
+appears after a handshake, later than a hold would return. That re-check is **local only**: it must
+*not* cancel the in-flight `/refresh`, or an idle client re-polls every 2s instead of parking for the
+hold (measured: 30 req/min/client, each costing the coordinator an O(peers) snapshot build — i.e. an
+O(N²)-every-2s aggregate, worse than the herd the delta/cache work removed). The request is dropped
+only when it's genuinely stale: we have a reflexive/relay/ICE report, our grant needs renewing, or the
+local opt-out/paused state changed — exactly the cases that also want an immediate (`since = None`)
+return. Idle cost is one request per hold. **Delta merge**
 (`merge_seeds`): a partial response upserts changed peers by pubkey, drops `removed`, keeps the rest
 untouched; the client echoes `held: [(pubkey, rev)]` and forces a full refresh (empty `held`) when
 its soonest-expiring peer attestation nears expiry (Option A).
