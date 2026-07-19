@@ -512,15 +512,42 @@ pub fn held_for_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDir;
     use common::api::{GuildAnchor, GuildAttestation, RegisterResp, Seed};
     use common::crypto::CoordinatorKey;
 
     const GUILD: u64 = 42;
 
-    fn temp_state_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("unitylan-coord-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A self-cleaning state dir with `GUILD`'s anchor already pinned to a fresh honest key —
+    /// the starting point every seed-verification test needs.
+    fn pinned_state_dir(tag: &str) -> (TempDir, CoordinatorKey) {
+        let dir = TempDir::new(&format!("coord-{tag}"));
+        let honest = CoordinatorKey::generate();
+        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+        (dir, honest)
+    }
+
+    /// The attestation every test here signs, varying only the fields any of them care about; the
+    /// owner identity is fixed because nothing verifies against it.
+    fn test_attestation(
+        guild_id: u64,
+        wg_ip: Ipv4Addr,
+        wg_net: &str,
+        wg_pubkey: [u8; 32],
+        expires_at: u64,
+    ) -> Attestation {
+        Attestation {
+            guild_id,
+            user_id: 5,
+            username: "neo".into(),
+            device_name: "box".into(),
+            is_primary: false,
+            wg_ip,
+            wg_net: wg_net.parse().unwrap(),
+            wg_pubkey,
+            issued_at: 0,
+            expires_at,
+        }
     }
 
     /// A seed with one attestation for `guild_id`, signed by `key` (attacker or honest coordinator).
@@ -531,19 +558,8 @@ mod tests {
     /// Like `seed_signed_by`, but with an explicit signed `wg_ip` / `wg_net` (to exercise the
     /// off-mesh-`/32` guard).
     fn seed_with_ip(key: &CoordinatorKey, guild_id: u64, wg_ip: Ipv4Addr, wg_net: &str) -> Seed {
-        let now = now_unix();
-        let att = Attestation {
-            guild_id,
-            user_id: 7,
-            username: "eve".into(),
-            device_name: "box".into(),
-            is_primary: false,
-            wg_ip,
-            wg_net: wg_net.parse().unwrap(),
-            wg_pubkey: [9u8; 32],
-            issued_at: now,
-            expires_at: now + common::ATTESTATION_TTL_SECS,
-        };
+        let expires_at = now_unix() + common::ATTESTATION_TTL_SECS;
+        let att = test_attestation(guild_id, wg_ip, wg_net, [9u8; 32], expires_at);
         Seed {
             attestations: vec![GuildAttestation {
                 attestation: Signed::sign(key, &att).unwrap().to_base64(),
@@ -569,29 +585,23 @@ mod tests {
                 pubkey: anchor_key.anchor_bytes(),
                 rotation_chain: Vec::new(),
             }],
-            grant: None,
-            device_token: None,
             seeds,
             version: 1,
-            networks: Vec::new(),
-            stun_addr: None,
             proto: common::PROTOCOL_VERSION,
             server_version: common::VERSION.to_string(),
-            release: None,
-            partial: false,
-            removed: Vec::new(),
+            ..Default::default()
         }
     }
 
     /// Regression for the steady-state MITM: after we pin the honest anchor for a guild, a later
     /// response that self-signs its seeds with an attacker key must be rejected — seeds are verified
-    /// against the PINNED anchor, not the anchor the response carries.
+    /// against the PINNED anchor, not the anchor the response carries. This equally covers tenant
+    /// isolation (design.md §3.1): any key that isn't the one pinned for the guild — including
+    /// another guild's honest key — fails the same signature check.
     #[test]
     fn seeds_verified_against_pinned_not_response_anchor() {
-        let dir = temp_state_dir("pinned");
-        let honest = CoordinatorKey::generate();
+        let (dir, honest) = pinned_state_dir("pinned");
         let attacker = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
 
         // Attacker-substituted response: its own anchor for GUILD + seeds self-signed by it. The
         // pin on disk (honest) is what we verify against, so the forged seed is rejected.
@@ -604,28 +614,6 @@ mod tests {
         // Sanity: seeds legitimately signed by the pinned anchor still verify.
         let honest_resp = resp_with_seeds(GUILD, &attacker, vec![seed_signed_by(&honest, GUILD)]);
         assert!(verified_seeds(&honest_resp, &dir).is_ok());
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Tenant isolation: a seed's attestation signed by guild A's honest key but presented for a
-    /// guild we pinned with a *different* key must be rejected — a compromised guild-A key cannot
-    /// vouch for a peer in guild B (design.md §3.1). Here we pin GUILD with `honest`; a seed carrying
-    /// a GUILD-scoped attestation signed by `other` fails because the signature doesn't match the pin.
-    #[test]
-    fn cross_guild_key_cannot_vouch() {
-        let dir = temp_state_dir("cross-guild");
-        let honest = CoordinatorKey::generate();
-        let other = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
-
-        let forged = resp_with_seeds(GUILD, &honest, vec![seed_signed_by(&other, GUILD)]);
-        assert!(
-            verified_seeds(&forged, &dir).is_err(),
-            "an attestation signed by a different guild's key must be rejected"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Defence in depth: a seed whose signature verifies but whose signed `wg_ip` falls outside its
@@ -633,9 +621,7 @@ mod tests {
     /// co-member's `/32` at an off-mesh address. The in-net peer in the same batch still admits.
     #[test]
     fn seed_wg_ip_outside_signed_net_is_dropped() {
-        let dir = temp_state_dir("wg-ip-oob");
-        let honest = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+        let (dir, honest) = pinned_state_dir("wg-ip-oob");
 
         let resp = resp_with_seeds(
             GUILD,
@@ -654,8 +640,6 @@ mod tests {
         let peers = verified_seeds(&resp, &dir).unwrap();
         assert_eq!(peers.len(), 1, "only the in-mesh peer is admitted");
         assert_eq!(peers[0].ip, Ipv4Addr::new(100, 64, 0, 9));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn sp(pubkey: [u8; 32], rev: u64, expires_at: u64) -> SeedPeer {
@@ -680,9 +664,7 @@ mod tests {
     /// drops the `removed` ones, and leaves everything it didn't mention untouched.
     #[test]
     fn merge_seeds_full_replaces_delta_upserts_and_drops() {
-        let dir = temp_state_dir("merge");
-        let honest = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+        let (dir, honest) = pinned_state_dir("merge");
 
         let a = [9u8; 32]; // matches the pubkey seed_signed_by mints
         let b = [8u8; 32];
@@ -708,8 +690,6 @@ mod tests {
         noop.partial = true;
         let merged = merge_seeds(&prev, &noop, &dir).unwrap();
         assert_eq!(merged.len(), 2, "an empty delta must not drop held peers");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Option A: normally echo held `(pubkey, rev)`, but return empty (force a full attestation
@@ -733,18 +713,13 @@ mod tests {
         pubkey: [u8; 32],
         expires_at: u64,
     ) -> GuildAttestation {
-        let att = Attestation {
-            guild_id: guild,
-            user_id: 5,
-            username: "neo".into(),
-            device_name: "box".into(),
-            is_primary: false,
-            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
-            wg_net: "100.64.0.0/10".parse().unwrap(),
-            wg_pubkey: pubkey,
-            issued_at: 0,
+        let att = test_attestation(
+            guild,
+            Ipv4Addr::new(100, 64, 0, 9),
+            "100.64.0.0/10",
+            pubkey,
             expires_at,
-        };
+        );
         GuildAttestation {
             attestation: Signed::sign(key, &att).unwrap().to_base64(),
             community_name: "c".into(),
@@ -755,10 +730,8 @@ mod tests {
     /// pubkey that is strictly fresher than what we hold. Reject wrong pubkey, non-fresher, unpinned.
     #[test]
     fn verify_pulled_adopts_only_fresher_valid_for_expected_pubkey() {
-        let dir = temp_state_dir("pulled");
-        let honest = CoordinatorKey::generate();
+        let (dir, honest) = pinned_state_dir("pulled");
         let attacker = CoordinatorKey::generate();
-        keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
         let pk = [7u8; 32];
         let now = 1_000;
         let fresh = signed_att(&honest, GUILD, pk, now + 1800);
@@ -782,8 +755,6 @@ mod tests {
             now
         )
         .is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `apply_pulled` advances expiry + identity from the verified attestation but leaves the
@@ -792,21 +763,16 @@ mod tests {
     fn apply_pulled_advances_expiry_keeps_transport() {
         let mut seed = sp([7; 32], 42, 100);
         seed.endpoint = Some("203.0.113.9:51820".parse().unwrap());
-        let att = Attestation {
-            guild_id: GUILD,
-            user_id: 5,
-            username: "trinity".into(),
-            device_name: "box".into(),
-            is_primary: false,
-            wg_ip: Ipv4Addr::new(100, 64, 0, 9),
-            wg_net: "100.64.0.0/10".parse().unwrap(),
-            wg_pubkey: [7u8; 32],
-            issued_at: 0,
-            expires_at: 9_999,
-        };
+        let att = test_attestation(
+            GUILD,
+            Ipv4Addr::new(100, 64, 0, 9),
+            "100.64.0.0/10",
+            [7u8; 32],
+            9_999,
+        );
         apply_pulled(&mut seed, &att);
         assert_eq!(seed.expires_at, 9_999);
-        assert_eq!(seed.username, "trinity");
+        assert_eq!(seed.username, att.username);
         assert_eq!(seed.ip, Ipv4Addr::new(100, 64, 0, 9));
         assert_eq!(
             seed.rev, 42,

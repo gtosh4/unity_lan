@@ -20,6 +20,8 @@ mod selfupdate;
 #[cfg(windows)]
 mod service;
 mod shutdown;
+#[cfg(test)]
+mod testutil;
 mod util;
 mod wg;
 

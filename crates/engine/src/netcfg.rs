@@ -311,11 +311,11 @@ impl LocalNet {
 #[cfg(test)]
 mod tests {
     use super::LocalNet;
+    use crate::testutil::TempDir;
 
     #[test]
     fn paused_flag_persists_and_reloads() {
-        let dir = std::env::temp_dir().join(format!("unitylan-netcfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("netcfg");
 
         let ln = LocalNet::load(&dir, true, true);
         assert!(!ln.is_paused(), "defaults to connected");
@@ -333,14 +333,11 @@ mod tests {
         // Reconnecting clears it.
         assert!(reloaded.set_paused(false).unwrap());
         assert!(!LocalNet::load(&dir, true, true).is_paused());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn new_networks_disabled_on_discovery_when_policy_set() {
-        let dir = std::env::temp_dir().join(format!("unitylan-netcfg-new-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("netcfg-new");
 
         // Policy on: a freshly-seen network is opted out; re-seeing it doesn't re-disable.
         let ln = LocalNet::load(&dir, true, true);
@@ -363,14 +360,11 @@ mod tests {
         // Policy off: a new network is recorded but left enabled.
         assert!(!reloaded.reconcile_new(&[(2, 20)]).unwrap());
         assert!(!reloaded.snapshot().contains(&(2, 20)));
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn peer_own_devices_persists_and_reloads() {
-        let dir = std::env::temp_dir().join(format!("unitylan-netcfg-own-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("netcfg-own");
 
         // Defaults to the config-seeded value (enabled).
         let ln = LocalNet::load(&dir, true, true);
@@ -384,15 +378,11 @@ mod tests {
         // The persisted value wins over the config default on reload.
         let reloaded = LocalNet::load(&dir, true, true);
         assert!(!reloaded.peer_own_devices());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn blocked_users_persist_and_reload() {
-        let dir =
-            std::env::temp_dir().join(format!("unitylan-netcfg-block-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TempDir::new("netcfg-block");
 
         let ln = LocalNet::load(&dir, true, true);
         assert!(ln.blocked_snapshot().is_empty(), "defaults to none blocked");
@@ -418,7 +408,5 @@ mod tests {
         assert!(LocalNet::load(&dir, true, true)
             .blocked_snapshot()
             .is_empty());
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
