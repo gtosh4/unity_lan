@@ -21,6 +21,19 @@ pub struct Config {
     /// environment. Validated at startup to a private/CGNAT range (fails closed otherwise).
     #[serde(default)]
     pub cidr: Option<ipnet::Ipv4Net>,
+    /// Reverse proxies whose `X-Forwarded-For` header may be believed, as CIDRs.
+    ///
+    /// The rate limiter buckets by source IP. When TLS is terminated by a proxy on the same host
+    /// (Caddy, nginx), every request arrives from loopback, so **the whole deployment shares one
+    /// bucket** and the per-IP cap throttles everyone together. Listing the proxy here makes the
+    /// limiter read the real client from `X-Forwarded-For` instead.
+    ///
+    /// Empty by default — an unlisted peer's `X-Forwarded-For` is ignored, since a header anyone can
+    /// set would otherwise let a caller forge a fresh bucket per request and bypass the limiter
+    /// entirely. Only list proxies you control. Typical Caddy-on-the-same-host setup:
+    /// `trusted_proxies = ["127.0.0.1/32", "::1/128"]`.
+    #[serde(default)]
+    pub trusted_proxies: Vec<ipnet::IpNet>,
     /// Offline role source. Mutually exclusive with a live Discord source.
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).

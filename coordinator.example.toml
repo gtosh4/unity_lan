@@ -5,6 +5,15 @@
 bind = "127.0.0.1:8080"
 database = "coordinator.db"
 
+# --- Behind a TLS-terminating reverse proxy (Caddy, nginx) ---
+# REQUIRED if you run one. The rate limiter buckets by source IP, and a same-host proxy makes every
+# request arrive from loopback — so without this the whole deployment shares ONE bucket and the
+# per-IP cap (30/s) throttles all your clients together. Listing the proxy makes the limiter read the
+# real client from X-Forwarded-For (which Caddy sets automatically).
+# Only list proxies you control: an unlisted peer's X-Forwarded-For is ignored, because a header any
+# caller can set would otherwise let them forge a fresh bucket per request and bypass the limiter.
+# trusted_proxies = ["127.0.0.1/32", "::1/128"]
+
 # Attestation lifetime (seconds) = the revocation window: a member who loses a role keeps mesh
 # access until their last attestation expires. The client renewal/gossip cadence and the long-poll
 # hold derive from it. Shorter = tighter revocation, more refresh churn. Default 1800 (30 min).

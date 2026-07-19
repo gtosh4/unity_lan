@@ -96,6 +96,9 @@ For the optional monitoring surface (`[admin]` block → dashboard + Prometheus 
   hand-off). The OAuth redirect is **loopback to the engine** (`127.0.0.1:8765`, C.3), so Discord
   never redirects to the coordinator — login works even when the browser can't reach it. Local
   testing → `localhost` is fine. Real deploy → a public host/domain with **TLS** for the client API.
+- **TLS**: the coordinator serves **plain HTTP** and does not terminate TLS — put a reverse proxy in
+  front for a real deployment. See "Behind a reverse proxy" below; two settings there are not
+  optional.
 - **Open-file limit**: every connected device parks a long-poll, so each one holds an open socket —
   the concurrent-device ceiling is an fd count. The coordinator raises its own soft limit to the hard
   limit at startup (no privilege needed) and logs what it got: `raised the open-file soft limit
@@ -103,6 +106,50 @@ For the optional monitoring surface (`[admin]` block → dashboard + Prometheus 
   (or a warning that it couldn't raise) does an operator need to lift it — `LimitNOFILE=` in the
   systemd unit, or `--ulimit nofile=` / `default-ulimits` for a container.
 - Nothing else Discord-side. Intents (B) + `applications.commands` invite (D) cover it.
+
+---
+
+## Behind a reverse proxy (TLS termination)
+
+The coordinator speaks plain HTTP, so a real deployment fronts it with Caddy/nginx for TLS. Two
+things need attention — both are silent failures, not startup errors.
+
+**1. Tell the coordinator about the proxy.** The rate limiter buckets by source IP. A same-host proxy
+makes every request arrive from loopback, so *all* your clients share one bucket and the 30 req/s
+per-IP cap throttles the whole deployment at once (measured: 60 requests from 60 distinct clients
+through a proxy hop → 30 admitted, 30 got `429`). Fix in `coordinator.toml`:
+
+```toml
+trusted_proxies = ["127.0.0.1/32", "::1/128"]
+```
+
+With that set, the same test admits all 60. Only list proxies you control — an unlisted peer's
+`X-Forwarded-For` is deliberately ignored, since otherwise any caller could forge a fresh bucket per
+request and walk past the limiter. Caddy sets the header itself; no Caddyfile change needed for it.
+
+**2. Don't let the proxy cut the long-poll.** Clients park a held request for `attestation_ttl/2`
+(15 min by default) — that's what makes idle cost ~zero. A proxy timeout shorter than the hold
+breaks the park and puts every client back to polling. Set it explicitly rather than trusting
+defaults:
+
+```caddyfile
+coordinator.example.com {
+	reverse_proxy 127.0.0.1:8080 {
+		transport http {
+			# Must exceed the long-poll hold (attestation_ttl_secs / 2, default 900s).
+			read_timeout 20m
+			dial_timeout 5s
+		}
+	}
+}
+```
+
+If you shorten `attestation_ttl_secs`, the hold shortens with it and this can come down too — but
+keep headroom.
+
+**3. The proxy has its own fd and memory limits.** It holds a connection per device just as the
+coordinator does, so its `LimitNOFILE` matters equally (Caddy's packaged systemd unit already sets a
+high one). Budget its memory alongside the coordinator's ~48 KB/device when sizing the instance.
 
 ---
 

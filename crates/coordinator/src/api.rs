@@ -154,8 +154,11 @@ impl Wakers {
     }
 }
 
-pub fn router(state: AppState) -> Router {
-    let limiter = Arc::new(Mutex::new(RateLimiter::new(Instant::now())));
+pub fn router(state: AppState, trusted_proxies: Vec<ipnet::IpNet>) -> Router {
+    let limiter = RateLimitState {
+        limiter: Arc::new(Mutex::new(RateLimiter::new(Instant::now()))),
+        trusted_proxies: Arc::new(trusted_proxies),
+    };
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         // register and refresh share the same logic: issue grants, record presence, return seeds.
@@ -187,6 +190,42 @@ const RL_WINDOW: Duration = Duration::from_secs(1);
 const RL_MAX_PER_IP: u32 = 30;
 const RL_MAX_TOTAL: u32 = 500;
 const RL_MAX_TRACKED_IPS: usize = 65_536;
+
+/// The IP to rate-limit this request under: the real client when a **trusted** proxy named it in
+/// `X-Forwarded-For`, else the peer we're actually talking to.
+///
+/// Without this, terminating TLS in a same-host proxy collapses every client into one loopback
+/// bucket and the per-IP cap throttles the whole deployment at once. With it, the limiter sees real
+/// clients again.
+///
+/// `X-Forwarded-For` is client-writable, so it's read **only** when the peer is a configured proxy —
+/// otherwise a caller would forge a fresh bucket per request and walk straight past the limiter.
+/// Entries are scanned right-to-left (each hop appends what it saw, so the rightmost is the most
+/// trustworthy) skipping addresses that are themselves trusted proxies; the first remaining entry is
+/// the client. Falls back to the peer if the header is absent or unparseable.
+fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> IpAddr {
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|net| net.contains(ip));
+    if !is_trusted(&peer) {
+        return peer;
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| {
+            v.rsplit(',')
+                .filter_map(|s| s.trim().parse::<IpAddr>().ok())
+                .find(|ip| !is_trusted(ip))
+        })
+        .unwrap_or(peer)
+}
+
+/// Middleware state for [`rate_limit`]: the shared counter plus the proxies allowed to name the
+/// real client via `X-Forwarded-For`.
+#[derive(Clone)]
+struct RateLimitState {
+    limiter: Arc<Mutex<RateLimiter>>,
+    trusted_proxies: Arc<Vec<ipnet::IpNet>>,
+}
 
 /// A per-source + global windowed request counter, shared across handlers behind an `Arc<Mutex>`.
 struct RateLimiter {
@@ -232,17 +271,14 @@ impl RateLimiter {
 /// Axum middleware: refuse a request with `429 Too Many Requests` once the caller's source IP (or the
 /// deployment as a whole) exceeds the window budget. The source IP comes from `ConnectInfo`; if it's
 /// absent the request still counts against the global cap under the unspecified-address bucket.
-async fn rate_limit(
-    State(limiter): State<Arc<Mutex<RateLimiter>>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    let ip = req
+async fn rate_limit(State(st): State<RateLimitState>, req: Request, next: Next) -> Response {
+    let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-    let admit = limiter.lock().unwrap().allow(ip, Instant::now());
+    let ip = client_ip(peer, req.headers(), &st.trusted_proxies);
+    let admit = st.limiter.lock().unwrap().allow(ip, Instant::now());
     if admit {
         next.run(req).await
     } else {
@@ -1596,6 +1632,42 @@ mod tests {
         let other: IpAddr = "198.51.100.9".parse().unwrap();
         assert!(rl.allow(other, t0)); // a different source is unaffected
         assert!(rl.allow(ip, t0 + RL_WINDOW)); // a new window clears the counters
+    }
+
+    #[test]
+    fn client_ip_trusts_forwarded_for_only_from_a_configured_proxy() {
+        use super::{client_ip, HeaderMap};
+        let trusted: Vec<ipnet::IpNet> = vec!["127.0.0.1/32".parse().unwrap()];
+        let proxy: IpAddr = "127.0.0.1".parse().unwrap();
+        let direct: IpAddr = "198.51.100.9".parse().unwrap();
+        let client: IpAddr = "203.0.113.5".parse().unwrap();
+        let hdr = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", v.parse().unwrap());
+            h
+        };
+
+        // Behind the proxy: the header names the client, so each one gets its own bucket instead of
+        // the whole deployment sharing loopback's.
+        assert_eq!(client_ip(proxy, &hdr("203.0.113.5"), &trusted), client);
+
+        // A direct caller's header is ignored — otherwise anyone could mint a fresh bucket per
+        // request and bypass the limiter entirely.
+        assert_eq!(client_ip(direct, &hdr("203.0.113.5"), &trusted), direct);
+
+        // Client-supplied entries sit to the LEFT of what our proxy observed; scanning right-to-left
+        // past trusted hops picks the real client, not the spoofed prefix.
+        assert_eq!(
+            client_ip(proxy, &hdr("1.2.3.4, 203.0.113.5, 127.0.0.1"), &trusted),
+            client
+        );
+
+        // No header, or garbage, falls back to the peer rather than failing open.
+        assert_eq!(client_ip(proxy, &HeaderMap::new(), &trusted), proxy);
+        assert_eq!(client_ip(proxy, &hdr("not-an-ip"), &trusted), proxy);
+
+        // Default config trusts nobody: behavior is exactly as before for a directly exposed server.
+        assert_eq!(client_ip(proxy, &hdr("203.0.113.5"), &[]), proxy);
     }
 
     #[test]
