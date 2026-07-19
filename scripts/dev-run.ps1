@@ -15,8 +15,9 @@
   To instead exercise the real *unprivileged* GUI -> engine split, leave the engine running and
   launch the GUI from a separate, non-elevated shell (same user):
       target\debug\unitylan-gui.exe control.sock
-  That connects because the pipe's DACL grants the creating user and the pipe object defaults to
-  medium integrity (no write-up barrier).
+  That connects because the control pipe's DACL grants INTERACTIVE users read+write (see
+  control/server.rs), so a non-elevated desktop session reaches it; the pipe also defaults to medium
+  integrity (no write-up barrier).
 
 .PARAMETER Config
   Engine config path (default: engine.toml in the repo root).

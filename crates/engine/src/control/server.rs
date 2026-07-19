@@ -27,8 +27,14 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
     // Clear a stale unix socket file from a previous run (named pipes have no filesystem residue).
     #[cfg(not(windows))]
     let _ = std::fs::remove_file(endpoint);
-    let listener = ListenerOptions::new()
-        .name(to_name(endpoint)?)
+    let opts = ListenerOptions::new().name(to_name(endpoint)?);
+    // On Windows, pin an explicit DACL (unix ownership is handled by `grant_socket_access` below).
+    #[cfg(windows)]
+    let opts = {
+        use interprocess::os::windows::local_socket::ListenerOptionsExt;
+        opts.security_descriptor(control_pipe_sd()?)
+    };
+    let listener = opts
         .create_tokio()
         .with_context(|| format!("binding control socket {endpoint}"))?;
     #[cfg(not(windows))]
@@ -75,6 +81,25 @@ fn grant_socket_access(endpoint: &str, group: Option<&str>) {
             }
         }
     }
+}
+
+/// The control pipe's DACL (Windows). The default named-pipe security descriptor grants *read* to
+/// Everyone and the anonymous account — which leaks the status stream (peers, mesh IPs, networks,
+/// block list, device identity) to any local user, other terminal-services sessions, and remote
+/// callers — while granting the unprivileged GUI only read, so it couldn't drive a LocalSystem
+/// service daemon. Replace it with a protected DACL: `SYSTEM` + `Administrators` full, `INTERACTIVE`
+/// users read+write. INTERACTIVE covers the local GUI at any integrity level (elevated or not) and
+/// excludes network/anonymous logons — the analogue of the unix `grant_socket_access` gate.
+#[cfg(windows)]
+fn control_pipe_sd(
+) -> anyhow::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
+    use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+    // D:P — protected DACL (drops inheritance). FA = full; GRGW = GENERIC_READ|GENERIC_WRITE (write
+    // carries FILE_CREATE_PIPE_INSTANCE, which the server needs for each accept). SY=SYSTEM,
+    // BA=Administrators, IU=INTERACTIVE.
+    let sddl = widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)")
+        .expect("static SDDL contains no interior nul");
+    SecurityDescriptor::deserialize(&sddl).context("building control-pipe security descriptor")
 }
 
 /// Look up a group's gid by name via `getgrnam`. `None` if the group doesn't exist.
@@ -359,4 +384,14 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
         ),
     };
     Ok(ExposeResp { message, exposed })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    /// The control-pipe SDDL must parse — a typo would only surface as a runtime bind failure on a
+    /// Windows service start, which the Linux-heavy test suite would never catch.
+    #[test]
+    fn control_pipe_sddl_is_valid() {
+        super::control_pipe_sd().expect("control-pipe SDDL should deserialize");
+    }
 }

@@ -44,3 +44,6 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+# Build the control-pipe DACL as an SDDL wide-string (see control/server.rs). Version-matched to
+# interprocess's own widestring so `SecurityDescriptor::deserialize`'s `&U16CStr` type unifies.
+widestring = "1"

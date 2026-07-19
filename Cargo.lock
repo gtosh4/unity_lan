@@ -6860,6 +6860,7 @@ dependencies = [
  "unitylan-common",
  "webrtc-ice",
  "webrtc-util",
+ "widestring 1.2.1",
  "windows-service",
 ]
 
