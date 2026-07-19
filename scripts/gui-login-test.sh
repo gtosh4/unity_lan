@@ -82,9 +82,11 @@ curl -sf "http://127.0.0.1:$REDIR_PORT/callback?state=$STATE&code=user:1" >/dev/
 echo "callback: device bound ✓"
 
 # The daemon's register loop now succeeds → brings up the interface and clears needs_login.
-for _ in $(seq 1 30); do "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q 'lan.unity.internal' && break; sleep 0.5; done
+# Hostname is <device>.<user>.unity.internal — the community/guild is NOT in the name.
+HOST="host-a.nodea.unity.internal"
+for _ in $(seq 1 30); do "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q "$HOST" && break; sleep 0.5; done
 ST=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
-if echo "$ST" | grep -q 'lan.unity.internal' && ! echo "$ST" | grep -q 'not logged in'; then
+if echo "$ST" | grep -q "$HOST" && ! echo "$ST" | grep -q 'not logged in'; then
   echo "$ST" | grep -E 'device:'
   echo "RESULT: PASS ✓  daemon-mediated login bound the device and brought up the mesh"
   exit 0
