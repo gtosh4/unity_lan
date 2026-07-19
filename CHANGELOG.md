@@ -3,7 +3,7 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
+## v0.3.0
 
 **Wire protocol 4 → 5, and versioning that actually does something.** `PROTOCOL_VERSION` was
 advertised but never enforced: the coordinator logged a warning and served the request anyway, and
@@ -18,8 +18,23 @@ be upgraded in lockstep. Features that need no break ride **capability flags** i
 
 The 4 → 5 bump itself is the P2P response envelope gaining an unknown-variant fallback (below).
 
+### Added
+
+- **Fleet version visibility.** The admin dashboard and `/metrics`
+  (`unitylan_devices_online_by_version`) now show how many online devices run each release — so an
+  operator can confirm the fleet is fully updated before retiring a phased wire change.
+- **Admin per-network counts split users from devices** — a user with three devices in a network
+  reads as one user, three devices, instead of a single ambiguous number.
+- **`unitylan-engine --token` flag** for scripted/headless enrollment.
+
 ### Changed
 
+- **The GUI update flow is actionable.** The dead "update available" notice is gone; when a newer
+  engine is staged (or already running under an older GUI process) the window offers a one-click
+  relaunch instead of leaving the user to restart by hand.
+- **Windows MSI starts the service and launches the GUI on install**, so a fresh install comes up
+  without a manual service start.
+- **Enrollment keys now expire**, bounding the window a leaked one-time key can be redeemed.
 - **Linux auto-update ships engine + GUI together** (`.tar.gz`, was the bare engine binary). The
   GUI↔engine control protocol carries no version, so updating only the engine left an older GUI
   talking to a newer daemon. Windows already did this via the MSI's `MajorUpgrade`. A bare artifact
@@ -29,6 +44,8 @@ The 4 → 5 bump itself is the P2P response envelope gaining an unknown-variant 
 
 ### Fixed
 
+- **Exposed ports survive a restart**, and `unexpose` now closes the exact scope it was given (an
+  all-peers rule and a per-network rule on the same port no longer clobber each other).
 - **A newer peer's P2P reply broke older peers.** The request envelope degraded an unknown type to
   `Unsupported`, but the *response* envelope had no such fallback, so a future reply variant was a
   decode failure on an older caller. Extensibility now runs both directions.
