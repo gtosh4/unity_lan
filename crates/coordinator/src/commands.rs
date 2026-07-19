@@ -420,3 +420,173 @@ async fn role_name(http: &twilight_http::Client, guild_id: u64, role_id: u64) ->
         .find(|r| r.id.get() == role_id)
         .map(|r| r.name)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use twilight_model::application::interaction::application_command::CommandDataOption;
+    use twilight_model::application::interaction::InteractionType;
+    use twilight_model::guild::{MemberFlags, PartialMember};
+    use twilight_model::oauth::ApplicationIntegrationMap;
+
+    /// An interaction whose invoking member carries `perms` — `None` for a member Discord sent
+    /// without a permission field, `member: None` for a DM (no member at all).
+    #[allow(deprecated)] // `channel_id` is deprecated upstream but is still a struct field.
+    fn interaction(member_perms: Option<Option<Permissions>>) -> Interaction {
+        Interaction {
+            app_permissions: None,
+            application_id: Id::new(1),
+            authorizing_integration_owners: ApplicationIntegrationMap {
+                guild: None,
+                user: None,
+            },
+            channel: None,
+            channel_id: None,
+            context: None,
+            data: None,
+            entitlements: Vec::new(),
+            guild: None,
+            guild_id: Some(Id::new(42)),
+            guild_locale: None,
+            id: Id::new(2),
+            kind: InteractionType::ApplicationCommand,
+            locale: None,
+            member: member_perms.map(|permissions| PartialMember {
+                avatar: None,
+                avatar_decoration_data: None,
+                banner: None,
+                communication_disabled_until: None,
+                deaf: false,
+                flags: MemberFlags::empty(),
+                joined_at: None,
+                mute: false,
+                nick: None,
+                permissions,
+                premium_since: None,
+                roles: Vec::new(),
+                user: None,
+            }),
+            message: None,
+            token: "t".to_string(),
+            user: None,
+        }
+    }
+
+    /// One `network <name>` subcommand, with the given role option (if any).
+    fn sub(name: &str, role: Option<u64>) -> Vec<CommandDataOption> {
+        let options = role
+            .map(|id| {
+                vec![CommandDataOption {
+                    name: "role".to_string(),
+                    value: CommandOptionValue::Role(Id::new(id)),
+                }]
+            })
+            .unwrap_or_default();
+        vec![CommandDataOption {
+            name: name.to_string(),
+            value: CommandOptionValue::SubCommand(options),
+        }]
+    }
+
+    /// A `twilight_http::Client` performs no I/O until a request is actually issued, so every path
+    /// below (none of which reaches `role_name`) leaves it untouched.
+    fn http() -> twilight_http::Client {
+        twilight_http::Client::new("token".to_string())
+    }
+
+    #[test]
+    fn is_admin_accepts_manage_guild_and_administrator() {
+        assert!(is_admin(&interaction(Some(Some(
+            Permissions::MANAGE_GUILD
+        )))));
+        assert!(is_admin(&interaction(Some(Some(
+            Permissions::ADMINISTRATOR
+        )))));
+    }
+
+    #[test]
+    fn is_admin_rejects_unprivileged_missing_and_absent_members() {
+        assert!(
+            !is_admin(&interaction(Some(Some(Permissions::SEND_MESSAGES)))),
+            "an unrelated permission does not grant network mutation"
+        );
+        assert!(
+            !is_admin(&interaction(Some(None))),
+            "a member with no permission field is not an admin"
+        );
+        assert!(
+            !is_admin(&interaction(None)),
+            "a DM interaction has no member, so no guild permissions"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_add_rejects_everyone_role() {
+        let store = Store::memory().await;
+        let versions = Versions::default();
+        // `@everyone`'s role id equals the guild id; it is every member, not an ACL group. The
+        // guard must fire before the role-name lookup, so this reaches no HTTP call.
+        let out = handle_network(&http(), &store, &versions, 42, &sub("add", Some(42))).await;
+        assert_eq!(out, "`@everyone` cannot be a network.");
+        assert!(store.networks_in_guild(42).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn network_add_and_remove_require_a_role_option() {
+        let store = Store::memory().await;
+        let versions = Versions::default();
+        for name in ["add", "remove"] {
+            let out = handle_network(&http(), &store, &versions, 42, &sub(name, None)).await;
+            assert_eq!(out, "Missing role.");
+        }
+    }
+
+    #[tokio::test]
+    async fn network_remove_deletes_and_bumps_the_guild_scope() {
+        let store = Store::memory().await;
+        let versions = Versions::default();
+        store.upsert_network(42, 7, "gamers").await.unwrap();
+        let scopes: BTreeSet<Scope> = [Scope::Guild(42)].into_iter().collect();
+        let before = versions.aggregate(&scopes);
+
+        let out = handle_network(&http(), &store, &versions, 42, &sub("remove", Some(7))).await;
+
+        assert_eq!(out, "Unregistered <@&7>.");
+        assert!(store.networks_in_guild(42).await.unwrap().is_empty());
+        assert_ne!(
+            versions.aggregate(&scopes),
+            before,
+            "the guild's parked long-polls must wake and drop the network"
+        );
+    }
+
+    #[tokio::test]
+    async fn network_list_renders_empty_and_populated() {
+        let store = Store::memory().await;
+        let versions = Versions::default();
+        let out = handle_network(&http(), &store, &versions, 42, &sub("list", None)).await;
+        assert_eq!(out, "No networks registered.");
+
+        store.upsert_network(42, 7, "gamers").await.unwrap();
+        store.upsert_network(42, 8, "modders").await.unwrap();
+        // A network in another guild must not leak into this guild's listing.
+        store.upsert_network(99, 9, "elsewhere").await.unwrap();
+
+        let out = handle_network(&http(), &store, &versions, 42, &sub("list", None)).await;
+        assert!(out.starts_with("Networks:\n"));
+        assert!(out.contains("• <@&7> — gamers\n"));
+        assert!(out.contains("• <@&8> — modders\n"));
+        assert!(!out.contains("elsewhere"));
+    }
+
+    #[tokio::test]
+    async fn network_rejects_unknown_and_empty_subcommands() {
+        let store = Store::memory().await;
+        let versions = Versions::default();
+        let out = handle_network(&http(), &store, &versions, 42, &sub("nope", Some(7))).await;
+        assert_eq!(out, "Unknown subcommand.");
+        let out = handle_network(&http(), &store, &versions, 42, &[]).await;
+        assert_eq!(out, "Unknown subcommand.");
+    }
+}
