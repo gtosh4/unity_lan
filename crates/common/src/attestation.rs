@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::wire::{Signed, WireError};
 use crate::DNS_SUFFIX;
 
+/// Current [`Attestation`] schema version — see that field's docs for why postcard needs one.
+pub const ATTESTATION_SCHEMA: u32 = 1;
+
 /// Binds a device (WG key + allocated IP) to its owner + name, for a TTL.
 ///
 /// All signed fields are **stable** — the coordinator need not know a device's live endpoint
@@ -19,6 +22,18 @@ use crate::DNS_SUFFIX;
 /// sanitized to DNS labels by the coordinator.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Attestation {
+    /// Schema version of this struct ([`ATTESTATION_SCHEMA`]), and **the first field on purpose**.
+    ///
+    /// The signed payload is postcard, which is positional and not self-describing: adding,
+    /// removing, or reordering a field below silently changes how every existing blob decodes, and
+    /// a mismatched build can read *wrong values* rather than failing. A leading discriminator is
+    /// what turns that silent corruption into a clean rejection. Bump it whenever the fields change.
+    ///
+    /// A leading field invalidates previously-signed blobs — which costs nothing here, because
+    /// [`crate::ATTESTATION_TTL_SECS`] is 30 minutes, so the entire signed corpus turns over on its
+    /// own. That is *not* true of [`crate::rotation::RotationCert`], whose chains are walked forever;
+    /// see the note there.
+    pub schema: u32,
     /// The guild (Discord server) this attestation is scoped to. Signed by that guild's own
     /// per-guild key (design.md §3.1), so a compromised/forged key's blast radius is one guild.
     /// The verifier checks this equals the guild it pinned the signing anchor for — load-bearing
@@ -79,6 +94,15 @@ pub fn verify_attestation(
     expected_guild: u64,
 ) -> Result<Attestation, AttestationError> {
     let att: Attestation = signed.verify(anchor)?;
+    // Checked first: every field below is only meaningful if we agree on the layout they were
+    // decoded from. A signature that verifies proves the bytes are authentic, not that we read them
+    // the way the signer wrote them.
+    if att.schema != ATTESTATION_SCHEMA {
+        return Err(AttestationError::SchemaMismatch {
+            expected: ATTESTATION_SCHEMA,
+            got: att.schema,
+        });
+    }
     if att.guild_id != expected_guild {
         return Err(AttestationError::GuildMismatch {
             expected: expected_guild,
@@ -99,6 +123,8 @@ pub enum AttestationError {
     Expired,
     #[error("attestation guild mismatch: expected {expected}, got {got}")]
     GuildMismatch { expected: u64, got: u64 },
+    #[error("attestation schema {got} is not the {expected} this build reads (peer version skew)")]
+    SchemaMismatch { expected: u32, got: u32 },
 }
 
 #[cfg(test)]
@@ -110,6 +136,7 @@ mod tests {
 
     fn sample(now: u64) -> Attestation {
         Attestation {
+            schema: ATTESTATION_SCHEMA,
             guild_id: GUILD,
             user_id: 333,
             username: "alice".into(),
@@ -141,6 +168,23 @@ mod tests {
         assert!(matches!(
             verify_attestation(&signed, &key.anchor(), later, GUILD),
             Err(AttestationError::Expired)
+        ));
+    }
+
+    #[test]
+    fn foreign_schema_rejected_even_when_signed_correctly() {
+        // A future coordinator's attestation: authentic signature, unreadable layout. Rejecting it
+        // is the point — postcard would otherwise decode the new field order into our old fields and
+        // hand back a valid-looking attestation with wrong values.
+        let key = CoordinatorKey::generate();
+        let now = 1_000;
+        let mut att = sample(now);
+        att.schema = ATTESTATION_SCHEMA + 1;
+        let signed = Signed::sign(&key, &att).unwrap();
+        assert!(matches!(
+            verify_attestation(&signed, &key.anchor(), now, GUILD),
+            Err(AttestationError::SchemaMismatch { expected, got })
+                if expected == ATTESTATION_SCHEMA && got == ATTESTATION_SCHEMA + 1
         ));
     }
 

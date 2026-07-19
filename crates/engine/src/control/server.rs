@@ -140,7 +140,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         return stream_status(reader.into_inner(), ctx.status.subscribe()).await;
     }
     let resp = match req {
-        ControlRequest::Status => ControlResponse::Status(ctx.status.borrow().clone()),
+        ControlRequest::Status => ControlResponse::Status(Box::new(ctx.status.borrow().clone())),
         ControlRequest::Watch => unreachable!("Watch handled above"),
         ControlRequest::Manage(op) => match ctx.token.read().await.clone() {
             None => ControlResponse::Error("device not enrolled yet".into()),
@@ -262,7 +262,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             match ctx.localnet.set_blocked(user_id, username, true) {
                 Ok(_) => {
                     set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot());
-                    ControlResponse::Status(ctx.status.borrow().clone())
+                    ControlResponse::Status(Box::new(ctx.status.borrow().clone()))
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -271,7 +271,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             match ctx.localnet.set_blocked(user_id, String::new(), false) {
                 Ok(_) => {
                     set_blocked(&ctx.status, &ctx.localnet.blocked_snapshot());
-                    ControlResponse::Status(ctx.status.borrow().clone())
+                    ControlResponse::Status(Box::new(ctx.status.borrow().clone()))
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -283,7 +283,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             match ctx.localnet.set_disable_new(disable) {
                 Ok(_) => {
                     set_disable_new(&ctx.status, disable);
-                    ControlResponse::Status(ctx.status.borrow().clone())
+                    ControlResponse::Status(Box::new(ctx.status.borrow().clone()))
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -295,7 +295,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
             match ctx.localnet.set_peer_own_devices(enabled) {
                 Ok(_) => {
                     set_peer_own(&ctx.status, enabled);
-                    ControlResponse::Status(ctx.status.borrow().clone())
+                    ControlResponse::Status(Box::new(ctx.status.borrow().clone()))
                 }
                 Err(e) => ControlResponse::Error(format!("{e:#}")),
             }
@@ -343,7 +343,7 @@ async fn stream_status(
     loop {
         let mut out = {
             let report = rx.borrow_and_update();
-            serde_json::to_vec(&ControlResponse::Status(report.clone()))?
+            serde_json::to_vec(&ControlResponse::Status(Box::new(report.clone())))?
         };
         out.push(b'\n');
         stream.write_all(&out).await?;

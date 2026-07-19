@@ -51,11 +51,20 @@ pub struct P2pResponse {
     pub body: RespBody,
 }
 
-/// The response payload.
+/// The response payload. Internally tagged with an `#[serde(other)]` fallback for the same reason as
+/// [`ReqBody`], and symmetrically: without it, a *newer* peer's response variant is a decode failure
+/// on an older caller rather than a clean "can't use this, ask the coordinator". Extensibility has to
+/// run both directions or the older side of a mixed mesh still breaks.
+///
+/// Variants must be struct-style — an internally tagged enum can't hold a sequence-shaped newtype.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum RespBody {
     /// The responder's own current attestations (one per guild it participates in).
-    Attestations(Vec<GuildAttestation>),
+    Attestations { attestations: Vec<GuildAttestation> },
     /// The responder doesn't support the requested type — the caller falls back to the coordinator.
     Unsupported,
+    /// A response type this build doesn't understand (a newer peer). Treated as `Unsupported`.
+    #[serde(other)]
+    Unknown,
 }

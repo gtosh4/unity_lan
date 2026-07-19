@@ -266,6 +266,20 @@ impl App {
             .spacing(8)
             .align_y(Vertical::Center)
         });
+        // The coordinator refused us on wire protocol version. Red, not amber: unlike "coordinator
+        // offline" this never resolves on its own — the mesh is running from cache and will keep
+        // decaying until someone updates a side. The engine passes the coordinator's own message
+        // through because it names which side is stale.
+        let proto_line = status.and_then(|s| s.proto_mismatch.as_deref()).map(|why| {
+            row![
+                dot(RED),
+                text(format!("incompatible with the coordinator — {why}"))
+                    .size(14)
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center)
+        });
         // Update-available signal: the coordinator advertised a newer release than we're running.
         // When a verified, platform-matching artifact is staged (`update_ready`) the strip shows the
         // Update button; here it's the descriptive notice (also the only surface when notice-only).
@@ -295,6 +309,7 @@ impl App {
             .map(|v| muted(format!("UnityLAN v{v}")));
         column![header("account")]
             .push_maybe(identity)
+            .push_maybe(proto_line)
             .push_maybe(coord_line)
             .push_maybe(update_line)
             .push_maybe(version_line)

@@ -89,7 +89,10 @@ pub enum ControlRequest {
 
 #[derive(Serialize, Deserialize)]
 pub enum ControlResponse {
-    Status(StatusReport),
+    /// Boxed: the status snapshot dwarfs every other variant (peers, networks, blocked users), so
+    /// inlining it would size *every* `ControlResponse` by the largest one. Serializes identically —
+    /// `Box` is transparent to serde, so this is not a wire change.
+    Status(Box<StatusReport>),
     Manage(ManageResp),
     Expose(ExposeResp),
     Network(NetworkResp),
@@ -246,6 +249,14 @@ pub struct StatusReport {
     /// `[release]`, the artifact isn't for this platform, or verification failed (notice-only).
     #[serde(default)]
     pub update_ready: bool,
+    /// The coordinator refused us on wire protocol version: our range and its range don't overlap
+    /// ([`crate::negotiate_proto`]). Carries the coordinator's message, which names both ranges and
+    /// which side is stale. Distinct from `coordinator_online` — the coordinator is reachable and
+    /// answering, it just won't talk to this build, so the GUI must say "update" rather than show a
+    /// connectivity error. `None` in the normal case — boxed for the same reason as `directive`,
+    /// so a rarely-set field doesn't grow the largest `ControlResponse` variant.
+    #[serde(default)]
+    pub proto_mismatch: Option<Box<str>>,
     /// A human-readable warning that the coordinator's mesh CIDR overlaps a local network
     /// interface's subnet (checked at join). Overlap risks shadowing the user's real LAN, so the
     /// GUI surfaces it. `None` when the ranges are disjoint (the expected case). Advisory only —
@@ -326,6 +337,7 @@ impl Default for StatusReport {
             engine_version: String::new(),
             update_available: None,
             update_ready: false,
+            proto_mismatch: None,
             lan_overlap: None,
             directive: None,
         }

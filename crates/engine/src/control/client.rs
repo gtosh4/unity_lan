@@ -42,10 +42,12 @@ macro_rules! expect_resp {
 
 /// Client: fetch the daemon's status snapshot.
 pub async fn client_status(endpoint: &str) -> anyhow::Result<StatusReport> {
+    // `Status` is boxed on the wire (see `ControlResponse::Status`); unwrap for the caller.
     expect_resp!(
         request(endpoint, &ControlRequest::Status).await?,
         ControlResponse::Status
     )
+    .map(|s| *s)
 }
 
 /// Client: run a device-management op via the daemon (which forwards it to the coordinator).
@@ -114,6 +116,7 @@ pub async fn client_set_own_device_peering(
         request(endpoint, &ControlRequest::SetOwnDevicePeering { enabled }).await?,
         ControlResponse::Status
     )
+    .map(|s| *s)
 }
 
 /// Client: locally block (`Some(username)`) or un-block (`None`) a user by `user_id`. Returns the
@@ -127,5 +130,5 @@ pub async fn client_set_blocked(
         Some(username) => ControlRequest::BlockPeer { user_id, username },
         None => ControlRequest::UnblockPeer { user_id },
     };
-    expect_resp!(request(endpoint, &req).await?, ControlResponse::Status)
+    expect_resp!(request(endpoint, &req).await?, ControlResponse::Status).map(|s| *s)
 }

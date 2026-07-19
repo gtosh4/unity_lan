@@ -40,6 +40,12 @@ const P2P_REFRESH_MARGIN: u64 = common::LONGPOLL_HOLD_SECS;
 /// How long to wait on a peer-direct pull before giving up on that peer (the coordinator covers it).
 const P2P_PULL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Retry interval after the coordinator refuses us on wire protocol version. Deliberately far longer
+/// than `refresh_secs`: the refusal is a version gap, not a blip, so it clears only when an operator
+/// updates one side. We still retry — an update can land at any time, and a coordinator rollback
+/// would restore service — but at a rate that doesn't hammer a coordinator that already said no.
+const PROTO_MISMATCH_BACKOFF: Duration = Duration::from_secs(300);
+
 /// How often the mesh loop re-reads **local** WG stats to notice a freshly-learned reflexive endpoint
 /// (one only appears after a handshake — later than a long-poll hold would return). Local only: it
 /// never cancels the held `/refresh`, so idle clients still park for the full hold.
@@ -747,6 +753,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             match refreshed {
                 Ok((resp, dev)) => {
                     coord_online = true;
+                    // A successful exchange means the versions reconciled — clear any prior refusal
+                    // (an operator updated a side, or the coordinator rolled back).
+                    control::set_proto_mismatch(&status, None);
                     control::set_update_available(&status, &resp.server_version);
                     // Verify the signed release manifest against the pinned anchor and stage a
                     // platform-matching, strictly-newer artifact for the GUI's Update button.
@@ -811,10 +820,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 // Coordinator unreachable: back off (don't hammer), keep the existing mesh alive but
                 // flag it so the GUI shows the coordinator as offline.
                 Err(e) => {
-                    tracing::warn!("refresh failed: {e:#}");
+                    // A protocol refusal isn't unreachability — the coordinator answered. Keep the
+                    // mesh running from cache (peers we already hold stay reachable), but say so and
+                    // back off hard: no retry interval fixes a version gap.
+                    let stale = e
+                        .downcast_ref::<coord::UpgradeRequired>()
+                        .map(|u| u.to_string());
+                    let backoff = if let Some(why) = stale {
+                        tracing::error!("coordinator refused this build: {why}");
+                        control::set_proto_mismatch(&status, Some(why));
+                        PROTO_MISMATCH_BACKOFF
+                    } else {
+                        tracing::warn!("refresh failed: {e:#}");
+                        Duration::from_secs(cfg.refresh_secs.max(1))
+                    };
                     coord_online = false;
                     control::set_coord_online(&status, false);
-                    tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(1))).await;
+                    tokio::time::sleep(backoff).await;
                 }
             }
         }
@@ -1077,14 +1099,26 @@ async fn register_until_ready(
         match attempt {
             Ok((resp, Some(dev))) => {
                 control::set_needs_login(status, false);
+                control::set_proto_mismatch(status, None);
                 return Ok(Some((resp, dev)));
             }
             // Enrolled but no networks yet — not a login problem; wait for a role.
             Ok((_resp, None)) => {
                 control::set_needs_login(status, false);
+                control::set_proto_mismatch(status, None);
                 tracing::info!("registered but hold no networks yet; waiting for a role");
             }
             Err(e) => {
+                // A protocol refusal is not transient: the coordinator is up and answering, it just
+                // won't speak to this build. Retrying at `refresh_secs` would hammer it forever for
+                // nothing, so flag it for the GUI and back off hard until someone updates.
+                if let Some(u) = e.downcast_ref::<coord::UpgradeRequired>() {
+                    tracing::error!("coordinator refused this build: {u}");
+                    control::set_proto_mismatch(status, Some(u.to_string()));
+                    tokio::time::sleep(PROTO_MISMATCH_BACKOFF).await;
+                    continue;
+                }
+                control::set_proto_mismatch(status, None);
                 // A 401 means we're not logged in; flag it so a frontend offers login. Other
                 // errors (coordinator down) are transient — just retry without the flag.
                 let msg = format!("{e:#}");

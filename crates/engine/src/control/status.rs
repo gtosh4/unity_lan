@@ -45,6 +45,13 @@ pub fn set_needs_login(shared: &Shared, needs: bool) {
     shared.send_if_modified(|s| std::mem::replace(&mut s.needs_login, needs) != needs);
 }
 
+/// Flag that the coordinator refused us on wire protocol version, carrying its explanation (which
+/// names both ranges and which side is stale). Cleared by passing `None` on the next success.
+pub fn set_proto_mismatch(shared: &Shared, why: Option<String>) {
+    let why = why.map(String::into_boxed_str);
+    shared.send_if_modified(|s| std::mem::replace(&mut s.proto_mismatch, why) != s.proto_mismatch);
+}
+
 /// Set the mesh connection state the daemon reports (`true` = connected, `false` = disconnected).
 pub fn set_connected(shared: &Shared, connected: bool) {
     shared.send_if_modified(|s| std::mem::replace(&mut s.connected, connected) != connected);
@@ -120,12 +127,13 @@ pub fn update(
     coordinator_online: bool,
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
-    let (prev_update_available, prev_update_ready, prev_lan_overlap) = {
+    let (prev_update_available, prev_update_ready, prev_lan_overlap, prev_proto_mismatch) = {
         let prev = shared.borrow();
         (
             prev.update_available.clone(),
             prev.update_ready,
             prev.lan_overlap.clone(),
+            prev.proto_mismatch.clone(),
         )
     };
     let report = StatusReport {
@@ -177,6 +185,9 @@ pub fn update(
         update_ready: prev_update_ready,
         // Set once at join by `set_lan_overlap`; preserved across snapshot rebuilds.
         lan_overlap: prev_lan_overlap,
+        // Owned by the register/refresh loops (set on a 426, cleared on success), so preserve it
+        // here rather than letting a snapshot rebuild silently clear a live refusal.
+        proto_mismatch: prev_proto_mismatch,
         // Demo-only UI push; the real engine never drives the GUI (see `StatusReport::directive`).
         directive: None,
     };

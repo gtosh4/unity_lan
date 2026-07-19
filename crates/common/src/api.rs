@@ -97,10 +97,21 @@ pub struct RegisterReq {
     /// and drops them from its own.
     #[serde(default = "default_true")]
     pub peer_own_devices: bool,
-    /// Wire protocol version this client speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
-    /// pre-versioning client. The coordinator logs a warning on a mismatch (negotiate, don't crash).
+    /// Highest wire protocol version this client speaks ([`crate::PROTOCOL_VERSION`]) — the ceiling
+    /// of the range it offers. `0` from a pre-versioning client, which is served without
+    /// negotiation. See [`crate::negotiate_proto`].
     #[serde(default)]
     pub proto: u32,
+    /// Lowest wire protocol version this client still speaks ([`crate::MIN_PROTOCOL_VERSION`]) — the
+    /// floor of that range. `0` from a client that predates range negotiation and therefore speaks
+    /// exactly [`proto`](Self::proto); the coordinator treats its ceiling as its floor.
+    #[serde(default)]
+    pub proto_min: u32,
+    /// Capability flags this client implements ([`crate::CAPABILITIES`]). The coordinator gates
+    /// optional behavior on these rather than on [`proto`](Self::proto), so a new feature ships
+    /// without a protocol bump. Empty from a client that predates capabilities — infer from `proto`.
+    #[serde(default)]
+    pub caps: Vec<String>,
     /// This client's release version (semver, [`crate::VERSION`]). The coordinator ignores it today;
     /// it's here so a future coordinator could tailor the update offer per client version. Empty from
     /// a pre-versioning client.
@@ -243,10 +254,24 @@ pub struct RegisterResp {
     /// dials, which is reachable by construction.
     #[serde(default)]
     pub stun_port: Option<u16>,
-    /// Wire protocol version the coordinator speaks ([`crate::PROTOCOL_VERSION`]); `0` from a
-    /// pre-versioning coordinator.
+    /// The wire protocol version the coordinator **selected** for this exchange — the highest both
+    /// sides speak, not the coordinator's own ceiling ([`crate::negotiate_proto`]). The client
+    /// speaks this version back. `0` from a pre-versioning coordinator.
     #[serde(default)]
     pub proto: u32,
+    /// The coordinator's own support window, `[proto_min, proto_max]`, independent of what it
+    /// selected above. A client whose range sits outside this learns *which side* is out of date
+    /// and can say so, rather than reporting a bare failure. `0` from a coordinator that predates
+    /// range negotiation.
+    #[serde(default)]
+    pub proto_min: u32,
+    /// See [`proto_min`](Self::proto_min).
+    #[serde(default)]
+    pub proto_max: u32,
+    /// Capability flags the coordinator implements ([`crate::CAPABILITIES`]), so the client can
+    /// likewise skip a feature the coordinator lacks. Empty from a pre-capabilities coordinator.
+    #[serde(default)]
+    pub caps: Vec<String>,
     /// The coordinator's own release version (semver, [`crate::VERSION`]) — the latest release the
     /// mesh should run, since coordinator and engine ship from one monorepo tag. The client compares
     /// it against its own [`crate::VERSION`] and surfaces "update available" to the GUI. Empty from a
@@ -433,6 +458,59 @@ mod tests {
         let req: RegisterReq = serde_json::from_str(old).unwrap();
         assert_eq!(req.proto, 0);
         assert_eq!(req.client_version, "");
+        // No range and no capabilities: negotiation reads the absent floor as "exactly `proto`",
+        // and an empty cap set as "infer from proto".
+        assert_eq!(req.proto_min, 0);
+        assert!(req.caps.is_empty());
+    }
+
+    // Golden fixtures for the previous protocol version — what a v4 peer actually puts on the wire.
+    // The support window (current + 1 previous) is a promise these tests keep honest: if a change
+    // makes a v4 message undecodable, the floor in `MIN_PROTOCOL_VERSION` is a lie and this fails.
+    const V4_REGISTER_REQ: &str = r#"{
+        "wg_pubkey":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+        "device_name":"laptop",
+        "endpoint":"203.0.113.7:51820",
+        "since":42,
+        "peer_own_devices":true,
+        "proto":4,
+        "client_version":"0.2.0",
+        "held":[{"pubkey":[2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"rev":99}]
+    }"#;
+
+    const V4_REGISTER_RESP: &str = r#"{
+        "version":42,
+        "proto":4,
+        "server_version":"0.2.0",
+        "stun_port":3478,
+        "partial":true
+    }"#;
+
+    #[test]
+    fn v4_register_req_still_decodes() {
+        let req: RegisterReq = serde_json::from_str(V4_REGISTER_REQ).unwrap();
+        assert_eq!(req.proto, 4);
+        assert_eq!(req.device_name, "laptop");
+        assert_eq!(req.since, Some(42));
+        assert_eq!(req.held.len(), 1);
+        assert_eq!(req.held[0].rev, 99);
+        // v4 predates both, so they must default rather than fail the decode.
+        assert_eq!(req.proto_min, 0);
+        assert!(req.caps.is_empty());
+        // And a v4 client negotiates to v4 — inside the window, not rejected.
+        assert_eq!(crate::negotiate_proto(req.proto_min, req.proto), Ok(4));
+    }
+
+    #[test]
+    fn v4_register_resp_still_decodes() {
+        let resp: RegisterResp = serde_json::from_str(V4_REGISTER_RESP).unwrap();
+        assert_eq!(resp.proto, 4);
+        assert_eq!(resp.version, 42);
+        assert_eq!(resp.stun_port, Some(3478));
+        assert!(resp.partial);
+        assert_eq!(resp.proto_min, 0);
+        assert_eq!(resp.proto_max, 0);
+        assert!(resp.caps.is_empty());
     }
 
     #[test]

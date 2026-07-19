@@ -39,8 +39,23 @@ pub async fn serve(sock: UdpSocket, own: OwnAttestations) -> anyhow::Result<()> 
     loop {
         let (n, from) = sock.recv_from(&mut buf).await.context("p2p recv")?;
         let body = match serde_json::from_slice::<P2pRequest>(&buf[..n]) {
+            // A peer outside our support window gets a clean `Unsupported` (→ it falls back to the
+            // coordinator) rather than a reply it may misread. `proto == 0` predates the envelope.
+            Ok(req)
+                if req.proto != 0
+                    && !(common::MIN_PROTOCOL_VERSION..=common::PROTOCOL_VERSION)
+                        .contains(&req.proto) =>
+            {
+                tracing::debug!(
+                    peer_proto = req.proto,
+                    "p2p request outside our version window"
+                );
+                RespBody::Unsupported
+            }
             Ok(req) => match req.body {
-                ReqBody::GetAttestations => RespBody::Attestations(own.get()),
+                ReqBody::GetAttestations => RespBody::Attestations {
+                    attestations: own.get(),
+                },
                 ReqBody::Unknown => RespBody::Unsupported,
             },
             Err(_) => continue, // not a P2P request we can parse → stay silent
@@ -82,8 +97,11 @@ pub async fn pull(target: SocketAddr, timeout: Duration) -> anyhow::Result<Vec<G
         .context("decoding p2p response")?
         .body
     {
-        RespBody::Attestations(a) => Ok(a),
+        RespBody::Attestations { attestations } => Ok(attestations),
         RespBody::Unsupported => anyhow::bail!("peer does not support attestation pull"),
+        // A newer peer answered with something this build has no variant for. Not an error worth
+        // escalating — the coordinator path covers it.
+        RespBody::Unknown => anyhow::bail!("peer replied with an unrecognized p2p response type"),
     }
 }
 
@@ -124,7 +142,7 @@ mod tests {
         );
         let req = req.as_bytes();
         match round_trip(&client, addr, req).await.body {
-            RespBody::Attestations(a) => {
+            RespBody::Attestations { attestations: a } => {
                 assert_eq!(a.len(), 2);
                 assert_eq!(a[0].attestation, "blobA");
             }
@@ -134,7 +152,7 @@ mod tests {
         // A later grant is served on the next request (no restart).
         own.set(vec![ga("blobC")]);
         match round_trip(&client, addr, req).await.body {
-            RespBody::Attestations(a) => assert_eq!(a[0].attestation, "blobC"),
+            RespBody::Attestations { attestations: a } => assert_eq!(a[0].attestation, "blobC"),
             other => panic!("expected refreshed attestations, got {other:?}"),
         }
     }
@@ -154,6 +172,46 @@ mod tests {
         assert!(matches!(
             round_trip(&client, addr, raw.as_bytes()).await.body,
             RespBody::Unsupported
+        ));
+    }
+
+    /// The mirror of the above: a *newer* peer's response variant must decode to `Unknown` rather
+    /// than failing outright, so the older side of a mixed mesh degrades to the coordinator instead
+    /// of erroring. Decode-level, since the wire is what has to tolerate it.
+    #[test]
+    fn unknown_response_type_decodes_as_unknown() {
+        let raw = format!(
+            r#"{{"proto":{},"body":{{"type":"SomeFutureReply","data":[1,2,3]}}}}"#,
+            common::PROTOCOL_VERSION
+        );
+        let resp: P2pResponse = serde_json::from_slice(raw.as_bytes()).unwrap();
+        assert!(matches!(resp.body, RespBody::Unknown));
+    }
+
+    #[tokio::test]
+    async fn peer_outside_our_version_window_gets_unsupported() {
+        let own = OwnAttestations::default();
+        own.set(vec![ga("blobA")]);
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(serve(sock, own));
+
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // A peer far below our floor: answered, but not with attestations it might misread.
+        let raw = r#"{"proto":1,"body":{"type":"GetAttestations"}}"#;
+        assert!(matches!(
+            round_trip(&client, addr, raw.as_bytes()).await.body,
+            RespBody::Unsupported
+        ));
+
+        // …while a peer inside the window is served normally.
+        let ok = format!(
+            r#"{{"proto":{},"body":{{"type":"GetAttestations"}}}}"#,
+            common::MIN_PROTOCOL_VERSION
+        );
+        assert!(matches!(
+            round_trip(&client, addr, ok.as_bytes()).await.body,
+            RespBody::Attestations { .. }
         ));
     }
 }

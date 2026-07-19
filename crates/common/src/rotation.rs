@@ -16,6 +16,13 @@ use crate::wire::Signed;
 
 /// One rotation hop: the coordinator moved its anchor from `prev_anchor` to `new_anchor`. Signed
 /// by `prev_anchor`'s key (the outgoing key vouches for its successor).
+///
+/// **This layout is frozen.** Unlike [`crate::attestation::Attestation`] — which carries a schema
+/// tag and can afford to break it, since its blobs expire in 30 minutes — rotation certs are
+/// long-lived by design: a client pinned years ago walks the whole chain from its pin forward, so
+/// every cert ever issued must still decode. Postcard is positional, so adding, removing, or
+/// reordering a field here silently breaks that walk and strands clients on a manual re-pin. If this
+/// ever must change, it needs a parallel type and a chain that carries both, not an edit in place.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RotationCert {
     pub prev_anchor: [u8; 32],

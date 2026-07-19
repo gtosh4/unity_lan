@@ -315,7 +315,9 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
     let mut s = state.lock().unwrap();
     match req {
         // Watch is streamed in `serve_conn` and never reaches here; a snapshot is a safe fallback.
-        ControlRequest::Status | ControlRequest::Watch => ControlResponse::Status(s.status()),
+        ControlRequest::Status | ControlRequest::Watch => {
+            ControlResponse::Status(Box::new(s.status()))
+        }
 
         ControlRequest::Manage(op) => {
             let message = match op {
@@ -400,18 +402,18 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
 
         ControlRequest::SetNewNetworkDefault { disable } => {
             s.disable_new_networks = disable;
-            ControlResponse::Status(s.status())
+            ControlResponse::Status(Box::new(s.status()))
         }
 
         ControlRequest::SetOwnDevicePeering { enabled } => {
             s.peer_own_devices = enabled;
-            ControlResponse::Status(s.status())
+            ControlResponse::Status(Box::new(s.status()))
         }
 
         ControlRequest::BlockPeer { user_id, username } => {
             s.peers.retain(|p| p.user_id != user_id);
             s.blocked.push(BlockedUser { user_id, username });
-            ControlResponse::Status(s.status())
+            ControlResponse::Status(Box::new(s.status()))
         }
 
         ControlRequest::UnblockPeer { user_id } => {
@@ -426,7 +428,7 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                     s.peers.push(p);
                 }
             }
-            ControlResponse::Status(s.status())
+            ControlResponse::Status(Box::new(s.status()))
         }
 
         ControlRequest::Login => ControlResponse::Login(LoginResp {
@@ -469,7 +471,7 @@ async fn serve_conn(stream: impl AsyncReadWrite, state: Arc<Mutex<State>>) {
     if matches!(req, ControlRequest::Watch) {
         let mut stream = reader.into_inner();
         loop {
-            let resp = ControlResponse::Status(state.lock().unwrap().status());
+            let resp = ControlResponse::Status(Box::new(state.lock().unwrap().status()));
             let mut bytes = serde_json::to_vec(&resp).unwrap_or_default();
             bytes.push(b'\n');
             if stream.write_all(&bytes).await.is_err() || stream.flush().await.is_err() {

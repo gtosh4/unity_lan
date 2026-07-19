@@ -151,13 +151,10 @@ async fn register(
     State(st): State<AppState>,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
-    if req.proto != 0 && req.proto != common::PROTOCOL_VERSION {
-        tracing::warn!(
-            client_proto = req.proto,
-            server_proto = common::PROTOCOL_VERSION,
-            "protocol version mismatch; relying on additive-field compatibility"
-        );
-    }
+    // Negotiate before doing any work: a client we can't speak to should cost us a range check, not
+    // a snapshot build (and its Discord fan-out). Rejecting here is the whole point of the version —
+    // serving a snapshot a client will misread is worse than telling it to upgrade.
+    negotiate(&req)?;
     // Subscribe to our targeted-wake channel *before* building, so a pair-specific update that
     // targets us while we build (or decide to park) isn't lost.
     let mut personal = st.wakers.subscribe(req.wg_pubkey);
@@ -184,6 +181,35 @@ async fn register(
         return Ok(Json(build_snapshot(&st, &req).await?.resp));
     }
     Ok(Json(built.resp))
+}
+
+/// Reconcile the client's advertised protocol range with ours, returning the version to speak.
+///
+/// A non-overlapping range is a `426 Upgrade Required` naming both ranges and which side is stale —
+/// the operator needs to know *what to upgrade*, and a bare "version mismatch" doesn't say. This is
+/// the only place a request is refused on protocol grounds; everything downstream can then assume a
+/// version it understands.
+fn negotiate(req: &RegisterReq) -> Result<u32, ApiError> {
+    common::negotiate_proto(req.proto_min, req.proto).map_err(|why| {
+        let advice = match why {
+            common::ProtoReject::PeerTooOld => "the client is too old; update it",
+            common::ProtoReject::PeerTooNew => "the coordinator is too old; update it",
+        };
+        tracing::warn!(
+            client_proto = req.proto,
+            client_proto_min = req.proto_min,
+            server_proto = common::PROTOCOL_VERSION,
+            server_proto_min = common::MIN_PROTOCOL_VERSION,
+            "rejecting client on protocol version: {advice}"
+        );
+        ApiError::new(
+            StatusCode::UPGRADE_REQUIRED,
+            format!(
+                "wire protocol mismatch: client speaks {}..={}, coordinator speaks {}..={} — {advice}",
+                req.proto_min, req.proto, common::MIN_PROTOCOL_VERSION, common::PROTOCOL_VERSION
+            ),
+        )
+    })
 }
 
 /// An opaque revision of a seed's **peering-relevant** content, for delta sync ([`Seed::rev`]).
@@ -799,7 +825,12 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
             version,
             networks: networks_status,
             stun_port: st.stun_port,
-            proto: common::PROTOCOL_VERSION,
+            // The version we *selected* for this client, not our ceiling. `register` already
+            // rejected a non-overlapping range, so the fallback here is unreachable.
+            proto: negotiate(req).unwrap_or(common::PROTOCOL_VERSION),
+            proto_min: common::MIN_PROTOCOL_VERSION,
+            proto_max: common::PROTOCOL_VERSION,
+            caps: common::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             server_version: common::VERSION.to_string(),
             release,
             partial,
@@ -1044,6 +1075,7 @@ fn accepted_reflexives<'a>(
         .filter(move |o| comembers.contains(&o.pubkey))
 }
 
+#[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
     message: String,
@@ -1066,11 +1098,59 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::{accepted_reflexives, punch_target, relay_target, should_supersede, RelayReg};
-    use common::api::{ObservedEndpoint, SharedNetwork};
+    use super::{
+        accepted_reflexives, negotiate, punch_target, relay_target, should_supersede, RelayReg,
+        StatusCode,
+    };
+    use common::api::{ObservedEndpoint, RegisterReq, SharedNetwork};
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().unwrap()
+    }
+
+    /// Build a request from the JSON a client of the given range would actually send — omitting a
+    /// field entirely, as an older client does, rather than defaulting it in Rust.
+    fn req_speaking(range: &str) -> RegisterReq {
+        let pk = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
+        serde_json::from_str(&format!(r#"{{"wg_pubkey":{pk},{range}}}"#)).unwrap()
+    }
+
+    #[test]
+    fn negotiation_selects_the_shared_version() {
+        let sel = negotiate(&req_speaking(r#""proto":5,"proto_min":4"#)).unwrap();
+        assert_eq!(sel, common::PROTOCOL_VERSION);
+        // A client capped below us is served at *its* ceiling, not ours.
+        assert_eq!(
+            negotiate(&req_speaking(r#""proto":4,"proto_min":4"#)).unwrap(),
+            4
+        );
+    }
+
+    #[test]
+    fn stale_client_gets_426_naming_both_ranges() {
+        let err = negotiate(&req_speaking(r#""proto":2,"proto_min":1"#)).unwrap_err();
+        assert_eq!(err.status, StatusCode::UPGRADE_REQUIRED);
+        // The message has to say what to upgrade — a bare "mismatch" leaves an operator stuck.
+        assert!(err.message.contains("client is too old"), "{}", err.message);
+        assert!(err.message.contains("1..=2"), "{}", err.message);
+    }
+
+    #[test]
+    fn client_newer_than_coordinator_says_so() {
+        let err = negotiate(&req_speaking(r#""proto":99,"proto_min":98"#)).unwrap_err();
+        assert_eq!(err.status, StatusCode::UPGRADE_REQUIRED);
+        assert!(
+            err.message.contains("coordinator is too old"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn pre_versioning_client_is_still_served() {
+        // No `proto` at all — a client from before the field existed. Refusing it would impose a
+        // flag day on clients that never had a say.
+        assert!(negotiate(&req_speaking(r#""device_name":"old""#)).is_ok());
     }
 
     fn reg(s: &str) -> RelayReg {

@@ -70,8 +70,16 @@ macro_rules! expect {
     };
 }
 
+/// `expect!` for the status variant, which is boxed on the wire (see [`ControlResponse::Status`]).
+/// Unwraps the box so callers keep working with a plain `StatusReport`.
+macro_rules! expect_status {
+    ($path:expr, $req:expr) => {
+        expect!($path, $req, ControlResponse::Status).map(|s| *s)
+    };
+}
+
 pub async fn fetch_status(path: PathBuf) -> Result<StatusReport, String> {
-    expect!(path, ControlRequest::Status, ControlResponse::Status)
+    expect_status!(path, ControlRequest::Status)
 }
 
 pub async fn manage(path: PathBuf, op: ManageOp) -> Result<ManageResp, String> {
@@ -131,20 +139,12 @@ pub async fn set_connected(path: PathBuf, connected: bool) -> Result<ConnectedRe
 
 /// Set the new-network default (secure default: disable on discovery). Returns the updated status.
 pub async fn set_new_network_default(path: PathBuf, disable: bool) -> Result<StatusReport, String> {
-    expect!(
-        path,
-        ControlRequest::SetNewNetworkDefault { disable },
-        ControlResponse::Status
-    )
+    expect_status!(path, ControlRequest::SetNewNetworkDefault { disable })
 }
 
 /// Set whether this device always peers with the owner's own other devices. Returns updated status.
 pub async fn set_own_device_peering(path: PathBuf, enabled: bool) -> Result<StatusReport, String> {
-    expect!(
-        path,
-        ControlRequest::SetOwnDevicePeering { enabled },
-        ControlResponse::Status
-    )
+    expect_status!(path, ControlRequest::SetOwnDevicePeering { enabled })
 }
 
 /// Locally block a user (by Discord `user_id`) — drop all their peers from the mesh. Returns the
@@ -154,20 +154,12 @@ pub async fn block_peer(
     user_id: u64,
     username: String,
 ) -> Result<StatusReport, String> {
-    expect!(
-        path,
-        ControlRequest::BlockPeer { user_id, username },
-        ControlResponse::Status
-    )
+    expect_status!(path, ControlRequest::BlockPeer { user_id, username })
 }
 
 /// Un-block a previously-blocked user. Returns the updated status.
 pub async fn unblock_peer(path: PathBuf, user_id: u64) -> Result<StatusReport, String> {
-    expect!(
-        path,
-        ControlRequest::UnblockPeer { user_id },
-        ControlResponse::Status
-    )
+    expect_status!(path, ControlRequest::UnblockPeer { user_id })
 }
 
 /// How long to wait before reconnecting the status stream after the engine is down or drops us
@@ -228,7 +220,7 @@ pub fn watch_status(
                 }
                 Ok(_) => {
                     let item = match serde_json::from_str::<ControlResponse>(line.trim()) {
-                        Ok(ControlResponse::Status(s)) => Ok(s),
+                        Ok(ControlResponse::Status(s)) => Ok(*s),
                         Ok(ControlResponse::Error(e)) => Err(e),
                         Ok(_) => Err("unexpected response".into()),
                         Err(e) => Err(e.to_string()),

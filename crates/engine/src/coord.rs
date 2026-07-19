@@ -12,12 +12,32 @@ use common::wire::Signed;
 
 use crate::keys;
 
+/// The coordinator refused us on wire protocol version (`426 Upgrade Required`) — our range and its
+/// range don't overlap, so no amount of retrying helps until one side is updated.
+///
+/// A distinct type rather than a string, because the daemon must treat it differently from every
+/// other failure: retrying it is pointless, and the GUI needs to say "update" instead of showing a
+/// connectivity error. The coordinator's message says which side is stale; we pass it through.
+#[derive(Debug)]
+pub struct UpgradeRequired(pub String);
+
+impl std::fmt::Display for UpgradeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for UpgradeRequired {}
+
 /// Return the response if it's a success status, else read the body and bail with the
 /// coordinator's error. `what` names the route for the error message.
 async fn ensure_ok(resp: reqwest::Response, what: &str) -> anyhow::Result<reqwest::Response> {
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::UPGRADE_REQUIRED {
+            return Err(anyhow::Error::new(UpgradeRequired(body)));
+        }
         bail!("coordinator rejected {what}: {status}: {body}");
     }
     Ok(resp)
@@ -224,6 +244,8 @@ async fn post(
             relay_allocated: relay.allocated,
             ice,
             proto: common::PROTOCOL_VERSION,
+            proto_min: common::MIN_PROTOCOL_VERSION,
+            caps: common::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             client_version: common::VERSION.to_string(),
             held,
         })
@@ -232,6 +254,20 @@ async fn post(
         .with_context(|| format!("sending /{path}"))?;
     let resp = ensure_ok(resp, path).await?;
     let resp: RegisterResp = resp.json().await.context("decoding RegisterResp")?;
+
+    // The coordinator echoes the version it selected. It negotiated within the range we offered, so
+    // a value outside it means the two sides disagree about what was agreed — worth saying out loud,
+    // since everything downstream decodes on the assumption that they don't.
+    if resp.proto != 0
+        && !(common::MIN_PROTOCOL_VERSION..=common::PROTOCOL_VERSION).contains(&resp.proto)
+    {
+        tracing::warn!(
+            selected = resp.proto,
+            ours = %format!("{}..={}", common::MIN_PROTOCOL_VERSION, common::PROTOCOL_VERSION),
+            coordinator = %format!("{}..={}", resp.proto_min, resp.proto_max),
+            "coordinator selected a wire protocol version outside the range we offered"
+        );
+    }
 
     // Trust gate: pin every guild anchor the response carries (TOFU per guild, design.md §3.1). On a
     // change we accept only a valid rotation path for that guild; a MITM that swaps an anchor (and
@@ -422,26 +458,40 @@ pub async fn manage(
 /// with. Anchors come from disk, not the response: the response was already gated through
 /// [`keys::pin_anchor`] in [`post`], so a pinned key is what we trust (re-pinned already if a valid
 /// rotation occurred). Each seed is admitted on the first of its shared-guild attestations that
-/// verifies against the matching pinned anchor; a seed none of whose attestations verify fails the
-/// whole batch (fail closed — a substituted/self-signed seed must be rejected, not silently peered).
+/// verifies against the matching pinned anchor; a seed none of whose attestations verify is **skipped**
+/// (fail closed — a substituted/self-signed seed is never peered — but one bad seed doesn't deny the
+/// rest of the mesh, which is what peer version skew would otherwise cause).
 pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<Vec<SeedPeer>> {
     let pinned = pinned_anchors(resp, state_dir);
     let now = now_unix();
     let mut peers = Vec::new();
+    let mut admitted = 0usize;
     for seed in &resp.seeds {
         // Any one of the peer's shared-guild attestations verifying admits it; the hostname no longer
         // depends on which guild (community left the name — see `Attestation::hostname`), so we just
         // need the first that clears a pinned anchor.
         let mut verified: Option<Attestation> = None;
         for ga in &seed.attestations {
-            let signed =
-                Signed::from_base64(&ga.attestation).context("decoding seed attestation")?;
+            let Ok(signed) = Signed::from_base64(&ga.attestation) else {
+                tracing::warn!("seed attestation is not decodable — ignoring it");
+                continue;
+            };
             if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
                 verified = Some(att);
                 break;
             }
         }
-        let att = verified.context("seed has no attestation signed by a pinned guild anchor")?;
+        // Still fail closed — an unverifiable seed is never peered — but per *peer*, not per batch.
+        // A `?` here let one peer deny the whole mesh: a single co-member running a build whose
+        // attestation layout we can't read (or mid-rotation, or corrupt) would drop every other peer
+        // along with it. That's the failure mode version skew actually produces, so it must degrade
+        // to "that peer is unreachable", matching the `wg_net` skip below.
+        let Some(att) = verified else {
+            tracing::warn!(
+                "seed has no attestation signed by a pinned guild anchor — skipping peer"
+            );
+            continue;
+        };
         // Defence in depth: the signed `wg_net` exists to bound `wg_ip` (attestation.rs). Refuse to
         // route a `/32` that falls outside it, so a compromised or buggy guild key can't get a
         // co-member's allowed-IPs pointed at an off-mesh address (a LAN gateway, a public host).
@@ -454,6 +504,7 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             );
             continue;
         }
+        admitted += 1;
         peers.push(SeedPeer {
             pubkey: att.wg_pubkey,
             user_id: att.user_id,
@@ -469,6 +520,16 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
             rev: seed.rev,
             expires_at: att.expires_at,
         });
+    }
+    // Per-peer skipping means a wholesale substitution (a MITM signing every seed with its own key)
+    // now reads as "nobody is reachable" instead of an error. Losing every peer at once is not the
+    // same event as losing one, so say so at error level — it is the signature of an attack or a
+    // botched anchor rotation, and it would otherwise be a silent, empty mesh.
+    if admitted == 0 && !resp.seeds.is_empty() {
+        tracing::error!(
+            seeds = resp.seeds.len(),
+            "every seed failed verification against the pinned anchors — peering with no one"
+        );
     }
     Ok(peers)
 }
@@ -548,6 +609,7 @@ mod tests {
         expires_at: u64,
     ) -> Attestation {
         Attestation {
+            schema: common::attestation::ATTESTATION_SCHEMA,
             guild_id,
             user_id: 5,
             username: "neo".into(),
@@ -615,16 +677,38 @@ mod tests {
         let attacker = CoordinatorKey::generate();
 
         // Attacker-substituted response: its own anchor for GUILD + seeds self-signed by it. The
-        // pin on disk (honest) is what we verify against, so the forged seed is rejected.
+        // pin on disk (honest) is what we verify against, so the forged seed is rejected. Rejection
+        // is per-peer (it's skipped, not an error), so the property to assert is that it was never
+        // *admitted* — a forged seed must never become a peer we route to.
         let forged = resp_with_seeds(GUILD, &attacker, vec![seed_signed_by(&attacker, GUILD)]);
         assert!(
-            verified_seeds(&forged, &dir).is_err(),
-            "seeds signed by a non-pinned anchor must be rejected"
+            verified_seeds(&forged, &dir).unwrap().is_empty(),
+            "seeds signed by a non-pinned anchor must never be peered"
         );
 
         // Sanity: seeds legitimately signed by the pinned anchor still verify.
         let honest_resp = resp_with_seeds(GUILD, &attacker, vec![seed_signed_by(&honest, GUILD)]);
-        assert!(verified_seeds(&honest_resp, &dir).is_ok());
+        assert_eq!(verified_seeds(&honest_resp, &dir).unwrap().len(), 1);
+
+        // The isolation property itself: one forged seed alongside an honest one drops only the
+        // forgery. Before per-peer skipping this returned `Err` and denied peering with everyone —
+        // which is exactly how a single skewed or malicious peer could deny the whole mesh.
+        let mixed = resp_with_seeds(
+            GUILD,
+            &honest,
+            vec![
+                seed_signed_by(&attacker, GUILD),
+                seed_with_ip(
+                    &honest,
+                    GUILD,
+                    Ipv4Addr::new(100, 64, 0, 11),
+                    "100.64.0.0/10",
+                ),
+            ],
+        );
+        let peers = verified_seeds(&mixed, &dir).unwrap();
+        assert_eq!(peers.len(), 1, "only the honestly-signed peer is admitted");
+        assert_eq!(peers[0].ip, Ipv4Addr::new(100, 64, 0, 11));
     }
 
     /// Defence in depth: a seed whose signature verifies but whose signed `wg_ip` falls outside its

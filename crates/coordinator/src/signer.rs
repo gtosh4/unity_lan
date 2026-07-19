@@ -51,6 +51,7 @@ impl Signer {
     ) -> anyhow::Result<Signed> {
         let now = now_unix();
         let att = Attestation {
+            schema: common::attestation::ATTESTATION_SCHEMA,
             guild_id: self.guild_id,
             user_id,
             username,
