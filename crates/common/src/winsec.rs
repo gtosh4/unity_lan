@@ -10,6 +10,7 @@
 //!
 //! On non-Windows this is a no-op — Unix call sites apply `0600` themselves and never call here.
 
+use std::ffi::OsString;
 use std::path::Path;
 
 /// Restrict `path` to its owner + SYSTEM + Administrators, removing inherited access. No-op on
@@ -18,31 +19,7 @@ use std::path::Path;
 pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     use std::process::Command;
 
-    // Locale-independent well-known SIDs: NT AUTHORITY\SYSTEM and BUILTIN\Administrators — the
-    // Windows analogue of "root can always read it" under a Unix 0600.
-    let mut grants: Vec<String> = vec![
-        "*S-1-5-18:(F)".to_string(),     // SYSTEM (the service identity)
-        "*S-1-5-32-544:(F)".to_string(), // Administrators
-    ];
-    // Also keep the account that runs the process (and thus created the file) able to read it. For a
-    // service running as LocalSystem this is already covered by SYSTEM above; for an interactive dev
-    // run it's the logged-in user, who would otherwise be locked out once inheritance is stripped.
-    if let Some(user) = std::env::var_os("USERNAME") {
-        if !user.is_empty() {
-            let principal = match std::env::var_os("USERDOMAIN") {
-                Some(dom) if !dom.is_empty() => {
-                    let mut p = dom;
-                    p.push("\\");
-                    p.push(&user);
-                    p
-                }
-                _ => user,
-            };
-            let mut ace = principal;
-            ace.push(":(F)");
-            grants.push(ace.to_string_lossy().into_owned());
-        }
-    }
+    let grants = owner_grants(std::env::var_os("USERNAME"), std::env::var_os("USERDOMAIN"));
 
     // `/inheritance:r` drops inherited ACEs (the `Users: Read` a ProgramData file inherits);
     // `/grant:r` replaces any explicit ACE for each principal with exactly the one given; `/q`
@@ -61,6 +38,45 @@ pub fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Build the `icacls /grant:r` principals for a restricted secret file.
+///
+/// Always grants the locale-independent well-known SIDs NT AUTHORITY\SYSTEM and BUILTIN\Administrators
+/// — the Windows analogue of "root can always read it" under a Unix 0600. Then, so the account that
+/// created the file isn't locked out once inheritance is stripped, it grants that account too — *unless*
+/// it's a **machine account** (`USERNAME` ending in `$`, which is what a LocalSystem/LocalService/
+/// NetworkService process reports). That case is deliberately skipped: it's already covered by the
+/// SYSTEM SID, and on a non-domain (workgroup) machine the reported `WORKGROUP\<HOST>$` does not resolve
+/// through `icacls` ("No mapping between account names and security IDs was done"), which would fail the
+/// whole restriction and, in turn, every secret write the service makes. Kept pure (env passed in) so the
+/// grant list is unit-testable without a real process identity.
+#[cfg(windows)]
+fn owner_grants(username: Option<OsString>, userdomain: Option<OsString>) -> Vec<String> {
+    let mut grants: Vec<String> = vec![
+        "*S-1-5-18:(F)".to_string(),     // SYSTEM (the service identity)
+        "*S-1-5-32-544:(F)".to_string(), // Administrators
+    ];
+    if let Some(user) = username {
+        // A machine account (`<HOST>$`) is the service-identity case: covered by SYSTEM above, and its
+        // name doesn't resolve on a workgroup box — so don't add (and thus don't fail on) it.
+        let is_machine_account = user.to_string_lossy().ends_with('$');
+        if !user.is_empty() && !is_machine_account {
+            let principal = match userdomain {
+                Some(dom) if !dom.is_empty() => {
+                    let mut p = dom;
+                    p.push("\\");
+                    p.push(&user);
+                    p
+                }
+                _ => user,
+            };
+            let mut ace = principal;
+            ace.push(":(F)");
+            grants.push(ace.to_string_lossy().into_owned());
+        }
+    }
+    grants
 }
 
 /// No-op on non-Windows: Unix call sites apply `chmod 0600` themselves.
@@ -101,5 +117,43 @@ mod tests {
         assert!(acl.contains("SYSTEM"), "SYSTEM lost access:\n{acl}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A LocalSystem service on a non-domain box reports USERNAME="<HOST>$", USERDOMAIN="WORKGROUP".
+    // That name doesn't resolve through icacls, so the grant list must NOT include it — otherwise every
+    // secret write the service makes (wg.key, token, relay secret) fails and the daemon exits.
+    #[test]
+    fn machine_account_grant_is_skipped() {
+        let g = owner_grants(Some("DESKTOP-O699522$".into()), Some("WORKGROUP".into()));
+        assert_eq!(
+            g,
+            vec!["*S-1-5-18:(F)".to_string(), "*S-1-5-32-544:(F)".to_string()],
+            "machine account must not be added as a principal"
+        );
+        assert!(
+            !g.iter().any(|s| s.contains('$')),
+            "no unresolvable machine-account principal: {g:?}"
+        );
+    }
+
+    // An interactive user is granted access (domain-qualified) so stripping inheritance doesn't lock
+    // them out of a secret they created during a dev `run`.
+    #[test]
+    fn interactive_user_gets_domain_qualified_grant() {
+        let g = owner_grants(Some("Gordon".into()), Some("DESKTOP-O699522".into()));
+        assert!(
+            g.contains(&"DESKTOP-O699522\\Gordon:(F)".to_string()),
+            "interactive user grant missing: {g:?}"
+        );
+    }
+
+    // With no USERDOMAIN we fall back to the bare user name rather than dropping the grant.
+    #[test]
+    fn user_without_domain_falls_back_to_bare_name() {
+        let g = owner_grants(Some("Gordon".into()), None);
+        assert!(
+            g.contains(&"Gordon:(F)".to_string()),
+            "bare-name grant missing: {g:?}"
+        );
     }
 }
