@@ -49,20 +49,24 @@ pub const MIN_PROTOCOL_VERSION: u32 = 4;
 /// from our set, never a decode failure. An empty set (an older client) means "infer from `proto`".
 /// Only declare a capability that actually gates behavior — an aspirational list is worse than none.
 pub mod caps {
-    /// Client understands delta snapshots: it sends `RegisterReq::held` and honors
-    /// `RegisterResp::partial` + `removed` instead of treating every response as a full peer list.
-    pub const DELTA_SYNC: &str = "delta-sync";
-    /// Client runs the userspace ICE agent and can use `Seed::ice` / report `RegisterReq::ice`.
-    pub const ICE: &str = "ice";
-    /// Client can use a TURN relay (`Seed::relay`) and report `RegisterReq::relay_allocated`.
-    pub const RELAY: &str = "relay";
-    /// Client serves and consumes peer-direct attestation pulls over the in-tunnel P2P channel
-    /// (`docs/gossip-refresh.md`), so it can renew without the coordinator.
-    pub const GOSSIP_PULL: &str = "gossip-pull";
+    /// Client can read the **V2** attestation layout
+    /// ([`crate::attestation::ATTESTATION_SCHEMA_V2`]), so the coordinator may sign its snapshot in
+    /// V2 rather than the original layout.
+    ///
+    /// This is what makes the layout change survivable: a v0.2.0 client handed a V2 blob decodes
+    /// neither its own grant nor any peer and silently meshes with nobody, and the blob is postcard
+    /// so it cannot detect that. Gating emission on the client saying "I can read this" is the only
+    /// safe way to roll it out while both kinds are in the field. Retire the flag — and always emit
+    /// V2 — once [`crate::MIN_PROTOCOL_VERSION`] is past the last release that lacked it.
+    pub const ATTESTATION_V2: &str = "attestation-v2";
 }
 
 /// Every capability this build implements — what we advertise on the wire.
-pub const CAPABILITIES: &[&str] = &[caps::DELTA_SYNC, caps::ICE, caps::RELAY, caps::GOSSIP_PULL];
+///
+/// Deliberately short: a capability earns its place by gating real behavior. Things a peer can
+/// infer from `proto` (delta sync, ICE, relay, gossip pull) don't belong here — an advertised flag
+/// nobody reads is worse than no flag, because it reads as a guarantee.
+pub const CAPABILITIES: &[&str] = &[caps::ATTESTATION_V2];
 
 /// This build's release version (the shared workspace version, from Cargo). All crates ship from one
 /// monorepo tag, so this is simultaneously the coordinator's, engine's, and GUI's version — which is

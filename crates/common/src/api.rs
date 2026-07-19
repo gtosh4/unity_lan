@@ -372,6 +372,13 @@ pub struct GuildAttestation {
     /// hostname (see `Attestation::hostname`); surfaced as metadata — the CLI shows it, and it tags
     /// shared networks (`SharedNetwork`).
     pub community_name: String,
+    /// Which wire layout `attestation` was signed in
+    /// ([`crate::attestation::ATTESTATION_SCHEMA_V1`]). The blob itself is postcard — positional, so
+    /// a reader must be told the layout rather than infer it — but *this* envelope is JSON, so the
+    /// hint can be added compatibly: absent means `0`, the original layout, which is exactly what a
+    /// pre-hint sender emits. That asymmetry is the whole trick; see the constant's docs.
+    #[serde(default)]
+    pub att_schema: u32,
 }
 
 /// A network (ACL role) a peer shares with the caller, tagged with the community (guild) it lives

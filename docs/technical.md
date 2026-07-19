@@ -110,8 +110,7 @@ around a `Signed` are JSON, but the signed bytes inside are always postcard.
 ### 3.2 Attestation — the signed unit (`attestation.rs`)
 **Model B: the signed unit is a device.** No `role_id`, no `nick`.
 ```rust
-struct Attestation {
-    schema:      u32,        // ATTESTATION_SCHEMA — first field; see §3.6
+struct Attestation {           // wire layout named by GuildAttestation.att_schema, not a field here (§3.6)
     guild_id:    u64,        // scoped guild; signed by THAT guild's per-guild key (§4)
     user_id:     u64,        // Discord snowflake (owner)
     username:    String,     // global @handle, sanitized DNS label  → the <user>
@@ -124,10 +123,10 @@ struct Attestation {
     expires_at:  u64,        // issued_at + ATTESTATION_TTL_SECS (30 min)
 }
 ```
-**Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild)`: `schema ==
-ATTESTATION_SCHEMA` (checked **first** — the other fields only mean anything if we agree on the
-layout they were decoded from), **AND** signature valid under the **pinned per-guild anchor**,
-**AND** `guild_id == expected_guild`, **AND** unexpired.
+**Verification rule (MUST)** — `verify_attestation(signed, anchor, now, expected_guild, schema)`:
+decode in the caller-supplied `schema` layout (from the JSON envelope's `att_schema`, §3.6 — an
+unknown layout is refused, never guessed), **AND** signature valid under the **pinned per-guild
+anchor**, **AND** `guild_id == expected_guild`, **AND** unexpired.
 The `guild_id` check is load-bearing defence-in-depth even with per-guild keys (design §4.1).
 Hostname = `<device>.<user>.unity.internal`; primary alias = `<user>.unity.internal`
 (`is_primary` only). The `unity` label is the coordinator's namespace (fixed while
@@ -200,13 +199,26 @@ Without the fixture the floor is just a number.
 **Postcard is positional.** Signed payloads (`Signed`, §3.1) are postcard, which encodes by position
 and variant index, not by name — so adding, removing, or reordering a field silently changes how
 every existing blob decodes, and a mismatched build can read *wrong values* rather than failing.
-Two consequences:
+Because it isn't self-describing, a reader **cannot** infer the layout from the bytes; it must be
+*told* which layout a blob is in, out of band. Consequences:
 
-- `Attestation` carries a leading `schema` tag, checked before anything else. Breaking it is cheap
-  because `ATTESTATION_TTL_SECS` is 30 minutes: the whole signed corpus turns over on its own.
+- **Attestation layouts are versioned in the JSON envelope, not the signature.** The blob stays bare
+  postcard; `api::GuildAttestation::att_schema` (JSON, so additive) names its layout, and the
+  verifier is handed that number. `V1` (`0`) is the original layout; `V2` (`1`) is `schema`-first so
+  a *future* change is a clean rejection. This is a **two-phase rollout**: this release's clients
+  *read* both, but the coordinator still *emits* V1 to any client that hasn't advertised
+  `caps::ATTESTATION_V2`, because a pre-cap client handed a V2 blob decodes neither its own grant nor
+  any peer — and, postcard being what it is, can't even tell. Emission flips to V2 (moving
+  `ATTESTATION_SCHEMA_EMIT`) only once `MIN_PROTOCOL_VERSION` excludes every release that lacked the
+  cap; two tests fail if it moves early. The 30-minute TTL means the switch needs no migration — the
+  signed corpus turns over on its own.
 - `RotationCert` (§3.4) and `ReleaseManifest`'s enums are **frozen** — rotation chains are walked
   forever from a client's original pin, so every cert ever issued must still decode. Only append new
   enum variants; never edit those layouts in place.
+
+This is the worked example of the capability-flag mechanism above: `caps::ATTESTATION_V2` is not
+decoration, it is what makes a *signed*-payload change survivable across independent upgrades — the
+one place an additive JSON field alone couldn't have.
 
 **Peer failures are isolated, not fatal.** `verified_seeds` skips a seed it can't verify instead of
 failing the batch, so one co-member running an unreadable build can't deny peering with everyone

@@ -48,10 +48,10 @@ impl Signer {
         is_primary: bool,
         wg_ip: std::net::Ipv4Addr,
         wg_pubkey: WgPublicKey,
+        schema: u32,
     ) -> anyhow::Result<Signed> {
         let now = now_unix();
         let att = Attestation {
-            schema: common::attestation::ATTESTATION_SCHEMA,
             guild_id: self.guild_id,
             user_id,
             username,
@@ -63,7 +63,12 @@ impl Signer {
             issued_at: now,
             expires_at: now + self.ttl,
         };
-        Ok(Signed::sign(&self.key, &att)?)
+        // The caller picks the layout from what the *client* said it can read; we tell that client
+        // which one it got via `GuildAttestation::att_schema`. Never emit a layout the reader hasn't
+        // claimed — the blob is postcard, so it can't tell it guessed wrong.
+        Ok(common::attestation::sign_attestation(
+            &self.key, &att, schema,
+        )?)
     }
 
     /// Sign an arbitrary value with this guild's key, returning the base64 transport form. Used for
@@ -161,7 +166,12 @@ pub struct SignCache {
 }
 
 struct SignCacheInner {
-    map: HashMap<(u64, [u8; 32]), CachedAtt>,
+    /// Keyed by `(guild, device, attestation layout)`. The layout is part of the key because two
+    /// clients can be owed the *same* peer's attestation in different wire layouts during the V2
+    /// rollout — the same blob signed twice, not one blob reused. Costs at most one extra entry per
+    /// peer, only while both kinds of client are in the field, and collapses back once emission is
+    /// uniform.
+    map: HashMap<(u64, [u8; 32], u32), CachedAtt>,
     /// Last time stale entries (departed devices) were swept. Sweeping is `O(size)`, so it's
     /// time-gated to ~once per reuse window rather than run on every insert.
     last_prune: u64,
@@ -195,8 +205,9 @@ impl SignCache {
         ip: Ipv4Addr,
         pubkey: WgPublicKey,
         now: u64,
+        schema: u32,
     ) -> anyhow::Result<Arc<str>> {
-        let key = (guild_id, pubkey);
+        let key = (guild_id, pubkey, schema);
         // Fast path: concurrent read, no signing, no async lock.
         if let Some(hit) = self.fresh(&key, now, username, device_name, is_primary, ip) {
             return Ok(hit);
@@ -215,6 +226,7 @@ impl SignCache {
             is_primary,
             ip,
             pubkey,
+            schema,
         )?;
         let blob: Arc<str> = Arc::from(signed.to_base64());
         let mut inner = self.inner.write().unwrap();
@@ -242,7 +254,7 @@ impl SignCache {
     /// current one (else the attestation content changed and must be re-signed).
     fn fresh(
         &self,
-        key: &(u64, [u8; 32]),
+        key: &(u64, [u8; 32], u32),
         now: u64,
         username: &str,
         device_name: &str,
@@ -264,6 +276,7 @@ impl SignCache {
 mod tests {
     use super::*;
     use crate::store::Store;
+    use common::attestation::ATTESTATION_SCHEMA_V1 as V1;
 
     async fn keys() -> GuildKeys {
         let store = Arc::new(Store::memory().await);
@@ -281,7 +294,7 @@ mod tests {
         let pk = [7u8; 32];
         let addr = ip("100.72.0.5");
         let sign = |name: &'static str, primary: bool, now: u64| {
-            cache.attestation(&keys, 1, 42, "alice", name, primary, addr, pk, now)
+            cache.attestation(&keys, 1, 42, "alice", name, primary, addr, pk, now, V1)
         };
 
         let a = sign("laptop", false, 1_000).await.unwrap();
@@ -310,15 +323,66 @@ mod tests {
         let keys = keys().await;
         let cache = SignCache::new(1800);
         let g1_pk1 = cache
-            .attestation(&keys, 1, 1, "a", "d", false, ip("100.72.0.1"), [1u8; 32], 0)
+            .attestation(
+                &keys,
+                1,
+                1,
+                "a",
+                "d",
+                false,
+                ip("100.72.0.1"),
+                [1u8; 32],
+                0,
+                V1,
+            )
             .await
             .unwrap();
         // Same peer, different guild → different signer → distinct blob.
         let g2_pk1 = cache
-            .attestation(&keys, 2, 1, "a", "d", false, ip("100.72.0.1"), [1u8; 32], 0)
+            .attestation(
+                &keys,
+                2,
+                1,
+                "a",
+                "d",
+                false,
+                ip("100.72.0.1"),
+                [1u8; 32],
+                0,
+                V1,
+            )
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&g1_pk1, &g2_pk1));
         assert_ne!(g1_pk1.as_ref(), g2_pk1.as_ref());
+    }
+
+    /// The same peer owed to two clients on opposite sides of the V2 rollout must be signed once per
+    /// layout — sharing one cached blob would hand somebody bytes they can't decode.
+    #[tokio::test]
+    async fn layout_is_part_of_the_cache_key() {
+        let keys = keys().await;
+        let cache = SignCache::new(1800);
+        let sign = |schema: u32| {
+            cache.attestation(
+                &keys,
+                1,
+                1,
+                "a",
+                "d",
+                false,
+                ip("100.72.0.1"),
+                [1u8; 32],
+                0,
+                schema,
+            )
+        };
+        let v1 = sign(V1).await.unwrap();
+        let v2 = sign(common::attestation::ATTESTATION_SCHEMA_V2)
+            .await
+            .unwrap();
+        assert_ne!(v1.as_ref(), v2.as_ref(), "layouts must not share a blob");
+        // …and each layout still caches on its own.
+        assert!(Arc::ptr_eq(&v1, &sign(V1).await.unwrap()));
     }
 }

@@ -114,6 +114,7 @@ mod tests {
         GuildAttestation {
             attestation: blob.into(),
             community_name: "c".into(),
+            att_schema: common::attestation::ATTESTATION_SCHEMA_EMIT,
         }
     }
 

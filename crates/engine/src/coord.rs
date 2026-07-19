@@ -320,16 +320,19 @@ fn pinned_anchors(resp: &RegisterResp, state_dir: &Path) -> Vec<(u64, [u8; 32])>
 /// Verify one attestation against whichever pinned guild anchor it is scoped to (the `guild_id`
 /// check inside [`verify_attestation`] binds it to that guild). Returns the verified attestation, or
 /// `None` if no pinned anchor accepts it — wrong guild, bad signature, or expired.
+/// `schema` is the layout the sender declared in [`GuildAttestation::att_schema`] — the blob is
+/// postcard, so we must be told rather than guess.
 fn verify_against_pinned(
     signed: &Signed,
     pinned: &[(u64, [u8; 32])],
     now: u64,
+    schema: u32,
 ) -> Option<Attestation> {
     for (guild_id, pk) in pinned {
         let Ok(anchor) = anchor_from_bytes(pk) else {
             continue;
         };
-        if let Ok(att) = verify_attestation(signed, &anchor, now, *guild_id) {
+        if let Ok(att) = verify_attestation(signed, &anchor, now, *guild_id, schema) {
             return Some(att);
         }
     }
@@ -345,7 +348,7 @@ fn verify_grant(
 ) -> anyhow::Result<(Attestation, String)> {
     for ga in &grant.attestations {
         let signed = Signed::from_base64(&ga.attestation).context("decoding grant attestation")?;
-        if let Some(att) = verify_against_pinned(&signed, pinned, now) {
+        if let Some(att) = verify_against_pinned(&signed, pinned, now, ga.att_schema) {
             return Ok((att, ga.community_name.clone()));
         }
     }
@@ -369,7 +372,7 @@ pub fn verify_pulled(
         let Ok(signed) = Signed::from_base64(&ga.attestation) else {
             continue;
         };
-        if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
+        if let Some(att) = verify_against_pinned(&signed, &pinned, now, ga.att_schema) {
             if att.wg_pubkey == expected_pubkey
                 && att.wg_net.contains(&att.wg_ip)
                 && att.expires_at > current_expiry
@@ -476,7 +479,7 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
                 tracing::warn!("seed attestation is not decodable — ignoring it");
                 continue;
             };
-            if let Some(att) = verify_against_pinned(&signed, &pinned, now) {
+            if let Some(att) = verify_against_pinned(&signed, &pinned, now, ga.att_schema) {
                 verified = Some(att);
                 break;
             }
@@ -586,6 +589,7 @@ mod tests {
     use super::*;
     use crate::testutil::TempDir;
     use common::api::{GuildAnchor, GuildAttestation, RegisterResp, Seed};
+    use common::attestation::{ATTESTATION_SCHEMA_EMIT, ATTESTATION_SCHEMA_V2};
     use common::crypto::CoordinatorKey;
 
     const GUILD: u64 = 42;
@@ -609,7 +613,6 @@ mod tests {
         expires_at: u64,
     ) -> Attestation {
         Attestation {
-            schema: common::attestation::ATTESTATION_SCHEMA,
             guild_id,
             user_id: 5,
             username: "neo".into(),
@@ -631,13 +634,32 @@ mod tests {
     /// Like `seed_signed_by`, but with an explicit signed `wg_ip` / `wg_net` (to exercise the
     /// off-mesh-`/32` guard).
     fn seed_with_ip(key: &CoordinatorKey, guild_id: u64, wg_ip: Ipv4Addr, wg_net: &str) -> Seed {
+        seed_with_ip_schema(key, guild_id, wg_ip, wg_net, ATTESTATION_SCHEMA_EMIT)
+    }
+
+    /// Sign `att` in `schema` and wrap it in the envelope that declares that layout — the pairing the
+    /// reader depends on.
+    fn signed_ga(key: &CoordinatorKey, att: &Attestation, schema: u32) -> GuildAttestation {
+        GuildAttestation {
+            attestation: common::attestation::sign_attestation(key, att, schema)
+                .unwrap()
+                .to_base64(),
+            community_name: "c".into(),
+            att_schema: schema,
+        }
+    }
+
+    fn seed_with_ip_schema(
+        key: &CoordinatorKey,
+        guild_id: u64,
+        wg_ip: Ipv4Addr,
+        wg_net: &str,
+        schema: u32,
+    ) -> Seed {
         let expires_at = now_unix() + common::ATTESTATION_TTL_SECS;
         let att = test_attestation(guild_id, wg_ip, wg_net, [9u8; 32], expires_at);
         Seed {
-            attestations: vec![GuildAttestation {
-                attestation: Signed::sign(key, &att).unwrap().to_base64(),
-                community_name: "c".into(),
-            }],
+            attestations: vec![signed_ga(key, &att, schema)],
             endpoint: None,
             punch: None,
             networks: Vec::new(),
@@ -709,6 +731,36 @@ mod tests {
         let peers = verified_seeds(&mixed, &dir).unwrap();
         assert_eq!(peers.len(), 1, "only the honestly-signed peer is admitted");
         assert_eq!(peers[0].ip, Ipv4Addr::new(100, 64, 0, 11));
+    }
+
+    /// A partially-upgraded mesh puts both attestation layouts in one snapshot. Each seed is decoded
+    /// per its own envelope hint, so peers on either side of the rollout mesh together — that's the
+    /// whole reason the hint rides outside the signed blob.
+    #[test]
+    fn seeds_of_mixed_layouts_all_verify() {
+        let (dir, honest) = pinned_state_dir("mixed-layout");
+        let resp = resp_with_seeds(
+            GUILD,
+            &honest,
+            vec![
+                seed_with_ip_schema(
+                    &honest,
+                    GUILD,
+                    Ipv4Addr::new(100, 64, 0, 9),
+                    "100.64.0.0/10",
+                    ATTESTATION_SCHEMA_EMIT,
+                ),
+                seed_with_ip_schema(
+                    &honest,
+                    GUILD,
+                    Ipv4Addr::new(100, 64, 0, 10),
+                    "100.64.0.0/10",
+                    ATTESTATION_SCHEMA_V2,
+                ),
+            ],
+        );
+        let peers = verified_seeds(&resp, &dir).unwrap();
+        assert_eq!(peers.len(), 2, "both layouts must be admitted");
     }
 
     /// Defence in depth: a seed whose signature verifies but whose signed `wg_ip` falls outside its
@@ -815,10 +867,7 @@ mod tests {
             pubkey,
             expires_at,
         );
-        GuildAttestation {
-            attestation: Signed::sign(key, &att).unwrap().to_base64(),
-            community_name: "c".into(),
-        }
+        signed_ga(key, &att, ATTESTATION_SCHEMA_EMIT)
     }
 
     /// Peer-direct pull verification: adopt only a pinned-anchor-valid attestation for the *expected*

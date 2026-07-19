@@ -273,6 +273,15 @@ struct Built {
 async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiError> {
     let user_id = resolve_user(st, req).await?;
     let now = common::now_unix();
+    // Which attestation layout this client gets. Gated on the client *saying* it can read V2: the
+    // blob is postcard, so a client handed a layout it doesn't know decodes neither its own grant
+    // nor any peer — and cannot tell that's what happened. Absent capability → the original layout,
+    // which every released client reads. See `common::caps::ATTESTATION_V2`.
+    let att_schema = if req.caps.iter().any(|c| c == common::caps::ATTESTATION_V2) {
+        common::attestation::ATTESTATION_SCHEMA_V2
+    } else {
+        common::attestation::ATTESTATION_SCHEMA_V1
+    };
     let networks = st.store.all_networks().await.map_err(internal)?;
     // One IP + one name per device (keyed by pubkey), reused across every network it holds. The
     // request name only seeds these on first enrollment; thereafter `allocate_device` returns the
@@ -516,9 +525,11 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
                     is_primary,
                     ip,
                     req.wg_pubkey,
+                    att_schema,
                 )
                 .map_err(internal)?;
             attestations.push(GuildAttestation {
+                att_schema,
                 attestation: signed.to_base64(),
                 community_name: community_cache.get(&g).cloned().unwrap_or_default(),
             });
@@ -706,10 +717,12 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
                     mp.ip,
                     mp.pubkey,
                     now,
+                    att_schema,
                 )
                 .await
                 .map_err(internal)?;
             attestations.push(GuildAttestation {
+                att_schema,
                 attestation: blob.to_string(),
                 community_name: community_cache.get(&g).cloned().unwrap_or_default(),
             });

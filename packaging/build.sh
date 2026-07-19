@@ -32,13 +32,19 @@ for cfg in engine desktop; do
     done
 done
 
-# Bundle for the signed auto-update path (the Linux artifact a release manifest points at). It
-# carries **both** binaries because the engine and GUI speak an unversioned control protocol: an
-# update that replaced only the engine would leave an older GUI talking to a newer daemon. Named by
-# platform to match Platform::LinuxAmd64.
+# Two Linux artifacts for the signed auto-update path, because the rollout is phased.
 #
-# The engine also still accepts a bare binary here (it sniffs gzip magic), so a manifest pointing at
-# an older release's raw artifact keeps working.
+# The bundle carries **both** binaries: the engine and GUI speak an unversioned control protocol, so
+# an update replacing only the engine leaves an older GUI talking to a newer daemon. Engines from
+# this release on sniff gzip magic and unpack it.
+#
+# The raw binary is what a **pre-0.3 engine** must be pointed at. Its `apply` writes the artifact
+# bytes straight over its own executable — hand it the tarball and it installs a gzip file as its
+# binary and crash-loops on exec format error, needing a manual reinstall.
+#
+# So: publish `unitylan-engine-linux-$ARCH` in the coordinator's [release] block while any pre-0.3
+# clients remain, and switch to the bundle once they're gone. See packaging/README.md.
+cp "$ROOT/target/release/unitylan-engine" "$DIST/unitylan-engine-linux-$ARCH"
 tar -czf "$DIST/unitylan-linux-$ARCH.tar.gz" \
     -C "$ROOT/target/release" unitylan-engine unitylan-gui
 

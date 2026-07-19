@@ -282,11 +282,25 @@ Anything inside a `Signed` envelope (`common::wire`) is **postcard**, which enco
 position and variant index rather than by name. `#[serde(default)]` does nothing there, and a
 reordered field decodes as the wrong value instead of failing. So:
 
-- **`Attestation`** carries a leading `schema: u32`. Change the layout → bump `ATTESTATION_SCHEMA`.
-  It's cheap: the 30-minute TTL turns the whole signed corpus over on its own.
-- **`RotationCert`** and **`ReleaseManifest`**'s enums are **frozen**. Rotation chains are walked
-  forever from a client's original pin, so every cert ever issued must still decode. Append new enum
-  variants only; never edit those layouts in place. A change there needs a parallel type.
+And `#[serde(default)]` can't save you, because the field isn't named on the wire. So a
+signed-payload layout change is **versioned out of band and rolled out in two phases** — the pattern
+`Attestation` already demonstrates, worth copying rather than reinventing:
+
+1. Add the new layout as a distinct type (`AttestationV2`) and a `schema` number; keep the old one.
+   `sign_attestation`/`verify_attestation` take the number and pick the layout — callers never guess.
+2. Carry the number in the **JSON** envelope that wraps the blob (`GuildAttestation::att_schema`),
+   which *can* gain a field compatibly. The reader is told the layout; it never sniffs the bytes.
+3. Ship the **readers** everywhere first. Keep **emitting the old layout** until every supported
+   client can read the new one — gate emission on a capability the client advertises
+   (`caps::ATTESTATION_V2`), not on a version number. A client handed a layout it can't read decodes
+   nothing and silently meshes with no one; the capability is the interlock against that.
+4. Flip emission (`ATTESTATION_SCHEMA_EMIT`) only once `MIN_PROTOCOL_VERSION` excludes every release
+   without the cap. Two tests fail if you flip early.
+
+**`RotationCert`** and **`ReleaseManifest`**'s enums are **frozen** — no phased anything. Rotation
+chains are walked forever from a client's original pin, so every cert ever issued must still decode.
+Append new enum variants only; never edit those layouts in place. A change there needs a parallel
+type carried alongside, not a replacement.
 
 ### Don't make one peer everyone's problem
 

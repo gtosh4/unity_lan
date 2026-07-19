@@ -36,10 +36,15 @@ The 4 → 5 bump itself is the P2P response envelope gaining an unknown-variant 
   single bad attestation; it now skips that peer (still fail-closed — never routed) and logs at error
   level only when *every* seed fails, which is the signature of a substitution attack rather than
   version skew.
-- **Attestations had no schema tag.** They're signed as postcard, which is positional and not
-  self-describing, so a layout change could decode to wrong values rather than erroring. A leading
-  schema field now makes that a clean rejection — free here, since the 30-minute TTL turns the signed
-  corpus over on its own. `RotationCert` is documented frozen: its chains are walked forever.
+- **Attestation layouts are now versioned — compatibly.** They're signed as postcard, which is
+  positional and not self-describing, so a layout change could decode to wrong values rather than
+  erroring, and a client handed a layout it doesn't know can't even tell. The layout a blob is in is
+  now named in the JSON envelope (`GuildAttestation.att_schema`), which — unlike the signed bytes —
+  can gain a field compatibly. Clients from this release read both the original layout and the new
+  `schema`-tagged one; the coordinator keeps emitting the original to any client that hasn't
+  advertised the `attestation-v2` capability, so **every existing v0.2.0 client keeps working
+  unchanged**. Emission switches over in a later release once the support floor covers the
+  capability. `RotationCert` stays frozen — its chains are walked forever.
 
 ## v0.2.0
 

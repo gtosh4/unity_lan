@@ -140,8 +140,10 @@ git tag v0.1.0 && git push origin v0.1.0
 The package version comes from the tag (`VERSION=<tag without v> build.sh`). For arm64, add a
 matrix leg that builds via [`cross`](https://github.com/cross-rs/cross).
 
-Alongside the packages, the Linux job attaches `unitylan-linux-amd64.tar.gz` (engine + GUI) and a
-`SHA256SUMS`; the Windows job attaches `SHA256SUMS-windows.txt`. These feed the auto-update below.
+Alongside the packages, the Linux job attaches **both** `unitylan-engine-linux-amd64` (the raw
+binary) and `unitylan-linux-amd64.tar.gz` (engine + GUI), plus a `SHA256SUMS`; the Windows job
+attaches `SHA256SUMS-windows.txt`. These feed the auto-update below — see the phased rollout there
+for which of the two to publish.
 
 ## Signed auto-update
 
@@ -160,6 +162,13 @@ above) + size. The coordinator signs this manifest with its anchor at startup an
 long-poll. Each engine verifies it against its **pinned** anchor and, if the version is newer and an
 artifact matches its platform, the GUI shows an **Update** button. Applying it downloads the
 artifact, re-checks the SHA-256 against the signed manifest, then:
+
+> **Which Linux artifact to publish (phased).** A **pre-0.3 engine** writes the artifact bytes
+> straight over its own executable, so pointing it at the `.tar.gz` installs a gzip file as its
+> binary and crash-loops it — a manual reinstall. While any pre-0.3 clients may still be out there,
+> publish the raw `unitylan-engine-linux-amd64`; engines from 0.3 on handle either. Switch the
+> `[release]` block to the bundle once every client is ≥ 0.3, which is also when the GUI starts
+> being updated in lockstep.
 
 - **Linux** — unpacks the `.tar.gz`, self-replaces the engine binary
   (`/usr/lib/unitylan/unitylan-engine`, symlinked onto PATH) in place, replaces the GUI at
