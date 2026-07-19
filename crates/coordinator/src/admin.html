@@ -141,6 +141,7 @@
   </section>
 
   <div id="guilds"></div>
+  <div id="versions"></div>
   <footer id="footer"></footer>
 </div>
 
@@ -199,6 +200,20 @@ function render(d){
       </tbody></table>` : `<div class="empty">no networks registered</div>`;
     return `<section class="guild"><div class="ghead"><h2>${name}</h2><span class="chip">${esc(g.id)}</span></div>${rows}</section>`;
   }).join("") || `<div class="empty">no guilds yet</div>`;
+
+  // Fleet composition: how many online devices run each release. Lets an operator confirm every
+  // client has updated before flipping a phased wire change (e.g. retiring an attestation layout).
+  const cv = d.client_versions || [];
+  $("#versions").innerHTML = cv.length ? `
+    <section class="guild"><div class="ghead"><h2>client versions</h2>
+      <span class="chip">${cv.reduce((a,r)=>a+(r.devices||0),0).toLocaleString()} online</span></div>
+      <table><thead><tr><th>version</th><th class="num">devices</th></tr></thead><tbody>
+      ${cv.map(r => {
+        const unknown = r.version === "unknown" ? " zero" : "";
+        return `<tr><td>${esc(r.version)}</td>
+          <td class="num"><span class="onl${unknown}">${(r.devices ?? 0).toLocaleString()}</span></td></tr>`;
+      }).join("")}
+      </tbody></table></section>` : "";
 
   $("#footer").textContent = `membership version ${d.version} · control plane only — no peer traffic passes here`;
   lastOk = Date.now();

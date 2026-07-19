@@ -456,6 +456,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
                     is_primary,
                     endpoint: req.endpoint,
                 },
+                req.client_version.clone(),
                 now,
             )
         {
@@ -491,6 +492,7 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
                 is_primary,
                 endpoint: req.endpoint,
             },
+            req.client_version.clone(),
             now,
         )
     } else {

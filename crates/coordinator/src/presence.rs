@@ -4,7 +4,7 @@
 //!
 //! Keyed by (guild, role, device pubkey) so a user's multiple devices don't collide.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
@@ -21,12 +21,17 @@ pub struct MemberPresence {
     pub endpoint: Option<SocketAddr>,
 }
 
-/// A presence entry: the device's live info plus when we last heard from it. `last_seen` is kept
-/// out of `MemberPresence`'s `PartialEq` (it lives here, not there) so a steady-state re-record
-/// still compares equal and doesn't spuriously bump the version every refresh.
+/// A presence entry: the device's live info plus when we last heard from it. `last_seen` and
+/// `client_version` are both kept out of `MemberPresence`'s `PartialEq` (they live here, not there)
+/// so a steady-state re-record — including a client that just auto-updated to a new version — still
+/// compares equal and doesn't spuriously bump the membership version and wake the herd. The version
+/// is peering-irrelevant; it's tracked only for the operator's fleet view (`stats`).
 struct Entry {
     p: MemberPresence,
     last_seen: u64,
+    /// The device's reported release version (`RegisterReq::client_version`), `""` from a
+    /// pre-versioning client. Refreshed on every record so it tracks a device across an update.
+    client_version: String,
 }
 
 #[derive(Default)]
@@ -47,22 +52,49 @@ impl Presence {
     /// `true` if this changed the map (a new device or altered fields) — the caller bumps the
     /// membership version so parked long-polls wake. An identical re-record (steady-state refresh)
     /// returns `false` → no wake, but still refreshes `last_seen` so the reaper leaves it alone.
-    pub fn record(&self, guild_id: u64, role_id: u64, p: MemberPresence, now: u64) -> bool {
+    pub fn record(
+        &self,
+        guild_id: u64,
+        role_id: u64,
+        p: MemberPresence,
+        client_version: String,
+        now: u64,
+    ) -> bool {
         let key = (guild_id, role_id, p.pubkey);
         let mut map = self.map.lock().unwrap();
         let changed = map.get(&key).map(|e| &e.p) != Some(&p);
-        map.insert(key, Entry { p, last_seen: now });
+        map.insert(
+            key,
+            Entry {
+                p,
+                last_seen: now,
+                client_version,
+            },
+        );
         changed
     }
 
     /// Record a device in the per-user online set (own-device peering). Semantics mirror [`record`]:
     /// returns `true` if it changed the map (new device / altered fields) so the caller bumps the
     /// version; an identical re-record refreshes `last_seen` only.
-    pub fn record_self(&self, user_id: u64, p: MemberPresence, now: u64) -> bool {
+    pub fn record_self(
+        &self,
+        user_id: u64,
+        p: MemberPresence,
+        client_version: String,
+        now: u64,
+    ) -> bool {
         let key = (user_id, p.pubkey);
         let mut map = self.self_map.lock().unwrap();
         let changed = map.get(&key).map(|e| &e.p) != Some(&p);
-        map.insert(key, Entry { p, last_seen: now });
+        map.insert(
+            key,
+            Entry {
+                p,
+                last_seen: now,
+                client_version,
+            },
+        );
         changed
     }
 
@@ -177,6 +209,9 @@ impl Presence {
             HashMap::new();
         let mut devices = std::collections::HashSet::new();
         let mut users = std::collections::HashSet::new();
+        // Each device reports one version; it appears in one map row per network, so collapse to
+        // pubkey first, then tally — otherwise a device in N networks would count N times.
+        let mut device_version: HashMap<[u8; 32], String> = HashMap::new();
         for ((g, r, pk), e) in map.iter() {
             *online_per_network.entry((*g, *r)).or_default() += 1;
             users_by_network
@@ -185,6 +220,20 @@ impl Presence {
                 .insert(e.p.user_id);
             devices.insert(*pk);
             users.insert(e.p.user_id);
+            device_version
+                .entry(*pk)
+                .or_insert_with(|| e.client_version.clone());
+        }
+        // Tally distinct devices per version. An empty string (a pre-versioning client) buckets as
+        // "unknown" so both the JSON feed and the Prometheus label carry a clean value.
+        let mut client_versions: BTreeMap<String, usize> = BTreeMap::new();
+        for v in device_version.into_values() {
+            let label = if v.is_empty() {
+                "unknown".to_string()
+            } else {
+                v
+            };
+            *client_versions.entry(label).or_default() += 1;
         }
         PresenceStats {
             online_per_network,
@@ -194,6 +243,7 @@ impl Presence {
                 .collect(),
             online_devices: devices.len(),
             online_users: users.len(),
+            client_versions,
         }
     }
 
@@ -222,6 +272,10 @@ pub struct PresenceStats {
     pub online_devices: usize,
     /// Distinct users currently online across the deployment.
     pub online_users: usize,
+    /// Distinct online devices per reported client version (`""` bucketed as `"unknown"`), sorted
+    /// by version. The operator's fleet view — how many of each release are live, so a phased wire
+    /// change (e.g. retiring an attestation layout) can be gated on "no old client remains".
+    pub client_versions: BTreeMap<String, usize>,
 }
 
 #[cfg(test)]
@@ -243,7 +297,7 @@ mod tests {
     #[test]
     fn evict_removes_and_reports_change() {
         let p = Presence::default();
-        p.record(1, 2, mp([9; 32], 42), 0);
+        p.record(1, 2, mp([9; 32], 42), "".into(), 0);
         assert_eq!(p.networks_of(&[9; 32]), vec![(1, 2)]);
         assert!(p.evict(1, 2, &[9; 32]));
         assert!(p.networks_of(&[9; 32]).is_empty());
@@ -253,9 +307,9 @@ mod tests {
     #[test]
     fn evict_user_drops_all_their_devices_in_network() {
         let p = Presence::default();
-        p.record(1, 2, mp([1; 32], 42), 0); // user 42, device A
-        p.record(1, 2, mp([2; 32], 42), 0); // user 42, device B
-        p.record(1, 2, mp([3; 32], 99), 0); // other user
+        p.record(1, 2, mp([1; 32], 42), "".into(), 0); // user 42, device A
+        p.record(1, 2, mp([2; 32], 42), "".into(), 0); // user 42, device B
+        p.record(1, 2, mp([3; 32], 99), "".into(), 0); // other user
         assert!(p.evict_user(1, 2, 42));
         // both of 42's devices gone; the other user's stays.
         assert_eq!(p.others_in(1, 2, &[0; 32]).len(), 1);
@@ -265,10 +319,10 @@ mod tests {
     #[test]
     fn reap_evicts_only_stale_entries() {
         let p = Presence::default();
-        p.record(1, 2, mp([1; 32], 42), 100); // last seen t=100
-        p.record(1, 2, mp([2; 32], 99), 150); // last seen t=150
-                                              // At t=200 with max_age 60: entry A (age 100) is stale, B (age 50) is fresh.
-                                              // Only guild 1's scope is reported — no other guild's clients are woken.
+        p.record(1, 2, mp([1; 32], 42), "".into(), 100); // last seen t=100
+        p.record(1, 2, mp([2; 32], 99), "".into(), 150); // last seen t=150
+                                                         // At t=200 with max_age 60: entry A (age 100) is stale, B (age 50) is fresh.
+                                                         // Only guild 1's scope is reported — no other guild's clients are woken.
         assert_eq!(p.reap(200, 60), [Scope::Guild(1)].into_iter().collect());
         assert!(p.networks_of(&[1; 32]).is_empty());
         assert_eq!(p.networks_of(&[2; 32]), vec![(1, 2)]);
@@ -280,10 +334,12 @@ mod tests {
     fn stats_counts_per_network_and_distinct_totals() {
         let p = Presence::default();
         // user 42 device A in two networks; user 42 device B in one; user 99 device C in one.
-        p.record(1, 2, mp([1; 32], 42), 0);
-        p.record(1, 3, mp([1; 32], 42), 0);
-        p.record(1, 2, mp([2; 32], 42), 0);
-        p.record(1, 2, mp([3; 32], 99), 0);
+        // A runs 0.3.0 and is recorded in two networks — it must still count once for its version.
+        // B also 0.3.0; C is a pre-versioning client ("" → "unknown").
+        p.record(1, 2, mp([1; 32], 42), "0.3.0".into(), 0);
+        p.record(1, 3, mp([1; 32], 42), "0.3.0".into(), 0);
+        p.record(1, 2, mp([2; 32], 42), "0.3.0".into(), 0);
+        p.record(1, 2, mp([3; 32], 99), "".into(), 0);
         let s = p.stats();
         assert_eq!(s.online_per_network[&(1, 2)], 3); // A, B, C
         assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
@@ -291,16 +347,19 @@ mod tests {
         assert_eq!(s.users_per_network[&(1, 3)], 1); // 42 only
         assert_eq!(s.online_devices, 3); // A, B, C distinct
         assert_eq!(s.online_users, 2); // 42, 99
+                                       // A (in two networks) counts once, not twice; empty version buckets as "unknown".
+        assert_eq!(s.client_versions[&"0.3.0".to_string()], 2); // A, B
+        assert_eq!(s.client_versions[&"unknown".to_string()], 1); // C
     }
 
     #[test]
     fn membership_dedupes_devices_per_user_and_sorts() {
         let p = Presence::default();
         // user 42 has two devices in network (1,2) — one edge; also in (1,3). user 99 in (1,2).
-        p.record(1, 2, mp([1; 32], 42), 0);
-        p.record(1, 2, mp([2; 32], 42), 0);
-        p.record(1, 3, mp([1; 32], 42), 0);
-        p.record(1, 2, mp([3; 32], 99), 0);
+        p.record(1, 2, mp([1; 32], 42), "".into(), 0);
+        p.record(1, 2, mp([2; 32], 42), "".into(), 0);
+        p.record(1, 3, mp([1; 32], 42), "".into(), 0);
+        p.record(1, 2, mp([3; 32], 99), "".into(), 0);
         assert_eq!(
             p.membership(),
             vec![(1, 2, 42), (1, 2, 99), (1, 3, 42)],
@@ -312,9 +371,9 @@ mod tests {
     fn self_presence_scopes_to_owner_and_reaps() {
         let p = Presence::default();
         // user 42 devices A & B; user 99 device C.
-        assert!(p.record_self(42, mp([1; 32], 42), 100));
-        assert!(p.record_self(42, mp([2; 32], 42), 100));
-        assert!(p.record_self(99, mp([3; 32], 99), 100));
+        assert!(p.record_self(42, mp([1; 32], 42), "".into(), 100));
+        assert!(p.record_self(42, mp([2; 32], 42), "".into(), 100));
+        assert!(p.record_self(99, mp([3; 32], 99), "".into(), 100));
         // A sees only its sibling B, never user 99's C.
         let others: Vec<_> = p
             .others_of_user(42, &[1; 32])
@@ -323,7 +382,7 @@ mod tests {
             .collect();
         assert_eq!(others, vec![[2; 32]]);
         // Identical re-record doesn't report a change (no spurious version bump).
-        assert!(!p.record_self(42, mp([2; 32], 42), 200));
+        assert!(!p.record_self(42, mp([2; 32], 42), "".into(), 200));
         // Explicit evict removes B; a second evict is a no-op.
         assert!(p.evict_self(42, &[2; 32]));
         assert!(!p.evict_self(42, &[2; 32]));
@@ -340,9 +399,9 @@ mod tests {
     #[test]
     fn record_refreshes_last_seen_without_reporting_change() {
         let p = Presence::default();
-        assert!(p.record(1, 2, mp([1; 32], 42), 100)); // new → changed
-        assert!(!p.record(1, 2, mp([1; 32], 42), 300)); // identical → no wake, but re-stamped
-                                                        // The re-stamp at t=300 keeps it alive: at t=340, age 40 ≤ 60, survives.
+        assert!(p.record(1, 2, mp([1; 32], 42), "".into(), 100)); // new → changed
+        assert!(!p.record(1, 2, mp([1; 32], 42), "".into(), 300)); // identical → no wake, but re-stamped
+                                                                   // The re-stamp at t=300 keeps it alive: at t=340, age 40 ≤ 60, survives.
         assert!(p.reap(340, 60).is_empty());
         assert_eq!(p.networks_of(&[1; 32]), vec![(1, 2)]);
     }

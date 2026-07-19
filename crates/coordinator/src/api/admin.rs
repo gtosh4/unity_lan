@@ -38,6 +38,9 @@ struct AdminStats {
     enrolled_devices: u64,
     longpoll_waiters: usize,
     version: u64,
+    /// Distinct online devices per reported client version (`""` → `"unknown"`). Lets the operator
+    /// confirm the fleet is fully updated before retiring a phased wire change.
+    client_versions: BTreeMap<String, usize>,
 }
 
 async fn gather_stats(st: &AppState) -> Result<AdminStats, ApiError> {
@@ -88,6 +91,7 @@ async fn gather_stats(st: &AppState) -> Result<AdminStats, ApiError> {
         enrolled_devices,
         longpoll_waiters: st.versions.waiters(),
         version: st.versions.global(),
+        client_versions: pres.client_versions,
     })
 }
 
@@ -203,6 +207,12 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
         })
         .collect();
 
+    let client_versions: Vec<serde_json::Value> = s
+        .client_versions
+        .iter()
+        .map(|(v, n)| serde_json::json!({ "version": v, "devices": n }))
+        .collect();
+
     serde_json::json!({
         "version": s.version,
         "totals": {
@@ -214,6 +224,7 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
             "longpoll_waiters": s.longpoll_waiters,
         },
         "guilds": guilds,
+        "client_versions": client_versions,
     })
 }
 
@@ -459,6 +470,20 @@ fn render_metrics(s: &AdminStats) -> String {
             );
         }
     }
+    // Fleet composition — how many online devices run each release. The version string is not user
+    // identity (it's the same for everyone on a build), so it's safe on the wider scrape audience;
+    // the operator uses it to confirm the fleet is updated before retiring a phased wire change.
+    let _ = writeln!(
+        out,
+        "# HELP unitylan_devices_online_by_version Online devices per reported client version."
+    );
+    let _ = writeln!(out, "# TYPE unitylan_devices_online_by_version gauge");
+    for (v, n) in &s.client_versions {
+        let _ = writeln!(
+            out,
+            "unitylan_devices_online_by_version{{version=\"{v}\"}} {n}"
+        );
+    }
     out
 }
 
@@ -631,6 +656,9 @@ mod tests {
             enrolled_devices: 9,
             longpoll_waiters: 1,
             version: 42,
+            client_versions: [("0.3.0".to_string(), 2), ("unknown".to_string(), 1)]
+                .into_iter()
+                .collect(),
         };
 
         let json = stats_json(&s).to_string();
@@ -649,6 +677,13 @@ mod tests {
         assert!(!metrics.contains("Some Server") && !metrics.contains("gamers"));
         // The dashboard, by contrast, does show them.
         assert!(json.contains("Some Server") && json.contains("gamers"));
+        // Fleet version counts surface on both — a version string is not identity, so it's allowed
+        // on the wider metrics audience.
+        assert!(
+            metrics.contains("unitylan_devices_online_by_version{version=\"0.3.0\"} 2"),
+            "version series missing from metrics"
+        );
+        assert!(json.contains("0.3.0") && json.contains("unknown"));
     }
 
     /// The listing shows only what's live: zero-online networks drop out, and a guild left with
@@ -692,6 +727,7 @@ mod tests {
             enrolled_devices: 9,
             longpoll_waiters: 1,
             version: 42,
+            client_versions: BTreeMap::new(),
         };
 
         let v = stats_json(&s);
