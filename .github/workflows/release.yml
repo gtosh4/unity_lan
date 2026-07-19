@@ -13,8 +13,37 @@ permissions:
   packages: write   # push the coordinator image to GHCR
 
 jobs:
+  # Create the GitHub Release with notes lifted from CHANGELOG.md *before* any artifact attaches, so
+  # the release page (and the Discord announce, which reads the body) always has real notes. Left to
+  # itself, action-gh-release creates the release with an empty body. The build jobs below `needs`
+  # this and attach files without a body, which action-gh-release preserves.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish release notes from CHANGELOG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The section for this tag: lines from `## v<ver>` (prefix match, so a titled header like
+          # `## v0.1.0 — first release` still matches) up to the next `## ` heading.
+          awk -v v="## ${TAG}" 'index($0,v)==1{f=1;next} /^## /{f=0} f' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "::warning::no CHANGELOG.md section for ${TAG}"
+            printf 'Release %s\n' "$TAG" > notes.md
+          fi
+          # Idempotent: create on first run, edit on a re-run or a hand-created release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+              --notes-file notes.md --verify-tag
+          fi
+
   # engine + desktop .deb/.rpm (amd64). For arm64, add a matrix building via `cross`.
   packages:
+    needs: [release]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +62,7 @@ jobs:
 
   # Windows installer (.msi, x64) built with WiX. Bundles the engine service + GUI + wireguard-nt.
   windows:
+    needs: [release]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
