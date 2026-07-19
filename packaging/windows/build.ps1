@@ -88,9 +88,14 @@ foreach ($f in @($engineExe, $guiExe, $engineToml, $wgDll)) {
 # The installer's dialogs (WelcomeDlg + the launch-on-finish ExitDialog) come from the WixUI stock
 # dialog library in the UI extension. Add it globally to the wix tool if it isn't already present
 # (idempotent — a second add is a no-op warning we ignore).
+#
+# Pin the extension version to the WiX toolset version (see the `--version` in the header + CI). An
+# unpinned `add` grabs the newest published — a wixext 7.x that fails against a v5 toolset with
+# WIX6101 ("could not find package root folder wixext5"). Keep this in lockstep with the toolset.
+$WixExtVersion = '5.0.2'
 if (-not (wix extension list -g | Select-String -SimpleMatch 'WixToolset.UI.wixext')) {
-    Write-Host ">> adding WiX UI extension" -ForegroundColor Cyan
-    wix extension add -g WixToolset.UI.wixext
+    Write-Host ">> adding WiX UI extension $WixExtVersion" -ForegroundColor Cyan
+    wix extension add -g "WixToolset.UI.wixext/$WixExtVersion"
     if ($LASTEXITCODE -ne 0) { throw "wix extension add failed" }
 }
 
