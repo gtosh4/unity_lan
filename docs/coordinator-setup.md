@@ -169,7 +169,7 @@ token = "…"   # a long random secret YOU generate, e.g. `openssl rand -hex 32`
 |---|---|---|
 | `GET /admin` | none (holds no data) | the browser dashboard (a shell that fetches the feed) |
 | `GET /admin/stats` | `Authorization: Bearer <token>` | JSON feed the dashboard long-polls |
-| `GET /admin/graph` | `Authorization: Bearer <token>` | anonymized network↔user graph the dashboard renders |
+| `GET /admin/graph` | `Authorization: Bearer <token>` | network↔user graph the dashboard renders (users anonymized) |
 | `GET /metrics` | `Authorization: Bearer <token>` | Prometheus text exposition |
 
 **Dashboard.** Open `https://<your-coordinator>/admin` in a browser and paste the token once
@@ -179,26 +179,37 @@ instant a device joins or leaves; otherwise a ~25 s heartbeat keeps it live.
 
 ![UnityLAN coordinator admin dashboard](../assets/coordinator-admin.png)
 
-**Network graph.** Below the stat cards, the dashboard draws a live, **fully anonymized** graph of
-your mesh: one node per registered **network** (colored by its guild) and one per **online user**,
-with an edge wherever a user is in a network. It's built from the same cheap sources as the stats
-feed — the network registry plus in-memory presence — so it adds **no** Discord or database load,
-and it refreshes on the same realtime tick as the counts.
+**Network graph.** Below the stat cards, the dashboard draws a live graph of your mesh: one node
+per registered **network** (colored by its guild) and one per **online user**, with an edge wherever
+a user is in a network. It's built from the same cheap sources as the stats feed — the network
+registry plus in-memory presence — so it adds **no** database load and at most one cached
+guild-name lookup, and it refreshes on the same realtime tick as the counts.
 
-- Every label is a deterministic, deployment-keyed hash — **no Discord ID, username, or role name
-  ever leaves the coordinator**. The mapping is stable, so the same user stays the same node.
+- **Users are always anonymized.** Each is a deterministic, deployment-keyed hash — **no Discord
+  ID, username, or device name reaches this surface**. The mapping is stable, so the same user
+  stays the same node between renders, but it means nothing outside your deployment.
+- **Guilds and networks are shown by name**, because they are your own registry (what you set with
+  `/unitylan network add`) and already ride in every peer snapshot — hiding them here would buy
+  nothing. So an operator sees *which communities and networks exist* and *the shape* of who joins
+  what, without seeing *who*.
 - A user in **multiple guilds** is a single node bridging those guilds' networks (a device is one
   identity across all of a coordinator's guilds), so cross-community overlap is visible at a glance.
-- Empty (zero-online) networks still show, as isolated nodes.
+- **Only live networks appear.** A network with nobody online is omitted, and a guild left with no
+  networks is omitted with it — the graph and the guild listing below it are a "what's connected
+  right now" view, so a quiet deployment draws a small graph or none at all. The stat cards above
+  (and `/metrics`) keep counting everything registered, so you can still tell *configured* from
+  *connected*.
 - **Scroll to zoom, drag the background to pan, drag a node** to pull the layout around.
 - **Download .dot** exports the current graph as [Graphviz](https://graphviz.org/) DOT (networks
   clustered per guild) for offline rendering or archiving.
 
 ![UnityLAN coordinator network graph](../assets/coordinator-admin-graph.png)
 
-In the shot above, `user-3f9a2b1c` (top) sits in three different guilds at once — its edges reach a
-network of each guild color — while `net-empty` hangs unconnected because no one holding that role
-is currently online.
+In the shot above the networks are named (`minecraft`, `valheim`, `storage`, …) and colored by
+guild, while every member is an opaque `user-…` token. `user-68f112db` (center) sits in three
+guilds at once — its edges reach a network of each guild color. The deployment has a seventh
+registered network with nobody online; it isn't drawn, which is why the header reads 6 while the
+stat card above still counts 7.
 
 **Auth model.** The token is a secret *you* set — there is no shipped default, so no one
 upstream can reach your instance; anyone running their own coordinator controls their own. It
@@ -219,7 +230,13 @@ scrape_configs:
 
 Exposed gauges: `unitylan_guilds`, `unitylan_networks`, `unitylan_devices_enrolled`,
 `unitylan_devices_online`, `unitylan_users_online`, `unitylan_longpoll_waiters`, and
-`unitylan_peers_online{guild_id,guild,network,role_id}` (online devices per network).
+`unitylan_peers_online{guild_id,role_id}` (online devices per network).
+
+> **Ids only, no names.** `unitylan_peers_online` labels with `guild_id`/`role_id` and **not**
+> guild or network names. A scrape stream leaves the coordinator for whatever Prometheus/Grafana
+> consumes it — an audience typically wider than the admin token — and the ids are enough to
+> correlate a series with a report. Join names in at query time if you want them on a chart. (The
+> `guild` and `network` labels were removed; a dashboard relying on them needs updating.)
 
 > **"Online" vs "enrolled."** Per-network counts are devices **currently connected** (live
 > presence). `devices_enrolled` is the deployment-wide total of registered devices — devices

@@ -162,7 +162,39 @@ pub(super) async fn admin_stats(
 
 /// Serialize a snapshot for the dashboard. Guild/role snowflakes go out as **strings** — they
 /// exceed 2^53 and a JS `Number` would silently mangle them.
+///
+/// The **listing** shows only what is live: networks with nobody online are omitted, and a guild
+/// left with no networks after that is omitted too. The **totals** above it stay unfiltered (they
+/// are deployment-wide registration counts, not a live view), as does `/metrics` — a Prometheus
+/// series that disappears at zero reads as a scrape failure rather than "nobody online".
 fn stats_json(s: &AdminStats) -> serde_json::Value {
+    let guilds: Vec<serde_json::Value> = s
+        .guilds
+        .iter()
+        .filter_map(|g| {
+            let nets: Vec<serde_json::Value> = g
+                .networks
+                .iter()
+                .filter(|n| n.online > 0)
+                .map(|n| {
+                    serde_json::json!({
+                        "role_id": n.role_id.to_string(),
+                        "name": n.name,
+                        "online": n.online,
+                    })
+                })
+                .collect();
+            if nets.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "id": g.id.to_string(),
+                "name": g.name,
+                "networks": nets,
+            }))
+        })
+        .collect();
+
     serde_json::json!({
         "version": s.version,
         "totals": {
@@ -173,24 +205,23 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
             "devices_enrolled": s.enrolled_devices,
             "longpoll_waiters": s.longpoll_waiters,
         },
-        "guilds": s.guilds.iter().map(|g| serde_json::json!({
-            "id": g.id.to_string(),
-            "name": g.name,
-            "networks": g.networks.iter().map(|n| serde_json::json!({
-                "role_id": n.role_id.to_string(),
-                "name": n.name,
-                "online": n.online,
-            })).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
+        "guilds": guilds,
     })
 }
 
-/// `GET /admin/graph`: token-gated, fully-anonymized bipartite graph of **networks ↔ currently-
-/// online users**, for the dashboard's interactive view and its Graphviz export. Built from the
-/// same cheap sources as `/admin/stats` — the network registry plus in-memory presence — so it
-/// adds **no** Discord/DB fan-out. Every identifier (guild, network/role, user) is replaced by a
-/// deployment-keyed opaque label (see [`common::crypto::anon_label`]): the mapping is stable within
-/// a deployment (a user is the same node across renders) but leaks no Discord snowflake or name.
+/// `GET /admin/graph`: token-gated bipartite graph of **networks ↔ currently-online users**, for
+/// the dashboard's interactive view and its Graphviz export. Built from the same cheap sources as
+/// `/admin/stats` — the network registry, in-memory presence, and the TTL-cached guild-name lookup
+/// — so it adds no DB fan-out and at most one cached Discord read per guild.
+///
+/// **Anonymization is asymmetric, by policy.** Guilds and networks appear under their real
+/// snowflake and name: they are the operator's own registry (set by `/unitylan network add`) and
+/// already ride in every peer snapshot, so hiding them here buys nothing. **Users never do** —
+/// each is a deployment-keyed opaque label ([`common::crypto::anon_label`]), stable across renders
+/// so the topology stays readable, but carrying no Discord id, username, or device name. The
+/// operator can see *which communities and networks exist*, and *the shape* of who joins what,
+/// without seeing *who*.
+///
 /// Returned immediately (no long-poll); the dashboard refetches it when the `/admin/stats` version
 /// ticks, so the graph stays live without a second parked request.
 pub(super) async fn admin_graph(
@@ -201,12 +232,13 @@ pub(super) async fn admin_graph(
     Ok(Json(build_graph(&st).await?))
 }
 
-/// Gather the graph's cheap inputs (deployment seed, network registry, live membership, version)
-/// and hand them to [`graph_json`]. The split keeps the async I/O here and the anonymization +
-/// assembly pure and unit-testable.
+/// Gather the graph's cheap inputs (deployment seed, network registry, live membership, guild
+/// display names, version) and hand them to [`graph_json`]. The split keeps the async I/O here and
+/// the anonymization + assembly pure and unit-testable.
 async fn build_graph(st: &AppState) -> Result<serde_json::Value, ApiError> {
     // The deployment seed is a stable per-deployment secret (not a signing key); it keys the
-    // anonymization so labels are consistent across requests yet meaningless off this instance.
+    // *user* anonymization so labels are consistent across requests yet meaningless off this
+    // instance. Guilds and networks are not anonymized — see `admin_graph`.
     let seed = st
         .store
         .load_or_create_deployment_seed()
@@ -214,49 +246,93 @@ async fn build_graph(st: &AppState) -> Result<serde_json::Value, ApiError> {
         .map_err(internal)?;
     let networks = st.store.all_networks().await.map_err(internal)?;
     let membership = st.presence.membership();
+
+    // One TTL-cached lookup per guild, same source the dashboard already uses. Admin-only and
+    // rare, so this stays off the client hot path.
+    let mut guild_names: BTreeMap<u64, String> = BTreeMap::new();
+    for id in networks
+        .iter()
+        .map(|n| n.guild_id)
+        .chain(membership.iter().map(|(g, _, _)| *g))
+        .collect::<BTreeSet<u64>>()
+    {
+        if let Some(name) = st.roles.guild_name(id).await {
+            guild_names.insert(id, name);
+        }
+    }
+
     let version = st.versions.global();
-    Ok(graph_json(&seed, &networks, &membership, version))
+    Ok(graph_json(
+        &seed,
+        &networks,
+        &membership,
+        &guild_names,
+        version,
+    ))
 }
 
-/// Assemble the anonymized graph. Network nodes come from the registry (so empty networks still
-/// appear, as isolated nodes); user nodes and edges come from live presence `membership` (one edge
-/// per user per network they're online in). Every identifier is replaced by a seed-keyed opaque
-/// label. Ordering is deterministic (BTree-backed) so the graph and its DOT export are stable
-/// between renders.
+/// Assemble the graph. Everything is driven by live presence `membership` (one edge per user per
+/// network they're online in): a network with nobody online is omitted, and so is a guild left
+/// with no networks. The registry supplies display names and the authoritative role→guild mapping
+/// for the networks that survive.
+///
+/// Guild and network nodes carry their real snowflake as `id` and their real name as `label`.
+/// User nodes carry only a seed-keyed opaque label and have no `label` field — there is no user
+/// name, id, or device name anywhere in the output. Ordering is deterministic (BTree-backed) so
+/// the graph and its DOT export are stable between renders.
 fn graph_json(
     seed: &[u8; 32],
     networks: &[crate::store::Network],
     membership: &[(u64, u64, u64)],
+    guild_names: &BTreeMap<u64, String>,
     version: u64,
 ) -> serde_json::Value {
-    let net = |role_id: u64| {
-        format!(
-            "net-{}",
-            common::crypto::anon_label(seed, "network", role_id)
-        )
-    };
-    let guild = |guild_id: u64| {
-        format!(
-            "guild-{}",
-            common::crypto::anon_label(seed, "guild", guild_id)
-        )
-    };
+    let net = |role_id: u64| format!("net-{role_id}");
+    let guild = |guild_id: u64| format!("guild-{guild_id}");
     let user = |user_id: u64| format!("user-{}", common::crypto::anon_label(seed, "user", user_id));
 
-    // role_id → guild_id, from the registry plus any presence network lingering after its
-    // registry row was removed (reaped shortly, but keep the edge's endpoint from dangling).
-    let mut net_guild: BTreeMap<u64, u64> =
+    // role_id → guild_id for the networks that actually have someone online. The registry is
+    // authoritative for the mapping; a presence network lingering after its registry row was
+    // removed (reaped shortly) falls back to the guild presence recorded it under.
+    let registry_guild: BTreeMap<u64, u64> =
         networks.iter().map(|n| (n.role_id, n.guild_id)).collect();
-    for (g, r, _) in membership {
-        net_guild.entry(*r).or_insert(*g);
-    }
+    let net_guild: BTreeMap<u64, u64> = membership
+        .iter()
+        .map(|(g, r, _)| (*r, registry_guild.get(r).copied().unwrap_or(*g)))
+        .collect();
+    // role_id → display name; a presence-only network has no registry row, so it falls back to
+    // its id below.
+    let net_names: BTreeMap<u64, &str> = networks
+        .iter()
+        .map(|n| (n.role_id, n.name.as_str()))
+        .collect();
 
-    let guilds: BTreeSet<String> = net_guild.values().map(|g| guild(*g)).collect();
+    let guilds: Vec<serde_json::Value> = net_guild
+        .values()
+        .copied()
+        .collect::<BTreeSet<u64>>()
+        .into_iter()
+        .map(|g| {
+            let label = guild_names
+                .get(&g)
+                .cloned()
+                .unwrap_or_else(|| g.to_string());
+            serde_json::json!({ "id": guild(g), "label": label })
+        })
+        .collect();
     let users: BTreeSet<String> = membership.iter().map(|(_, _, u)| user(*u)).collect();
 
     let mut nodes: Vec<serde_json::Value> = net_guild
         .iter()
-        .map(|(r, g)| serde_json::json!({ "id": net(*r), "kind": "network", "guild": guild(*g) }))
+        .map(|(r, g)| {
+            let label = net_names
+                .get(r)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| r.to_string());
+            serde_json::json!({
+                "id": net(*r), "kind": "network", "guild": guild(*g), "label": label,
+            })
+        })
         .collect();
     nodes.extend(
         users
@@ -270,7 +346,7 @@ fn graph_json(
 
     serde_json::json!({
         "version": version,
-        "guilds": guilds.into_iter().collect::<Vec<_>>(),
+        "guilds": guilds,
         "nodes": nodes,
         "edges": edges,
     })
@@ -297,13 +373,6 @@ pub(super) async fn admin_metrics(
 /// `[admin]` token from `localStorage` (prompting once), then long-polls `/admin/stats` with a
 /// `Bearer` header and re-renders on every response — realtime with no server-rendered data here.
 const ADMIN_HTML: &str = include_str!("../admin.html");
-
-/// Escape a Prometheus label value (backslash, double-quote, newline).
-fn esc_label(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-}
 
 fn gauge(out: &mut String, name: &str, help: &str, val: impl std::fmt::Display) {
     use std::fmt::Write;
@@ -362,17 +431,16 @@ fn render_metrics(s: &AdminStats) -> String {
         "# HELP unitylan_peers_online Devices online per network."
     );
     let _ = writeln!(out, "# TYPE unitylan_peers_online gauge");
+    // Ids only, never guild/network *names*. A scrape stream leaves this box for whatever
+    // Prometheus/Grafana consumes it — an audience wider than the `[admin]` token — and the ids
+    // are enough to correlate a series with a support report. Names stay on the token-gated
+    // dashboard.
     for g in &s.guilds {
-        let gname = esc_label(g.name.as_deref().unwrap_or(""));
         for n in &g.networks {
             let _ = writeln!(
                 out,
-                "unitylan_peers_online{{guild_id=\"{}\",guild=\"{}\",network=\"{}\",role_id=\"{}\"}} {}",
-                g.id,
-                gname,
-                esc_label(&n.name),
-                n.role_id,
-                n.online
+                "unitylan_peers_online{{guild_id=\"{}\",role_id=\"{}\"}} {}",
+                g.id, n.role_id, n.online
             );
         }
     }
@@ -392,60 +460,245 @@ mod tests {
         }
     }
 
+    struct Fixture {
+        seed: [u8; 32],
+        networks: Vec<Network>,
+        membership: Vec<(u64, u64, u64)>,
+        guild_names: BTreeMap<u64, String>,
+    }
+
+    impl Fixture {
+        fn graph(&self) -> serde_json::Value {
+            graph_json(
+                &self.seed,
+                &self.networks,
+                &self.membership,
+                &self.guild_names,
+                42,
+            )
+        }
+    }
+
+    /// Guild 100 has two networks (roles 11, 12); guild 200 has one (role 21); guild 300 has one
+    /// (role 31). Live membership: user 7 in (100,11); user 8 in (100,11) and (200,21). Role 12
+    /// has nobody, and guild 300 has nobody at all — so both should be filtered out.
+    fn fixture() -> Fixture {
+        Fixture {
+            seed: [3u8; 32],
+            networks: vec![
+                net(100, 11, "gamers"),
+                net(100, 12, "empty-net"),
+                net(200, 21, "staff"),
+                net(300, 31, "ghost-town"),
+            ],
+            membership: vec![(100, 11, 7), (100, 11, 8), (200, 21, 8)],
+            guild_names: [
+                (100u64, "Some Server".to_string()),
+                (200, "Staff HQ".into()),
+                (300, "Nobody Home".into()),
+            ]
+            .into_iter()
+            .collect(),
+        }
+    }
+
     #[test]
-    fn graph_json_anonymizes_and_keeps_empty_networks() {
-        let seed = [3u8; 32];
-        // Guild 100 has two networks (roles 11, 12); guild 200 has one (role 21).
-        let networks = [
-            net(100, 11, "gamers"),
-            net(100, 12, "empty-net"),
-            net(200, 21, "staff"),
-        ];
-        // Live membership: user 7 in (100,11); user 8 in (100,11) and (200,21). Role 12 has nobody.
-        let membership = [(100, 11, 7), (100, 11, 8), (200, 21, 8)];
-        let g = graph_json(&seed, &networks, &membership, 42);
+    fn graph_json_names_guilds_and_networks_but_never_users() {
+        let f = fixture();
+        let g = f.graph();
+        let blob = g.to_string();
+
+        // Guilds and networks are the operator's own registry — the live ones are shown as-is.
+        for shown in ["gamers", "staff", "Some Server", "Staff HQ"] {
+            assert!(blob.contains(shown), "expected to expose: {shown}");
+        }
+        assert!(blob.contains("guild-100") && blob.contains("net-11"));
+
+        // Users are never identifiable: no raw user id, and every user node is an opaque label
+        // with no `label` field to leak a name.
+        for uid in [7u64, 8] {
+            let anon = format!("user-{}", common::crypto::anon_label(&f.seed, "user", uid));
+            assert!(blob.contains(&anon), "user {uid} should appear anonymized");
+        }
+        let nodes = g["nodes"].as_array().unwrap();
+        for n in nodes.iter().filter(|n| n["kind"] == "user") {
+            let id = n["id"].as_str().unwrap();
+            assert!(id.starts_with("user-"));
+            assert!(!id.contains('7') || id.len() > 6, "raw id in {id}");
+            assert!(n.get("label").is_none(), "user node carries a label: {n}");
+        }
+        // Edges reference users only by their anonymized node id.
+        for e in g["edges"].as_array().unwrap() {
+            assert!(e["from"].as_str().unwrap().starts_with("user-"));
+        }
+    }
+
+    #[test]
+    fn graph_json_omits_empty_networks_and_their_guilds() {
+        let f = fixture();
+        let g = f.graph();
 
         assert_eq!(g["version"], 42);
 
-        // Raw identifiers must never appear in the anonymized output.
-        let blob = g.to_string();
-        for raw in [
-            "gamers",
-            "empty-net",
-            "staff",
-            "\"11\"",
-            "\"7\"",
-            "\"8\"",
-            "\"100\"",
-        ] {
-            assert!(!blob.contains(raw), "leaked raw identifier: {raw}");
-        }
-
-        // 3 network nodes (empty one included) + 2 distinct user nodes = 5.
+        // Only the 2 networks with someone online + 2 distinct user nodes = 4. `empty-net` (role
+        // 12, registered but nobody online) and `ghost-town` (role 31) are both gone.
         let nodes = g["nodes"].as_array().unwrap();
-        assert_eq!(nodes.len(), 5);
+        assert_eq!(nodes.len(), 4);
         let networks_n = nodes.iter().filter(|n| n["kind"] == "network").count();
         let users_n = nodes.iter().filter(|n| n["kind"] == "user").count();
-        assert_eq!((networks_n, users_n), (3, 2));
+        assert_eq!((networks_n, users_n), (2, 2));
+        for gone in ["net-12", "net-31"] {
+            assert!(
+                !nodes.iter().any(|n| n["id"] == serde_json::json!(gone)),
+                "empty network still rendered: {gone}"
+            );
+        }
+        assert_eq!(g["edges"].as_array().unwrap().len(), 3);
 
-        // The empty network (role 12) is present but has no edge.
-        let empty_id = format!("net-{}", common::crypto::anon_label(&seed, "network", 12));
-        assert!(nodes.iter().any(|n| n["id"] == serde_json::json!(empty_id)));
-        let edges = g["edges"].as_array().unwrap();
-        assert_eq!(edges.len(), 3);
-        assert!(edges.iter().all(|e| e["to"] != serde_json::json!(empty_id)));
+        // Guild 300's only network is empty, so the guild drops out entirely.
+        assert_eq!(
+            g["guilds"],
+            serde_json::json!([
+                {"id": "guild-100", "label": "Some Server"},
+                {"id": "guild-200", "label": "Staff HQ"},
+            ])
+        );
 
-        // Two guilds, both anonymized; network nodes carry their anonymized guild.
-        assert_eq!(g["guilds"].as_array().unwrap().len(), 2);
-        let g100 = format!("guild-{}", common::crypto::anon_label(&seed, "guild", 100));
-        let net11 = format!("net-{}", common::crypto::anon_label(&seed, "network", 11));
         let node11 = nodes
             .iter()
-            .find(|n| n["id"] == serde_json::json!(net11))
+            .find(|n| n["id"] == serde_json::json!("net-11"))
             .unwrap();
-        assert_eq!(node11["guild"], serde_json::json!(g100));
+        assert_eq!(node11["guild"], serde_json::json!("guild-100"));
+        assert_eq!(node11["label"], serde_json::json!("gamers"));
 
         // Deterministic: same inputs → byte-identical JSON.
-        assert_eq!(g, graph_json(&seed, &networks, &membership, 42));
+        assert_eq!(g, f.graph());
+    }
+
+    /// A guild whose name lookup failed, and a network present only in live presence (its registry
+    /// row was removed and not yet reaped), both fall back to their id rather than dangling.
+    #[test]
+    fn graph_json_falls_back_to_ids_when_names_are_missing() {
+        let g = graph_json(&[3u8; 32], &[], &[(100, 11, 7)], &BTreeMap::new(), 1);
+        assert_eq!(
+            g["guilds"],
+            serde_json::json!([{"id": "guild-100", "label": "100"}])
+        );
+        let node = g["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["kind"] == "network")
+            .unwrap()
+            .clone();
+        assert_eq!(node["label"], serde_json::json!("11"));
+    }
+
+    /// Policy guard: user identity never reaches an operator surface. `/admin/stats` and
+    /// `/metrics` are built from counts only — if someone later threads a username, device name,
+    /// or raw user id into `AdminStats`, this fails.
+    #[test]
+    fn stats_and_metrics_expose_no_user_identity() {
+        let s = AdminStats {
+            guilds: vec![GuildStat {
+                id: 100,
+                name: Some("Some Server".into()),
+                networks: vec![NetStat {
+                    role_id: 11,
+                    name: "gamers".into(),
+                    online: 2,
+                }],
+            }],
+            total_networks: 1,
+            online_devices: 3,
+            online_users: 2,
+            enrolled_devices: 9,
+            longpoll_waiters: 1,
+            version: 42,
+        };
+
+        let json = stats_json(&s).to_string();
+        let metrics = render_metrics(&s);
+        for surface in [&json, &metrics] {
+            for key in ["username", "user_id", "device_name", "pubkey"] {
+                assert!(
+                    !surface.contains(key),
+                    "user identity on admin surface: {key}"
+                );
+            }
+        }
+
+        // Metrics carries ids only — names stay on the token-gated dashboard.
+        assert!(metrics.contains("unitylan_peers_online{guild_id=\"100\",role_id=\"11\"} 2"));
+        assert!(!metrics.contains("Some Server") && !metrics.contains("gamers"));
+        // The dashboard, by contrast, does show them.
+        assert!(json.contains("Some Server") && json.contains("gamers"));
+    }
+
+    /// The listing shows only what's live: zero-online networks drop out, and a guild left with
+    /// nothing drops with them. Totals and `/metrics` stay unfiltered.
+    #[test]
+    fn stats_listing_hides_empty_networks_and_guilds() {
+        let s = AdminStats {
+            guilds: vec![
+                GuildStat {
+                    id: 100,
+                    name: Some("Some Server".into()),
+                    networks: vec![
+                        NetStat {
+                            role_id: 11,
+                            name: "gamers".into(),
+                            online: 2,
+                        },
+                        NetStat {
+                            role_id: 12,
+                            name: "empty-net".into(),
+                            online: 0,
+                        },
+                    ],
+                },
+                GuildStat {
+                    id: 300,
+                    name: Some("Nobody Home".into()),
+                    networks: vec![NetStat {
+                        role_id: 31,
+                        name: "ghost-town".into(),
+                        online: 0,
+                    }],
+                },
+            ],
+            total_networks: 3,
+            online_devices: 3,
+            online_users: 2,
+            enrolled_devices: 9,
+            longpoll_waiters: 1,
+            version: 42,
+        };
+
+        let v = stats_json(&s);
+
+        // Only the live guild, with only its live network.
+        assert_eq!(
+            v["guilds"],
+            serde_json::json!([{
+                "id": "100",
+                "name": "Some Server",
+                "networks": [{"role_id": "11", "name": "gamers", "online": 2}],
+            }])
+        );
+
+        // Totals are registration counts, not a live view — they still count all 2 guilds and all
+        // 3 networks.
+        assert_eq!(v["totals"]["guilds"], 2);
+        assert_eq!(v["totals"]["networks"], 3);
+
+        // Metrics is unaffected: a series that vanished at zero would read as a scrape failure.
+        let metrics = render_metrics(&s);
+        for series in [
+            "unitylan_peers_online{guild_id=\"100\",role_id=\"12\"} 0",
+            "unitylan_peers_online{guild_id=\"300\",role_id=\"31\"} 0",
+        ] {
+            assert!(metrics.contains(series), "metrics dropped a zero: {series}");
+        }
     }
 }
