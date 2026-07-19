@@ -154,7 +154,6 @@ impl State {
             device: Some(fixture_self()),
             peers,
             networks: self.networks.clone(),
-            needs_login: false,
             connected: self.connected,
             disable_new_networks: self.disable_new_networks,
             peer_own_devices: self.peer_own_devices,
@@ -162,10 +161,8 @@ impl State {
             coordinator_online: true,
             blocked: self.blocked.clone(),
             engine_version: "0.4.0".into(),
-            update_available: None,
-            update_ready: false,
-            lan_overlap: None,
             directive: self.directive(secs),
+            ..Default::default()
         }
     }
 }
