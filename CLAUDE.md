@@ -105,6 +105,18 @@ blast radius is one guild. The coordinator never sees peer traffic.
 request `LONGPOLL_HOLD_SECS` (≈ attestation TTL / 2) then rebuilds a fresh, re-signed snapshot.
 A membership change bumps a shared `watch` **version**, which wakes every parked client at once.
 
+**Changing a wire type? Read `CONTRIBUTING.md` § "Changing a wire type" first.** Coordinator and
+clients upgrade on **independent schedules**, so anything crossing the network has to answer "what
+happens when the other side hasn't got this change yet?". Work down the ladder and stop at the first
+rung that fits: **additive field** (`#[serde(default)]`, default chosen so *absent = old behavior*)
+→ **capability flag** (`common::caps`) → **version bump** (last resort: it costs every user in every
+mesh a coordinated upgrade). A bump means moving `MIN_PROTOCOL_VERSION` to the retired version,
+writing the shim that keeps it working, and adding a golden fixture — the support window is
+current + 1 previous, and it's a promise, not a number. Two things that bite: `#[serde(default)]`
+does **nothing** inside a `Signed` envelope (postcard encodes by position — hence `Attestation`'s
+schema tag, and `RotationCert` being frozen), and peer-supplied data that won't parse or verify must
+cost you *that peer*, not the whole batch. Rationale in `docs/technical.md` §3.6.
+
 **Platform split.** Engine OS-specific code is separate modules selected at runtime:
 `wg/{userspace,windows}.rs`, `fw/{nftables,windows}.rs`, `resolver/{linux,windows}.rs`. The
 userspace WireGuard (boringtun) backend is the portable primary; kernel drivers (Linux netlink,
