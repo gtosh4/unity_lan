@@ -167,7 +167,9 @@ fn sanitize_label(&str) -> String;                          // [a-z0-9-], ≤63,
 ### 3.6 Compatibility policy — what forces a bump, and what doesn't
 
 The coordinator and its clients upgrade on **independent schedules**, so the wire has to tolerate
-skew rather than assume a flag day. Three mechanisms, in the order you should reach for them:
+skew rather than assume a flag day. Three mechanisms, in the order you should reach for them —
+this section is the *why*; the step-by-step procedure for making such a change is in
+[CONTRIBUTING.md § Changing a wire type](../CONTRIBUTING.md):
 
 1. **An additive field** — `#[serde(default)]`, no bump. Nothing in the workspace uses
    `deny_unknown_fields`, so a newer peer's extra fields are ignored by an older one. This covers

@@ -204,6 +204,97 @@ Linux `.deb`/`.rpm` and the coordinator Docker image are built from `packaging/`
 `packaging/README.md`. A Windows MSI/WiX installer (bundling engine + GUI + `wireguard.dll` and
 registering the service) is still TODO.
 
+## Changing a wire type
+
+The coordinator and its clients upgrade on **independent schedules** — one mesh can be running
+several client versions against one coordinator, and a user's client may auto-update days after the
+coordinator did. So a change to anything crossing the network has to answer: *what happens when the
+other side hasn't got this change yet?*
+
+Design rationale is in [docs/technical.md §3.6](docs/technical.md); this is the procedure.
+
+### Pick the cheapest mechanism that works
+
+Work down this list and stop at the first one that fits. Reaching the bottom costs every user in
+every mesh a coordinated upgrade, so it's worth some effort to stay off it.
+
+**1. An additive field — no bump.** Add it with `#[serde(default)]` (or `default = "…"` when absent
+must mean something other than zero/false — see `default_true` in `api.rs`). No struct in the
+workspace uses `deny_unknown_fields`, so an older peer ignores what it doesn't know and a newer peer
+fills in the default. Most changes are this; delta sync shipped this way.
+
+Choose the default so **absent = the old behavior**. If the safe reading of "absent" is `true`,
+say so explicitly — `peer_own_devices` does exactly this, because defaulting it to `false` would
+have silently switched the feature off for every client that hadn't updated.
+
+**2. A capability flag — no bump.** When both sides need to *agree* before using something, add a
+const to `common::caps`, list it in `CAPABILITIES`, and gate the behavior on the peer's advertised
+set rather than on a version number:
+
+```rust
+if req.caps.iter().any(|c| c == common::caps::MY_FEATURE) { … }
+```
+
+An empty `caps` (an older client) means "infer from `proto`" — treat it as not having the feature.
+Only add a flag that actually gates code; an aspirational list is worse than none.
+
+**3. A version bump — last resort.** Only when neither of the above can preserve the old peer's
+reading: removing a field, changing what an existing field means, or reshaping a type (as the P2P
+`RespBody` retagging did).
+
+### Bumping, compatibly
+
+1. **`PROTOCOL_VERSION += 1`** and move **`MIN_PROTOCOL_VERSION`** to the version you're retiring, in
+   `crates/common/src/lib.rs`. `support_window_is_current_plus_one_previous` fails if you forget the
+   second half.
+2. **Write the shim** that keeps the previous version working — you have just promised to serve it
+   for one more release. If you can't, you're proposing a flag day: say so in the PR rather than
+   quietly lowering the floor.
+3. **Add a golden fixture** for the version you retired: a literal JSON message as that version
+   sends it, in `api.rs`'s tests, asserted to still decode (copy `V4_REGISTER_REQ`). Without it the
+   floor is just a number — this is the test that makes the support window real.
+4. **Note it in `CHANGELOG.md`** under Unreleased: what broke, and what an operator has to do.
+5. **Verify the skew**, don't assume it. Start a coordinator and drive the boundaries by hand:
+
+   ```sh
+   cargo run -p unitylan-coordinator -- coordinator.test.toml   # :8080
+   PK='[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32]'
+   # Retired version → 426, naming both ranges and which side is stale.
+   curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8080/register \
+     -H 'content-type: application/json' -d "{\"wg_pubkey\":$PK,\"proto\":3,\"proto_min\":3}"
+   # Still-supported floor → past negotiation (401 "not enrolled" is the expected next gate).
+   curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:8080/register \
+     -H 'content-type: application/json' -d "{\"wg_pubkey\":$PK,\"proto\":4,\"proto_min\":4}"
+   ```
+
+   Then run `scripts/mesh-test.sh` and `scripts/gossip-test.sh` — the register/refresh and P2P paths.
+
+### Deploy the coordinator first
+
+A coordinator speaking `[N-1, N]` serves both old and new clients; a client speaking `N` gets a
+`426` from a coordinator still on `N-1`. So **upgrade the coordinator before the clients** — the
+reverse order takes the mesh down for everyone who updated early. Clients auto-update on their
+owners' schedule, which is exactly why the coordinator has to lead.
+
+### Signed types are stricter
+
+Anything inside a `Signed` envelope (`common::wire`) is **postcard**, which encodes by field
+position and variant index rather than by name. `#[serde(default)]` does nothing there, and a
+reordered field decodes as the wrong value instead of failing. So:
+
+- **`Attestation`** carries a leading `schema: u32`. Change the layout → bump `ATTESTATION_SCHEMA`.
+  It's cheap: the 30-minute TTL turns the whole signed corpus over on its own.
+- **`RotationCert`** and **`ReleaseManifest`**'s enums are **frozen**. Rotation chains are walked
+  forever from a client's original pin, so every cert ever issued must still decode. Append new enum
+  variants only; never edit those layouts in place. A change there needs a parallel type.
+
+### Don't make one peer everyone's problem
+
+Peer-supplied data that fails to parse or verify should cost you *that peer*, not the mesh.
+`coord::verified_seeds` skips a seed it can't verify (still fail-closed — never routed) rather than
+failing the batch; `p2p::serve` answers `Unsupported` to a peer outside the version window so the
+caller falls back to the coordinator. Keep new peer-facing paths in that shape.
+
 ## Submitting changes
 
 1. Branch off `main`.
