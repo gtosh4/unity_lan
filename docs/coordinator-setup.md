@@ -169,6 +169,7 @@ token = "…"   # a long random secret YOU generate, e.g. `openssl rand -hex 32`
 |---|---|---|
 | `GET /admin` | none (holds no data) | the browser dashboard (a shell that fetches the feed) |
 | `GET /admin/stats` | `Authorization: Bearer <token>` | JSON feed the dashboard long-polls |
+| `GET /admin/graph` | `Authorization: Bearer <token>` | anonymized network↔user graph the dashboard renders |
 | `GET /metrics` | `Authorization: Bearer <token>` | Prometheus text exposition |
 
 **Dashboard.** Open `https://<your-coordinator>/admin` in a browser and paste the token once
@@ -177,6 +178,27 @@ token = "…"   # a long random secret YOU generate, e.g. `openssl rand -hex 32`
 instant a device joins or leaves; otherwise a ~25 s heartbeat keeps it live.
 
 ![UnityLAN coordinator admin dashboard](../assets/coordinator-admin.png)
+
+**Network graph.** Below the stat cards, the dashboard draws a live, **fully anonymized** graph of
+your mesh: one node per registered **network** (colored by its guild) and one per **online user**,
+with an edge wherever a user is in a network. It's built from the same cheap sources as the stats
+feed — the network registry plus in-memory presence — so it adds **no** Discord or database load,
+and it refreshes on the same realtime tick as the counts.
+
+- Every label is a deterministic, deployment-keyed hash — **no Discord ID, username, or role name
+  ever leaves the coordinator**. The mapping is stable, so the same user stays the same node.
+- A user in **multiple guilds** is a single node bridging those guilds' networks (a device is one
+  identity across all of a coordinator's guilds), so cross-community overlap is visible at a glance.
+- Empty (zero-online) networks still show, as isolated nodes.
+- **Scroll to zoom, drag the background to pan, drag a node** to pull the layout around.
+- **Download .dot** exports the current graph as [Graphviz](https://graphviz.org/) DOT (networks
+  clustered per guild) for offline rendering or archiving.
+
+![UnityLAN coordinator network graph](../assets/coordinator-admin-graph.png)
+
+In the shot above, `user-3f9a2b1c` (top) sits in three different guilds at once — its edges reach a
+network of each guild color — while `net-empty` hangs unconnected because no one holding that role
+is currently online.
 
 **Auth model.** The token is a secret *you* set — there is no shipped default, so no one
 upstream can reach your instance; anyone running their own coordinator controls their own. It

@@ -79,6 +79,26 @@ fn push_hex(s: &mut String, bytes: &[u8]) {
     }
 }
 
+/// Anonymize a `u64` identifier into a short, stable, opaque label for the admin network graph.
+/// Keyed by the deployment seed, so the mapping is deterministic within one deployment (the same
+/// user is the same node across a render, and across renders) yet reveals nothing about the
+/// underlying Discord snowflake to whoever views the graph. `domain` namespaces the input so a
+/// user and a role that share an id map to different labels. This is de-identification, not a
+/// security boundary (the graph already sits behind the admin token), so a truncated HMAC-SHA1
+/// suffices — 32 bits is ample to avoid collisions at mesh scale.
+pub fn anon_label(key: &[u8], domain: &str, id: u64) -> String {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+    let mut mac = Hmac::<Sha1>::new_from_slice(key).expect("HMAC accepts a key of any length");
+    mac.update(domain.as_bytes());
+    mac.update(&[0]); // separator: ("ab", …) and ("a", "b"…) must not collide
+    mac.update(&id.to_le_bytes());
+    let tag = mac.finalize().into_bytes();
+    let mut s = String::with_capacity(8);
+    push_hex(&mut s, &tag[..4]);
+    s
+}
+
 /// Mint a one-time enrollment key: `unl_` + 32 hex chars (128 bits from the OS CSPRNG).
 pub fn gen_enrollment_key() -> String {
     let mut bytes = [0u8; 16];
@@ -135,6 +155,24 @@ mod tests {
         let seed = key.to_seed();
         let restored = CoordinatorKey::from_seed(&seed);
         assert_eq!(key.anchor_bytes(), restored.anchor_bytes());
+    }
+
+    #[test]
+    fn anon_label_is_stable_distinct_and_domain_separated() {
+        let key = [7u8; 32];
+        // Stable: same (key, domain, id) → same label.
+        assert_eq!(anon_label(&key, "user", 42), anon_label(&key, "user", 42));
+        // Distinct ids differ; same id in a different domain differs; a different key differs.
+        assert_ne!(anon_label(&key, "user", 42), anon_label(&key, "user", 43));
+        assert_ne!(anon_label(&key, "user", 42), anon_label(&key, "net", 42));
+        assert_ne!(
+            anon_label(&key, "user", 42),
+            anon_label(&[9u8; 32], "user", 42)
+        );
+        // Opaque short label: 8 lowercase hex chars, no leak of the raw id.
+        let l = anon_label(&key, "user", 42);
+        assert_eq!(l.len(), 8);
+        assert!(l.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 
     #[test]

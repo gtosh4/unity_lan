@@ -1,6 +1,6 @@
 //! Operator admin surface (`/admin` dashboard + `/metrics`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -185,6 +185,97 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
     })
 }
 
+/// `GET /admin/graph`: token-gated, fully-anonymized bipartite graph of **networks ↔ currently-
+/// online users**, for the dashboard's interactive view and its Graphviz export. Built from the
+/// same cheap sources as `/admin/stats` — the network registry plus in-memory presence — so it
+/// adds **no** Discord/DB fan-out. Every identifier (guild, network/role, user) is replaced by a
+/// deployment-keyed opaque label (see [`common::crypto::anon_label`]): the mapping is stable within
+/// a deployment (a user is the same node across renders) but leaks no Discord snowflake or name.
+/// Returned immediately (no long-poll); the dashboard refetches it when the `/admin/stats` version
+/// ticks, so the graph stays live without a second parked request.
+pub(super) async fn admin_graph(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    admin_auth(&st, &headers)?;
+    Ok(Json(build_graph(&st).await?))
+}
+
+/// Gather the graph's cheap inputs (deployment seed, network registry, live membership, version)
+/// and hand them to [`graph_json`]. The split keeps the async I/O here and the anonymization +
+/// assembly pure and unit-testable.
+async fn build_graph(st: &AppState) -> Result<serde_json::Value, ApiError> {
+    // The deployment seed is a stable per-deployment secret (not a signing key); it keys the
+    // anonymization so labels are consistent across requests yet meaningless off this instance.
+    let seed = st
+        .store
+        .load_or_create_deployment_seed()
+        .await
+        .map_err(internal)?;
+    let networks = st.store.all_networks().await.map_err(internal)?;
+    let membership = st.presence.membership();
+    let version = st.versions.global();
+    Ok(graph_json(&seed, &networks, &membership, version))
+}
+
+/// Assemble the anonymized graph. Network nodes come from the registry (so empty networks still
+/// appear, as isolated nodes); user nodes and edges come from live presence `membership` (one edge
+/// per user per network they're online in). Every identifier is replaced by a seed-keyed opaque
+/// label. Ordering is deterministic (BTree-backed) so the graph and its DOT export are stable
+/// between renders.
+fn graph_json(
+    seed: &[u8; 32],
+    networks: &[crate::store::Network],
+    membership: &[(u64, u64, u64)],
+    version: u64,
+) -> serde_json::Value {
+    let net = |role_id: u64| {
+        format!(
+            "net-{}",
+            common::crypto::anon_label(seed, "network", role_id)
+        )
+    };
+    let guild = |guild_id: u64| {
+        format!(
+            "guild-{}",
+            common::crypto::anon_label(seed, "guild", guild_id)
+        )
+    };
+    let user = |user_id: u64| format!("user-{}", common::crypto::anon_label(seed, "user", user_id));
+
+    // role_id → guild_id, from the registry plus any presence network lingering after its
+    // registry row was removed (reaped shortly, but keep the edge's endpoint from dangling).
+    let mut net_guild: BTreeMap<u64, u64> =
+        networks.iter().map(|n| (n.role_id, n.guild_id)).collect();
+    for (g, r, _) in membership {
+        net_guild.entry(*r).or_insert(*g);
+    }
+
+    let guilds: BTreeSet<String> = net_guild.values().map(|g| guild(*g)).collect();
+    let users: BTreeSet<String> = membership.iter().map(|(_, _, u)| user(*u)).collect();
+
+    let mut nodes: Vec<serde_json::Value> = net_guild
+        .iter()
+        .map(|(r, g)| serde_json::json!({ "id": net(*r), "kind": "network", "guild": guild(*g) }))
+        .collect();
+    nodes.extend(
+        users
+            .iter()
+            .map(|u| serde_json::json!({ "id": u, "kind": "user" })),
+    );
+    let edges: Vec<serde_json::Value> = membership
+        .iter()
+        .map(|(_, r, u)| serde_json::json!({ "from": user(*u), "to": net(*r) }))
+        .collect();
+
+    serde_json::json!({
+        "version": version,
+        "guilds": guilds.into_iter().collect::<Vec<_>>(),
+        "nodes": nodes,
+        "edges": edges,
+    })
+}
+
 /// `GET /metrics`: Prometheus text exposition of the same counts.
 pub(super) async fn admin_metrics(
     State(st): State<AppState>,
@@ -286,4 +377,75 @@ fn render_metrics(s: &AdminStats) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Network;
+
+    fn net(guild_id: u64, role_id: u64, name: &str) -> Network {
+        Network {
+            guild_id,
+            role_id,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn graph_json_anonymizes_and_keeps_empty_networks() {
+        let seed = [3u8; 32];
+        // Guild 100 has two networks (roles 11, 12); guild 200 has one (role 21).
+        let networks = [
+            net(100, 11, "gamers"),
+            net(100, 12, "empty-net"),
+            net(200, 21, "staff"),
+        ];
+        // Live membership: user 7 in (100,11); user 8 in (100,11) and (200,21). Role 12 has nobody.
+        let membership = [(100, 11, 7), (100, 11, 8), (200, 21, 8)];
+        let g = graph_json(&seed, &networks, &membership, 42);
+
+        assert_eq!(g["version"], 42);
+
+        // Raw identifiers must never appear in the anonymized output.
+        let blob = g.to_string();
+        for raw in [
+            "gamers",
+            "empty-net",
+            "staff",
+            "\"11\"",
+            "\"7\"",
+            "\"8\"",
+            "\"100\"",
+        ] {
+            assert!(!blob.contains(raw), "leaked raw identifier: {raw}");
+        }
+
+        // 3 network nodes (empty one included) + 2 distinct user nodes = 5.
+        let nodes = g["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 5);
+        let networks_n = nodes.iter().filter(|n| n["kind"] == "network").count();
+        let users_n = nodes.iter().filter(|n| n["kind"] == "user").count();
+        assert_eq!((networks_n, users_n), (3, 2));
+
+        // The empty network (role 12) is present but has no edge.
+        let empty_id = format!("net-{}", common::crypto::anon_label(&seed, "network", 12));
+        assert!(nodes.iter().any(|n| n["id"] == serde_json::json!(empty_id)));
+        let edges = g["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 3);
+        assert!(edges.iter().all(|e| e["to"] != serde_json::json!(empty_id)));
+
+        // Two guilds, both anonymized; network nodes carry their anonymized guild.
+        assert_eq!(g["guilds"].as_array().unwrap().len(), 2);
+        let g100 = format!("guild-{}", common::crypto::anon_label(&seed, "guild", 100));
+        let net11 = format!("net-{}", common::crypto::anon_label(&seed, "network", 11));
+        let node11 = nodes
+            .iter()
+            .find(|n| n["id"] == serde_json::json!(net11))
+            .unwrap();
+        assert_eq!(node11["guild"], serde_json::json!(g100));
+
+        // Deterministic: same inputs → byte-identical JSON.
+        assert_eq!(g, graph_json(&seed, &networks, &membership, 42));
+    }
 }

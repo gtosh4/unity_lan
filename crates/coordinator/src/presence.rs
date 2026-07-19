@@ -185,6 +185,19 @@ impl Presence {
             online_users: users.len(),
         }
     }
+
+    /// Distinct `(guild_id, role_id, user_id)` membership edges for the admin network graph —
+    /// one per user per network they're currently online in, collapsing a user's several devices
+    /// in the same network to a single edge. Sorted, so the graph (and its DOT export) is stable
+    /// across renders. Off the hot path: taken under one lock on a rare operator request.
+    pub fn membership(&self) -> Vec<(u64, u64, u64)> {
+        let map = self.map.lock().unwrap();
+        let edges: BTreeSet<(u64, u64, u64)> = map
+            .iter()
+            .map(|((g, r, _), e)| (*g, *r, e.p.user_id))
+            .collect();
+        edges.into_iter().collect()
+    }
 }
 
 /// A snapshot of live presence counts for the admin dashboard (see [`Presence::stats`]).
@@ -262,6 +275,21 @@ mod tests {
         assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
         assert_eq!(s.online_devices, 3); // A, B, C distinct
         assert_eq!(s.online_users, 2); // 42, 99
+    }
+
+    #[test]
+    fn membership_dedupes_devices_per_user_and_sorts() {
+        let p = Presence::default();
+        // user 42 has two devices in network (1,2) — one edge; also in (1,3). user 99 in (1,2).
+        p.record(1, 2, mp([1; 32], 42), 0);
+        p.record(1, 2, mp([2; 32], 42), 0);
+        p.record(1, 3, mp([1; 32], 42), 0);
+        p.record(1, 2, mp([3; 32], 99), 0);
+        assert_eq!(
+            p.membership(),
+            vec![(1, 2, 42), (1, 2, 99), (1, 3, 42)],
+            "one edge per user per network, sorted"
+        );
     }
 
     #[test]
