@@ -69,6 +69,12 @@ bot_token = "..."             # B.2
 client_id = "..."             # A.2  (= Application ID) — public client_id only; no secret/redirect
 ```
 
+**Running the container image?** `database` must be an **absolute** path inside the mounted volume —
+`database = "/data/coordinator.db"`. The image sets no `WORKDIR`, so a relative path resolves against
+`/`, which the unprivileged `unitylan` user can't write; it also bypasses the `/data` volume, so the
+database wouldn't survive a container replacement even if it did open. See
+`packaging/docker/coordinator.Dockerfile`.
+
 The engine is a **public PKCE client** — it holds no secret, and it owns the loopback redirect
 (`http://127.0.0.1:8765/callback`, C.3) and the token exchange. So the coordinator config carries
 **only** the public `client_id`; there is no `client_secret` or `redirect` key.
@@ -126,6 +132,20 @@ trusted_proxies = ["127.0.0.1/32", "::1/128"]
 With that set, the same test admits all 60. Only list proxies you control — an unlisted peer's
 `X-Forwarded-For` is deliberately ignored, since otherwise any caller could forge a fresh bucket per
 request and walk past the limiter. Caddy sets the header itself; no Caddyfile change needed for it.
+
+⚠️ **The CIDRs must match where the proxy actually connects *from*, which is not always loopback.**
+Copying the loopback pair above into a containerized deployment is a silent no-op — it matches
+nothing, so you get exactly the one-shared-bucket failure it was meant to prevent.
+
+| Proxy runs… | Connects from | `trusted_proxies` |
+|---|---|---|
+| same host, `reverse_proxy 127.0.0.1:8080` | loopback | `["127.0.0.1/32", "::1/128"]` |
+| a container on the same Docker/Podman network | its bridge IP | that network's subnet, e.g. `["172.18.0.0/16"]` |
+| a separate host | its LAN IP | that host's address, e.g. `["10.0.1.7/32"]` |
+
+Find the container case with `docker network inspect <network> --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}'`.
+Docker assigns bridge subnets dynamically, so pin it under `networks.<name>.ipam.config.subnet` in
+your compose file if you want the value to survive a network recreate.
 
 **2. Don't let the proxy cut the long-poll.** Clients park a held request for `attestation_ttl/2`
 (15 min by default) — that's what makes idle cost ~zero. A proxy timeout shorter than the hold
