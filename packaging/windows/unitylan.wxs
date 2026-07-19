@@ -17,15 +17,14 @@
            Manufacturer="gtosh4"
            Version="$(Version)"
            UpgradeCode="7E6B2C1A-9F84-4D3B-B2A7-1C5E8A0F4D22"
-           Scope="perMachine"
-           Compression="high">
+           Scope="perMachine">
 
     <!-- Remove the old version wholesale before laying down the new one, so the service is torn
          down and re-registered cleanly rather than double-installed. -->
     <MajorUpgrade Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer version of UnityLAN is already installed." />
 
-    <MediaTemplate EmbedCab="yes" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!-- Add/Remove Programs metadata. -->
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/gtosh4/unity_lan" />
