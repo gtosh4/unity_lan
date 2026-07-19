@@ -250,10 +250,12 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         }
         Some(Cmd::Run { config }) => {
             let cfg = load_config(config)?;
-            // Console mode: Ctrl-C latches the shutdown signal the daemon awaits.
+            // Latch the shutdown signal so the daemon runs its teardown (revert interface/firewall/
+            // DNS, withdraw presence) rather than being hard-killed: Ctrl-C (SIGINT) everywhere, plus
+            // SIGTERM on unix — what `systemctl stop` / a container runtime sends.
             let (trigger, shutdown) = shutdown::channel();
             tokio::spawn(async move {
-                let _ = tokio::signal::ctrl_c().await;
+                wait_for_shutdown_signal().await;
                 trigger.trigger();
             });
             daemon::run(cfg, shutdown).await
@@ -265,6 +267,34 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Some(Cmd::Login { config }) => login(load_config(config)?).await,
         None => register_once(cli.config).await,
     }
+}
+
+/// Wait for a process-termination signal: Ctrl-C (SIGINT) on every platform, plus SIGTERM on unix —
+/// the signal `systemctl stop`, `docker stop`, and most service managers send. Returns once either
+/// fires. On Windows, `ctrl_c()` also covers console-close; the SCM service path handles Stop itself
+/// (see `service.rs`), so this console path is only reached by an interactive `run`.
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            // Can't register SIGTERM (unusual) — fall back to Ctrl-C only rather than never shutting.
+            tracing::warn!("cannot listen for SIGTERM ({e}); handling Ctrl-C only");
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+/// Non-unix: Ctrl-C (which on Windows also fires on console close).
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 /// Bare invocation (register-once): register with the coordinator, verify + pin the trust anchor,
