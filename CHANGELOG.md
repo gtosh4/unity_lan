@@ -3,7 +3,7 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
+## v0.3.1
 
 ### Added
 

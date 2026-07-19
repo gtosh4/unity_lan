@@ -6808,7 +6808,7 @@ dependencies = [
 
 [[package]]
 name = "unitylan-common"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -6826,7 +6826,7 @@ dependencies = [
 
 [[package]]
 name = "unitylan-coordinator"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6852,7 +6852,7 @@ dependencies = [
 
 [[package]]
 name = "unitylan-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6889,7 +6889,7 @@ dependencies = [
 
 [[package]]
 name = "unitylan-gui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "iced",
