@@ -24,7 +24,7 @@ mod admin;
 mod ratelimit;
 mod wake;
 
-use admin::{admin_dashboard, admin_metrics, admin_stats};
+use admin::{admin_dashboard, admin_graph, admin_metrics, admin_stats};
 use ratelimit::{rate_limit, RateLimitState, RateLimiter};
 pub use wake::Wakers;
 use wake::{wait_park, wake_jitter, Woke};
@@ -133,6 +133,7 @@ pub fn router(state: AppState, trusted_proxies: Vec<ipnet::IpNet>) -> Router {
         // `/admin/stats` feed and `/metrics` are token-gated. All 404 when `[admin]` is unset.
         .route("/admin", get(admin_dashboard))
         .route("/admin/stats", get(admin_stats))
+        .route("/admin/graph", get(admin_graph))
         .route("/metrics", get(admin_metrics))
         .with_state(state)
         // Rate-limit every route. The API is internet-facing and `/oauth/complete` is unauthenticated
