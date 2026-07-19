@@ -94,10 +94,11 @@ PY
 cat >"$WORK/coord.toml" <<EOF
 bind = "127.0.0.1:8080"
 database = "$WORK/coord.db"
-# Short attestation TTL -> short long-poll hold ((ttl/2).max(1)), so /refresh returns in a few
-# seconds and the staging path runs promptly. Membership never changes on this single node, so
-# without this the first refresh would park for the full default hold (~15 min).
-attestation_ttl_secs = 10
+# Deliberately left at the default attestation TTL, so the long-poll hold is the full ~15 min.
+# Membership never changes on this single node, so its first /refresh parks for that whole hold:
+# the update below can therefore only be staged from the *register* response. That makes this a
+# regression test for exactly that (an earlier version staged only on refresh, so a solo or idle
+# device saw no update offer for half the attestation TTL).
 [[fake.guild]]
 id = 1
 name = "Test"

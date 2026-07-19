@@ -51,6 +51,26 @@ const PROTO_MISMATCH_BACKOFF: Duration = Duration::from_secs(300);
 /// never cancels the held `/refresh`, so idle clients still park for the full hold.
 const STATS_RECHECK: Duration = Duration::from_secs(2);
 
+/// Reflect the coordinator's advertised version, and verify + stage a release manifest from `resp`
+/// for the control socket's `ApplyUpdate`.
+///
+/// Called on the initial register *and* on every refresh. Register matters because a device whose
+/// membership never changes — a solo install, or any idle mesh — parks its first `/refresh` for the
+/// full long-poll hold (half the deployment's attestation TTL, ~15 min by default), and would
+/// otherwise not learn about a published update until then. Both responses carry the manifest, so
+/// there's no reason to wait for the second.
+fn note_update(
+    status: &control::Shared,
+    resp: &common::api::RegisterResp,
+    state_dir: &std::path::Path,
+    pending_update: &crate::selfupdate::PendingSlot,
+) {
+    control::set_update_available(status, &resp.server_version);
+    let staged = crate::selfupdate::stage(resp, state_dir);
+    control::set_update_ready(status, staged.is_some());
+    *pending_update.lock().unwrap() = staged;
+}
+
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
@@ -112,7 +132,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let status = control::shared();
     // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
     control::set_connected(&status, !localnet.is_paused());
-    // Verified auto-update staged by the refresh loop; consumed by the control socket's ApplyUpdate.
+    // Verified auto-update staged on register + each refresh; consumed by control's ApplyUpdate.
     let pending_update = crate::selfupdate::pending_slot();
     {
         let name = cfg.control_name();
@@ -228,6 +248,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             return Ok(()); // interrupted before login
         };
         // `register` already pinned/verified the anchor (via `coord::post`); no separate pin here.
+        // The register response already carries the release manifest, so stage from it here rather
+        // than waiting for the first refresh to return.
+        note_update(&status, &resp, &cfg.state_dir, &pending_update);
         if let Some(tok) = &resp.device_token {
             keys::save_token(&cfg.state_dir, tok)?;
             *token.write().await = Some(tok.clone());
@@ -756,12 +779,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     // A successful exchange means the versions reconciled — clear any prior refusal
                     // (an operator updated a side, or the coordinator rolled back).
                     control::set_proto_mismatch(&status, None);
-                    control::set_update_available(&status, &resp.server_version);
-                    // Verify the signed release manifest against the pinned anchor and stage a
-                    // platform-matching, strictly-newer artifact for the GUI's Update button.
-                    let staged = crate::selfupdate::stage(&resp, &cfg.state_dir);
-                    control::set_update_ready(&status, staged.is_some());
-                    *pending_update.lock().unwrap() = staged;
+                    note_update(&status, &resp, &cfg.state_dir, &pending_update);
                     since = Some(resp.version);
                     last_reported = observed; // the coordinator now has this reflexive set
                     last_relay_need = this_relay_need; // …and this relay need/allocation set
