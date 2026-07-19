@@ -199,4 +199,7 @@ keep it going, you can buy me a coffee — every bit is appreciated and entirely
 
 ## License
 
-[MIT](LICENSE).
+[GNU Affero General Public License v3.0 or later](LICENSE) (AGPL-3.0-or-later).
+
+Network use is distribution: if you run a modified UnityLAN coordinator (or any part of
+this software) as a service, you must offer your users the corresponding source.
