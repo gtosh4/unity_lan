@@ -1395,13 +1395,6 @@ fn apply_seeds(
                 tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
             }
         }
-        if let Some(lan) = lan_ep {
-            tracing::debug!(peer = %hex8(&s.pubkey), %lan, "beacon: routing peer via direct LAN endpoint");
-        } else if let Some(shim) = ice_ep {
-            tracing::debug!(peer = %hex8(&s.pubkey), %shim, "ice: routing peer via ICE shim");
-        } else if let Some(shim) = relay_ep {
-            tracing::debug!(peer = %hex8(&s.pubkey), %shim, "relay: routing peer via TURN shim");
-        }
         let ep = lan_ep.or(s.endpoint).or(ice_ep).or(relay_ep).or(s.punch);
         let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), ep));
         e.0.push((s.ip, 32));
@@ -1449,6 +1442,22 @@ fn apply_seeds(
             }
             backend.set_peer(&peer)?;
             tracing::info!(peer = %hex8(&pubkey), ips = ?peer.allowed_ips, "peer set");
+            // Note the non-obvious path we routed via — but only here, on an actual (re)apply, not on
+            // every idle reconcile pass: a peer parked on its LAN/ICE/relay endpoint is re-seen each
+            // ~2s recheck, and logging it every pass floods the log (the coordinator's own directly
+            // dialable endpoint is the unremarkable default, so it stays unlogged).
+            match peer.endpoint {
+                Some(ep) if lan_eps.get(&pubkey) == Some(&ep) => {
+                    tracing::debug!(peer = %hex8(&pubkey), lan = %ep, "beacon: routing peer via direct LAN endpoint");
+                }
+                Some(ep) if ice_eps.get(&pubkey) == Some(&ep) => {
+                    tracing::debug!(peer = %hex8(&pubkey), shim = %ep, "ice: routing peer via ICE shim");
+                }
+                Some(ep) if relay_eps.get(&pubkey) == Some(&ep) => {
+                    tracing::debug!(peer = %hex8(&pubkey), shim = %ep, "relay: routing peer via TURN shim");
+                }
+                _ => {}
+            }
             peers.insert(pubkey, peer);
             changed = true;
         }
