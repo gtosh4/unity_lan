@@ -27,3 +27,10 @@ state_dir = "engine-state"
 # source, so revocation survives a coordinator outage. The coordinator stays the fallback. Set false
 # to revert to coordinator-only refresh + coordinator-snapshot revocation.
 # gossip = false
+
+# LAN discovery beacon. On by default: the engine broadcasts its WireGuard key + port on the local
+# segment so two peers behind one NAT find their direct LAN path instead of hairpinning through the
+# router's public IP (which flaps). Nothing private is advertised, and a LAN path is used only if it
+# verifies. Set false to disable, or change the UDP port it broadcasts on (default 51821).
+# beacon = false
+# beacon_port = 51821

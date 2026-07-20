@@ -1,10 +1,11 @@
 //! Windows host-firewall backend, driving Windows Defender Firewall through PowerShell's
 //! `NetSecurity` module (`New-NetFirewallRule` / `Remove-NetFirewallRule`).
 //!
-//! Every rule is an *inbound allow*; all but one are scoped to the wg interface (`-InterfaceAlias`),
+//! Every rule is an *inbound allow*; all but two are scoped to the wg interface (`-InterfaceAlias`),
 //! so — like the nftables backend — only traffic arriving on the wg adapter is opened, never the
-//! host's other interfaces. The exception is the WireGuard listen port, opened host-wide so inbound
-//! handshakes reach the tunnel at all (see [`script`]). All rules share `-Group UnityLAN`, so a
+//! host's other interfaces. The exceptions are the WireGuard listen port (so inbound handshakes
+//! reach the tunnel at all) and the LAN discovery beacon port (so a same-segment peer's broadcast is
+//! received), both opened host-wide (see [`script`]). All rules share `-Group UnityLAN`, so a
 //! reset is a single group removal and every `apply` is an idempotent full replace (rebuild = pure
 //! function of the listen port + exposed set + peer IPs).
 //!
@@ -29,6 +30,9 @@ use super::{Exposed, FirewallBackend, PeerSets};
 pub struct WindowsFwBackend {
     /// WireGuard's UDP listen port, opened on the host interfaces (see [`script`]).
     pub listen_port: u16,
+    /// The LAN discovery beacon's UDP port, opened on the host interfaces like `listen_port` so
+    /// inbound broadcasts arrive; `None` when the beacon is disabled.
+    pub beacon_port: Option<u16>,
 }
 
 /// Shared `-Group` tag on every rule, so cleanup is one `Remove-NetFirewallRule -Group`.
@@ -36,7 +40,13 @@ const GROUP: &str = "UnityLAN";
 
 impl FirewallBackend for WindowsFwBackend {
     fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
-        run_fw_ps(&script(iface, self.listen_port, exposed, peers))
+        run_fw_ps(&script(
+            iface,
+            self.listen_port,
+            self.beacon_port,
+            exposed,
+            peers,
+        ))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -54,14 +64,22 @@ fn remove_group() -> String {
 /// carries `-RemoteAddress` restricting it to that scope's peer IPs; a scoped expose whose peers
 /// are all offline is omitted entirely (reachable by nobody — the default-deny covers it).
 ///
-/// One rule is deliberately *not* wg-scoped: `listen_port`, WireGuard's own UDP transport port,
-/// opened on the host interfaces so inbound handshakes from off-LAN peers arrive. Every exposed
-/// port governs already-decrypted traffic on the wg adapter; this one governs the encrypted
-/// transport on the physical NIC, which Windows Defender default-denies. Opening it host-wide adds
-/// no real surface — WireGuard authenticates every datagram and drops non-peer traffic itself — and
-/// mirrors the reference `wireguard.exe`, which permits its listen port via WFP; UnityLAN skipped
-/// that by driving wireguard-nt directly. It shares the group, so `reset` removes it too.
-fn script(iface: &str, listen_port: u16, exposed: &[Exposed], peers: &PeerSets) -> String {
+/// Two rules are deliberately *not* wg-scoped: `listen_port` (WireGuard's own UDP transport port),
+/// opened on the host interfaces so inbound handshakes from off-LAN peers arrive; and `beacon_port`
+/// (the LAN discovery beacon), opened the same way so a same-segment peer's broadcast is received —
+/// it arrives on the physical NIC, not the wg adapter, which Windows Defender default-denies. Every
+/// exposed port governs already-decrypted traffic on the wg adapter; these govern traffic on the
+/// physical NIC. Opening the listen port host-wide adds no real surface — WireGuard authenticates
+/// every datagram and drops non-peer traffic itself — and mirrors the reference `wireguard.exe`; the
+/// beacon likewise only ever triggers an authenticated WG handshake attempt (see `beacon.rs`). Both
+/// share the group, so `reset` removes them too.
+fn script(
+    iface: &str,
+    listen_port: u16,
+    beacon_port: Option<u16>,
+    exposed: &[Exposed],
+    peers: &PeerSets,
+) -> String {
     let mut s = String::new();
     s.push_str(&remove_group());
     s.push('\n');
@@ -80,6 +98,16 @@ fn script(iface: &str, listen_port: u16, exposed: &[Exposed], peers: &PeerSets) 
          -Direction Inbound -Action Allow -Protocol UDP -LocalPort {listen_port} \
          -ErrorAction SilentlyContinue | Out-Null\n",
     ));
+
+    // The LAN discovery beacon port on the host interfaces (no -InterfaceAlias), when enabled — see
+    // the fn docs. Broadcasts arrive on the physical NIC, which Defender default-denies.
+    if let Some(beacon_port) = beacon_port {
+        s.push_str(&format!(
+            "New-NetFirewallRule -DisplayName 'UnityLAN beacon {beacon_port}/udp' -Group '{GROUP}' \
+             -Direction Inbound -Action Allow -Protocol UDP -LocalPort {beacon_port} \
+             -ErrorAction SilentlyContinue | Out-Null\n",
+        ));
+    }
 
     for e in exposed {
         let proto = ps_proto(e.proto);
@@ -186,6 +214,7 @@ mod tests {
         let s = script(
             "unl0",
             51820,
+            None,
             &[
                 exp(Proto::Tcp, 25565, ExposeScope::AllPeers),
                 exp(Proto::Udp, 34197, ExposeScope::AllPeers),
@@ -198,7 +227,8 @@ mod tests {
         assert!(s.contains("-Action Allow -Protocol UDP -LocalPort 34197 -InterfaceAlias 'unl0'"));
         // Unscoped exposes reach any peer — no remote-address restriction.
         assert!(!s.contains("-RemoteAddress"));
-        // One `-ErrorAction SilentlyContinue` per rule: ICMP echo, the wg listen port, the two ports.
+        // One `-ErrorAction SilentlyContinue` per rule: ICMP echo, the wg listen port, the two ports
+        // (beacon disabled here, so no beacon rule).
         assert_eq!(
             s.matches("-ErrorAction SilentlyContinue | Out-Null")
                 .count(),
@@ -212,7 +242,7 @@ mod tests {
     /// handshake and the device is unreachable to the mesh.
     #[test]
     fn script_opens_wg_listen_port_host_wide() {
-        let s = script("unl0", 51820, &[], &PeerSets::default());
+        let s = script("unl0", 51820, None, &[], &PeerSets::default());
         let line = s
             .lines()
             .find(|l| l.contains("-Protocol UDP -LocalPort 51820"))
@@ -224,13 +254,33 @@ mod tests {
         assert!(line.contains("-Group 'UnityLAN'"), "so reset() removes it");
     }
 
+    /// The beacon port, when enabled, is opened host-wide (not wg-scoped) so a same-segment peer's
+    /// broadcast — which arrives on the physical NIC — is received; disabled, no such rule exists.
+    #[test]
+    fn script_opens_beacon_port_host_wide_only_when_enabled() {
+        let s = script("unl0", 51820, Some(51821), &[], &PeerSets::default());
+        let line = s
+            .lines()
+            .find(|l| l.contains("-Protocol UDP -LocalPort 51821"))
+            .expect("a rule for the beacon port");
+        assert!(
+            !line.contains("-InterfaceAlias"),
+            "the beacon port must be open on the host, not just the wg iface: {line}"
+        );
+        assert!(line.contains("-Group 'UnityLAN'"), "so reset() removes it");
+
+        // Disabled → no beacon rule at all.
+        let off = script("unl0", 51820, None, &[], &PeerSets::default());
+        assert!(!off.contains("-LocalPort 51821"));
+    }
+
     #[test]
     fn scoped_expose_restricts_to_network_peer_ips() {
         let peers = by_net(
             "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let s = script("unl0", 51820, &[exp(Proto::Tcp, 9001, MESH)], &peers);
+        let s = script("unl0", 51820, None, &[exp(Proto::Tcp, 9001, MESH)], &peers);
         assert!(s.contains(
             "-LocalPort 9001 -InterfaceAlias 'unl0' -RemoteAddress 100.64.0.2,100.64.0.3"
         ));
@@ -254,6 +304,7 @@ mod tests {
         let s = script(
             "unl0",
             51820,
+            None,
             &[exp(Proto::Tcp, 9001, ExposeScope::OwnDevices)],
             &peers,
         );
@@ -269,6 +320,7 @@ mod tests {
         let s = script(
             "unl0",
             51820,
+            None,
             &[exp(Proto::Tcp, 9001, MESH)],
             &PeerSets::default(),
         );

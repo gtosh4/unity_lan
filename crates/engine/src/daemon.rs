@@ -124,7 +124,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             .collect::<anyhow::Result<_>>()
             .context("reading the `expose` list")?;
         let f = Arc::new(Firewall::load(
-            fw::default_backend(cfg.listen_port),
+            fw::default_backend(cfg.listen_port, cfg.beacon.then_some(cfg.beacon_port)),
             cfg.iface.clone(),
             seeds,
             &cfg.state_dir,
@@ -375,6 +375,38 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             })
         });
 
+        // LAN discovery beacon (`beacon.rs`): broadcast our WG pubkey + listen port on the local
+        // segment so two peers behind one NAT find a direct LAN path instead of hairpinning through
+        // the router's public IP. Bound to `0.0.0.0` (the physical segment, not the mesh /32) so it
+        // can send/receive segment broadcasts. Off when `beacon` is unset; a bind / broadcast failure
+        // is non-fatal (the mesh still works via coordinator-supplied endpoints).
+        let mut beacon = if cfg.beacon {
+            let bind = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cfg.beacon_port));
+            match tokio::net::UdpSocket::bind(bind).await {
+                Ok(sock) => match sock.set_broadcast(true) {
+                    Ok(()) => {
+                        tracing::info!(port = cfg.beacon_port, "LAN discovery beacon active");
+                        Some(crate::beacon::Beacon::spawn(
+                            sock,
+                            wg_pub,
+                            cfg.listen_port,
+                            cfg.beacon_port,
+                        ))
+                    }
+                    Err(e) => {
+                        tracing::warn!("beacon: set_broadcast failed ({e}); LAN discovery off");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("beacon bind {bind} failed ({e}); LAN discovery off");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
         // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
         let mut peers: HashMap<[u8; 32], PeerConfig> = HashMap::new();
@@ -398,6 +430,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let mut coord_stun = coord::stun_addr(&cfg.coordinator, resp.stun_port).await;
         tracing::debug!(?coord_stun, port = ?resp.stun_port, "coordinator STUN bootstrap");
         let mut ice_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        // Per-peer direct LAN endpoints learned from discovery beacons (`beacon.rs`), recomputed each
+        // loop iteration from this device's ping-reachability of each peer. Empty until a beacon is
+        // received *and* the LAN path verifies; tops endpoint precedence in `apply_seeds`.
+        let mut lan_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
         apply_state(
             backend.as_ref(),
             &fw,
@@ -410,6 +446,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             coord_online,
             &relay_eps,
             &ice_eps,
+            &lan_eps,
         )
         .await?;
 
@@ -508,6 +545,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         coord_online,
                         &relay_eps,
                         &ice_eps,
+                        &lan_eps,
                     )
                     .await?;
                 }
@@ -551,6 +589,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 None => HashMap::new(),
             };
             let mut live: HashMap<Ipv4Addr, control::PeerLive> = HashMap::new();
+            // Per-peer ping reachability this iteration — the health signal the beacon adoption check
+            // uses to confirm a LAN endpoint carries traffic (a switched-to endpoint keeps the old WG
+            // session, so only live round-trips, not handshake age, prove the new path).
+            let mut reach_by_pk: HashMap<[u8; 32], bool> = HashMap::new();
             // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`)
             // *plus* those we're already relaying — a working relay tunnel reads as connected, so
             // without this it would drop out of `need_relay` and the coordinator would withdraw the
@@ -630,6 +672,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     want_relay.push(*pk);
                 }
                 if let Some((ip, _)) = cfg.allowed_ips.first() {
+                    reach_by_pk.insert(*pk, latency.contains_key(ip));
                     let (rx_bytes, tx_bytes) = stats
                         .as_ref()
                         .and_then(|m| m.get(pk))
@@ -651,6 +694,18 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             attempt_since.retain(|pk, _| peers.contains_key(pk));
             prev_reach.retain(|pk, _| peers.contains_key(pk));
             control::set_live(&status, &live);
+
+            // Recompute direct LAN endpoints from received beacons + this iteration's ping health.
+            // `lan_changed` flags an adoption/reversion so the local-recheck branch re-applies at once
+            // (this transition is async to the long-poll, like an ICE session coming up).
+            let lan_changed = if let Some(b) = beacon.as_mut() {
+                let new = b.select(now, &reach_by_pk);
+                let changed = new != lan_eps;
+                lan_eps = new;
+                changed
+            } else {
+                false
+            };
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
@@ -813,7 +868,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         relay_eps = sync_relays(&mut relays, &last_seeds).await;
                     }
                     apply_state(
-                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps,
+                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps, &lan_eps,
                     ).await?;
                     // The held request carries the *old* opt-out/paused state — re-issue it.
                     drop_pending = true;
@@ -827,16 +882,21 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     // ICE connects asynchronously and nothing about that transition wakes the
                     // long-poll, so the shim would otherwise sit unused until the next refresh
                     // completed — up to a whole hold after the path was actually ready. Re-sync here
-                    // and apply the moment the endpoint set changes. Purely local: no coordinator
-                    // traffic, so an idle client still costs one request per hold.
+                    // and apply the moment either endpoint set changes. A beacon adopting/reverting a
+                    // LAN endpoint (`lan_changed`) is likewise async to the long-poll. Purely local:
+                    // no coordinator traffic, so an idle client still costs one request per hold.
+                    let mut ice_changed = false;
                     if ice_enabled {
                         let eps = sync_ice(&mut ice, &last_seeds, wg_pub, coord_stun, &want_set).await;
                         if eps != ice_eps {
                             ice_eps = eps;
-                            apply_state(
-                                backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps,
-                            ).await?;
+                            ice_changed = true;
                         }
+                    }
+                    if ice_changed || lan_changed {
+                        apply_state(
+                            backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps, &lan_eps,
+                        ).await?;
                     }
                     None
                 }
@@ -904,6 +964,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                                 coord_online,
                                 &relay_eps,
                                 &ice_eps,
+                                &lan_eps,
                             )
                             .await?;
                         }
@@ -992,6 +1053,7 @@ async fn apply_state(
     coord_online: bool,
     relay_eps: &HashMap<[u8; 32], SocketAddr>,
     ice_eps: &HashMap<[u8; 32], SocketAddr>,
+    lan_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<()> {
     // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
     // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
@@ -1040,7 +1102,7 @@ async fn apply_state(
     if let Some(fw) = fw {
         changed |= fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;
     }
-    changed |= apply_seeds(backend, active, peers, relay_eps, ice_eps)?;
+    changed |= apply_seeds(backend, active, peers, relay_eps, ice_eps, lan_eps)?;
     if changed {
         if let Some(dev) = device {
             tracing::debug!(
@@ -1312,29 +1374,35 @@ fn apply_seeds(
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     relay_eps: &HashMap<[u8; 32], SocketAddr>,
     ice_eps: &HashMap<[u8; 32], SocketAddr>,
+    lan_eps: &HashMap<[u8; 32], SocketAddr>,
 ) -> anyhow::Result<bool> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
     #[allow(clippy::type_complexity)]
     let mut desired: HashMap<[u8; 32], (Vec<(Ipv4Addr, u8)>, Option<SocketAddr>)> = HashMap::new();
     for s in seeds {
-        // Endpoint precedence: a directly dialable endpoint wins; else our ICE shim (userspace path,
-        // the negotiated best path — direct srflx or relay); else the M5.4 relay shim (kernel path);
-        // else the punch target (reflexive) so WG handshakes toward it. Both shims are loopback —
-        // the daemon's ICE / TURN pump forwards through them.
+        // Endpoint precedence: a LAN endpoint learned from a discovery beacon wins — it's a direct
+        // same-segment path that supersedes the coordinator's endpoint (which, for two peers behind
+        // one NAT, is a flaky public-IP hairpin); else the coordinator's directly dialable endpoint;
+        // else our ICE shim (userspace path, the negotiated best path — direct srflx or relay); else
+        // the M5.4 relay shim (kernel path); else the punch target (reflexive) so WG handshakes toward
+        // it. The shims are loopback — the daemon's ICE / TURN pump forwards through them.
+        let lan_ep = lan_eps.get(&s.pubkey).copied();
         let ice_ep = ice_eps.get(&s.pubkey).copied();
         let relay_ep = relay_eps.get(&s.pubkey).copied();
-        if s.endpoint.is_none() && ice_ep.is_none() && relay_ep.is_none() {
+        if s.endpoint.is_none() && ice_ep.is_none() && relay_ep.is_none() && lan_ep.is_none() {
             if let Some(p) = s.punch {
                 tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
             }
         }
-        if let Some(shim) = ice_ep {
+        if let Some(lan) = lan_ep {
+            tracing::debug!(peer = %hex8(&s.pubkey), %lan, "beacon: routing peer via direct LAN endpoint");
+        } else if let Some(shim) = ice_ep {
             tracing::debug!(peer = %hex8(&s.pubkey), %shim, "ice: routing peer via ICE shim");
         } else if let Some(shim) = relay_ep {
             tracing::debug!(peer = %hex8(&s.pubkey), %shim, "relay: routing peer via TURN shim");
         }
-        let ep = s.endpoint.or(ice_ep).or(relay_ep).or(s.punch);
+        let ep = lan_ep.or(s.endpoint).or(ice_ep).or(relay_ep).or(s.punch);
         let e = desired.entry(s.pubkey).or_insert_with(|| (Vec::new(), ep));
         e.0.push((s.ip, 32));
         if e.1.is_none() {

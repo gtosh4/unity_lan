@@ -7,6 +7,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
+- **Two devices on the same network now connect directly instead of flapping.** When two of your
+  peers sit behind the same router, their tunnel used to run through the router's public address (a
+  "hairpin") — which many home routers do unreliably, so the connection kept dropping and coming
+  back. Each engine now quietly announces itself on the local network so same-network peers find each
+  other's direct address and use it, giving a faster, stable link. Nothing private about your network
+  is sent anywhere — the announcement carries only this device's WireGuard key and port, stays on the
+  local segment, and if the direct path doesn't actually work the engine falls back to the old route.
+  On by default; turn it off with `beacon = false` in `engine.toml` (or change its port with
+  `beacon_port`).
 - **A peer changing reachability is now logged.** When a peer goes down or comes back — or shifts
   between direct, ICE, relayed, and unreachable — the engine logs the transition with the peer and
   how long since its last handshake, so a peer that intermittently drops leaves a timestamped trail

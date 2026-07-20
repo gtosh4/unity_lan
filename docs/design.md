@@ -381,6 +381,19 @@ No traffic transits the coordinator.
 ### 7.2 NAT traversal — connectivity ladder (end-state)
 Most-direct-first ladder; the **userspace socket owns traversal** (§7.3), so STUN/ICE machinery
 can attach to the data path:
+- **Same-LAN members**: two members behind one NAT would otherwise reach each other only through
+  the router's public IP — a **hairpin** — since the coordinator hands out each peer's *reflexive*
+  (public) endpoint and neither advertises its private address (advertising RFC1918 addresses would
+  leak internal topology, and they collide across sites — a remote peer on `192.168.4.0/24` looks
+  "same subnet" as yours). Consumer routers hairpin unreliably: the translation drops/rebinds and the
+  tunnel **flaps** (a working-then-dropping handshake) even though both boxes share a segment. A
+  **LAN discovery beacon** closes this without advertising anything private: each engine periodically
+  UDP-**broadcasts** its WG pubkey + listen port on the local segment; a beacon is only *received* by
+  a host on the same L2 segment, so its source address is a proven direct LAN path (proof by receipt,
+  not by guessing subnets). The receiver points WireGuard at `src_ip : advertised_port`, replacing the
+  hairpin. No beacon crypto — the WG handshake is the authenticator; adoption is guarded by a
+  reachability check that reverts to the reflexive path if the LAN endpoint doesn't carry traffic, so
+  a forged beacon costs at most a brief blip.
 - **Reachable members**: open the WG listen port via **UPnP-IGD** (or manual forward) → directly
   dialable. Covers most home setups.
 - **Cone-NAT members**: a userspace **ICE** agent gathers candidates (host + STUN reflexive) and
