@@ -21,6 +21,20 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **One interrupted shutdown could leave the engine unable to start ever again.** If tearing down the
+  interface wedged, systemd eventually killed the engine outright, and the killed process left its
+  WireGuard control socket behind — after which every start failed with `Address already in use` and
+  the service simply restart-looped until someone deleted the file by hand. A socket with nothing
+  behind it is now recognised as the leftover it is and cleared automatically; one that is still
+  answering is left strictly alone, since that means another engine is running. Shutdown also now
+  reverts the firewall and DNS settings *before* the interface, so the changes that outlive the
+  process are undone even when that last step is what hangs, and it gives up after fifteen seconds
+  instead of holding a stop — or a reboot — for a minute and a half.
+- **Running the engine once by hand could break the service afterwards.** Doing so leaves the
+  WireGuard runtime directory owned by your user, and the service, which deliberately runs with
+  almost no privileges, then can't write there. The failure surfaced as a bare `Permission denied`
+  that made no sense for a daemon running as root; it now says which directory is wrong, who owns
+  it, and how to fix it.
 - **Two devices on the same network could never reach each other if the router wouldn't hairpin.**
   Both got handed the router's public address, dialed it, and the handshake quietly never landed —
   yet status kept reporting them as `Direct`, so nothing ever escalated to ICE and there was nothing

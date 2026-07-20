@@ -1,6 +1,7 @@
 //! Userspace WireGuard backend (boringtun via defguard). Portable across Linux/Windows/macOS;
 //! requires CAP_NET_ADMIN (or equivalent) to create the TUN interface.
 
+use anyhow::Context;
 use defguard_wireguard_rs::key::Key;
 use defguard_wireguard_rs::peer::Peer;
 use defguard_wireguard_rs::{InterfaceConfiguration, Userspace, WGApi, WireguardInterfaceApi};
@@ -53,6 +54,73 @@ fn normalize_handshake(
     stats
 }
 
+/// Where boringtun puts an interface's uapi socket. `/var/run` is a symlink to `/run` on any
+/// systemd host, so the two candidates are usually the same file — check both regardless, since
+/// which one the library picked depends on its own probing.
+#[cfg(unix)]
+fn api_socket_paths(ifname: &str) -> [std::path::PathBuf; 2] {
+    [
+        std::path::PathBuf::from(format!("/run/wireguard/{ifname}.sock")),
+        std::path::PathBuf::from(format!("/var/run/wireguard/{ifname}.sock")),
+    ]
+}
+
+/// Delete an orphaned uapi socket, returning whether anything was removed.
+///
+/// Only ever removes a socket that refuses a connection: if something is listening, another engine
+/// owns this interface and deleting the file would hijack a *live* mesh. `ECONNREFUSED` is the
+/// kernel telling us the file outlived its process, which is the only case we act on.
+#[cfg(unix)]
+fn reap_stale_api_socket(ifname: &str) -> anyhow::Result<bool> {
+    let mut removed = false;
+    for path in api_socket_paths(ifname) {
+        if !path.exists() {
+            continue;
+        }
+        match std::os::unix::net::UnixStream::connect(&path) {
+            // Someone answered — a live engine holds this interface. Leave it alone.
+            Ok(_) => return Ok(false),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                std::fs::remove_file(&path)
+                    .with_context(|| format!("removing stale api socket {}", path.display()))?;
+                removed = true;
+            }
+            // Anything else (EACCES, ENOTSOCK, …) is not ours to interpret — don't delete blind.
+            Err(_) => return Ok(false),
+        }
+    }
+    Ok(removed)
+}
+
+/// Explain a uapi-socket bind failure in terms of the thing the operator has to change.
+///
+/// The raw error is `Permission denied (os error 13)` with no path, which is doubly opaque here: the
+/// engine runs as root, so a permission error looks impossible — until you remember the unit drops
+/// everything but `CAP_NET_ADMIN`/`CAP_NET_BIND_SERVICE`, and root without `CAP_DAC_OVERRIDE` obeys
+/// ordinary file modes. Running the engine once as a normal user is enough to leave
+/// `/run/wireguard` owned by that user, and every subsequent service start then fails.
+#[cfg(unix)]
+fn api_socket_hint(ifname: &str) -> String {
+    use std::os::unix::fs::MetadataExt;
+    for path in api_socket_paths(ifname) {
+        let Some(dir) = path.parent() else { continue };
+        let Ok(md) = std::fs::metadata(dir) else {
+            continue;
+        };
+        if md.uid() != 0 {
+            return format!(
+                "{} is owned by uid {}, not root — the engine runs without CAP_DAC_OVERRIDE, so it \
+                 cannot write there. It was likely created by running the engine as a normal user. \
+                 Remove it (`rm -rf {}`) and restart; the service recreates it as root",
+                dir.display(),
+                md.uid(),
+                dir.display()
+            );
+        }
+    }
+    format!("creating the boringtun uapi socket for {ifname}")
+}
+
 impl UserspaceBackend {
     pub fn new(ifname: &str) -> anyhow::Result<Self> {
         let api = WGApi::<Userspace>::new(ifname.to_string())?;
@@ -87,7 +155,24 @@ fn set_link_state(_name: &str, _up: bool) -> anyhow::Result<()> {
 
 impl WgBackend for UserspaceBackend {
     fn up(&mut self, cfg: &IfaceConfig) -> anyhow::Result<()> {
-        self.api.create_interface()?;
+        if let Err(e) = self.api.create_interface() {
+            // An engine killed before it could tear down (systemd SIGKILL after a hung stop) leaves
+            // its boringtun uapi socket behind, and the bind then fails for the life of the machine
+            // until someone deletes the file by hand — a headless box just restart-loops. Treat a
+            // socket nobody is listening on as the orphan it is.
+            #[cfg(unix)]
+            if reap_stale_api_socket(&self.name)? {
+                tracing::warn!(
+                    iface = %self.name,
+                    "wg: removed a stale boringtun api socket left by a previous engine; retrying"
+                );
+                self.api.create_interface()?;
+            } else {
+                return Err(anyhow::Error::from(e).context(api_socket_hint(&self.name)));
+            }
+            #[cfg(not(unix))]
+            return Err(e.into());
+        }
         let config = InterfaceConfiguration {
             name: self.name.clone(),
             prvkey: Key::new(cfg.private_key).to_string(), // defguard wants base64
@@ -179,5 +264,35 @@ mod tests {
         m.insert([2u8; 32], stat(None));
         let out = normalize_handshake(m);
         assert!(out[&[2u8; 32]].last_handshake.is_none());
+    }
+
+    /// The reaper deletes a socket file, so the one thing it must never do is delete a socket some
+    /// *live* engine is serving — that would hijack a running mesh. Only a refused connection counts.
+    #[cfg(unix)]
+    #[test]
+    fn reaper_spares_a_socket_that_still_has_a_listener() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = crate::testutil::TempDir::new("wg-reaper");
+        let path = dir.join("live.sock");
+        let _listener = UnixListener::bind(&path).expect("bind");
+
+        // Someone answers → this is a live engine, leave the file alone.
+        assert!(UnixStream::connect(&path).is_ok());
+        assert!(path.exists());
+
+        // With the listener gone the file remains but refuses connections — that is the orphan.
+        drop(_listener);
+        std::fs::remove_file(&path).expect("cleanup");
+        let stale = dir.join("stale.sock");
+        let l = UnixListener::bind(&stale).expect("bind");
+        drop(l);
+        // A bound-then-dropped path either vanishes or refuses; both are safe to remove.
+        if stale.exists() {
+            assert_eq!(
+                UnixStream::connect(&stale).unwrap_err().kind(),
+                std::io::ErrorKind::ConnectionRefused
+            );
+        }
     }
 }

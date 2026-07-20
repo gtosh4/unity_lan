@@ -728,9 +728,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
                         Err(_) => tracing::debug!("shutdown withdraw timed out"),
                     }
-                    if let Err(e) = backend.down() {
-                        tracing::warn!("interface down on shutdown: {e:#}");
-                    }
+                    // Revert host-global state *before* the interface. `backend.down()` can wedge
+                    // inside boringtun's uapi (seen in the field: `remove_interface` spinning until
+                    // systemd's stop timeout, then SIGKILL), and a SIGKILL runs nothing after it —
+                    // stranding the firewall table, the resolved routing domain, and the exemption
+                    // we inserted into *another* product's nft chain. Those outlive the process and
+                    // nothing else will clean them; a leftover interface and uapi socket are both
+                    // recovered on the next start.
                     if let Some(fw) = &fw {
                         if let Err(e) = fw.reset() {
                             tracing::warn!("firewall reset on shutdown: {e:#}");
@@ -740,6 +744,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                         if let Err(e) = r.revert(&cfg.iface) {
                             tracing::warn!("resolver revert on shutdown: {e:#}");
                         }
+                    }
+                    if let Err(e) = backend.down() {
+                        tracing::warn!("interface down on shutdown: {e:#}");
                     }
                     if let Some(t) = &dns_task {
                         t.abort();

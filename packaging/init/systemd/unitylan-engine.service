@@ -12,6 +12,11 @@ ExecStart=/usr/lib/unitylan/unitylan-engine run /etc/unitylan/engine.toml
 # and be relaunched onto the new version. An explicit `systemctl stop` still stops (not a restart).
 Restart=always
 RestartSec=5
+# Teardown reverts the firewall and resolver first, then the interface — and that last step can wedge
+# inside boringtun's uapi. Cap the wait well under systemd's 90s default so a stuck `remove_interface`
+# doesn't hold a stop (or a reboot) for a minute and a half; the host-global state is already undone
+# by then, and a leftover interface/uapi socket is recovered on the next start.
+TimeoutStopSec=15
 
 # Run as root (User unset) but with the `unitylan` group, so RuntimeDirectory (/run/unitylan) and
 # the control socket the engine binds there are group-owned by `unitylan`. Members of that group
