@@ -285,6 +285,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         }
         control::set_lan_overlap(&status, overlap);
 
+        // The CGNAT exemption needs our own mesh address as well as the interface: anything we send
+        // to ourselves (the resolver below is exactly that) loops back on `lo`, where a rule scoped
+        // to the mesh interface can't match it.
+        if let Some(fw) = &fw {
+            if let Err(e) = fw.set_mesh_addr(device.wg_ip) {
+                tracing::warn!("firewall: recording mesh address: {e:#}");
+            }
+        }
+
         // Resolver address: this device's own mesh IP (now on the interface) + the configured port.
         // Bound here, not on loopback, so `:53` is free on every platform and Windows NRPT (port-53
         // only) can forward to it. The IP is pubkey-derived, so it changes on re-key — hence the

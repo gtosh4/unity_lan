@@ -194,17 +194,65 @@ fn cgnat_conflict(ruleset: &str) -> Option<CgnatConflict> {
     None
 }
 
-/// Whether our exemption for `iface` is already installed (so we don't stack a duplicate on every
-/// reconcile).
-fn compat_present(ruleset: &str, iface: &str) -> bool {
-    ruleset
-        .lines()
-        .any(|l| l.contains(COMPAT_COMMENT) && l.contains(&format!("\"{iface}\"")))
+/// One exemption we want present in the foreign chain: the `nft` arguments that create it, plus a
+/// substring unique enough to recognise it again in `nft list` output.
+struct CompatRule {
+    args: Vec<String>,
+    key: String,
 }
 
-/// Locate our previously-inserted exemption, returning the coordinates `nft delete rule` needs.
-fn compat_handle(ruleset: &str, iface: &str) -> Option<(String, String, String, String)> {
+/// The exemptions the foreign drop makes necessary.
+///
+/// Two are needed, because mesh traffic reaches us on two different interfaces:
+///   * peer traffic arrives on the mesh interface itself;
+///   * traffic we send to *our own* mesh address — the `.internal` resolver is the case that bit us
+///     — is looped back by the kernel and arrives on `lo`, where an `iifname "unl0"` exemption
+///     cannot match. Tailscale hits the identical problem with its own resolver and solves it the
+///     same way, with an `ip saddr <its own addr> iifname "lo" accept` sitting just above the drop.
+///
+/// The loopback rule is scoped to our exact address rather than the whole CGNAT block, so it permits
+/// no more than the one host's own traffic.
+fn compat_rules(iface: &str, mesh_addr: Option<std::net::Ipv4Addr>) -> Vec<CompatRule> {
+    let mut rules = vec![CompatRule {
+        args: vec![
+            "iifname".into(),
+            iface.into(),
+            "accept".into(),
+            "comment".into(),
+            COMPAT_COMMENT.into(),
+        ],
+        key: format!("iifname \"{iface}\""),
+    }];
+    if let Some(ip) = mesh_addr {
+        rules.push(CompatRule {
+            args: vec![
+                "ip".into(),
+                "saddr".into(),
+                ip.to_string(),
+                "iifname".into(),
+                "lo".into(),
+                "accept".into(),
+                "comment".into(),
+                COMPAT_COMMENT.into(),
+            ],
+            key: format!("ip saddr {ip} iifname \"lo\""),
+        });
+    }
+    rules
+}
+
+/// Whether a given exemption is already installed (so we don't stack duplicates on every reconcile).
+fn compat_present(ruleset: &str, key: &str) -> bool {
+    ruleset
+        .lines()
+        .any(|l| l.contains(COMPAT_COMMENT) && l.contains(key))
+}
+
+/// Locate every exemption we previously inserted, with the coordinates `nft delete rule` needs.
+/// Handles are listed newest-first so deleting in the returned order stays valid.
+fn compat_handles(ruleset: &str) -> Vec<(String, String, String, String)> {
     let (mut family, mut table, mut chain) = (String::new(), String::new(), String::new());
+    let mut found = Vec::new();
     for line in ruleset.lines() {
         let l = line.trim();
         if let Some(rest) = l.strip_prefix("table ") {
@@ -217,12 +265,18 @@ fn compat_handle(ruleset: &str, iface: &str) -> Option<(String, String, String, 
                 .next()
                 .unwrap_or_default()
                 .to_string();
-        } else if l.contains(COMPAT_COMMENT) && l.contains(&format!("\"{iface}\"")) {
-            let handle = l.rsplit("# handle ").next()?.trim().to_string();
-            return Some((family.clone(), table.clone(), chain.clone(), handle));
+        } else if l.contains(COMPAT_COMMENT) {
+            if let Some(h) = l.rsplit("# handle ").next() {
+                found.push((
+                    family.clone(),
+                    table.clone(),
+                    chain.clone(),
+                    h.trim().to_string(),
+                ));
+            }
         }
     }
-    None
+    found
 }
 
 fn nft_ruleset(args: &[&str]) -> Option<String> {
@@ -240,51 +294,68 @@ fn nft_ruleset(args: &[&str]) -> Option<String> {
 ///
 /// Best-effort throughout: any `nft` failure degrades to the warning rather than failing the reconcile.
 #[cfg(target_os = "linux")]
-pub fn ensure_cgnat_compat(iface: &str, auto: bool) {
+pub fn ensure_cgnat_compat(iface: &str, mesh_addr: Option<std::net::Ipv4Addr>, auto: bool) {
     let Some(ruleset) = nft_ruleset(&["list", "ruleset"]) else {
         return;
     };
     let Some(c) = cgnat_conflict(&ruleset) else {
         return;
     };
-    if compat_present(&ruleset, iface) {
+    let missing: Vec<CompatRule> = compat_rules(iface, mesh_addr)
+        .into_iter()
+        .filter(|r| !compat_present(&ruleset, &r.key))
+        .collect();
+    if missing.is_empty() {
         return;
     }
-    let manual = format!(
-        "nft insert rule {} {} {} iifname \"{iface}\" accept",
-        c.family, c.table, c.chain
-    );
+    let manual = missing
+        .iter()
+        .map(|r| {
+            // Drop the trailing `comment <marker>` — that's our bookkeeping, not something a human
+            // needs to type.
+            let body: Vec<&str> = r
+                .args
+                .iter()
+                .map(String::as_str)
+                .take_while(|a| *a != "comment")
+                .collect();
+            format!(
+                "nft insert rule {} {} {} {}",
+                c.family,
+                c.table,
+                c.chain,
+                body.join(" ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     if !auto {
         tracing::warn!(
             offending_rule = %c.rule,
             "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
-             interfaces; UnityLAN traffic on {iface} will be silently blackholed. Exempt the mesh \
-             interface: `{manual}` (or set tailscale_compat = true to do this automatically)"
+             interfaces; UnityLAN traffic on {iface} will be silently blackholed. Exempt it: \
+             `{manual}` (or set tailscale_compat = true to do this automatically)"
         );
         return;
     }
-    // Built as argv, never a shell string, so the interface name is not subject to quoting.
-    let ok = Command::new("nft")
-        .args([
-            "insert",
-            "rule",
-            &c.family,
-            &c.table,
-            &c.chain,
-            "iifname",
-            iface,
-            "accept",
-            "comment",
-            COMPAT_COMMENT,
-        ])
-        .status()
-        .is_ok_and(|s| s.success());
-    if ok {
+    let mut inserted = 0usize;
+    for r in &missing {
+        // Built as argv, never a shell string, so nothing here is subject to quoting.
+        let ok = Command::new("nft")
+            .args(["insert", "rule", &c.family, &c.table, &c.chain])
+            .args(&r.args)
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            inserted += 1;
+        }
+    }
+    if inserted == missing.len() {
         tracing::info!(
             offending_rule = %c.rule,
             "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
-             interfaces; inserted an exemption for {iface} in {} {} {} (removed on shutdown; set \
-             tailscale_compat = false to manage this yourself)",
+             interfaces; inserted {inserted} exemption(s) for {iface} in {} {} {} (removed on \
+             shutdown; set tailscale_compat = false to manage this yourself)",
             c.family, c.table, c.chain
         );
     } else {
@@ -297,19 +368,18 @@ pub fn ensure_cgnat_compat(iface: &str, auto: bool) {
     }
 }
 
-/// Remove the exemption we inserted into the foreign chain. Called on teardown — that rule is not in
-/// our table, so nothing else would ever clean it up.
+/// Remove every exemption we inserted into the foreign chain. Called on teardown — those rules are
+/// not in our table, so nothing else would ever clean them up.
 #[cfg(target_os = "linux")]
-pub fn remove_cgnat_compat(iface: &str) {
+pub fn remove_cgnat_compat() {
     let Some(ruleset) = nft_ruleset(&["-a", "list", "ruleset"]) else {
         return;
     };
-    let Some((family, table, chain, handle)) = compat_handle(&ruleset, iface) else {
-        return;
-    };
-    let _ = Command::new("nft")
-        .args(["delete", "rule", &family, &table, &chain, "handle", &handle])
-        .status();
+    for (family, table, chain, handle) in compat_handles(&ruleset) {
+        let _ = Command::new("nft")
+            .args(["delete", "rule", &family, &table, &chain, "handle", &handle])
+            .status();
+    }
 }
 
 fn run_nft(script: &str) -> anyhow::Result<()> {
@@ -447,28 +517,62 @@ mod tests {
 		iifname != "tailscale0" ip saddr 100.64.0.0/10 counter drop
 	}
 }"#;
-        assert!(compat_present(installed, "unl0"));
+        assert!(compat_present(installed, "iifname \"unl0\""));
         // A different interface's exemption is not ours.
-        assert!(!compat_present(installed, "unl1"));
-        assert!(!compat_present(TS_RULESET, "unl0"));
+        assert!(!compat_present(installed, "iifname \"unl1\""));
+        assert!(!compat_present(TS_RULESET, "iifname \"unl0\""));
     }
 
-    /// Teardown needs the handle plus the same coordinates, or the rule outlives the engine.
+    /// Traffic to our *own* mesh address loops back on `lo`, so an interface-scoped exemption never
+    /// matches it — which is how the `.internal` resolver ended up silently blackholed while ping
+    /// worked. The loopback rule is scoped to this host's address, not the whole CGNAT block.
     #[test]
-    fn compat_handle_locates_the_rule_for_deletion() {
+    fn compat_rules_cover_loopback_to_our_own_mesh_address() {
+        let addr: std::net::Ipv4Addr = "100.73.208.187".parse().unwrap();
+        let rules = compat_rules("unl0", Some(addr));
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[1].key, "ip saddr 100.73.208.187 iifname \"lo\"");
+        assert_eq!(
+            rules[1].args,
+            vec![
+                "ip",
+                "saddr",
+                "100.73.208.187",
+                "iifname",
+                "lo",
+                "accept",
+                "comment",
+                COMPAT_COMMENT
+            ]
+        );
+        // Not the whole /10 — only this host's own traffic is re-permitted.
+        assert!(!rules[1].args.iter().any(|a| a.contains("/10")));
+        // Before the interface has an address there is nothing to scope to, so just the iface rule.
+        assert_eq!(compat_rules("unl0", None).len(), 1);
+    }
+
+    /// Teardown must find *every* rule it inserted, or one outlives the engine in a foreign chain.
+    #[test]
+    fn compat_handles_locate_all_our_rules_for_deletion() {
         let listed = r#"table ip filter {
 	chain ts-input {
 		iifname "unl0" accept comment "unitylan-cgnat-compat" # handle 42
+		ip saddr 100.73.208.187 iifname "lo" accept comment "unitylan-cgnat-compat" # handle 43
 		iifname != "tailscale0" ip saddr 100.64.0.0/10 counter drop # handle 7
 	}
 }"#;
-        let (family, table, chain, handle) = compat_handle(listed, "unl0").expect("finds our rule");
-        assert_eq!(
-            (family.as_str(), table.as_str(), chain.as_str()),
-            ("ip", "filter", "ts-input")
-        );
-        assert_eq!(handle, "42");
-        assert!(compat_handle(listed, "unl1").is_none());
+        let found = compat_handles(listed);
+        assert_eq!(found.len(), 2);
+        for (family, table, chain, _) in &found {
+            assert_eq!(
+                (family.as_str(), table.as_str(), chain.as_str()),
+                ("ip", "filter", "ts-input")
+            );
+        }
+        let handles: Vec<&str> = found.iter().map(|(_, _, _, h)| h.as_str()).collect();
+        assert_eq!(handles, vec!["42", "43"]);
+        // Never claims a rule that isn't ours — the drop must survive.
+        assert!(compat_handles(TS_RULESET).is_empty());
     }
 
     #[test]

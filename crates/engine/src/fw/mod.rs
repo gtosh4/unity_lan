@@ -164,6 +164,8 @@ pub struct Firewall {
     path: PathBuf,
     /// Auto-exempt the mesh interface from a foreign CGNAT drop (see `Config::tailscale_compat`).
     tailscale_compat: bool,
+    /// This host's mesh address, once assigned — see [`Firewall::set_mesh_addr`].
+    mesh_addr: Mutex<Option<std::net::Ipv4Addr>>,
 }
 
 impl Firewall {
@@ -202,6 +204,7 @@ impl Firewall {
             peers: Mutex::new(PeerSets::default()),
             path,
             tailscale_compat,
+            mesh_addr: Mutex::new(None),
         }
     }
 
@@ -319,15 +322,30 @@ impl Firewall {
     /// *foreign* chain and so is not covered by the backend's own table teardown.
     pub fn reset(&self) -> anyhow::Result<()> {
         #[cfg(target_os = "linux")]
-        nftables::remove_cgnat_compat(&self.iface);
+        nftables::remove_cgnat_compat();
         self.backend.reset()
+    }
+
+    /// Tell the firewall this host's mesh address, once the interface has one. Needed for the
+    /// loopback half of the CGNAT exemption — traffic to our own mesh address (the `.internal`
+    /// resolver) comes back on `lo`, which an interface-scoped rule can't match.
+    pub fn set_mesh_addr(&self, addr: std::net::Ipv4Addr) -> anyhow::Result<()> {
+        let changed = { self.mesh_addr.lock().unwrap().replace(addr) != Some(addr) };
+        if changed {
+            self.reconcile()?;
+        }
+        Ok(())
     }
 
     fn reconcile(&self) -> anyhow::Result<()> {
         // Re-checked on every reconcile, not just at startup: the owner of that chain (Tailscale)
         // rebuilds it on restart, silently dropping our exemption. Idempotent.
         #[cfg(target_os = "linux")]
-        nftables::ensure_cgnat_compat(&self.iface, self.tailscale_compat);
+        nftables::ensure_cgnat_compat(
+            &self.iface,
+            *self.mesh_addr.lock().unwrap(),
+            self.tailscale_compat,
+        );
         let exposed = self.exposed.lock().unwrap().clone();
         let peers = self.peers.lock().unwrap().clone();
         self.backend.apply(&self.iface, &exposed, &peers)

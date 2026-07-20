@@ -70,6 +70,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- **Name lookups stayed broken on hosts running Tailscale even once traffic flowed.** Clearing
+  Tailscale's block let peers reach each other, but `.unity.internal` names still failed: a lookup
+  goes to this machine's *own* mesh address, and the kernel loops that back on the loopback
+  interface, where an exemption written for the mesh interface never applies. Both paths are now
+  exempt — the loopback one scoped to just this host's own address.
 - **Tailscale's mesh-range block is now cleared automatically.** Tailscale installs a firewall rule
   that drops UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, which
   blackholes the entire mesh while peers still look perfectly reachable. The engine already spotted
