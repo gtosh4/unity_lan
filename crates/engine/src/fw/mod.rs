@@ -173,6 +173,9 @@ pub struct Firewall {
     /// owner opened at runtime falls through to the default `drop`.
     path: PathBuf,
     /// Auto-exempt the mesh interface from a foreign CGNAT drop (see `Config::tailscale_compat`).
+    /// Only read on Linux (the nftables CGNAT-conflict path); stored on every platform so the field
+    /// is `dead_code` off Linux.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     tailscale_compat: bool,
     /// This host's mesh address, once assigned — see [`Firewall::set_mesh_addr`].
     mesh_addr: Mutex<Option<std::net::Ipv4Addr>>,

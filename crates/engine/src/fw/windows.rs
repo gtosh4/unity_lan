@@ -23,7 +23,7 @@
 //! non-zero exit — aborting startup. Suppressed, those pre-up rules are simply skipped and then
 //! (re)created by the first post-up membership `apply`, once `unl0` exists.
 
-use common::control::{ExposeScope, Proto};
+use common::control::Proto;
 
 use super::{Exposed, FirewallBackend, PeerSets};
 
@@ -184,6 +184,7 @@ fn run_fw_ps(script: &str) -> anyhow::Result<()> {
 mod tests {
     use super::super::NetInfo;
     use super::*;
+    use common::control::ExposeScope;
     use std::net::Ipv4Addr;
 
     /// A resolved network scope, matching the ids the `by_net` fixture assigns.
