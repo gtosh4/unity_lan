@@ -381,16 +381,40 @@ pub struct GuildAttestation {
     pub att_schema: u32,
 }
 
-/// A network (ACL role) a peer shares with the caller, tagged with the community (guild) it lives
-/// in. The community is the disambiguator here — a peer met across two of the coordinator's guilds
-/// is one device/one IP (Model B), so it's carried per shared network, not in the hostname.
+/// A network (ACL role) a peer shares with the caller. A peer met across two of the coordinator's
+/// guilds is one device/one IP (Model B), so the guild is carried per shared network rather than in
+/// the hostname.
+///
+/// **`(guild_id, role_id)` is the identity; `name`/`community` are display only.** Both labels are
+/// user-chosen and mutable — two guilds may each have an `Engineering`, and either can be renamed —
+/// so anything that decides access (firewall scoping in particular) keys on the snowflakes and
+/// treats the strings as presentation.
+///
+/// The ids are `#[serde(default)]` because they were added after the labels: a coordinator that
+/// predates them sends neither, and both arrive `0`. Zero is therefore *not* an identity — it means
+/// "this coordinator didn't say" — and a network without ids cannot be used as an expose scope at
+/// all (see `PeerSets` in the engine). Fail closed: the alternative, treating `0` as a real id,
+/// would collapse every such network into one bucket and cross-admit all of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SharedNetwork {
-    /// Role display name (the ACL group).
+    /// Role display name (the ACL group). Display only — see the type docs.
     pub name: String,
-    /// Community slug of the guild this role belongs to — disambiguates same-named roles across
-    /// the coordinator's guilds, and labels which server a shared network came from.
+    /// Community slug of the guild this role belongs to. Display only — see the type docs.
     pub community: String,
+    /// The guild this role lives in. `0` when the coordinator predates this field.
+    #[serde(default)]
+    pub guild_id: u64,
+    /// The Discord role backing this network. `0` when the coordinator predates this field.
+    #[serde(default)]
+    pub role_id: u64,
+}
+
+impl SharedNetwork {
+    /// The identity pair, or `None` when the coordinator didn't send one — in which case this
+    /// network can be displayed but never scoped to.
+    pub fn id(&self) -> Option<(u64, u64)> {
+        (self.guild_id != 0 && self.role_id != 0).then_some((self.guild_id, self.role_id))
+    }
 }
 
 /// The caller's own device: its signed attestation(s) + the names to build its hostname(s).

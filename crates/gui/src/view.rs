@@ -826,7 +826,7 @@ impl App {
     fn scope_picker(&self) -> Element<'_, Message> {
         let summary = match self.expose_scopes.as_slice() {
             [] => "scope".to_string(),
-            [one] => one.label().to_string(),
+            [one] => self.scope_label(one),
             many => format!("{} scopes", many.len()),
         };
         let toggle = button(text(summary).size(13))
@@ -838,9 +838,8 @@ impl App {
         }
 
         let mut opts = Column::new().spacing(4).push(toggle);
-        for scope in self.selectable_scopes() {
+        for (scope, label) in self.selectable_scopes() {
             let on = self.expose_scopes.contains(&scope);
-            let label = scope.label().to_string();
             opts = opts.push(
                 checkbox(label, on)
                     .size(15)
@@ -851,15 +850,25 @@ impl App {
         opts.into()
     }
 
-    /// Scopes offered in the picker: all-peers, the owner's own devices, then each network this
-    /// device holds. Building the list from held networks is what keeps a typo — or a network the
-    /// engine would reject — from being expressible at all.
+    /// Scopes offered in the picker, each with the label to show for it: all-peers, the owner's own
+    /// devices, then every network this device holds. Building the list from held networks is what
+    /// keeps a typo — or a network the engine would reject — from being expressible at all.
     ///
-    /// Networks are listed per `(guild, role)`, never merged by role name: two guilds may each have
-    /// an `Engineering`, they are different networks with different members, and collapsing them
-    /// into one row would offer a scope that admits both.
-    fn selectable_scopes(&self) -> Vec<ExposeScope> {
-        let mut out = vec![ExposeScope::AllPeers, ExposeScope::OwnDevices];
+    /// Each network is offered per `(guild_id, role_id)`, never merged by role name: two guilds may
+    /// each have an `Engineering`, they are different networks with different members, and
+    /// collapsing them into one row would offer a scope that admits both. The name is only ever the
+    /// label; the scope the picker emits carries ids.
+    fn selectable_scopes(&self) -> Vec<(ExposeScope, String)> {
+        let mut out = vec![
+            (
+                ExposeScope::AllPeers,
+                ExposeScope::AllPeers.fallback_label(),
+            ),
+            (
+                ExposeScope::OwnDevices,
+                ExposeScope::OwnDevices.fallback_label(),
+            ),
+        ];
         let nets = self
             .status
             .as_ref()
@@ -867,14 +876,28 @@ impl App {
             .unwrap_or(&[]);
         for n in nets {
             let scope = ExposeScope::Net {
-                guild: n.guild_name.clone(),
-                name: n.name.clone(),
+                guild_id: n.guild_id,
+                role_id: n.role_id,
             };
-            if !out.contains(&scope) {
-                out.push(scope);
+            if !out.iter().any(|(s, _)| s == &scope) {
+                let label = if n.guild_name.is_empty() {
+                    n.name.clone()
+                } else {
+                    format!("{} @ {}", n.name, n.guild_name)
+                };
+                out.push((scope, label));
             }
         }
         out
+    }
+
+    /// How to render a scope the picker holds — looked up in the same list the picker was built
+    /// from, since the scope itself carries only ids.
+    fn scope_label(&self, scope: &ExposeScope) -> String {
+        self.selectable_scopes()
+            .into_iter()
+            .find(|(s, _)| s == scope)
+            .map_or_else(|| scope.fallback_label(), |(_, l)| l)
     }
 }
 
@@ -898,10 +921,11 @@ fn proto_toggle(current: Proto) -> Element<'static, Message> {
 /// offline is dimmed and marked — the rule is installed but nothing can currently reach it, and a
 /// chip that looked identical to a live one would read as working.
 fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
+    // The engine resolved the ids to a name for us; a frontend can't do that lookup itself.
     let label = if e.active {
-        e.scope.label().to_string()
+        e.label.clone()
     } else {
-        format!("{} (nobody online)", e.scope.label())
+        format!("{} (nobody online)", e.label)
     };
     let body = row![
         text(label)

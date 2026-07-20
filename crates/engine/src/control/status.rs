@@ -203,6 +203,8 @@ fn own_device_networks(s: &SeedPeer, self_user_id: u64) -> Vec<common::api::Shar
         nets.insert(
             0,
             common::api::SharedNetwork {
+                guild_id: 0,
+                role_id: 0,
                 name: common::control::OWN_DEVICES_LABEL.to_string(),
                 community: String::new(),
             },
@@ -335,6 +337,8 @@ mod tests {
             networks: nets
                 .iter()
                 .map(|(n, c)| common::api::SharedNetwork {
+                    guild_id: 1,
+                    role_id: 2,
                     name: (*n).into(),
                     community: (*c).into(),
                 })

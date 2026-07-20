@@ -107,24 +107,27 @@ impl State {
                     proto: Proto::Tcp,
                     port: 8080,
                     scope: ExposeScope::Net {
-                        guild: "acme".into(),
-                        name: "Engineering".into(),
+                        guild_id: 900_100,
+                        role_id: 7001,
                     },
+                    label: "Engineering @ acme".into(),
                     active: true,
                 },
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
                     scope: ExposeScope::Net {
-                        guild: "playhouse".into(),
-                        name: "Gaming".into(),
+                        guild_id: 900_200,
+                        role_id: 7002,
                     },
+                    label: "Gaming @ playhouse".into(),
                     active: true,
                 },
                 ExposedPort {
                     proto: Proto::Udp,
                     port: 51820,
                     scope: ExposeScope::OwnDevices,
+                    label: common::control::OWN_DEVICES_LABEL.into(),
                     active: true,
                 },
             ],
@@ -225,6 +228,8 @@ fn peer(
             .map(|(name, community)| SharedNetwork {
                 name: (*name).into(),
                 community: (*community).into(),
+                guild_id: 1,
+                role_id: 2,
             })
             .collect(),
     }
@@ -370,10 +375,26 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                 ExposeOp::Add { proto, port, scope } => {
                     s.exposed
                         .retain(|e| !(e.proto == proto && e.port == port && e.scope == scope));
+                    // The real engine resolves the scope's ids against its network list; the demo
+                    // just echoes something readable back.
+                    let label = fixture_networks()
+                        .iter()
+                        .find(|n| {
+                            scope
+                                == ExposeScope::Net {
+                                    guild_id: n.guild_id,
+                                    role_id: n.role_id,
+                                }
+                        })
+                        .map_or_else(
+                            || scope.fallback_label(),
+                            |n| format!("{} @ {}", n.name, n.guild_name),
+                        );
                     s.exposed.push(ExposedPort {
                         proto,
                         port,
                         scope,
+                        label,
                         active: true,
                     });
                     format!("exposed {}/{port}", proto.as_str())

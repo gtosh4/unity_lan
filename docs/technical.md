@@ -364,24 +364,32 @@ membership: the coordinator has no own-device network, and such peers arrive wit
 `networks` list. Opening a port to several networks means several exposures, whose source sets the
 ruleset unions — which is what lets one scope be closed while its siblings stay.
 
-**A network scope is `(guild, role)`, never a bare role name.** Role names are Discord display names
-in independent guilds, so two guilds on one coordinator may each have an `Engineering` — which is
-why `SharedNetwork` carries a `community`. Keying the source set on the name alone merged them, so a
-port scoped to one guild's role admitted the other guild's members too; `PeerSets::by_net` is keyed
-by the pair. A scope written before this (`ExposeScope::NetUnqualified`, what a bare
-`ctl expose <port> <role>` still means) resolves to the guild that carries the role **only while
-exactly one does**: `apply_expose` promotes it on the way in and refuses an ambiguous one with the
-candidates listed, and a stale unqualified entry already on disk admits *nobody* once a second guild
-matches, rather than falling back to both. Fail closed, never widen.
+**A network scope is `(guild_id, role_id)`, never a name.** Role and guild names are Discord display
+names — user-chosen, mutable, and not unique across guilds (two guilds may each have an
+`Engineering`) — so everything that decides access keys on the snowflakes and treats names as
+presentation. `SharedNetwork` carries the ids alongside the labels; `PeerSets` holds one `NetInfo`
+per visible network (ids + labels + member IPs); `ExposeScope::Net` carries ids only, and
+`ExposedPort.label` is the engine-resolved string a frontend renders.
 
-**Known issue: nft set names can collide.** `set_name` sanitizes guild and role into a valid nft
-identifier by mapping every non-alphanumeric character to `_`, so networks whose names differ only in
-punctuation (`game-night` and `game_night` in one guild) map to the same `net_<guild>_game_night` set
-and would share one source set — each admitting the other's peers. Discord role names are
-user-chosen, so this is reachable, though it needs an admin to create two near-identical roles in a
-guild you're in. Unfixed. A hash suffix or an index-keyed name would resolve it. Note the own-device
-set is *not* exposed to this: network sets keep the `net_` prefix, so a role named `own devices`
-becomes `net_<guild>_own_devices` and never `own_devices` (asserted in `fw::nftables::tests`).
+Names still *enter* the system — a person types `ctl expose 8080 Engineering`, not a role id. Those
+arrive as `ExposeScope::Unresolved { guild: Option<String>, name }` and are resolved to ids at the
+engine boundary (`resolve_scope`) against the caller's held networks: promoted when exactly one
+network matches, refused with the candidates listed when several do. Nothing past that boundary
+stores a name. A stale unresolved scope already on disk (written before ids) resolves the same way
+at match time and admits **nobody** once two networks match, rather than falling back to both. Fail
+closed, never widen.
+
+A network whose `(guild_id, role_id)` is absent — from a coordinator predating the ids, where both
+default to `0` — is **not scopable**: `peer_sets` drops it from `nets` entirely. Zero is not an
+identity, and treating it as one would merge every such network into a single source set and
+cross-admit all of them. Consequence: scoped exposures need a coordinator new enough to send ids.
+
+nft set names are `net_<guild_id>_<role_id>` — built from ids, so they need no sanitizing and cannot
+collide. (They previously sanitized the *name* into an identifier by mapping every non-alphanumeric
+character to `_`, which made `game-night` and `game_night` the same set, each network admitting the
+other's peers. Keying on ids removed that class of bug rather than papering over it.) Only an
+unresolved scope still sanitizes a name, under a distinct `named_` prefix, and such a scope never
+carries members.
 
 ### 5.4 Discovery client (`coord.rs`, `daemon.rs`, `p2p.rs`)
 Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned

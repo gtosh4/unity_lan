@@ -152,13 +152,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         ControlRequest::Expose(op) => match &ctx.fw {
             None => ControlResponse::Error("firewall disabled (set firewall = true)".into()),
             Some(fw) => {
-                let held = ctx
-                    .status
-                    .borrow()
-                    .networks
-                    .iter()
-                    .map(|n| (n.guild_name.clone(), n.name.clone()))
-                    .collect::<Vec<_>>();
+                let held = ctx.status.borrow().networks.clone();
                 match apply_expose(fw, op, &held) {
                     Ok(r) => ControlResponse::Expose(r),
                     Err(e) => ControlResponse::Error(format!("{e:#}")),
@@ -355,66 +349,67 @@ async fn stream_status(
     }
 }
 
-/// Resolve and validate the scope of an `Add` against the networks this device holds, as
-/// `(guild, role)` pairs.
+/// Resolve and validate the scope of an `Add` against the networks this device holds.
 ///
-/// A network scope must name a network the device actually holds; `OwnDevices` is derived from our
-/// own identity and `AllPeers` names nothing, so neither is checkable here.
+/// Returns a scope carrying only `(guild_id, role_id)` — names get no further than this function.
+/// `OwnDevices` is derived from our own identity and `AllPeers` names nothing, so neither needs a
+/// network.
 ///
-/// An unqualified scope (`ctl expose <port> <role>`, or a pre-qualification config seed) is
-/// promoted to the guild that carries it — but only when exactly one does. Two guilds may each have
-/// a role of the same name, and picking either would silently expose the port to a guild the caller
-/// never named, so an ambiguous one is refused with the candidates listed.
-fn resolve_scope(scope: ExposeScope, held: &[(String, String)]) -> anyhow::Result<ExposeScope> {
-    let listing = || {
-        held.iter()
-            .map(|(g, n)| ExposeScope::Net {
-                guild: g.clone(),
-                name: n.clone(),
-            })
-            .map(|s| s.label())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+/// A name a person typed ([`ExposeScope::Unresolved`], from `ctl expose`, a config seed, or an
+/// exposure stored before id-scoping) resolves to the network carrying that role — but only when
+/// exactly one does. Two guilds may each have a role of the same name, and picking either would
+/// silently expose the port to a community the caller never named, so an ambiguous one is refused
+/// with the candidates listed.
+fn resolve_scope(scope: ExposeScope, held: &[NetworkStatus]) -> anyhow::Result<ExposeScope> {
+    let listing = || held.iter().map(net_label).collect::<Vec<_>>().join(", ");
     match scope {
-        ExposeScope::Net { guild, name } => {
-            if !held.iter().any(|(g, n)| g == &guild && n == &name) {
+        ExposeScope::Net { guild_id, role_id } => {
+            let known = held
+                .iter()
+                .any(|n| n.guild_id == guild_id && n.role_id == role_id);
+            if !known {
                 anyhow::bail!(
-                    "not a member of network '{}' (your networks: {})",
-                    ExposeScope::Net {
-                        guild: guild.clone(),
-                        name: name.clone()
-                    }
-                    .label(),
-                    listing(),
+                    "not a member of network {guild_id}/{role_id} (your networks: {})",
+                    listing()
                 );
             }
-            Ok(ExposeScope::Net { guild, name })
+            Ok(ExposeScope::Net { guild_id, role_id })
         }
-        ExposeScope::NetUnqualified(name) => {
-            let mut hits = held.iter().filter(|(_, n)| n == &name);
-            let first = hits
-                .next()
-                .with_context(|| {
-                    format!(
-                        "not a member of network '{name}' (your networks: {})",
-                        listing()
-                    )
-                })?
-                .clone();
-            if let Some(second) = hits.next() {
-                anyhow::bail!(
-                    "network '{name}' is ambiguous — you hold it in more than one community                      ({}, {}, …). Name one with `--guild`.",
-                    first.0,
-                    second.0,
-                );
+        ExposeScope::Unresolved { guild, name } => {
+            let hits: Vec<&NetworkStatus> = held
+                .iter()
+                .filter(|n| n.name == name && guild.as_deref().is_none_or(|g| n.guild_name == g))
+                .collect();
+            match hits.as_slice() {
+                [] => anyhow::bail!(
+                    "not a member of network '{name}' (your networks: {})",
+                    listing()
+                ),
+                [only] => Ok(ExposeScope::Net {
+                    guild_id: only.guild_id,
+                    role_id: only.role_id,
+                }),
+                many => anyhow::bail!(
+                    "network '{name}' is ambiguous — you hold it in {} communities ({}). \
+                     Name one with `--guild`.",
+                    many.len(),
+                    many.iter()
+                        .map(|n| n.guild_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
             }
-            Ok(ExposeScope::Net {
-                guild: first.0,
-                name: first.1,
-            })
         }
         other => Ok(other),
+    }
+}
+
+/// `role @ guild` for a held network — display only.
+fn net_label(n: &NetworkStatus) -> String {
+    if n.guild_name.is_empty() {
+        n.name.clone()
+    } else {
+        format!("{} @ {}", n.name, n.guild_name)
     }
 }
 
@@ -422,20 +417,26 @@ fn resolve_scope(scope: ExposeScope, held: &[(String, String)]) -> anyhow::Resul
 fn apply_expose(
     fw: &Firewall,
     op: ExposeOp,
-    held_nets: &[(String, String)],
+    held_nets: &[NetworkStatus],
 ) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
         ExposeOp::Add { proto, port, scope } => {
             let scope = resolve_scope(scope, held_nets)?;
+            let exposed = fw.expose(proto, port, scope.clone())?;
+            // Report it the way the caller will recognize it, not as the ids we stored.
+            let label = exposed
+                .iter()
+                .find(|e| e.proto == proto && e.port == port && e.scope == scope)
+                .map_or_else(|| scope.fallback_label(), |e| e.label.clone());
             (
-                format!("exposed {}/{port} ({})", proto.as_str(), scope.label()),
-                fw.expose(proto, port, scope)?,
+                format!("exposed {}/{port} ({label})", proto.as_str()),
+                exposed,
             )
         }
         ExposeOp::Remove { proto, port, scope } => {
             let label = match &scope {
-                common::control::RemoveScope::Exact(s) => format!(" ({})", s.label()),
+                common::control::RemoveScope::Exact(s) => format!(" ({})", s.fallback_label()),
                 common::control::RemoveScope::All => String::new(),
             };
             (

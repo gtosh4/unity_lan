@@ -763,6 +763,8 @@ mod tests {
                 tx_bytes: 512,
                 last_handshake_secs: Some(5),
                 networks: vec![common::api::SharedNetwork {
+                    guild_id: 1,
+                    role_id: 2,
                     name: "mesh".into(),
                     community: "acme".into(),
                 }],
@@ -781,6 +783,8 @@ mod tests {
     #[test]
     fn shared_networks_group_by_community() {
         let net = |name: &str, community: &str| common::api::SharedNetwork {
+            guild_id: 1,
+            role_id: 2,
             name: name.into(),
             community: community.into(),
         };
@@ -826,6 +830,8 @@ mod tests {
             last_handshake_secs: None,
             networks: (0..nets)
                 .map(|i| common::api::SharedNetwork {
+                    guild_id: 1,
+                    role_id: 2,
                     name: format!("n{i}"),
                     community: "c".into(),
                 })
@@ -927,9 +933,10 @@ mod tests {
                 proto: Proto::Tcp,
                 port: 25565,
                 scope: ExposeScope::Net {
-                    guild: "acme".into(),
-                    name: "mesh".into(),
+                    guild_id: 1,
+                    role_id: 2,
                 },
+                label: "mesh @ acme".into(),
                 active: true,
             }],
         };
@@ -944,8 +951,8 @@ mod tests {
         a.expose_port_input = "34197".into();
         a.expose_proto = Proto::Udp;
         a.expose_scopes = vec![ExposeScope::Net {
-            guild: "acme".into(),
-            name: "mesh".into(),
+            guild_id: 1,
+            role_id: 2,
         }];
         let _ = a.update(Message::ExposeSubmit); // dispatches the expose task
         assert!(a.expose_port_input.is_empty());
@@ -984,8 +991,8 @@ mod tests {
     fn all_peers_is_exclusive_with_the_narrower_scopes() {
         let mut a = app();
         let net = ExposeScope::Net {
-            guild: "acme".into(),
-            name: "mesh".into(),
+            guild_id: 1,
+            role_id: 2,
         };
 
         let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
@@ -1009,8 +1016,8 @@ mod tests {
         a.expose_scopes = vec![
             ExposeScope::OwnDevices,
             ExposeScope::Net {
-                guild: "acme".into(),
-                name: "mesh".into(),
+                guild_id: 1,
+                role_id: 2,
             },
         ];
         let _ = a.update(Message::ExposeSubmit);

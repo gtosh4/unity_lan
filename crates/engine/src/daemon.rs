@@ -1161,9 +1161,11 @@ async fn register_until_ready(
     }
 }
 
-/// Build the firewall's source sets from the active seeds: peer IPs grouped by network — keyed by
-/// `(community, role)` so two guilds' same-named roles stay separate — plus the owner's own other
-/// devices.
+/// Build the firewall's view of the mesh from the active seeds: each visible network with its
+/// members, plus the owner's own other devices.
+///
+/// Networks are identified by `(guild_id, role_id)` so two guilds' same-named roles stay separate;
+/// the community and role labels ride along for display and for resolving a name someone typed.
 ///
 /// Own devices are *not* a network — the coordinator never sends one, and a peer's `networks` stays
 /// empty for the own-device relationship. They're recognized by identity instead: a seed carrying
@@ -1173,15 +1175,32 @@ fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
     let mut sets = crate::fw::PeerSets::default();
     for s in seeds {
         for n in &s.networks {
-            sets.by_net
-                .entry((n.community.clone(), n.name.clone()))
-                .or_default()
-                .push(s.ip);
+            // A network with no `(guild_id, role_id)` comes from a coordinator that predates the
+            // ids. It stays displayable but unscopable: inventing an identity for it (say `0/0`)
+            // would merge every such network into one source set and cross-admit all of them.
+            let Some((guild_id, role_id)) = n.id() else {
+                continue;
+            };
+            match sets
+                .nets
+                .iter_mut()
+                .find(|e| e.guild_id == guild_id && e.role_id == role_id)
+            {
+                Some(e) => e.ips.push(s.ip),
+                None => sets.nets.push(crate::fw::NetInfo {
+                    guild_id,
+                    role_id,
+                    guild: n.community.clone(),
+                    name: n.name.clone(),
+                    ips: vec![s.ip],
+                }),
+            }
         }
         if owner.is_some_and(|me| me == s.user_id) {
             sets.own_devices.push(s.ip);
         }
     }
+    sets.nets.sort_by_key(|n| (n.guild_id, n.role_id));
     sets
 }
 
@@ -1282,6 +1301,15 @@ mod tests {
     use super::*;
     use crate::coord::SeedPeer;
 
+    /// Stable fake ids per role name, so two seeds naming the same network agree on its identity.
+    fn ids(name: &str) -> (u64, u64) {
+        match name {
+            "minecraft" => (900_100, 7001),
+            "factorio" => (900_200, 7002),
+            other => panic!("unknown fixture network {other}"),
+        }
+    }
+
     fn seed(user_id: u64, last_octet: u8, nets: &[&str]) -> SeedPeer {
         SeedPeer {
             pubkey: [0; 32],
@@ -1294,9 +1322,14 @@ mod tests {
             primary_alias: None,
             networks: nets
                 .iter()
-                .map(|n| common::api::SharedNetwork {
-                    name: (*n).into(),
-                    community: "acme".into(),
+                .map(|n| {
+                    let (guild_id, role_id) = ids(n);
+                    common::api::SharedNetwork {
+                        name: (*n).into(),
+                        community: "acme".into(),
+                        guild_id,
+                        role_id,
+                    }
                 })
                 .collect(),
             relay: None,
@@ -1323,14 +1356,32 @@ mod tests {
             sets.own_devices,
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
+        let mc = sets
+            .nets
+            .iter()
+            .find(|n| n.name == "minecraft")
+            .expect("minecraft network present");
         assert_eq!(
-            sets.by_net
-                .get(&("acme".to_string(), "minecraft".to_string())),
-            Some(&vec![
-                Ipv4Addr::new(100, 64, 0, 2),
-                Ipv4Addr::new(100, 64, 0, 4)
-            ]),
+            mc.ips,
+            vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 4)],
             "network grouping is unaffected by the own-device split",
+        );
+        assert_eq!((mc.guild_id, mc.role_id), ids("minecraft"));
+    }
+
+    /// A coordinator that predates the network ids sends none, so its networks arrive with `0`s.
+    /// Zero is not an identity — inventing one would merge every such network into a single source
+    /// set and cross-admit all of them — so they're dropped from the scopable set entirely.
+    #[test]
+    fn networks_without_ids_are_not_scopable() {
+        let mut s = seed(7, 2, &["minecraft"]);
+        s.networks[0].guild_id = 0;
+        s.networks[0].role_id = 0;
+
+        let sets = peer_sets(&[s], Some(1));
+        assert!(
+            sets.nets.is_empty(),
+            "a network with no identity must not become a scope target",
         );
     }
 

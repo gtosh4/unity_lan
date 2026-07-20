@@ -153,14 +153,11 @@ impl ExposeSeed {
     /// The scope this seed names, or an error if it names two.
     pub fn scope(&self) -> anyhow::Result<common::control::ExposeScope> {
         match (&self.net, self.own_devices) {
-            // Without a guild this stays unqualified, and the engine resolves it against the
-            // held networks at startup — refusing rather than guessing if two guilds match.
-            (Some(n), false) => Ok(match &self.guild {
-                Some(g) => common::control::ExposeScope::Net {
-                    guild: g.clone(),
-                    name: n.clone(),
-                },
-                None => common::control::ExposeScope::NetUnqualified(n.clone()),
+            // A config names a network the way a person does. It resolves to ids against the held
+            // networks once those are known — refusing rather than guessing if two guilds match.
+            (Some(n), false) => Ok(common::control::ExposeScope::Unresolved {
+                guild: self.guild.clone(),
+                name: n.clone(),
             }),
             (None, true) => Ok(common::control::ExposeScope::OwnDevices),
             (None, false) => Ok(common::control::ExposeScope::AllPeers),
@@ -346,9 +343,12 @@ own_devices = true
             scopes,
             vec![
                 common::control::ExposeScope::AllPeers,
-                common::control::ExposeScope::NetUnqualified("minecraft".into()),
-                common::control::ExposeScope::Net {
-                    guild: "acme".into(),
+                common::control::ExposeScope::Unresolved {
+                    guild: None,
+                    name: "minecraft".into(),
+                },
+                common::control::ExposeScope::Unresolved {
+                    guild: Some("acme".into()),
                     name: "Engineering".into(),
                 },
                 common::control::ExposeScope::OwnDevices,

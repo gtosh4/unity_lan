@@ -32,6 +32,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   and `ctl expose <port> <role>` still takes a bare name — it resolves on its own unless the name is
   ambiguous, in which case it now refuses and asks for `--guild`.
 
+  Networks are now identified internally by their Discord guild and role ids rather than by their
+  names, so renaming a role or a community no longer changes what a port is exposed to, and two
+  identically-named roles can never be confused. **This needs a coordinator running this release or
+  newer**: an older one doesn't send those ids, and rather than guess, the client treats such a
+  network as un-exposable — a port scoped to one stays closed until the coordinator is updated.
+  Upgrade the coordinator before, or together with, the clients.
+
 ### Changed
 
 - **The exposed-ports list now shows who can actually reach each port.** Every port is one row with

@@ -17,7 +17,6 @@ pub use nftables::NftBackend;
 #[cfg(windows)]
 mod windows;
 
-use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -52,18 +51,41 @@ pub struct Exposed {
     pub scope: ExposeScope,
 }
 
-/// The current source sets a scoped exposure can be filtered against: peer IPs grouped by network,
-/// plus the owner's own devices (which are not a network — the daemon derives them from peer
-/// identity, see [`crate::daemon`]).
+/// The networks currently visible to this device and who is in them, plus the owner's own devices.
+/// Rebuilt from the seeds on every membership change.
 ///
-/// Networks are keyed by `(guild, role)`, not role name: role names are Discord display names in
-/// independent guilds, so two guilds may each have an `Engineering`, and keying on the name alone
-/// would merge them into one source set — letting a port scoped to one guild's role be reached by
-/// the other's members.
+/// Networks are identified by `(guild_id, role_id)`, never by name: role names are user-chosen and
+/// mutable, two guilds may each have an `Engineering`, and keying on the name merged them into one
+/// source set — letting a port scoped to one guild's role be reached by the other's members. The
+/// labels are carried alongside purely so a name a person typed can be resolved to ids, and so the
+/// engine can render an exposure.
 #[derive(Clone, Debug, Default)]
 pub struct PeerSets {
-    pub by_net: HashMap<(String, String), Vec<Ipv4Addr>>,
+    pub nets: Vec<NetInfo>,
     pub own_devices: Vec<Ipv4Addr>,
+}
+
+/// One network's identity, display labels, and current members.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NetInfo {
+    pub guild_id: u64,
+    pub role_id: u64,
+    /// Guild community label — display, and what `--guild` matches against.
+    pub guild: String,
+    /// Role display name — display, and what a bare `<role>` matches against.
+    pub name: String,
+    pub ips: Vec<Ipv4Addr>,
+}
+
+impl NetInfo {
+    /// `role @ guild`, or just the role when the coordinator sent no community label.
+    pub fn label(&self) -> String {
+        if self.guild.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{} @ {}", self.name, self.guild)
+        }
+    }
 }
 
 impl PeerSets {
@@ -76,30 +98,45 @@ impl PeerSets {
         match scope {
             ExposeScope::AllPeers => None,
             ExposeScope::OwnDevices => Some(&self.own_devices),
-            ExposeScope::Net { guild, name } => Some(
-                self.by_net
-                    .get(&(guild.clone(), name.clone()))
-                    .map_or(&[], Vec::as_slice),
+            ExposeScope::Net { guild_id, role_id } => Some(
+                self.nets
+                    .iter()
+                    .find(|n| n.guild_id == *guild_id && n.role_id == *role_id)
+                    .map_or(&[], |n| n.ips.as_slice()),
             ),
-            // Stored before scopes carried a guild. It means *the* network with this name while
-            // exactly one matches; once two do, there is no way to tell which was meant, so it
-            // admits nobody rather than both. See `unqualified_matches`.
-            ExposeScope::NetUnqualified(name) => {
-                Some(match self.unqualified_matches(name).as_slice() {
-                    [only] => self.by_net.get(*only).map_or(&[], Vec::as_slice),
+            // A name that was never resolved to ids — a scope stored before id-scoping, or one
+            // whose network is no longer visible. It stands for *the* matching network while
+            // exactly one matches; once two do there is no way to tell which was meant, so it
+            // admits nobody rather than both.
+            ExposeScope::Unresolved { guild, name } => {
+                Some(match self.matching(guild.as_deref(), name).as_slice() {
+                    [only] => only.ips.as_slice(),
                     _ => &[],
                 })
             }
         }
     }
 
-    /// Every known network whose role name is `name` — one entry unless two guilds share a role
-    /// name, which is the ambiguity a legacy unqualified scope can no longer resolve.
-    pub fn unqualified_matches(&self, name: &str) -> Vec<&(String, String)> {
-        let mut hits: Vec<&(String, String)> =
-            self.by_net.keys().filter(|(_, n)| n == name).collect();
-        hits.sort();
-        hits
+    /// The networks a human-typed scope could mean: role name must match, and the guild label too
+    /// when one was given. More than one hit is the ambiguity that must not be guessed at.
+    pub fn matching(&self, guild: Option<&str>, name: &str) -> Vec<&NetInfo> {
+        self.nets
+            .iter()
+            .filter(|n| n.name == name && guild.is_none_or(|g| n.guild == g))
+            .collect()
+    }
+
+    /// The label for a scope, resolved against the current networks. Falls back to the scope's own
+    /// rendering when the network isn't visible (offline, or left).
+    pub fn label(&self, scope: &ExposeScope) -> String {
+        match scope {
+            ExposeScope::Net { guild_id, role_id } => self
+                .nets
+                .iter()
+                .find(|n| n.guild_id == *guild_id && n.role_id == *role_id)
+                .map_or_else(|| scope.fallback_label(), NetInfo::label),
+            other => other.fallback_label(),
+        }
     }
 }
 
@@ -223,6 +260,7 @@ impl Firewall {
                 proto: e.proto,
                 port: e.port,
                 scope: e.scope.clone(),
+                label: peers.label(&e.scope),
                 // Unscoped is always reachable; a scope is reachable only while it has peers.
                 active: peers.sources(&e.scope).is_none_or(|ips| !ips.is_empty()),
             })
@@ -278,16 +316,35 @@ mod tests {
         }
     }
 
+    /// A resolved network scope. Fixture ids are derived from the name so two helpers agree.
     fn net(name: &str) -> ExposeScope {
-        ExposeScope::Net {
-            guild: "acme".into(),
+        let (guild_id, role_id) = fixture_ids(name);
+        ExposeScope::Net { guild_id, role_id }
+    }
+
+    fn fixture_ids(name: &str) -> (u64, u64) {
+        match name {
+            "minecraft" => (900_100, 7001),
+            "factorio" => (900_200, 7002),
+            "mesh" => (900_100, 7003),
+            other => panic!("unknown fixture network {other}"),
+        }
+    }
+
+    fn info(guild: &str, name: &str, ips: Vec<Ipv4Addr>) -> NetInfo {
+        let (guild_id, role_id) = fixture_ids(name);
+        NetInfo {
+            guild_id,
+            role_id,
+            guild: guild.into(),
             name: name.into(),
+            ips,
         }
     }
 
     fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
         PeerSets {
-            by_net: HashMap::from([(("acme".to_string(), name.to_string()), ips)]),
+            nets: vec![info("acme", name, ips)],
             own_devices: Vec::new(),
         }
     }
@@ -414,70 +471,121 @@ mod tests {
             listed.iter().map(|e| e.scope.clone()).collect::<Vec<_>>(),
             vec![
                 ExposeScope::AllPeers,
-                ExposeScope::NetUnqualified("factorio".into()),
+                ExposeScope::Unresolved {
+                    guild: None,
+                    name: "factorio".into(),
+                },
             ],
             "a bare name stays unqualified until it can be resolved against held networks",
         );
     }
 
-    /// The reason scopes carry a guild. Two guilds may each have a role named `Engineering`; they
+    /// The reason a scope carries ids. Two guilds may each have a role named `Engineering`; they
     /// are different networks with different members, so a port scoped to one must not admit the
-    /// other's peers.
+    /// other's peers — and their names are identical, so only the ids tell them apart.
     #[test]
     fn same_role_name_in_two_guilds_are_separate_source_sets() {
-        let acme = Ipv4Addr::new(100, 64, 0, 2);
-        let playhouse = Ipv4Addr::new(100, 64, 0, 3);
+        let acme_ip = Ipv4Addr::new(100, 64, 0, 2);
+        let play_ip = Ipv4Addr::new(100, 64, 0, 3);
         let peers = PeerSets {
-            by_net: HashMap::from([
-                (("acme".to_string(), "Engineering".to_string()), vec![acme]),
-                (
-                    ("playhouse".to_string(), "Engineering".to_string()),
-                    vec![playhouse],
-                ),
-            ]),
+            nets: vec![
+                NetInfo {
+                    guild_id: 900_100,
+                    role_id: 7001,
+                    guild: "acme".into(),
+                    name: "Engineering".into(),
+                    ips: vec![acme_ip],
+                },
+                NetInfo {
+                    guild_id: 900_200,
+                    role_id: 7002,
+                    guild: "playhouse".into(),
+                    name: "Engineering".into(),
+                    ips: vec![play_ip],
+                },
+            ],
             own_devices: Vec::new(),
         };
 
-        let scoped = |guild: &str| ExposeScope::Net {
-            guild: guild.into(),
-            name: "Engineering".into(),
-        };
-        assert_eq!(peers.sources(&scoped("acme")), Some(&[acme][..]));
-        assert_eq!(peers.sources(&scoped("playhouse")), Some(&[playhouse][..]));
+        assert_eq!(
+            peers.sources(&ExposeScope::Net {
+                guild_id: 900_100,
+                role_id: 7001
+            }),
+            Some(&[acme_ip][..]),
+        );
+        assert_eq!(
+            peers.sources(&ExposeScope::Net {
+                guild_id: 900_200,
+                role_id: 7002
+            }),
+            Some(&[play_ip][..]),
+        );
+
+        // Both render distinctly, so the two are told apart wherever they're listed.
+        assert_eq!(
+            peers.label(&ExposeScope::Net {
+                guild_id: 900_100,
+                role_id: 7001
+            }),
+            "Engineering @ acme",
+        );
     }
 
-    /// A scope stored before guilds were carried names only the role. It resolves while exactly one
-    /// guild has that role — and once two do, there is no way to tell which was meant, so it admits
-    /// nobody rather than both.
+    /// A scope stored before ids, or one whose network has gone, names only a role. It resolves
+    /// while exactly one network matches — and once two do, there is no way to tell which was
+    /// meant, so it admits nobody rather than both.
     #[test]
     fn an_unqualified_scope_resolves_alone_and_fails_closed_when_ambiguous() {
-        let acme = Ipv4Addr::new(100, 64, 0, 2);
-        let scope = ExposeScope::NetUnqualified("Engineering".into());
+        let acme_ip = Ipv4Addr::new(100, 64, 0, 2);
+        let scope = ExposeScope::Unresolved {
+            guild: None,
+            name: "Engineering".into(),
+        };
+        let acme = NetInfo {
+            guild_id: 900_100,
+            role_id: 7001,
+            guild: "acme".into(),
+            name: "Engineering".into(),
+            ips: vec![acme_ip],
+        };
 
-        let mut by_net =
-            HashMap::from([(("acme".to_string(), "Engineering".to_string()), vec![acme])]);
         let one = PeerSets {
-            by_net: by_net.clone(),
+            nets: vec![acme.clone()],
             own_devices: Vec::new(),
         };
         assert_eq!(
             one.sources(&scope),
-            Some(&[acme][..]),
+            Some(&[acme_ip][..]),
             "sole match resolves"
         );
 
-        by_net.insert(
-            ("playhouse".to_string(), "Engineering".to_string()),
-            vec![Ipv4Addr::new(100, 64, 0, 3)],
-        );
         let ambiguous = PeerSets {
-            by_net,
+            nets: vec![
+                acme,
+                NetInfo {
+                    guild_id: 900_200,
+                    role_id: 7002,
+                    guild: "playhouse".into(),
+                    name: "Engineering".into(),
+                    ips: vec![Ipv4Addr::new(100, 64, 0, 3)],
+                },
+            ],
             own_devices: Vec::new(),
         };
         assert_eq!(
             ambiguous.sources(&scope),
             Some(&[][..]),
             "ambiguous must admit nobody, never both guilds",
+        );
+
+        // Naming the guild disambiguates it again.
+        assert_eq!(
+            ambiguous.sources(&ExposeScope::Unresolved {
+                guild: Some("acme".into()),
+                name: "Engineering".into(),
+            }),
+            Some(&[acme_ip][..]),
         );
     }
 }

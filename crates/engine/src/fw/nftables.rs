@@ -25,16 +25,13 @@ impl FirewallBackend for NftBackend {
     }
 }
 
-/// nft set name for a scope's peer IPs, sanitized to a valid identifier.
+/// nft set name for a scope's peer IPs.
 ///
-/// Network names keep the `net_` prefix, which is what keeps the own-device set distinct: a role
-/// named "own devices" becomes `net_own_devices`, never `own_devices`.
-///
-/// **Known issue (not addressed, see `docs/technical.md` §5.3): this sanitization is not
-/// injective.** Every non-alphanumeric character maps to `_`, so `game-night` and `game_night` in
-/// one guild both become `net_<guild>_game_night` and share a source set — each network's peers
-/// would reach the other's scoped ports. Role names are user-chosen, so it's reachable; it needs
-/// two near-identical roles in a guild you hold. A hash suffix or an index-keyed name would fix it.
+/// A resolved network uses its `(guild_id, role_id)`, so the name is exact: no sanitizing, and no
+/// way for two networks to land in one set. (An earlier version sanitized the role *name* into an
+/// identifier, which silently merged `game-night` and `game_night`.) Only an unresolved scope still
+/// sanitizes a name, under a distinct `named_` prefix so it can't collide with a resolved set — and
+/// such a scope never carries members anyway.
 fn set_name(scope: &ExposeScope) -> String {
     let san = |s: &str| -> String {
         s.chars()
@@ -43,8 +40,17 @@ fn set_name(scope: &ExposeScope) -> String {
     };
     match scope {
         ExposeScope::OwnDevices => "own_devices".to_string(),
-        ExposeScope::Net { guild, name } => format!("net_{}_{}", san(guild), san(name)),
-        ExposeScope::NetUnqualified(name) => format!("net_{}", san(name)),
+        // Ids, so the set name is exact — no sanitization, no collision.
+        ExposeScope::Net { guild_id, role_id } => format!("net_{guild_id}_{role_id}"),
+        // An unresolved name never reaches the ruleset with members (it resolves first, or admits
+        // nobody), but it still needs a distinct set to hang the deny on.
+        ExposeScope::Unresolved { guild, name } => {
+            format!(
+                "named_{}_{}",
+                san(guild.as_deref().unwrap_or("")),
+                san(name)
+            )
+        }
         // Unscoped: no source set, so no name. Callers filter these out first.
         ExposeScope::AllPeers => String::new(),
     }
@@ -200,6 +206,7 @@ fn run_nft(script: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::NetInfo;
     use super::*;
     use std::net::Ipv4Addr;
 
@@ -207,12 +214,20 @@ mod tests {
         Exposed { proto, port, scope }
     }
 
+    const MESH: ExposeScope = ExposeScope::Net {
+        guild_id: 900_100,
+        role_id: 7001,
+    };
+
     fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
         PeerSets {
-            by_net: std::collections::HashMap::from([(
-                ("acme".to_string(), name.to_string()),
+            nets: vec![NetInfo {
+                guild_id: 900_100,
+                role_id: 7001,
+                guild: "acme".into(),
+                name: name.into(),
                 ips,
-            )]),
+            }],
             own_devices: Vec::new(),
         }
     }
@@ -242,23 +257,13 @@ mod tests {
             "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let rs = ruleset(
-            "unl0",
-            &[exp(
-                Proto::Tcp,
-                9001,
-                ExposeScope::Net {
-                    guild: "acme".into(),
-                    name: "mesh".into(),
-                },
-            )],
-            &peers,
-        );
-        // Named set populated with the network's peer IPs.
-        assert!(rs.contains("add set inet unitylan net_acme_mesh { type ipv4_addr ; }"));
-        assert!(rs.contains("add element inet unitylan net_acme_mesh { 100.64.0.2, 100.64.0.3 }"));
+        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, MESH)], &peers);
+        // Named set populated with the network's peer IPs. The set name is built from the ids, so
+        // it needs no sanitizing and cannot collide with another network's.
+        assert!(rs.contains("add set inet unitylan net_900100_7001 { type ipv4_addr ; }"));
+        assert!(rs.contains("add element inet unitylan net_900100_7001 { 100.64.0.2, 100.64.0.3 }"));
         // Port scoped to that set.
-        assert!(rs.contains("ip saddr @net_acme_mesh tcp dport 9001 accept"));
+        assert!(rs.contains("ip saddr @net_900100_7001 tcp dport 9001 accept"));
         // Not a global port accept.
         assert!(!rs.contains("tcp dport { 9001 } accept"));
     }
@@ -285,52 +290,38 @@ mod tests {
 
     #[test]
     fn scoped_expose_with_no_peers_still_defines_empty_set() {
-        let rs = ruleset(
-            "unl0",
-            &[exp(
-                Proto::Tcp,
-                9001,
-                ExposeScope::Net {
-                    guild: "acme".into(),
-                    name: "mesh".into(),
-                },
-            )],
-            &PeerSets::default(),
-        );
-        assert!(rs.contains("add set inet unitylan net_acme_mesh { type ipv4_addr ; }"));
+        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, MESH)], &PeerSets::default());
+        assert!(rs.contains("add set inet unitylan net_900100_7001 { type ipv4_addr ; }"));
         assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
-        assert!(rs.contains("ip saddr @net_acme_mesh tcp dport 9001 accept"));
+        assert!(rs.contains("ip saddr @net_900100_7001 tcp dport 9001 accept"));
     }
 
     /// The own-device scope gets its own source set, fed from the owner's devices rather than any
-    /// network — and a role *named* like the own-device set must not land in the same nft set.
+    /// network. Set names come from ids now, so a role *named* like the own-device set cannot
+    /// collide with it either.
     #[test]
     fn own_device_scope_has_its_own_set_that_a_role_name_cannot_collide_with() {
         let peers = PeerSets {
-            by_net: std::collections::HashMap::from([(
-                ("acme".to_string(), "own devices".to_string()),
-                vec![Ipv4Addr::new(100, 64, 0, 9)],
-            )]),
+            nets: vec![NetInfo {
+                guild_id: 900_100,
+                role_id: 7001,
+                guild: "acme".into(),
+                name: "own devices".into(),
+                ips: vec![Ipv4Addr::new(100, 64, 0, 9)],
+            }],
             own_devices: vec![Ipv4Addr::new(100, 64, 0, 2)],
         };
         let rs = ruleset(
             "unl0",
             &[
                 exp(Proto::Tcp, 9001, ExposeScope::OwnDevices),
-                exp(
-                    Proto::Tcp,
-                    9002,
-                    ExposeScope::Net {
-                        guild: "acme".into(),
-                        name: "own devices".into(),
-                    },
-                ),
+                exp(Proto::Tcp, 9002, MESH),
             ],
             &peers,
         );
         assert!(rs.contains("add element inet unitylan own_devices { 100.64.0.2 }"));
-        assert!(rs.contains("add element inet unitylan net_acme_own_devices { 100.64.0.9 }"));
+        assert!(rs.contains("add element inet unitylan net_900100_7001 { 100.64.0.9 }"));
         assert!(rs.contains("ip saddr @own_devices tcp dport 9001 accept"));
-        assert!(rs.contains("ip saddr @net_acme_own_devices tcp dport 9002 accept"));
+        assert!(rs.contains("ip saddr @net_900100_7001 tcp dport 9002 accept"));
     }
 }

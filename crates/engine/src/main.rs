@@ -715,12 +715,9 @@ fn expose_scope(
 ) -> common::control::ExposeScope {
     match (net, own_devices) {
         (_, true) => common::control::ExposeScope::OwnDevices,
-        // No `--guild`: the engine resolves it against the caller's held networks, and refuses
-        // if two guilds share the role name rather than guessing.
-        (Some(n), false) => match guild {
-            Some(g) => common::control::ExposeScope::Net { guild: g, name: n },
-            None => common::control::ExposeScope::NetUnqualified(n),
-        },
+        // A name, resolved to `(guild_id, role_id)` by the engine against the caller's held
+        // networks — refusing if two guilds share the role name rather than guessing.
+        (Some(n), false) => common::control::ExposeScope::Unresolved { guild, name: n },
         (None, false) => common::control::ExposeScope::AllPeers,
     }
 }
@@ -729,13 +726,7 @@ fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
     println!("{}", resp.message);
     for e in &resp.exposed {
         let idle = if e.active { "" } else { "  [no peers online]" };
-        println!(
-            "  {}/{} ({}){}",
-            e.proto.as_str(),
-            e.port,
-            e.scope.label(),
-            idle
-        );
+        println!("  {}/{} ({}){}", e.proto.as_str(), e.port, e.label, idle);
     }
     Ok(())
 }
