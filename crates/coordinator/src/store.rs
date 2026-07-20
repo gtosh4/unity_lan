@@ -637,28 +637,36 @@ impl Store {
                 .ok_or_else(|| anyhow::anyhow!("unknown enrollment key"))?;
 
         let user_id = row.get::<i64, _>("user_id") as u64;
-        let used_by: Option<Vec<u8>> = row.try_get("used_by")?;
-        if let Some(used) = used_by {
-            return if used.as_slice() == pubkey.as_slice() {
-                Ok(user_id) // same device re-presenting — idempotent
-            } else {
-                Err(anyhow::anyhow!("enrollment key already used"))
-            };
-        }
-        if let Some(exp) = row.try_get::<Option<i64>, _>("expires_at")? {
-            if now >= exp as u64 {
-                return Err(anyhow::anyhow!("enrollment key expired"));
-            }
+
+        // Claim the key in one statement, gating on both `used_by IS NULL` and non-expiry so no
+        // window exists between reading the key and binding it. SQLite serializes writers, so of two
+        // concurrent registers with distinct pubkeys exactly one UPDATE matches a row; the loser
+        // matches zero. `rows_affected() == 1` — not the mere fact that the UPDATE ran — is what
+        // proves *we* claimed it, which the previous code failed to check (it returned Ok
+        // unconditionally, letting a losing racer enrol a second device under the victim's user).
+        let claimed = sqlx::query(
+            "UPDATE enrollment_keys SET used_by = ? \
+             WHERE key = ? AND used_by IS NULL AND (expires_at IS NULL OR expires_at > ?)",
+        )
+        .bind(pubkey.as_slice())
+        .bind(key)
+        .bind(now as i64)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1;
+        if claimed {
+            return Ok(user_id);
         }
 
-        // `AND used_by IS NULL` makes the claim atomic: if a second device raced in between the
-        // SELECT above and here, only the first UPDATE binds the key.
-        sqlx::query("UPDATE enrollment_keys SET used_by = ? WHERE key = ? AND used_by IS NULL")
-            .bind(pubkey.as_slice())
-            .bind(key)
-            .execute(&self.pool)
-            .await?;
-        Ok(user_id)
+        // The claim matched nothing: the key was already bound, or it has expired. Distinguish the
+        // two from the row we already read — and stay idempotent when the same device re-presents a
+        // key it already holds (checked before expiry, matching the prior behaviour).
+        match row.try_get::<Option<Vec<u8>>, _>("used_by")? {
+            Some(used) if used.as_slice() == pubkey.as_slice() => Ok(user_id),
+            Some(_) => Err(anyhow::anyhow!("enrollment key already used")),
+            None => Err(anyhow::anyhow!("enrollment key expired")),
+        }
     }
 }
 
@@ -718,6 +726,24 @@ mod tests {
                 .unwrap(),
             7
         );
+    }
+
+    // A one-time key must bind exactly one device even when several registers race it. The three
+    // consumes interleave at each connection-acquire await, so the claim has to be atomic: the old
+    // SELECT-check-then-UPDATE let every racer that read `used_by IS NULL` before any UPDATE return
+    // Ok, enrolling multiple devices from a single key.
+    #[tokio::test]
+    async fn enrollment_key_claim_is_atomic_under_race() {
+        let st = Store::memory().await;
+        st.create_enrollment_key("k", 5, None).await.unwrap();
+        let (a, b, c) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let (ra, rb, rc) = tokio::join!(
+            st.consume_enrollment_key("k", &a, 0),
+            st.consume_enrollment_key("k", &b, 0),
+            st.consume_enrollment_key("k", &c, 0),
+        );
+        let oks = [ra, rb, rc].into_iter().filter(Result::is_ok).count();
+        assert_eq!(oks, 1, "exactly one racer may claim a one-time key");
     }
 
     #[tokio::test]
