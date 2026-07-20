@@ -25,7 +25,10 @@ pub fn empty_zone() -> Zone {
 }
 
 /// Rebuild the zone from our own device plus the current set of seed peers.
-pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) {
+/// Rebuild the zone from our device + peers. Returns whether the contents actually changed — a
+/// no-delta refresh (the common case: the coordinator re-sends the same membership every hold) skips
+/// the write and the log rather than churning an identical map every couple of seconds.
+pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) -> bool {
     let mut map = HashMap::new();
     map.insert(norm(&me.hostname), me.wg_ip);
     if let Some(alias) = &me.primary_alias {
@@ -37,8 +40,12 @@ pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) {
             map.insert(norm(alias), s.ip);
         }
     }
+    if *zone.read().await == map {
+        return false;
+    }
     tracing::debug!(names = map.len(), "dns zone updated");
     *zone.write().await = map;
+    true
 }
 
 fn norm(name: &str) -> String {

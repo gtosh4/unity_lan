@@ -435,6 +435,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // still unconnected — the bootstrap case (no observer online to report a reflexive). After a
         // grace we run ICE for it (userspace), whose STUN gets a reflexive with no observer needed.
         let mut bootstrap_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
+        // Last (up, reach) reported per peer, so a change can be logged: the recompute is otherwise
+        // silent and a flap (up↔down / Direct↔Unreachable) leaves no trace but a `ctl status` poll.
+        let mut prev_reach: HashMap<[u8; 32], (bool, common::control::PeerReach)> = HashMap::new();
         // Shared ICMP socket for the per-peer latency probe. Opening it needs privilege (we have it);
         // if it fails we run without latency numbers rather than aborting the daemon.
         let ping_client = match ping::client() {
@@ -595,6 +598,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 } else {
                     common::control::classify_reach(punched, connected, age)
                 };
+                // Log the flip (not every recheck): the state is otherwise only visible via
+                // `ctl status`, so a peer flapping down leaves no trace. Carries the handshake age so
+                // a stale-read glitch (age tiny) reads differently from a real outage (age large).
+                match prev_reach.insert(*pk, (connected, r)) {
+                    Some((was_up, was_reach)) if was_up != connected || was_reach != r => {
+                        tracing::info!(
+                            peer = %hex8(pk),
+                            up = connected,
+                            was_up,
+                            reach = ?r,
+                            was_reach = ?was_reach,
+                            last_handshake_secs = ?last_handshake_secs,
+                            "peer reachability changed"
+                        );
+                    }
+                    _ => {}
+                }
                 if relaying
                     || icing
                     || r == common::control::PeerReach::Unreachable
@@ -622,6 +642,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             }
             // Drop attempt bookkeeping for peers that have left the mesh.
             attempt_since.retain(|pk, _| peers.contains_key(pk));
+            prev_reach.retain(|pk, _| peers.contains_key(pk));
             control::set_live(&status, &live);
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
@@ -975,19 +996,6 @@ async fn apply_state(
     let disabled = localnet.snapshot();
     let blocked = localnet.blocked_snapshot();
     let paused = localnet.is_paused();
-    if let Some(dev) = device {
-        tracing::debug!(
-            paused,
-            coord_online,
-            networks = ?dev
-                .networks_status
-                .iter()
-                .map(|n| format!("{}({}/{})={}", n.name, n.guild_id, n.role_id, n.enabled))
-                .collect::<Vec<_>>(),
-            disabled = ?disabled,
-            "apply_state: networks from coordinator + local opt-out set"
-        );
-    }
     // Disconnected: bring the interface administratively down (no traffic, /32 route inactive) *and*
     // drop every peer — no mesh. Reconnect brings the link back up. The device, its uapi socket and
     // the resolver config all persist across the toggle, so this is idempotent and needs no teardown.
@@ -997,8 +1005,13 @@ async fn apply_state(
         Some(dev) if !paused => filter_active(seeds, &disabled, &blocked, &dev.networks_status),
         _ => Vec::new(),
     };
+    // Track whether any sink actually changed, so a no-delta refresh (the coordinator re-sending the
+    // same membership every hold) does no work and logs nothing rather than churning every ~2s.
+    // `control::update` still runs unconditionally — it's an in-memory status snapshot that also
+    // carries `coord_online`, which can flip with no membership change.
+    let mut changed = false;
     if let Some(dev) = device {
-        dns::update(zone, dev, &active).await;
+        changed |= dns::update(zone, dev, &active).await;
         control::update(
             status,
             dev,
@@ -1012,9 +1025,24 @@ async fn apply_state(
         );
     }
     if let Some(fw) = fw {
-        fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;
+        changed |= fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;
     }
-    apply_seeds(backend, active, peers, relay_eps, ice_eps)?;
+    changed |= apply_seeds(backend, active, peers, relay_eps, ice_eps)?;
+    if changed {
+        if let Some(dev) = device {
+            tracing::debug!(
+                paused,
+                coord_online,
+                networks = ?dev
+                    .networks_status
+                    .iter()
+                    .map(|n| format!("{}({}/{})={}", n.name, n.guild_id, n.role_id, n.enabled))
+                    .collect::<Vec<_>>(),
+                disabled = ?disabled,
+                "apply_state: networks from coordinator + local opt-out set"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1263,7 +1291,7 @@ fn apply_seeds(
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     relay_eps: &HashMap<[u8; 32], SocketAddr>,
     ice_eps: &HashMap<[u8; 32], SocketAddr>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
     #[allow(clippy::type_complexity)]
@@ -1344,7 +1372,7 @@ fn apply_seeds(
         }
         tracing::info!(peers = all.len(), "mesh updated");
     }
-    Ok(())
+    Ok(changed)
 }
 
 #[cfg(test)]

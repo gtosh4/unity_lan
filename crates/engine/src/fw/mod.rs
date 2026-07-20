@@ -65,7 +65,7 @@ pub struct Exposed {
 /// source set — letting a port scoped to one guild's role be reached by the other's members. The
 /// labels are carried alongside purely so a name a person typed can be resolved to ids, and so the
 /// engine can render an exposure.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PeerSets {
     pub nets: Vec<NetInfo>,
     pub own_devices: Vec<Ipv4Addr>,
@@ -220,11 +220,17 @@ impl Firewall {
     }
 
     /// Refresh the peer source sets (called on every membership change). Rescopes any scoped
-    /// exposure to the current peers of its scope.
-    pub fn update_peers(&self, peers: PeerSets) -> anyhow::Result<()> {
+    /// exposure to the current peers of its scope. Returns whether the sets changed — an identical
+    /// refresh (the coordinator re-sending the same membership each hold) skips the nftables
+    /// reconcile rather than rewriting the same ruleset every couple of seconds.
+    pub fn update_peers(&self, peers: PeerSets) -> anyhow::Result<bool> {
+        if *self.peers.lock().unwrap() == peers {
+            return Ok(false);
+        }
         self.warn_on_ambiguous(&peers);
         *self.peers.lock().unwrap() = peers;
-        self.reconcile()
+        self.reconcile()?;
+        Ok(true)
     }
 
     /// Warn about an exposure that names a role two networks carry. It admits nobody by design —
