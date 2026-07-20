@@ -140,6 +140,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   and leaving no service behind. Upgrades now stop the old service and reconfigure it in place instead
   of deleting it — so there is nothing to linger, and a failed upgrade leaves the service intact
   rather than gone.
+- **Upgrading the Linux package now restarts the engine onto the new version.** `apt`/`dnf` upgrading
+  the `unitylan` package replaced the binary on disk but left the old one running until you restarted
+  the service or rebooted — so a fix or feature didn't take effect on its own. The upgrade now restarts
+  a running engine automatically (a first-time install, where the service isn't enabled yet, is left
+  untouched), matching the in-app auto-update. Expect a brief reconnect as the tunnel re-establishes.
 - **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
   Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
   never opened its own UDP listen port on the host firewall. Windows Defender then dropped every
