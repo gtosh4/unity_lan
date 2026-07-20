@@ -11,7 +11,7 @@ use iced::widget::{
 use iced::window;
 use iced::{Color, Element, Length};
 
-use common::control::{PeerReach, PeerStatus, Proto};
+use common::control::{ExposeScope, ExposedPort, PeerReach, PeerStatus, Proto, RemoveScope};
 
 use crate::widgets::{
     card, collapsible_header, confirm_controls, dot, fmt_bytes, header, modal, muted, peer_menu,
@@ -736,56 +736,223 @@ impl App {
         let inner: Element<'_, Message> = if self.exposed.is_empty() {
             muted("No ports exposed.").into()
         } else {
-            let mut list = Column::new().spacing(6);
-            for e in &self.exposed {
-                let scope = e
-                    .net
-                    .as_deref()
-                    .map(|n| format!("  → net: {n}"))
-                    .unwrap_or_default();
-                // A scoped port with no online peers is open in the ruleset but unreachable —
-                // say so, or the row reads as working.
-                let idle = if e.active { "" } else { "  (no peers online)" };
-                let r = row![
-                    text(format!("{}/{}{}{}", e.proto.as_str(), e.port, scope, idle))
+            // One row per port, with a chip per scope that can reach it. The wire keeps these as
+            // separate exposures; collapsing them here is what makes "who can reach this port"
+            // answerable at a glance instead of by reading three rows that share a number.
+            // The chips sit on their own line below the port. A port can carry any number of
+            // scopes, so sharing one line with the port label and the close button only fits until
+            // it doesn't — at the window's 440px it already breaks at two.
+            let mut list = Column::new().spacing(10);
+            for (proto, port) in self.exposed_ports() {
+                let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
+                for e in self
+                    .exposed
+                    .iter()
+                    .filter(|e| e.proto == proto && e.port == port)
+                {
+                    chips = chips.push(scope_chip(e));
+                }
+                let head = row![
+                    text(format!("{}/{}", proto.as_str(), port))
                         .size(14)
                         .width(Length::Fill),
-                    button(text("unexpose").size(13)).on_press(Message::Unexpose {
-                        proto: e.proto,
-                        port: e.port,
-                        net: e.net.clone(),
-                    }),
+                    button(text("close").size(13))
+                        .style(button::secondary)
+                        .on_press(Message::Unexpose {
+                            proto,
+                            port,
+                            scope: RemoveScope::All,
+                        }),
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
-                list = list.push(r);
+                list = list.push(column![head, chips].spacing(4));
             }
             list.into()
         };
 
-        // Add row: port (e.g. `25565` or `udp/34197`) + optional network to scope it to.
+        // Compose row: the port number, the protocol, and who may reach it.
+        let port_err = (!self.expose_port_input.trim().is_empty())
+            .then(|| parse_port(self.expose_port_input.trim()).err())
+            .flatten();
+        let ready = port_err.is_none()
+            && !self.expose_port_input.trim().is_empty()
+            && !self.expose_scopes.is_empty();
         let add = row![
-            text_input("port (e.g. 25565 or udp/34197)", &self.expose_port_input)
+            text_input("port", &self.expose_port_input)
                 .on_input(Message::ExposePortInput)
-                .on_submit(Message::ExposeSubmit),
-            text_input("net (optional)", &self.expose_net_input)
-                .on_input(Message::ExposeNetInput)
-                .on_submit(Message::ExposeSubmit),
-            button(text("expose").size(13))
-                .style(button::secondary)
-                .on_press(Message::ExposeSubmit),
-        ]
-        .spacing(8);
-
-        column![
-            header("exposed ports"),
-            inner,
-            add,
-            muted("tcp is the default; write udp/34197 for UDP. Leave net blank to expose on all."),
+                .on_submit(Message::ExposeSubmit)
+                .width(Length::Fixed(64.0)),
+            proto_toggle(self.expose_proto),
+            self.scope_picker(),
+            {
+                let b = button(text("expose").size(13)).style(button::secondary);
+                // Disabled until the draft is actually sendable, so the failure shows up as a
+                // dimmed button rather than an error banner after the click.
+                if ready {
+                    b.on_press(Message::ExposeSubmit)
+                } else {
+                    b
+                }
+            },
         ]
         .spacing(8)
+        .align_y(Vertical::Center);
+
+        let mut col = column![header("exposed ports"), inner, add].spacing(8);
+        if let Some(e) = port_err {
+            col = col.push(text(e).size(13).color(RED));
+        }
+        col.push(muted(
+            "Exposed ports are reachable only over the mesh, and only by the scopes you pick.",
+        ))
         .into()
     }
+
+    /// The exposed (proto, port) pairs in first-seen order — the rows, each of which may carry
+    /// several scopes.
+    fn exposed_ports(&self) -> Vec<(Proto, u16)> {
+        let mut seen = Vec::new();
+        for e in &self.exposed {
+            if !seen.contains(&(e.proto, e.port)) {
+                seen.push((e.proto, e.port));
+            }
+        }
+        seen
+    }
+
+    /// The multi-select scope picker. Collapsed it reports the selection; expanded it offers
+    /// all-peers, own-devices, and every network this device holds.
+    fn scope_picker(&self) -> Element<'_, Message> {
+        let summary = match self.expose_scopes.as_slice() {
+            [] => "scope".to_string(),
+            [one] => self.scope_label(one),
+            many => format!("{} scopes", many.len()),
+        };
+        let toggle = button(text(summary).size(13))
+            .style(button::secondary)
+            .width(Length::Fill)
+            .on_press(Message::ExposeScopeToggleOpen);
+        if !self.expose_scope_open {
+            return toggle.into();
+        }
+
+        let mut opts = Column::new().spacing(4).push(toggle);
+        for (scope, label) in self.selectable_scopes() {
+            let on = self.expose_scopes.contains(&scope);
+            opts = opts.push(
+                checkbox(label, on)
+                    .size(15)
+                    .text_size(13)
+                    .on_toggle(move |v| Message::ExposeScopeToggle(scope.clone(), v)),
+            );
+        }
+        opts.into()
+    }
+
+    /// Scopes offered in the picker, each with the label to show for it: all-peers, the owner's own
+    /// devices, then every network this device holds. Building the list from held networks is what
+    /// keeps a typo — or a network the engine would reject — from being expressible at all.
+    ///
+    /// Each network is offered per `(guild_id, role_id)`, never merged by role name: two guilds may
+    /// each have an `Engineering`, they are different networks with different members, and
+    /// collapsing them into one row would offer a scope that admits both. The name is only ever the
+    /// label; the scope the picker emits carries ids.
+    fn selectable_scopes(&self) -> Vec<(ExposeScope, String)> {
+        let mut out = vec![
+            (
+                ExposeScope::AllPeers,
+                ExposeScope::AllPeers.fallback_label(),
+            ),
+            (
+                ExposeScope::OwnDevices,
+                ExposeScope::OwnDevices.fallback_label(),
+            ),
+        ];
+        let nets = self
+            .status
+            .as_ref()
+            .map(|s| s.networks.as_slice())
+            .unwrap_or(&[]);
+        for n in nets {
+            let scope = ExposeScope::Net {
+                guild_id: n.guild_id,
+                role_id: n.role_id,
+            };
+            if !out.iter().any(|(s, _)| s == &scope) {
+                let label = if n.guild_name.is_empty() {
+                    n.name.clone()
+                } else {
+                    format!("{} @ {}", n.name, n.guild_name)
+                };
+                out.push((scope, label));
+            }
+        }
+        out
+    }
+
+    /// How to render a scope the picker holds — looked up in the same list the picker was built
+    /// from, since the scope itself carries only ids.
+    fn scope_label(&self, scope: &ExposeScope) -> String {
+        self.selectable_scopes()
+            .into_iter()
+            .find(|(s, _)| s == scope)
+            .map_or_else(|| scope.fallback_label(), |(_, l)| l)
+    }
+}
+
+/// TCP/UDP as a two-button segmented control — the protocol is a binary choice, not something to
+/// spell correctly in a text field.
+fn proto_toggle(current: Proto) -> Element<'static, Message> {
+    let seg = |p: Proto, label: &str| {
+        let b = button(text(label.to_string()).size(13));
+        if p == current {
+            b.style(button::primary)
+        } else {
+            b.style(button::secondary).on_press(Message::ExposeProto(p))
+        }
+    };
+    row![seg(Proto::Tcp, "TCP"), seg(Proto::Udp, "UDP")]
+        .spacing(4)
+        .into()
+}
+
+/// One scope of an exposed port, with its own close button. An exposure whose peers are all
+/// offline is dimmed and marked — the rule is installed but nothing can currently reach it, and a
+/// chip that looked identical to a live one would read as working.
+fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
+    // The engine resolves the scope's ids to a name for us; a frontend can't do that lookup itself.
+    // An engine older than the `label` field sends none, so fall back to what the scope can say on
+    // its own — an unlabelled chip would render as an empty box with a close button.
+    let name = if e.label.is_empty() {
+        e.scope.fallback_label()
+    } else {
+        e.label.clone()
+    };
+    let label = if e.active {
+        name
+    } else {
+        format!("{name} (nobody online)")
+    };
+    let body = row![
+        text(label)
+            .size(13)
+            .color(if e.active { MUTED } else { AMBER }),
+        button(text("x").size(11))
+            .style(button::text)
+            .padding(0)
+            .on_press(Message::Unexpose {
+                proto: e.proto,
+                port: e.port,
+                scope: RemoveScope::Exact(e.scope.clone()),
+            }),
+    ]
+    .spacing(4)
+    .align_y(Vertical::Center);
+    container(body)
+        .padding([2, 6])
+        .style(container::bordered_box)
+        .into()
 }
 
 /// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
@@ -872,20 +1039,11 @@ fn error_banner<'a>(e: &str) -> Element<'a, Message> {
         .into()
 }
 
-/// Parse a port field: `25565` (tcp default) or `tcp/25565` / `udp/34197`.
-pub(crate) fn parse_port(s: &str) -> Result<(Proto, u16), String> {
-    let (proto, port) = match s.split_once('/') {
-        Some((p, n)) => {
-            let proto = match p.to_ascii_lowercase().as_str() {
-                "tcp" => Proto::Tcp,
-                "udp" => Proto::Udp,
-                other => return Err(format!("bad protocol '{other}' (use tcp or udp)")),
-            };
-            (proto, n)
-        }
-        None => (Proto::Tcp, s),
-    };
-    port.parse()
-        .map(|p| (proto, p))
-        .map_err(|_| format!("bad port '{port}'"))
+/// Parse the port field. The protocol is a separate control now, so this is just the number —
+/// 1..=65535, since 0 is not a port anything can listen on.
+pub(crate) fn parse_port(s: &str) -> Result<u16, String> {
+    match s.parse::<u16>() {
+        Ok(0) | Err(_) => Err(format!("'{s}' is not a port (1-65535)")),
+        Ok(p) => Ok(p),
+    }
 }

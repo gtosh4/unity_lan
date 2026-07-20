@@ -27,8 +27,8 @@ use std::time::Instant;
 use common::api::{DeviceInfo, ManageOp, ManageResp, NetworkStatus, SharedNetwork};
 use common::control::{
     BlockedUser, ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp,
-    ExposeResp, ExposedPort, LoginResp, LogoutResp, NetworkResp, PeerReach, PeerStatus, Proto,
-    StatusReport, UiAction, UiDirective, UiTab, UpdateResp,
+    ExposeResp, ExposeScope, ExposedPort, LoginResp, LogoutResp, NetworkResp, PeerReach,
+    PeerStatus, Proto, RemoveScope, StatusReport, UiAction, UiDirective, UiTab, UpdateResp,
 };
 use interprocess::local_socket::tokio::prelude::*;
 #[cfg(not(windows))]
@@ -83,8 +83,10 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         (12, UiAction::ArmBlockPeer(2001)),
         (16, UiAction::Cancel),
         (18, UiAction::CloseMenu),
+        // Manage holds the exposed-ports UI, so it dwells long enough to read the scope chips and
+        // to cut the `exposed.png` still from the middle of the pause.
         (22, UiAction::SelectTab(UiTab::Manage)),
-        (27, UiAction::SelectTab(UiTab::Networks)),
+        (31, UiAction::SelectTab(UiTab::Networks)),
     ]
 }
 
@@ -98,17 +100,34 @@ impl State {
             peers: fixture_peers(),
             networks: fixture_networks(),
             devices: fixture_devices(),
+            // Three scopes across two ports, so the stills show what the chips are for: a port
+            // shared with two networks at once, and one kept to the owner's own devices.
             exposed: vec![
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
-                    net: None,
+                    scope: ExposeScope::Net {
+                        guild_id: 900_100,
+                        role_id: 7001,
+                    },
+                    label: "Engineering @ acme".into(),
+                    active: true,
+                },
+                ExposedPort {
+                    proto: Proto::Tcp,
+                    port: 8080,
+                    scope: ExposeScope::Net {
+                        guild_id: 900_200,
+                        role_id: 7002,
+                    },
+                    label: "Gaming @ playhouse".into(),
                     active: true,
                 },
                 ExposedPort {
                     proto: Proto::Udp,
                     port: 51820,
-                    net: Some("Engineering".into()),
+                    scope: ExposeScope::OwnDevices,
+                    label: common::control::OWN_DEVICES_LABEL.into(),
                     active: true,
                 },
             ],
@@ -162,7 +181,10 @@ impl State {
             identity: Some("alice#4021".into()),
             coordinator_online: true,
             blocked: self.blocked.clone(),
-            engine_version: "0.4.0".into(),
+            // Our own version, so the demo shows a settled install. A hardcoded one drifts out of
+            // date and trips the relaunch banner, which would put a release that doesn't exist
+            // into the README screenshots.
+            engine_version: common::VERSION.into(),
             directive: self.directive(secs),
             ..Default::default()
         }
@@ -206,6 +228,8 @@ fn peer(
             .map(|(name, community)| SharedNetwork {
                 name: (*name).into(),
                 community: (*community).into(),
+                guild_id: 1,
+                role_id: 2,
             })
             .collect(),
     }
@@ -348,18 +372,42 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
         ControlRequest::Expose(op) => {
             let message = match op {
                 ExposeOp::List => "exposed".into(),
-                ExposeOp::Add { proto, port, net } => {
-                    s.exposed.retain(|e| !(e.proto == proto && e.port == port));
+                ExposeOp::Add { proto, port, scope } => {
+                    s.exposed
+                        .retain(|e| !(e.proto == proto && e.port == port && e.scope == scope));
+                    // The real engine resolves the scope's ids against its network list; the demo
+                    // just echoes something readable back.
+                    let label = fixture_networks()
+                        .iter()
+                        .find(|n| {
+                            scope
+                                == ExposeScope::Net {
+                                    guild_id: n.guild_id,
+                                    role_id: n.role_id,
+                                }
+                        })
+                        .map_or_else(
+                            || scope.fallback_label(),
+                            |n| format!("{} @ {}", n.name, n.guild_name),
+                        );
                     s.exposed.push(ExposedPort {
                         proto,
                         port,
-                        net,
+                        scope,
+                        label,
                         active: true,
                     });
                     format!("exposed {}/{port}", proto.as_str())
                 }
-                ExposeOp::Remove { proto, port, .. } => {
-                    s.exposed.retain(|e| !(e.proto == proto && e.port == port));
+                ExposeOp::Remove { proto, port, scope } => {
+                    s.exposed.retain(|e| {
+                        !(e.proto == proto
+                            && e.port == port
+                            && match &scope {
+                                RemoveScope::All => true,
+                                RemoveScope::Exact(s) => &e.scope == s,
+                            })
+                    });
                     format!("unexposed {}/{port}", proto.as_str())
                 }
             };
@@ -440,7 +488,7 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
         }),
 
         ControlRequest::ApplyUpdate => ControlResponse::Update(UpdateResp {
-            version: "0.4.0".into(),
+            version: common::VERSION.into(),
             message: "no update staged".into(),
         }),
     }

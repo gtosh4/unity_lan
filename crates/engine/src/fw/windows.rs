@@ -20,9 +20,9 @@
 //! non-zero exit — aborting startup. Suppressed, those pre-up rules are simply skipped and then
 //! (re)created by the first post-up membership `apply`, once `unl0` exists.
 
-use common::control::Proto;
+use common::control::{ExposeScope, Proto};
 
-use super::{Exposed, FirewallBackend, PeersByNet};
+use super::{Exposed, FirewallBackend, PeerSets};
 
 pub struct WindowsFwBackend;
 
@@ -30,13 +30,8 @@ pub struct WindowsFwBackend;
 const GROUP: &str = "UnityLAN";
 
 impl FirewallBackend for WindowsFwBackend {
-    fn apply(
-        &self,
-        iface: &str,
-        exposed: &[Exposed],
-        peers_by_net: &PeersByNet,
-    ) -> anyhow::Result<()> {
-        run_fw_ps(&script(iface, exposed, peers_by_net))
+    fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
+        run_fw_ps(&script(iface, exposed, peers))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -50,10 +45,10 @@ fn remove_group() -> String {
 }
 
 /// Build the PowerShell script: clear our group, then re-add an inbound-allow rule per exposed
-/// port (plus ICMPv4 echo for ping/diagnostics), each scoped to the wg interface. A `--net`-scoped
-/// expose carries `-RemoteAddress` restricting it to that network's peer IPs; a scoped expose whose
-/// network currently has no peers is omitted entirely (reachable by nobody — the default-deny).
-fn script(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String {
+/// port (plus ICMPv4 echo for ping/diagnostics), each scoped to the wg interface. A scoped expose
+/// carries `-RemoteAddress` restricting it to that scope's peer IPs; a scoped expose whose peers
+/// are all offline is omitted entirely (reachable by nobody — the default-deny covers it).
+fn script(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
     let mut s = String::new();
     s.push_str(&remove_group());
     s.push('\n');
@@ -68,12 +63,15 @@ fn script(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String
 
     for e in exposed {
         let proto = ps_proto(e.proto);
-        let (name, remote) = match &e.net {
+        let (name, remote) = match peers.sources(&e.scope) {
+            // Unscoped: no `-RemoteAddress`, so any peer on the wg interface reaches it.
             None => (format!("UnityLAN {}/{}", e.proto.as_str(), e.port), None),
-            Some(net) => {
-                let ips = peers_by_net.get(net).map(Vec::as_slice).unwrap_or(&[]);
+            Some(ips) => {
                 if ips.is_empty() {
-                    // Scoped to a network with no current peers → open to nobody; skip the rule.
+                    // Scoped to a set with no current peers → open to nobody. New-NetFirewallRule
+                    // has no way to spell an empty -RemoteAddress (unlike nft's empty set), and a
+                    // rule with the flag omitted would open the port to *every* peer — so the only
+                    // correct rendering is no rule at all, which the default-deny then covers.
                     continue;
                 }
                 let list = ips
@@ -82,7 +80,12 @@ fn script(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String
                     .collect::<Vec<_>>()
                     .join(",");
                 (
-                    format!("UnityLAN {}/{} net:{net}", e.proto.as_str(), e.port),
+                    format!(
+                        "UnityLAN {}/{} scope:{}",
+                        e.proto.as_str(),
+                        e.port,
+                        e.scope.label()
+                    ),
                     Some(list),
                 )
             }
@@ -134,11 +137,14 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    fn exp(proto: Proto, port: u16, net: Option<&str>) -> Exposed {
-        Exposed {
-            proto,
-            port,
-            net: net.map(String::from),
+    fn exp(proto: Proto, port: u16, scope: ExposeScope) -> Exposed {
+        Exposed { proto, port, scope }
+    }
+
+    fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
+        PeerSets {
+            by_net: std::collections::HashMap::from([(name.to_string(), ips)]),
+            own_devices: Vec::new(),
         }
     }
 
@@ -146,8 +152,11 @@ mod tests {
     fn script_resets_group_and_opens_unscoped_ports() {
         let s = script(
             "unl0",
-            &[exp(Proto::Tcp, 25565, None), exp(Proto::Udp, 34197, None)],
-            &PeersByNet::new(),
+            &[
+                exp(Proto::Tcp, 25565, ExposeScope::AllPeers),
+                exp(Proto::Udp, 34197, ExposeScope::AllPeers),
+            ],
+            &PeerSets::default(),
         );
         assert!(s.contains("Remove-NetFirewallRule -Group 'UnityLAN'"));
         assert!(s.contains("-Protocol ICMPv4 -IcmpType 8 -InterfaceAlias 'unl0'"));
@@ -166,24 +175,50 @@ mod tests {
 
     #[test]
     fn scoped_expose_restricts_to_network_peer_ips() {
-        let mut peers = PeersByNet::new();
-        peers.insert(
-            "mesh".into(),
+        let peers = by_net(
+            "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let s = script("unl0", &[exp(Proto::Tcp, 9001, Some("mesh"))], &peers);
+        let s = script(
+            "unl0",
+            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &peers,
+        );
         assert!(s.contains(
             "-LocalPort 9001 -InterfaceAlias 'unl0' -RemoteAddress 100.64.0.2,100.64.0.3"
         ));
-        assert!(s.contains("net:mesh"));
+        assert!(s.contains("scope:mesh"));
+    }
+
+    /// The own-device scope restricts to the owner's other devices, which are not in any network —
+    /// so a network's peers must not leak into the rule.
+    #[test]
+    fn own_device_scope_restricts_to_the_owners_devices() {
+        let peers = PeerSets {
+            by_net: std::collections::HashMap::from([(
+                "mesh".to_string(),
+                vec![Ipv4Addr::new(100, 64, 0, 9)],
+            )]),
+            own_devices: vec![Ipv4Addr::new(100, 64, 0, 2)],
+        };
+        let s = script(
+            "unl0",
+            &[exp(Proto::Tcp, 9001, ExposeScope::OwnDevices)],
+            &peers,
+        );
+        assert!(s.contains("-LocalPort 9001 -InterfaceAlias 'unl0' -RemoteAddress 100.64.0.2"));
+        assert!(
+            !s.contains("100.64.0.9"),
+            "a network peer must not be admitted"
+        );
     }
 
     #[test]
     fn scoped_expose_with_no_peers_is_omitted() {
         let s = script(
             "unl0",
-            &[exp(Proto::Tcp, 9001, Some("mesh"))],
-            &PeersByNet::new(),
+            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &PeerSets::default(),
         );
         // No peers in the network → the port is opened to nobody (relies on default-deny).
         assert!(!s.contains("-LocalPort 9001"));

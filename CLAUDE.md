@@ -95,7 +95,8 @@ Four crates (`crates/*`), two planes:
 | `gui` | `unitylan-gui` | unprivileged iced desktop app, drives the engine over its control socket |
 
 **GUI screenshots are docs.** When a GUI change alters what the app looks like, regenerate the
-README images — `assets/demo.gif`, `assets/peers.png`, `assets/networks.png` — with
+README images — `assets/demo.gif`, `assets/exposed.png` (plus `peers.png`/`networks.png`,
+generated but not currently referenced) — with
 `scripts/readme-demo.sh` (fake-engine canned fixtures + scripted tour + screencast). Keep the
 fixtures in `crates/gui/examples/fake-engine.rs` representative of the feature being shown, or the
 regenerated stills won't demonstrate it.

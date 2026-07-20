@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use common::api::{DeviceInfo, ManageOp, ManageResp};
 use common::control::{
-    ConnectedResp, ExposeOp, ExposeResp, ExposedPort, LoginResp, NetworkResp, Proto, RemoveScope,
-    StatusReport,
+    ConnectedResp, ExposeOp, ExposeResp, ExposeScope, ExposedPort, LoginResp, NetworkResp, Proto,
+    RemoveScope, StatusReport,
 };
 use iced::window;
 use iced::{Subscription, Task, Theme};
@@ -165,8 +165,14 @@ struct App {
     rename_input: String,
     /// Draft text for the expose port field.
     expose_port_input: String,
-    /// Draft text for the expose network-scope field.
-    expose_net_input: String,
+    /// Draft protocol for the exposure being composed.
+    expose_proto: Proto,
+    /// Scopes ticked for the exposure being composed. One `Add` op is sent per scope — the wire
+    /// carries one scope per exposure, and keeping them separate is what lets the user close one
+    /// later without touching the others.
+    expose_scopes: Vec<ExposeScope>,
+    /// Whether the scope picker is expanded.
+    expose_scope_open: bool,
     /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
     login_url: Option<String>,
     /// A mesh connect/disconnect is in flight — disables the button meanwhile.
@@ -252,13 +258,19 @@ enum Message {
     SetPrimary(String),
     Remove(String),
     ExposePortInput(String),
-    ExposeNetInput(String),
+    /// Pick TCP or UDP for the exposure being composed.
+    ExposeProto(Proto),
+    /// Open/close the scope picker.
+    ExposeScopeToggleOpen,
+    /// Tick (`true`) or untick a scope. `AllPeers` is exclusive with the rest — it's a superset, so
+    /// pairing it with a narrower scope would show a restriction the firewall isn't enforcing.
+    ExposeScopeToggle(ExposeScope, bool),
     ExposeSubmit,
     Unexpose {
         proto: Proto,
         port: u16,
-        /// The scope of the row being closed (`None` = the all-peers exposure).
-        net: Option<String>,
+        /// Which exposure(s) of that port to close: one scope's chip, or the whole row.
+        scope: RemoveScope,
     },
     /// Toggle this device's peering on a network (role@guild).
     ToggleNetwork {
@@ -338,7 +350,9 @@ impl App {
             exposed: Vec::new(),
             rename_input: String::new(),
             expose_port_input: String::new(),
-            expose_net_input: String::new(),
+            expose_proto: Proto::Tcp,
+            expose_scopes: Vec::new(),
+            expose_scope_open: false,
             login_url: None,
             connect_busy: false,
             confirm: None,
@@ -444,34 +458,57 @@ impl App {
             }
             Message::ExposesFetched(Err(e)) => self.error = Some(e),
             Message::ExposePortInput(s) => self.expose_port_input = s,
-            Message::ExposeNetInput(s) => self.expose_net_input = s,
-            Message::ExposeSubmit => match parse_port(self.expose_port_input.trim()) {
-                Ok((proto, port)) => {
-                    let net = match self.expose_net_input.trim() {
-                        "" => None,
-                        n => Some(n.to_string()),
-                    };
-                    self.expose_port_input.clear();
-                    self.expose_net_input.clear();
-                    return Task::perform(
-                        ctl::expose(self.socket.clone(), ExposeOp::Add { proto, port, net }),
-                        Message::ExposesFetched,
-                    );
+            Message::ExposeProto(p) => self.expose_proto = p,
+            Message::ExposeScopeToggleOpen => {
+                self.expose_scope_open = !self.expose_scope_open;
+            }
+            Message::ExposeScopeToggle(scope, on) => {
+                self.expose_scopes.retain(|s| *s != scope);
+                if on {
+                    // All-peers is a superset of every other scope, so it stands alone: ticking it
+                    // clears the rest, and ticking anything else clears it.
+                    if scope == ExposeScope::AllPeers {
+                        self.expose_scopes.clear();
+                    } else {
+                        self.expose_scopes.retain(|s| *s != ExposeScope::AllPeers);
+                    }
+                    self.expose_scopes.push(scope);
                 }
-                Err(e) => self.error = Some(e),
-            },
-            Message::Unexpose { proto, port, net } => {
+            }
+            Message::ExposeSubmit => {
+                let port = match parse_port(self.expose_port_input.trim()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.error = Some(e);
+                        return Task::none();
+                    }
+                };
+                if self.expose_scopes.is_empty() {
+                    self.error = Some("pick who can reach this port".into());
+                    return Task::none();
+                }
+                // One `Add` per scope. They're independent ops, so a scope that fails (a role
+                // revoked since the picker was built) leaves the others applied — the refetch that
+                // each op triggers shows what actually landed.
+                let proto = self.expose_proto;
+                let socket = self.socket.clone();
+                let ops: Vec<Task<Message>> = self
+                    .expose_scopes
+                    .drain(..)
+                    .map(|scope| {
+                        Task::perform(
+                            ctl::expose(socket.clone(), ExposeOp::Add { proto, port, scope }),
+                            Message::ExposesFetched,
+                        )
+                    })
+                    .collect();
+                self.expose_port_input.clear();
+                self.expose_scope_open = false;
+                return Task::batch(ops);
+            }
+            Message::Unexpose { proto, port, scope } => {
                 return Task::perform(
-                    ctl::expose(
-                        self.socket.clone(),
-                        ExposeOp::Remove {
-                            proto,
-                            port,
-                            // Close exactly the row the user clicked, so an all-peers exposure of
-                            // the same port survives closing its `--net`-scoped sibling.
-                            scope: RemoveScope::Exact(net),
-                        },
-                    ),
+                    ctl::expose(self.socket.clone(), ExposeOp::Remove { proto, port, scope }),
                     Message::ExposesFetched,
                 );
             }
@@ -726,6 +763,8 @@ mod tests {
                 tx_bytes: 512,
                 last_handshake_secs: Some(5),
                 networks: vec![common::api::SharedNetwork {
+                    guild_id: 1,
+                    role_id: 2,
                     name: "mesh".into(),
                     community: "acme".into(),
                 }],
@@ -744,6 +783,8 @@ mod tests {
     #[test]
     fn shared_networks_group_by_community() {
         let net = |name: &str, community: &str| common::api::SharedNetwork {
+            guild_id: 1,
+            role_id: 2,
             name: name.into(),
             community: community.into(),
         };
@@ -789,6 +830,8 @@ mod tests {
             last_handshake_secs: None,
             networks: (0..nets)
                 .map(|i| common::api::SharedNetwork {
+                    guild_id: 1,
+                    role_id: 2,
                     name: format!("n{i}"),
                     community: "c".into(),
                 })
@@ -889,7 +932,11 @@ mod tests {
             exposed: vec![ExposedPort {
                 proto: Proto::Tcp,
                 port: 25565,
-                net: Some("mesh".into()),
+                scope: ExposeScope::Net {
+                    guild_id: 1,
+                    role_id: 2,
+                },
+                label: "mesh @ acme".into(),
                 active: true,
             }],
         };
@@ -899,13 +946,17 @@ mod tests {
     }
 
     #[test]
-    fn expose_submit_valid_clears_inputs() {
+    fn expose_submit_valid_clears_the_draft() {
         let mut a = app();
-        a.expose_port_input = "udp/34197".into();
-        a.expose_net_input = "mesh".into();
+        a.expose_port_input = "34197".into();
+        a.expose_proto = Proto::Udp;
+        a.expose_scopes = vec![ExposeScope::Net {
+            guild_id: 1,
+            role_id: 2,
+        }];
         let _ = a.update(Message::ExposeSubmit); // dispatches the expose task
         assert!(a.expose_port_input.is_empty());
-        assert!(a.expose_net_input.is_empty());
+        assert!(a.expose_scopes.is_empty());
         assert!(a.error.is_none());
     }
 
@@ -913,9 +964,66 @@ mod tests {
     fn expose_submit_bad_port_surfaces_error_and_keeps_input() {
         let mut a = app();
         a.expose_port_input = "notaport".into();
+        a.expose_scopes = vec![ExposeScope::AllPeers];
         let _ = a.update(Message::ExposeSubmit);
         assert!(a.error.is_some());
         assert_eq!(a.expose_port_input, "notaport");
+        assert_eq!(
+            a.expose_scopes,
+            vec![ExposeScope::AllPeers],
+            "draft survives"
+        );
+    }
+
+    /// Submitting with nothing ticked would otherwise send zero ops and look like it worked.
+    #[test]
+    fn expose_submit_without_a_scope_is_refused() {
+        let mut a = app();
+        a.expose_port_input = "8080".into();
+        let _ = a.update(Message::ExposeSubmit);
+        assert!(a.error.is_some());
+        assert!(a.expose_port_input == "8080", "draft survives");
+    }
+
+    /// All-peers is a superset of every other scope, so the picker must never hold it alongside a
+    /// narrower one — that would show a restriction the firewall isn't enforcing.
+    #[test]
+    fn all_peers_is_exclusive_with_the_narrower_scopes() {
+        let mut a = app();
+        let net = ExposeScope::Net {
+            guild_id: 1,
+            role_id: 2,
+        };
+
+        let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
+        let _ = a.update(Message::ExposeScopeToggle(ExposeScope::OwnDevices, true));
+        assert_eq!(a.expose_scopes.len(), 2, "narrow scopes combine");
+
+        // Ticking all-peers clears them...
+        let _ = a.update(Message::ExposeScopeToggle(ExposeScope::AllPeers, true));
+        assert_eq!(a.expose_scopes, vec![ExposeScope::AllPeers]);
+
+        // ...and ticking a narrow one clears all-peers.
+        let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
+        assert_eq!(a.expose_scopes, vec![net]);
+    }
+
+    /// One `Add` op per ticked scope — the wire carries one scope per exposure.
+    #[test]
+    fn each_ticked_scope_becomes_its_own_exposure() {
+        let mut a = app();
+        a.expose_port_input = "8080".into();
+        a.expose_scopes = vec![
+            ExposeScope::OwnDevices,
+            ExposeScope::Net {
+                guild_id: 1,
+                role_id: 2,
+            },
+        ];
+        let _ = a.update(Message::ExposeSubmit);
+        // The draft is consumed once, not once per scope.
+        assert!(a.expose_scopes.is_empty());
+        assert!(a.error.is_none());
     }
 
     #[test]
@@ -989,11 +1097,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_port_defaults_tcp_and_reads_proto() {
-        assert_eq!(parse_port("25565").unwrap(), (Proto::Tcp, 25565));
-        assert_eq!(parse_port("udp/34197").unwrap(), (Proto::Udp, 34197));
-        assert!(parse_port("sctp/1").is_err());
+    fn parse_port_takes_a_bare_number_in_range() {
+        assert_eq!(parse_port("25565").unwrap(), 25565);
+        assert!(parse_port("notaport").is_err());
         assert!(parse_port("70000").is_err());
+        assert!(parse_port("0").is_err(), "0 is not a listenable port");
+        // The protocol is a separate control now, so the old prefix syntax is not a port.
+        assert!(parse_port("udp/34197").is_err());
     }
 
     #[test]

@@ -553,6 +553,9 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
         let net = SharedNetwork {
             name: net_name.clone(),
             community: community_cache.get(guild_id).cloned().unwrap_or_default(),
+            // The identity clients scope on; the two strings above are display only.
+            guild_id: *guild_id,
+            role_id: *role_id,
         };
         for mp in st.presence.others_in(*guild_id, *role_id, &req.wg_pubkey) {
             let entry = by_pubkey
@@ -1200,6 +1203,8 @@ mod tests {
         let net = |name: &str| SharedNetwork {
             name: name.into(),
             community: "c".into(),
+            guild_id: 1,
+            role_id: 2,
         };
         let peer = [9u8; 32];
         // Two relay candidates sharing "mesh" with the peer, plus one on an unrelated network.

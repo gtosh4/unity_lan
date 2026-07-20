@@ -5,6 +5,20 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ## Unreleased
 
+### Added
+
+- **Ports can be exposed to just your own devices.** A new scope sits alongside "all peers" and the
+  per-network ones, and it goes by identity rather than membership: only your other devices reach
+  the port, no matter what networks you and everyone else share. Useful for the things you run for
+  yourself — a syncthing instance, an SSH port on a home server — that until now had to be opened to
+  every co-member of a network to be reachable at all. In the GUI it's a checkbox in the new scope
+  picker; from the command line it's `unitylan-engine ctl expose <config> <port> --own-devices`
+  (and `ctl unexpose … --own-devices` to close it again). Startup exposures in `engine.toml` can
+  name a scope too — `net = "<name>"` or `own_devices = true` on an `[[expose]]` entry — where
+  before they could only ever open a port to every peer.
+- **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
+  its own exposure, so you can close one later without disturbing the rest.
+
 ### Fixed
 
 - **Two devices on the same network could never reach each other if the router wouldn't hairpin.**
@@ -22,6 +36,23 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   to a peer, nothing told the tunnel to start using it — the new path was only picked up the next
   time the engine heard from the coordinator, which for an otherwise-idle mesh could be many minutes
   of a peer staying unreachable after it had become reachable. The engine now notices within seconds.
+- **A port scoped to one community's network could be reached from another community's.** Networks
+  were matched by role name alone, so if two of your Discord servers each had a role with the same
+  name — an `Engineering` in both — a port you opened to one was reachable by the *other* server's
+  members too. Scopes now carry the community as well as the role, and are listed and labelled as
+  `role @ community` so you can tell them apart. If you had exposed a port to a role name that
+  exists in two of your communities, that exposure now admits **nobody** until you re-open it
+  against the community you meant: the old setting cannot say which one it was, and guessing is how
+  the wrong people got in. Exposures naming a role unique to one community keep working untouched,
+  and `ctl expose <port> <role>` still takes a bare name — it resolves on its own unless the name is
+  ambiguous, in which case it now refuses and asks for `--guild`.
+
+  Networks are now identified internally by their Discord guild and role ids rather than by their
+  names, so renaming a role or a community no longer changes what a port is exposed to, and two
+  identically-named roles can never be confused. **This needs a coordinator running this release or
+  newer**: an older one doesn't send those ids, and rather than guess, the client treats such a
+  network as un-exposable — a port scoped to one stays closed until the coordinator is updated.
+  Upgrade the coordinator before, or together with, the clients.
 
 ### Changed
 
@@ -31,6 +62,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   this and told you the command to run; it now inserts the exemption itself, re-checks it whenever
   the firewall reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it
   on shutdown. Set `tailscale_compat = false` to go back to being told rather than fixed. Linux only.
+
+||||||| 11d81f8
+- **The exposed-ports list now shows who can actually reach each port.** Every port is one row with
+  a labelled chip per scope that can reach it, instead of one look-alike row per scope; a chip whose
+  peers are all offline is marked, since the port is open but nothing can currently connect. Each
+  chip closes just that scope, and the row closes all of them.
+- **Exposing a port no longer means typing the network name.** The scope is a picker built from the
+  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and the port
+  field reports a bad value as you type instead of after you submit.
 
 ## v0.3.1
 

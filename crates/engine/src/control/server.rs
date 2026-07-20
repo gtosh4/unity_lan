@@ -4,8 +4,8 @@
 use anyhow::Context;
 use common::api::NetworkStatus;
 use common::control::{
-    ConnectedResp, ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, LogoutResp,
-    NetworkResp, StatusReport,
+    ConnectedResp, ControlRequest, ControlResponse, ExposeOp, ExposeResp, ExposeScope, LoginResp,
+    LogoutResp, NetworkResp, StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -152,13 +152,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         ControlRequest::Expose(op) => match &ctx.fw {
             None => ControlResponse::Error("firewall disabled (set firewall = true)".into()),
             Some(fw) => {
-                let held = ctx
-                    .status
-                    .borrow()
-                    .device
-                    .as_ref()
-                    .map(|d| d.networks.clone())
-                    .unwrap_or_default();
+                let held = ctx.status.borrow().networks.clone();
                 match apply_expose(fw, op, &held) {
                     Ok(r) => ControlResponse::Expose(r),
                     Err(e) => ControlResponse::Error(format!("{e:#}")),
@@ -355,33 +349,95 @@ async fn stream_status(
     }
 }
 
-/// Apply an expose op to the local firewall and report the resulting exposed set. A `--net` scope
-/// must name a network this device actually holds.
-fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Result<ExposeResp> {
+/// Resolve and validate the scope of an `Add` against the networks this device holds.
+///
+/// Returns a scope carrying only `(guild_id, role_id)` — names get no further than this function.
+/// `OwnDevices` is derived from our own identity and `AllPeers` names nothing, so neither needs a
+/// network.
+///
+/// A name a person typed ([`ExposeScope::Unresolved`], from `ctl expose`, a config seed, or an
+/// exposure stored before id-scoping) resolves to the network carrying that role — but only when
+/// exactly one does. Two guilds may each have a role of the same name, and picking either would
+/// silently expose the port to a community the caller never named, so an ambiguous one is refused
+/// with the candidates listed.
+fn resolve_scope(scope: ExposeScope, held: &[NetworkStatus]) -> anyhow::Result<ExposeScope> {
+    let listing = || held.iter().map(net_label).collect::<Vec<_>>().join(", ");
+    match scope {
+        ExposeScope::Net { guild_id, role_id } => {
+            let known = held
+                .iter()
+                .any(|n| n.guild_id == guild_id && n.role_id == role_id);
+            if !known {
+                anyhow::bail!(
+                    "not a member of network {guild_id}/{role_id} (your networks: {})",
+                    listing()
+                );
+            }
+            Ok(ExposeScope::Net { guild_id, role_id })
+        }
+        ExposeScope::Unresolved { guild, name } => {
+            let hits: Vec<&NetworkStatus> = held
+                .iter()
+                .filter(|n| n.name == name && guild.as_deref().is_none_or(|g| n.guild_name == g))
+                .collect();
+            match hits.as_slice() {
+                [] => anyhow::bail!(
+                    "not a member of network '{name}' (your networks: {})",
+                    listing()
+                ),
+                [only] => Ok(ExposeScope::Net {
+                    guild_id: only.guild_id,
+                    role_id: only.role_id,
+                }),
+                many => anyhow::bail!(
+                    "network '{name}' is ambiguous — you hold it in {} communities ({}). \
+                     Name one with `--guild`.",
+                    many.len(),
+                    many.iter()
+                        .map(|n| n.guild_name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            }
+        }
+        other => Ok(other),
+    }
+}
+
+/// `role @ guild` for a held network — display only.
+fn net_label(n: &NetworkStatus) -> String {
+    if n.guild_name.is_empty() {
+        n.name.clone()
+    } else {
+        format!("{} @ {}", n.name, n.guild_name)
+    }
+}
+
+/// Apply an expose op to the local firewall and report the resulting exposed set.
+fn apply_expose(
+    fw: &Firewall,
+    op: ExposeOp,
+    held_nets: &[NetworkStatus],
+) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
-        ExposeOp::Add { proto, port, net } => {
-            if let Some(n) = &net {
-                if !held_nets.iter().any(|h| h == n) {
-                    anyhow::bail!(
-                        "not a member of network '{n}' (your networks: {})",
-                        held_nets.join(", ")
-                    );
-                }
-            }
-            let scope = net
-                .as_deref()
-                .map(|n| format!(" (net: {n})"))
-                .unwrap_or_default();
+        ExposeOp::Add { proto, port, scope } => {
+            let scope = resolve_scope(scope, held_nets)?;
+            let exposed = fw.expose(proto, port, scope.clone())?;
+            // Report it the way the caller will recognize it, not as the ids we stored.
+            let label = exposed
+                .iter()
+                .find(|e| e.proto == proto && e.port == port && e.scope == scope)
+                .map_or_else(|| scope.fallback_label(), |e| e.label.clone());
             (
-                format!("exposed {}/{port}{scope}", proto.as_str()),
-                fw.expose(proto, port, net)?,
+                format!("exposed {}/{port} ({label})", proto.as_str()),
+                exposed,
             )
         }
         ExposeOp::Remove { proto, port, scope } => {
             let label = match &scope {
-                common::control::RemoveScope::Exact(Some(n)) => format!(" (net: {n})"),
-                _ => String::new(),
+                common::control::RemoveScope::Exact(s) => format!(" ({})", s.fallback_label()),
+                common::control::RemoveScope::All => String::new(),
             };
             (
                 format!("closed {}/{port}{label}", proto.as_str()),
