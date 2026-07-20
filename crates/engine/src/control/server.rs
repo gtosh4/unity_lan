@@ -34,11 +34,21 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
         use interprocess::os::windows::local_socket::ListenerOptionsExt;
         opts.security_descriptor(control_pipe_sd()?)
     };
+    // Create the socket owner-only from the start. bind() applies the process umask, so without
+    // this the socket file exists at the ambient umask (often group/world-accessible) for the window
+    // between bind and the tighten-to-0660 below — a local user could connect and drive the daemon
+    // in that gap. 0600 is also the fail-closed default: if `grant_socket_access` later fails to
+    // relax + re-own it, the socket stays root-only rather than world-open.
+    #[cfg(not(windows))]
+    let umask_guard = UmaskGuard::owner_only();
     let listener = opts
         .create_tokio()
         .with_context(|| format!("binding control socket {endpoint}"))?;
     #[cfg(not(windows))]
-    grant_socket_access(endpoint, group.as_deref());
+    {
+        drop(umask_guard);
+        grant_socket_access(endpoint, group.as_deref());
+    }
     tracing::info!(socket = %endpoint, "control socket listening");
     loop {
         let stream = listener.accept().await?;
@@ -48,6 +58,29 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
                 tracing::warn!("control conn: {e:#}");
             }
         });
+    }
+}
+
+/// Sets the process umask to 0177 (so a file is created 0600) for its lifetime, restoring the
+/// previous value on drop. Used to bracket the control-socket bind so the socket is never briefly
+/// group/world-accessible.
+#[cfg(not(windows))]
+struct UmaskGuard(libc::mode_t);
+
+#[cfg(not(windows))]
+impl UmaskGuard {
+    fn owner_only() -> Self {
+        // SAFETY: umask is a process-global setter with no memory-safety concerns; startup is
+        // single-threaded so the brief window doesn't race other file creation.
+        Self(unsafe { libc::umask(0o177) })
+    }
+}
+
+#[cfg(not(windows))]
+impl Drop for UmaskGuard {
+    fn drop(&mut self) {
+        // SAFETY: as above; restores the umask we captured.
+        unsafe { libc::umask(self.0) };
     }
 }
 

@@ -11,7 +11,7 @@
 //! never `resp.coord_pubkey` — a substituted response could carry an attacker's anchor + a manifest
 //! signed by it, which would otherwise be an update-channel RCE. Same rule as `coord::verified_seeds`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -51,6 +51,40 @@ pub(crate) fn is_newer(candidate: &str, current: &str) -> bool {
     }
 }
 
+/// The rollback floor: the highest release version we've ever verified, persisted in the state dir.
+fn floor_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("update_floor")
+}
+
+/// Accept `version` against the persisted rollback floor, raising the floor to it when accepted.
+/// The manifest is signed by the coordinator's anchor, but the transport is deliberately untrusted,
+/// so a MITM can *replay* an older-but-genuinely-signed manifest to walk us back onto a release with
+/// a known vuln (`is_newer` only blocks going below what we currently *run*, not below what we've
+/// already been offered). Once we've verified some release, we refuse any strictly-older one. A
+/// *withheld* newer manifest — freezing us in place — can't be caught here; that needs a signed
+/// freshness stamp inside the manifest itself.
+fn within_floor(state_dir: &Path, version: &str) -> bool {
+    let floor = std::fs::read_to_string(floor_path(state_dir))
+        .ok()
+        .and_then(|s| semver::Version::parse(s.trim()).ok());
+    if let Some(floor) = &floor {
+        if is_newer(&floor.to_string(), version) {
+            return false;
+        }
+    }
+    // Raise the floor when this is the newest we've seen. Best-effort: a write failure just means we
+    // don't tighten the floor this round, never that we wrongly reject.
+    let raise = match (&floor, semver::Version::parse(version)) {
+        (Some(f), Ok(v)) => v > *f,
+        (None, Ok(_)) => true,
+        _ => false,
+    };
+    if raise {
+        let _ = std::fs::write(floor_path(state_dir), version);
+    }
+    true
+}
+
 /// Verify the coordinator's release manifest and stage an update if one applies to us: signature
 /// valid against the **pinned** anchor, version strictly newer than ours, and an artifact for this
 /// platform. `None` in every other case (no manifest, bad signature, not newer, wrong platform) — a
@@ -83,6 +117,13 @@ pub fn stage(resp: &RegisterResp, state_dir: &Path) -> Option<PendingUpdate> {
             tracing::warn!("release manifest verified against no pinned anchor");
             None
         })?;
+    if !within_floor(state_dir, &manifest.version) {
+        tracing::warn!(
+            version = %manifest.version,
+            "release manifest older than one already verified — refusing (possible rollback)"
+        );
+        return None;
+    }
     if !is_newer(&manifest.version, common::VERSION) {
         return None;
     }
@@ -418,6 +459,54 @@ mod tests {
         assert!(stage(&base(&attacker), &dir).is_none());
         // Signed by the pinned (honest) anchor → stages, proving the gate keys on the pin.
         assert!(stage(&base(&honest), &dir).is_some());
+    }
+
+    // A MITM on the (untrusted) update transport can replay an older-but-genuinely-signed manifest
+    // to downgrade us onto a version with a known vuln. Once we've verified a release, `stage` must
+    // refuse any strictly-older one even though its signature checks out.
+    #[test]
+    fn stage_refuses_rollback_below_seen_version() {
+        use common::crypto::CoordinatorKey;
+        use common::update::{Platform, ReleaseArtifact, ReleaseManifest};
+
+        let dir = crate::testutil::TempDir::new("su-rollback");
+        let honest = CoordinatorKey::generate();
+        const GUILD: u64 = 42;
+        crate::keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        let resp = |version: &str| {
+            let manifest = ReleaseManifest {
+                version: version.into(),
+                artifacts: vec![
+                    ReleaseArtifact {
+                        platform: Platform::LinuxAmd64,
+                        url: "https://example.test/x".into(),
+                        sha256: [0u8; 32],
+                        size: 1,
+                    },
+                    ReleaseArtifact {
+                        platform: Platform::WindowsAmd64,
+                        url: "https://example.test/x.msi".into(),
+                        sha256: [0u8; 32],
+                        size: 1,
+                    },
+                ],
+            };
+            RegisterResp {
+                version: 1,
+                proto: common::PROTOCOL_VERSION,
+                server_version: version.into(),
+                release: Some(Signed::sign(&honest, &manifest).unwrap().to_base64()),
+                ..Default::default()
+            }
+        };
+
+        // Newest release seen first raises the floor to 9.9.9.
+        assert!(stage(&resp("9.9.9"), &dir).is_some());
+        // A replayed older (but still signed, still > our running version) manifest is refused.
+        assert!(stage(&resp("9.9.8"), &dir).is_none());
+        // Re-offering the version at the floor still stages (not a rollback).
+        assert!(stage(&resp("9.9.9"), &dir).is_some());
     }
 
     // A tampered/oversized/short artifact must be rejected before apply. We drive `download_verified`
