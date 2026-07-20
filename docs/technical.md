@@ -54,6 +54,7 @@ unitylan/
 │   │   ├── resolver/{mod,linux,windows}.rs # *.unity.internal split-DNS hookup
 │   │   ├── dns.rs        # local .internal zone built from verified attestations
 │   │   ├── nat.rs        # UPnP-IGD port mapping
+│   │   ├── beacon.rs     # LAN discovery beacon: UDP broadcast → direct same-segment endpoint (anti-hairpin)
 │   │   ├── p2p.rs        # peer-direct attestation serve + pull (gossip-refresh, docs/gossip-refresh.md)
 │   │   ├── ice.rs        # userspace ICE agent (webrtc-ice): STUN gather + hole-punch
 │   │   ├── relay.rs      # embedded TURN server (ciphertext relay) + client
@@ -417,8 +418,20 @@ exactly as the coordinator path — no new trust. A peer whose attestation lapse
 expiry even during a coordinator outage. The coordinator stays the fallback (`held_for_refresh` →
 empty → full) and the only path for bootstrap/introductions.
 
-### 5.5 NAT traversal (`nat.rs`, `ice.rs`, `relay.rs`, `ping.rs`) — connectivity ladder
+### 5.5 NAT traversal (`nat.rs`, `beacon.rs`, `ice.rs`, `relay.rs`, `ping.rs`) — connectivity ladder
 Most-direct-first (design §7.2):
+- **`beacon.rs`** — LAN discovery. Two members behind one NAT otherwise hairpin through the router's
+  public IP (each holds the other's coordinator-supplied *reflexive* endpoint; neither advertises its
+  private address — that would leak topology and RFC1918 ranges collide), and consumer hairpin is
+  flaky → the tunnel flaps. Each engine UDP-**broadcasts** `MAGIC|ver|wg_pubkey|listen_port` on
+  `0.0.0.0:beacon_port` (default 51821) every 30s (+ a 3-packet startup burst); a received beacon
+  proves a same-segment path, so the receiver records `src_ip:advertised_port` and gives it **top
+  endpoint precedence** in `apply_seeds` (above the reflexive endpoint/ICE/relay/punch). No beacon
+  crypto — the WG handshake authenticates; `Beacon::select` runs a per-peer state machine that adopts
+  the LAN endpoint only while the peer stays ping-reachable, reverting to reflexive (and suppressing a
+  bad address for a cooldown) if a switched-to endpoint goes dark within a grace, so a forged beacon
+  costs at most a bounded blip. Candidates TTL out (90s) when a peer stops beaconing (left the LAN).
+  Off via `beacon = false`.
 - **`nat.rs`** — UPnP-IGD maps an external UDP port → local WG `listen_port`.
 - **`ice.rs`** — userspace **ICE** agent (`webrtc-ice`): host + STUN server-reflexive candidate
   gathering + hole-punch. Candidates exchanged over the coordinator long-poll (`RegisterReq.ice` →

@@ -1,6 +1,7 @@
 //! UnityLAN engine (M1, headless): register with the coordinator, verify the signed
 //! attestations, pin the trust anchor, and print the resulting IPs + hostnames.
 
+mod beacon;
 mod config;
 mod control;
 mod coord;

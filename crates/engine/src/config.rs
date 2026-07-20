@@ -133,6 +133,17 @@ pub struct Config {
     /// shutdown. Set `false` to manage the exemption yourself — the engine then only warns. Linux only.
     #[serde(default = "default_true")]
     pub tailscale_compat: bool,
+    /// LAN peer-discovery beacon (`beacon.rs`). Periodically broadcasts this device's WG pubkey +
+    /// listen port on the local segment so two peers behind one NAT find their **direct LAN path**
+    /// instead of hairpinning through the router's public IP (which flaps). On by default; nothing
+    /// private is advertised (the beacon carries no LAN address — the receiver learns the sender's
+    /// LAN endpoint from the packet's source) and adoption is guarded by a reachability check. Set
+    /// `false` to disable local discovery and rely on coordinator-supplied endpoints only.
+    #[serde(default = "default_true")]
+    pub beacon: bool,
+    /// UDP port the discovery beacon broadcasts on and listens at (distinct from `listen_port`).
+    #[serde(default = "default_beacon_port")]
+    pub beacon_port: u16,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`, and the scope to every peer.
@@ -196,6 +207,9 @@ fn default_proto() -> String {
 
 fn default_iface() -> String {
     "unl0".to_string()
+}
+fn default_beacon_port() -> u16 {
+    crate::beacon::DEFAULT_PORT
 }
 fn default_port() -> u16 {
     51820
