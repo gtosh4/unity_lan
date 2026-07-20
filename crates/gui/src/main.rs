@@ -16,7 +16,7 @@ mod tray;
 mod view;
 mod widgets;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -187,6 +187,10 @@ struct App {
     /// Peer groups the user has collapsed (click the group header to toggle). Seeded with `Offline`
     /// so a large mesh's dead peers stay folded away by default.
     collapsed_groups: HashSet<PeerGroup>,
+    /// Smoothed (EWMA) latency per peer, keyed by WG IP, used *only* to order the peer list. The
+    /// number shown in the row stays the latest raw RTT — ordering off that raw value reshuffled
+    /// near-equal peers every poll as per-probe jitter crossed them, so the list flickered.
+    latency_ewma: HashMap<Ipv4Addr, u32>,
     /// The last action error, shown as a banner until the next action clears it.
     error: Option<String>,
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
@@ -359,6 +363,7 @@ impl App {
             menu_open: None,
             tab: Tab::default(),
             collapsed_groups: HashSet::from([PeerGroup::Offline]),
+            latency_ewma: HashMap::new(),
             error: None,
             tray_rx: Arc::new(Mutex::new(None)),
             window: None,
@@ -405,6 +410,22 @@ impl App {
         }
     }
 
+    /// Fold each peer's latest RTT into its EWMA (α = 1/4) so the sort order settles instead of
+    /// chasing per-poll jitter, and drop peers no longer in the report. Peers with no reply this
+    /// poll keep their last smoothed value; ones that never replied simply have no entry.
+    fn smooth_latencies(&mut self, s: &StatusReport) {
+        let live: HashSet<Ipv4Addr> = s.peers.iter().map(|p| p.wg_ip).collect();
+        self.latency_ewma.retain(|ip, _| live.contains(ip));
+        for p in &s.peers {
+            if let Some(ms) = p.latency_ms {
+                self.latency_ewma
+                    .entry(p.wg_ip)
+                    .and_modify(|e| *e = (*e * 3 + ms) / 4)
+                    .or_insert(ms);
+            }
+        }
+    }
+
     /// Open the main window, recording its id. Used at boot and to restore from the tray.
     fn open_window(&mut self) -> Task<Message> {
         let (id, task) = window::open(window_settings());
@@ -443,6 +464,7 @@ impl App {
             Message::StatusFetched(Ok(s)) => {
                 #[cfg(debug_assertions)]
                 self.apply_directive(&s);
+                self.smooth_latencies(&s);
                 self.status = Some(s);
                 self.error = None;
             }
@@ -844,7 +866,7 @@ mod tests {
         let c = mk("bob", 1, Some(5));
         let d = mk("ann", 1, Some(80));
         let mut v = [&d, &c, &b, &a];
-        v.sort_by_key(|p| peer_sort_key(p));
+        v.sort_by_key(|p| peer_sort_key(p, p.latency_ms));
         let order: Vec<&str> = v.iter().map(|p| p.username.as_str()).collect();
         assert_eq!(order, vec!["zeb", "amy", "bob", "ann"]);
     }

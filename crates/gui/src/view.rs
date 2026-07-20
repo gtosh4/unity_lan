@@ -407,7 +407,7 @@ impl App {
             let mut offline: Vec<&PeerStatus> =
                 peers.iter().filter(|p| !is_own(p) && !p.up).collect();
             for v in [&mut mine, &mut online, &mut offline] {
-                v.sort_by_key(|p| peer_sort_key(p));
+                v.sort_by_key(|p| peer_sort_key(p, self.latency_ewma.get(&p.wg_ip).copied()));
             }
             for (group, list) in [
                 (PeerGroup::Mine, mine),
@@ -959,13 +959,17 @@ fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
 /// A peer's status as a single health color plus a label. One color axis: green = the tunnel is up
 /// (however it's reached), amber = still connecting, red = down. The label carries the path detail
 /// (`direct`/`relayed`/`ice`) or the reason it's not up — so the dot never contradicts the word.
-/// Sort key ordering peers within a group: most shared networks first, then lowest latency (a peer
-/// with no RTT reading — offline / no reply — sorts last), then handle (case-insensitive) as a
-/// stable tiebreak.
-pub(crate) fn peer_sort_key(p: &common::control::PeerStatus) -> (Reverse<usize>, u32, String) {
+/// Sort key ordering peers within a group: most shared networks first, then lowest latency, then
+/// handle (case-insensitive) as a stable tiebreak. `latency` is the caller's *smoothed* (EWMA) RTT,
+/// not the raw per-poll reading, so the order settles instead of flickering; `None` (offline / no
+/// reply yet) sorts last.
+pub(crate) fn peer_sort_key(
+    p: &common::control::PeerStatus,
+    latency: Option<u32>,
+) -> (Reverse<usize>, u32, String) {
     (
         Reverse(p.networks.len()),
-        p.latency_ms.unwrap_or(u32::MAX),
+        latency.unwrap_or(u32::MAX),
         p.username.to_lowercase(),
     )
 }
