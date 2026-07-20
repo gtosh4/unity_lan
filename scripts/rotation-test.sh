@@ -83,7 +83,7 @@ anchor_hex() { xxd -p -c 64 "$TMP/client/anchors/1.pub" 2>/dev/null | tr -d '\n'
 mk_coord_toml "127.0.0.1:18080" "$TMP/coord.db" coord
 mk_eng_toml eng "http://127.0.0.1:18080"
 start_coord coord 127.0.0.1 18080
-"$ENG" "$TMP/eng.toml" >"$TMP/reg1.log" 2>&1 || fail "initial register failed (see $TMP/reg1.log)"
+"$ENG" -c "$TMP/eng.toml" >"$TMP/reg1.log" 2>&1 || fail "initial register failed (see $TMP/reg1.log)"
 A="$(anchor_hex)"
 [ -n "$A" ] || fail "no anchor pinned after initial register"
 echo "phase 1: TOFU-pinned anchor A=${A:0:16}… ✓"
@@ -100,7 +100,7 @@ C="$(rotate)" || exit 1
 [ -n "$C" ] && [ "$C" != "$B" ] && [ "$C" != "$A" ] || fail "second rotation produced no distinct anchor"
 start_coord coord 127.0.0.1 18080
 # The client is still pinned at A (offline across both rotations) → must walk A→B→C.
-"$ENG" "$TMP/eng.toml" >"$TMP/reg2.log" 2>&1 || fail "re-register after 2 rotations failed (multi-hop chain not followed) — see $TMP/reg2.log"
+"$ENG" -c "$TMP/eng.toml" >"$TMP/reg2.log" 2>&1 || fail "re-register after 2 rotations failed (multi-hop chain not followed) — see $TMP/reg2.log"
 NOW="$(anchor_hex)"
 [ "$NOW" = "$C" ] || fail "client did not re-pin to C (pinned=${NOW:0:16}…, want=${C:0:16}…)"
 echo "phase 2: rotated A→B→C (client offline), client walked the multi-hop chain to C ✓"
@@ -110,7 +110,7 @@ stop_coord
 mk_coord_toml "127.0.0.1:18081" "$TMP/coord2.db" coord2   # fresh DB → brand-new key, no rotation chain
 mk_eng_toml eng2 "http://127.0.0.1:18081"                 # same state_dir=client (pinned to B)
 start_coord coord2 127.0.0.1 18081
-if "$ENG" "$TMP/eng2.toml" >"$TMP/reg3.log" 2>&1; then
+if "$ENG" -c "$TMP/eng2.toml" >"$TMP/reg3.log" 2>&1; then
   fail "client accepted an unrelated anchor with no rotation chain (MITM not refused!)"
 fi
 grep -q "no valid rotation path" "$TMP/reg3.log" || fail "refused, but not for the expected reason (see $TMP/reg3.log)"

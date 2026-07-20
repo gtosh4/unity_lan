@@ -91,7 +91,7 @@ networks. A device enrolls against it in one of two ways:
   ```
   The key binds to the first device that registers with it.
 
-- **Interactive login** — `unitylan-engine login engine.toml`. In fake mode this uses an offline
+- **Interactive login** — `unitylan-engine login`. In fake mode this uses an offline
   fake-OAuth provider (no Discord round-trip); the `oauth-test.sh` / `gui-login-test.sh` scripts
   exercise the same path.
 
@@ -116,7 +116,7 @@ scripts/dev-run.sh my.toml      # explicit config
 If the device isn't enrolled yet, follow the printed login flow:
 
 ```sh
-target/debug/unitylan-engine ctl login engine.toml   # open the printed Discord URL
+target/debug/unitylan-engine ctl login   # open the printed Discord URL
 ```
 
 ### 2. Engine + GUI — Windows
@@ -152,7 +152,7 @@ stops the engine when the GUI closes. If the device isn't enrolled, use the GUI'
 **"Log in with Discord"** button, or:
 
 ```powershell
-.\target\debug\unitylan-engine.exe login engine.toml
+.\target\debug\unitylan-engine.exe login
 ```
 
 > **Privilege split.** `dev-run.ps1` runs both processes elevated for a reliable one-command loop.
@@ -166,12 +166,15 @@ If PowerShell blocks the script (`running scripts is disabled`), invoke it as
 
 ### 3. Talk to a running engine (any platform)
 
-The `ctl` subcommand speaks the same control protocol as the GUI:
+The `ctl` subcommand speaks the same control protocol as the GUI. It reads `engine.toml` from the
+working directory to find the control socket; `-c <path>` points it at another deployment:
 
 ```sh
-unitylan-engine ctl status  engine.toml     # device, networks, per-peer reachability
-unitylan-engine ctl connect engine.toml     # connect / disconnect the mesh
-unitylan-engine ctl devices engine.toml     # list / rename / set-primary / remove your devices
+unitylan-engine ctl status     # device, networks, per-peer reachability
+unitylan-engine ctl connect    # connect / disconnect the mesh
+unitylan-engine ctl devices    # list / rename / set-primary / remove your devices
+
+unitylan-engine -c /etc/unitylan/engine.toml ctl status   # a different deployment
 ```
 
 ---

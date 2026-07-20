@@ -181,9 +181,9 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a.toml"      >"$TMP/a.log" 2>&1 &
-$IB "$ENG" run "$TMP/b.toml"  >"$TMP/b.log" 2>&1 &
-$IC "$ENG" run "$TMP/c.toml"  >"$TMP/c.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run      >"$TMP/a.log" 2>&1 &
+$IB "$ENG" -c "$TMP/b.toml" run  >"$TMP/b.log" 2>&1 &
+$IC "$ENG" -c "$TMP/c.toml" run  >"$TMP/c.log" 2>&1 &
 
 # Sanity: B reaches the reachable node A (outbound through its NAT) — the mesh bootstraps.
 for _ in $(seq 1 40); do
@@ -243,7 +243,7 @@ fi
 # networks, where a lost return path also fails the handshake. The classifier itself is unit-tested
 # (`cargo test -p unitylan-common reach_classification`).
 echo "=== NAT diagnostics (M5.3): B's view of C's reachability [informational] ==="
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -E "peers|$C_IP|$A_IP" || echo "  (ctl status unavailable)"
+"$ENG" -c "$TMP/b.toml" ctl status 2>&1 | grep -E "peers|$C_IP|$A_IP" || echo "  (ctl status unavailable)"
 
 echo "RESULT: PASS ✓  reflexive discovery + coordinator pairing + hole-punch dial verified end-to-end"
 exit 0

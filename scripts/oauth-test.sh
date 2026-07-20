@@ -52,7 +52,7 @@ for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8087/healthz >/dev/null 2>&1 
 
 # Start interactive login (the headless/direct path); it prints the authorize URL (with state) and
 # binds a loopback listener, then waits. The daemon-mediated GUI path is covered by gui-login-test.sh.
-"$ENG" login "$TMP/a.toml" >"$TMP/login.out" 2>&1 &
+"$ENG" -c "$TMP/a.toml" login >"$TMP/login.out" 2>&1 &
 for _ in $(seq 1 40); do grep -q 'oauth2/authorize' "$TMP/login.out" 2>/dev/null && break; sleep 0.25; done
 STATE=$(grep -oE 'state=[A-Za-z0-9]+' "$TMP/login.out" | head -1 | cut -d= -f2)
 [ -n "$STATE" ] || { echo "FAIL: no authorize URL / state from login"; cat "$TMP/login.out"; exit 1; }

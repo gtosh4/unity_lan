@@ -101,8 +101,8 @@ EOF
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
 # A in the child ns with daemon debug on, so the peer-direct refresh line is captured as evidence.
-$NSA env RUST_LOG="info,unitylan_engine::daemon=debug" "$ENG" run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
-"$ENG" run "$TMP/b.toml" >"$TMP/b.log" 2>&1 &
+$NSA env RUST_LOG="info,unitylan_engine::daemon=debug" "$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
+"$ENG" -c "$TMP/b.toml" run >"$TMP/b.log" 2>&1 &
 
 for _ in $(seq 1 40); do
   grep -q "peer set" "$TMP/a.log" 2>/dev/null && grep -q "peer set" "$TMP/b.log" 2>/dev/null && break
@@ -137,7 +137,7 @@ echo "A refreshed B's attestation peer-direct ✓"
 
 # Keep going well past several TTLs, then confirm A still holds B and the tunnel still carries traffic.
 sleep $((TTL * 2))
-CTL=$($NSA "$ENG" ctl status "$TMP/a.toml" 2>&1)
+CTL=$($NSA "$ENG" -c "$TMP/a.toml" ctl status 2>&1)
 echo "$CTL" | grep -q "$B_IP" || { echo "FAIL: A dropped B despite peer-direct refresh"; echo "$CTL"; exit 1; }
 # Data-plane check (retry: at this extreme short TTL the WG handshake can briefly flap as attestations
 # churn — a test artifact, not a real-TTL concern).
@@ -158,7 +158,7 @@ for _ in $(seq 1 $((TTL * 4))); do
 done
 grep -q "lapsed attestations" "$TMP/a.log" || { echo "FAIL: A did not drop B on attestation expiry"; tail -20 "$TMP/a.log"; exit 1; }
 echo "A dropped B on attestation expiry ✓  (revocation via expiry, coordinator unreachable)"
-CTL=$($NSA "$ENG" ctl status "$TMP/a.toml" 2>&1)
+CTL=$($NSA "$ENG" -c "$TMP/a.toml" ctl status 2>&1)
 if echo "$CTL" | grep -q "$B_IP"; then echo "FAIL: A still lists B after expiry drop"; echo "$CTL"; exit 1; fi
 echo "A's status no longer lists B ✓"
 

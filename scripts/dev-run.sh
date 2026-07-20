@@ -14,7 +14,7 @@ cd "$ROOT"
 
 # Engine needs root for the WireGuard interface. No arg → engine bootstraps ./engine.toml.
 # sudo scrubs the environment, so pass RUST_LOG through explicitly when it's set and non-empty.
-sudo env ${RUST_LOG:+RUST_LOG="$RUST_LOG"} "$ENG" run ${1:+"$1"} &
+sudo env ${RUST_LOG:+RUST_LOG="$RUST_LOG"} "$ENG" ${1:+-c "$1"} run &
 ENG_PID=$!
 trap 'sudo kill $ENG_PID 2>/dev/null; kill $(jobs -p) 2>/dev/null' EXIT
 
@@ -32,6 +32,6 @@ for _ in $(seq 1 40); do [ -S "$SOCK" ] && break; sleep 0.25; done
 echo "engine up (pid $ENG_PID), socket $SOCK ✓"
 
 # If the coordinator is fake-mode and this device isn't bound yet, enroll:
-#   $ENG ctl login "$CFG"   # follow the printed URL
+#   $ENG -c "$CFG" ctl login   # follow the printed URL
 
 "$GUI" "$SOCK"

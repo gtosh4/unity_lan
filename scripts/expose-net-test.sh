@@ -142,10 +142,10 @@ node_toml d unld 51823 10.0.0.4 key-d
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG"     run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
-$NSB "$ENG" run "$TMP/b.toml" >"$TMP/b.log" 2>&1 &
-$NSC "$ENG" run "$TMP/c.toml" >"$TMP/c.log" 2>&1 &
-$NSD "$ENG" run "$TMP/d.toml" >"$TMP/d.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
+$NSB "$ENG" -c "$TMP/b.toml" run >"$TMP/b.log" 2>&1 &
+$NSC "$ENG" -c "$TMP/c.toml" run >"$TMP/c.log" 2>&1 &
+$NSD "$ENG" -c "$TMP/d.toml" run >"$TMP/d.log" 2>&1 &
 
 # A must learn all three co-members (one per network, plus its owner's other device).
 for _ in $(seq 1 60); do
@@ -171,11 +171,11 @@ probe() { $1 timeout 3 bash -c "exec 3<>/dev/tcp/$A_IP/$2" >/dev/null 2>&1; }
 echo "=== expose 9001 mesh@lan, 9002 mesh2 (bare), 9004 --own-devices on A ==="
 # Pinned: "mesh" exists in both of A's guilds. 9002 stays bare on purpose — "mesh2" is unique to
 # one guild, so it exercises the unqualified path still resolving when there's no ambiguity.
-"$ENG" ctl expose "$TMP/a.toml" 9001 mesh --guild lan
-"$ENG" ctl expose "$TMP/a.toml" 9002 mesh2
-"$ENG" ctl expose "$TMP/a.toml" 9004 --own-devices
+"$ENG" -c "$TMP/a.toml" ctl expose 9001 mesh --guild lan
+"$ENG" -c "$TMP/a.toml" ctl expose 9002 mesh2
+"$ENG" -c "$TMP/a.toml" ctl expose 9004 --own-devices
 # "mesh" exists in both guilds, so it must be pinned to one; B is in lan/mesh, C is in other/mesh.
-"$ENG" ctl expose "$TMP/a.toml" 9005 mesh --guild lan
+"$ENG" -c "$TMP/a.toml" ctl expose 9005 mesh --guild lan
 
 fail=0
 check() { # <desc> <expect open|blocked> <netns> <port>
@@ -197,7 +197,7 @@ check "C (other/mesh) -> 9005 [mesh @ lan]"  blocked "$NSC" 9005
 
 # Sanity: a --net for a network A doesn't hold must be rejected. Capture first — `ctl` exits
 # non-zero by design, and under pipefail that would mask grep's match in an `if … | grep`.
-reject_out=$("$ENG" ctl expose "$TMP/a.toml" 9003 nonesuch 2>&1 || true)
+reject_out=$("$ENG" -c "$TMP/a.toml" ctl expose 9003 nonesuch 2>&1 || true)
 if echo "$reject_out" | grep -q "not a member"; then
   echo "  ok: expose --net nonesuch rejected"
 else
@@ -206,7 +206,7 @@ fi
 
 # A bare "mesh" names a role A holds in *two* guilds. Guessing either would expose the port to a
 # community the caller never named, so it must refuse and say so.
-ambig_out=$("$ENG" ctl expose "$TMP/a.toml" 9006 mesh 2>&1 || true)
+ambig_out=$("$ENG" -c "$TMP/a.toml" ctl expose 9006 mesh 2>&1 || true)
 if echo "$ambig_out" | grep -q "ambiguous"; then
   echo "  ok: bare 'mesh' refused as ambiguous across guilds"
 else

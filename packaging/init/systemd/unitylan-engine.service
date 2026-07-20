@@ -7,7 +7,7 @@ Wants=network-online.target
 
 [Service]
 Type=exec
-ExecStart=/usr/lib/unitylan/unitylan-engine run /etc/unitylan/engine.toml
+ExecStart=/usr/lib/unitylan/unitylan-engine -c /etc/unitylan/engine.toml run
 # `always` (not `on-failure`) so the signed auto-update path can exit(0) after swapping the binary
 # and be relaunched onto the new version. An explicit `systemctl stop` still stops (not a restart).
 Restart=always
