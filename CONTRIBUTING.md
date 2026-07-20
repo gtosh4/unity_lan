@@ -166,8 +166,11 @@ If PowerShell blocks the script (`running scripts is disabled`), invoke it as
 
 ### 3. Talk to a running engine (any platform)
 
-The `ctl` subcommand speaks the same control protocol as the GUI. It reads `engine.toml` from the
-working directory to find the control socket; `-c <path>` points it at another deployment:
+The `ctl` subcommand speaks the same control protocol as the GUI. To find the control socket it
+reads `engine.toml` from the working directory, falling back to the installed config
+(`/etc/unitylan/engine.toml`; beside the exe, then `%ProgramData%\UnityLAN`, on Windows). `-c <path>`
+overrides the search — and is taken literally, so a typo'd path fails rather than quietly resolving
+to some other deployment:
 
 ```sh
 unitylan-engine ctl status     # device, networks, per-peer reachability

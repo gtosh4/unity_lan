@@ -26,7 +26,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   minecraft` — and it was mandatory on some subcommands but optional on others, with no way to tell
   which from `--help`. It's now a single `-c/--config` option that defaults to `engine.toml` in the
   working directory, so the common case is just `unitylan-engine ctl status` and the argument you
-  care about comes first: `unitylan-engine ctl expose 25565 minecraft`. **This breaks existing
+  care about comes first: `unitylan-engine ctl expose 25565 minecraft`. When `-c` is absent the
+  config is looked up in the working directory first and then where the package installed it
+  (`/etc/unitylan/engine.toml`; beside the exe or under `%ProgramData%\UnityLAN` on Windows), so on
+  an installed system the flag is usually unnecessary — `sudo unitylan-engine ctl status` works from
+  any directory. A path given with `-c` is never second-guessed: a typo fails loudly instead of
+  silently resolving to a different deployment, and when the search finds nothing the error lists
+  every location it tried. **This breaks existing
   scripts and unit files**, which need the path moved ahead of the subcommand as `-c <path>`; the
   packaged systemd unit is updated for you. Alongside it, `--help` now documents every `ctl`
   subcommand and its arguments (most had no description at all), `ctl net` and `ctl own-devices`

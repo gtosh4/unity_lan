@@ -45,8 +45,9 @@ Examples:
   unitylan-engine ctl status               show device, networks, and peer reachability
   unitylan-engine ctl expose 25565 gaming  open TCP 25565 to the 'gaming' network's peers
 
-Every command reads engine.toml from the working directory; pass -c to point elsewhere:
-  unitylan-engine -c /etc/unitylan/engine.toml ctl status"
+With no -c, the config is looked up in the working directory first, then this platform's
+installed location (/etc/unitylan/engine.toml on Linux). Point it anywhere with -c:
+  unitylan-engine -c /srv/mesh/engine.toml ctl status"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -120,7 +121,7 @@ reverts the interface/firewall/DNS on shutdown); this handles the coordinator + 
 }
 
 /// `ctl` subcommands. All of them reach the daemon over the control socket named by the global
-/// `-c/--config` (default `engine.toml`).
+/// `-c/--config`, or by the first config on the search path when it's absent.
 #[derive(Subcommand)]
 enum CtlCmd {
     /// Show this device, its networks, and every peer's address and reachability.
@@ -319,9 +320,9 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         // Uninstall reads an existing deployment; unlike `run`/`login` it must never bootstrap a
         // starter config, so it loads the resolved path directly instead of via `load_config`.
         Some(Cmd::Uninstall { purge }) => {
-            let path = config_path(config);
-            let cfg = Config::load(std::path::Path::new(&path))
-                .with_context(|| format!("loading config {path}"))?;
+            let path = resolve_existing_config(config)?;
+            let cfg = Config::load(&path)
+                .with_context(|| format!("loading config {}", path.display()))?;
             uninstall(cfg, purge).await
         }
         Some(Cmd::Login) => login(load_config(config, token)?).await,
@@ -427,20 +428,82 @@ async fn uninstall(cfg: Config, purge: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The config path a run resolves to: `-c/--config` if given, else `engine.toml` in the cwd.
-fn config_path(arg: Option<String>) -> String {
-    arg.unwrap_or_else(|| "engine.toml".to_string())
+/// Where a `-c`-less invocation looks for its config, in order: the working directory first (so a
+/// dev tree and `scripts/*` keep working unchanged), then the location this platform's package
+/// installs to.
+///
+/// Deliberately **not** searched: `$HOME`/`$XDG_CONFIG_HOME`. The engine runs as root, and `sudo`
+/// commonly leaves `HOME` pointing at the invoking user — a home-dir candidate would let any local
+/// unprivileged user plant a config naming their own `coordinator` and have the root daemon adopt
+/// it. A per-user config buys nothing for a system daemon.
+fn config_search_paths() -> Vec<std::path::PathBuf> {
+    let mut paths = vec![std::path::PathBuf::from("engine.toml")];
+    #[cfg(windows)]
+    {
+        // The MSI drops engine.toml beside the exe; the service resolves the same way.
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        {
+            paths.push(dir.join("engine.toml"));
+        }
+        if let Some(pd) = std::env::var_os("ProgramData") {
+            paths.push(
+                std::path::Path::new(&pd)
+                    .join("UnityLAN")
+                    .join("engine.toml"),
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    paths.push(std::path::PathBuf::from("/etc/unitylan/engine.toml"));
+    paths
 }
 
-/// Load config from an optional CLI path. An explicit path must exist; the default `engine.toml`
-/// is created with starter values on first run so a bare `run`/`login` bootstraps a dev config.
+/// The first candidate that exists, or `None` when the search came up empty.
+fn first_existing(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    paths.iter().find(|p| p.is_file()).cloned()
+}
+
+/// Resolve the config an invocation reads. An explicit `-c` is taken as-is (so a typo'd path fails
+/// loudly rather than silently falling back to an unrelated deployment); otherwise the search path
+/// applies. Fails with the list of places tried when nothing turned up — used by the commands that
+/// need an existing deployment (`ctl`, `uninstall`) rather than the ones that bootstrap one.
+fn resolve_existing_config(arg: Option<String>) -> anyhow::Result<std::path::PathBuf> {
+    match arg {
+        Some(p) => Ok(std::path::PathBuf::from(p)),
+        None => pick_config(&config_search_paths()),
+    }
+}
+
+/// The first candidate that exists, or an error naming every place that was tried.
+fn pick_config(candidates: &[std::path::PathBuf]) -> anyhow::Result<std::path::PathBuf> {
+    first_existing(candidates).ok_or_else(|| {
+        let tried: Vec<String> = candidates.iter().map(|p| p.display().to_string()).collect();
+        anyhow::anyhow!(
+            "no engine.toml found (looked in: {}); pass -c <path>",
+            tried.join(", ")
+        )
+    })
+}
+
+/// Load config from an optional CLI path. An explicit path must exist, as does one found on the
+/// search path; only when the search comes up empty is `./engine.toml` created with starter values,
+/// so a bare `run`/`login` in a fresh tree still bootstraps a dev config.
 fn load_config(arg: Option<String>, token_override: Option<String>) -> anyhow::Result<Config> {
     let mut cfg = match arg {
         Some(p) => {
             Config::load(std::path::Path::new(&p)).with_context(|| format!("loading config {p}"))?
         }
-        None => Config::load_or_init(std::path::Path::new("engine.toml"))
-            .with_context(|| "loading config engine.toml".to_string())?,
+        None => match first_existing(&config_search_paths()) {
+            Some(p) => {
+                // Which file an implicit lookup landed on is not obvious from the command line.
+                tracing::info!(config = %p.display(), "using config");
+                Config::load(&p).with_context(|| format!("loading config {}", p.display()))?
+            }
+            None => Config::load_or_init(std::path::Path::new("engine.toml"))
+                .with_context(|| "loading config engine.toml".to_string())?,
+        },
     };
     // A `--token` on the command line wins over the config file, so a headless box can enroll
     // without persisting the bearer secret to disk.
@@ -498,9 +561,9 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
 
     // The daemon must already be configured, so an absent config is an error here rather than a
     // cue to write a starter one.
-    let cfg_path = config_path(config);
-    let socket = Config::load(std::path::Path::new(&cfg_path))
-        .with_context(|| format!("loading config {cfg_path}"))?
+    let cfg_path = resolve_existing_config(config)?;
+    let socket = Config::load(&cfg_path)
+        .with_context(|| format!("loading config {}", cfg_path.display()))?
         .control_name();
 
     match sub {
@@ -839,4 +902,66 @@ fn wg_node(
     std::thread::sleep(Duration::from_secs(hold));
     backend.down()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testutil::TempDir;
+
+    #[test]
+    fn search_path_prefers_the_working_directory_then_the_installed_location() {
+        let paths = config_search_paths();
+        assert_eq!(paths[0], std::path::Path::new("engine.toml"));
+        assert!(paths.len() > 1, "no installed location to fall back to");
+        #[cfg(not(windows))]
+        assert!(paths.contains(&std::path::PathBuf::from("/etc/unitylan/engine.toml")));
+    }
+
+    /// The engine runs as root, so a config planted in a user-writable home directory must never
+    /// be picked up implicitly — it would name the coordinator the daemon trusts.
+    #[test]
+    fn search_path_never_reaches_into_a_home_directory() {
+        for p in config_search_paths() {
+            let s = p.to_string_lossy().to_lowercase();
+            assert!(
+                !s.contains("/home/") && !s.contains("/users/") && !s.contains(".config"),
+                "home-directory candidate on the search path: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn first_existing_skips_missing_and_takes_the_earliest_hit() {
+        let dir = TempDir::new("cfg-search");
+        let missing = dir.join("absent.toml");
+        let first = dir.join("first.toml");
+        let second = dir.join("second.toml");
+        std::fs::write(&first, "").unwrap();
+        std::fs::write(&second, "").unwrap();
+
+        assert_eq!(
+            first_existing(&[missing.clone(), first.clone(), second]),
+            Some(first)
+        );
+        assert_eq!(first_existing(&[missing]), None);
+    }
+
+    /// An explicit `-c` is never second-guessed: a typo'd path must fail loudly rather than fall
+    /// through to whatever deployment happens to be installed on the box.
+    #[test]
+    fn an_explicit_path_is_taken_as_is_even_when_it_does_not_exist() {
+        let p = resolve_existing_config(Some("/nonexistent/typo.toml".into())).unwrap();
+        assert_eq!(p, std::path::Path::new("/nonexistent/typo.toml"));
+    }
+
+    /// Coming up empty has to say where it looked, or the user has no idea what to fix.
+    #[test]
+    fn an_empty_search_lists_every_place_it_tried() {
+        let dir = TempDir::new("cfg-empty");
+        let candidates = vec![dir.join("a.toml"), dir.join("b.toml")];
+        let msg = format!("{:#}", pick_config(&candidates).unwrap_err());
+        assert!(msg.contains("a.toml") && msg.contains("b.toml"), "{msg}");
+        assert!(msg.contains("-c"), "{msg}");
+    }
 }
