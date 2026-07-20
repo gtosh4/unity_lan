@@ -59,9 +59,18 @@
       <Component>
         <File Id="GuiExeStaged" Name="unitylan-gui.new.exe" Source="$(GuiExe)" KeyPath="yes" />
       </Component>
-      <!-- Default config. NeverOverwrite keeps a user's edited coordinator/enrollment_key across
-           upgrades. Removed on uninstall (not Permanent). -->
-      <Component NeverOverwrite="yes">
+      <!-- Default config, laid down only on a fresh install. Marked Permanent + NeverOverwrite so a
+           user's edited coordinator/enrollment_key survives an upgrade verbatim. This is subtle:
+           without Permanent, the major upgrade's RemoveExistingProducts (scheduled
+           afterInstallInitialize) DELETES this file, and NeverOverwrite then declines to recreate it
+           (its keypath was present at costing time) — so the upgrade reaches the post-InstallFiles
+           `service install` custom action with no engine.toml, `service install` aborts ("config
+           not found"), and Return="check" rolls the whole upgrade back. Permanent keeps RExP from
+           touching the file at all; NeverOverwrite keeps a reinstall from clobbering edits. Trade-
+           off: Permanent means the file also survives a plain uninstall (a leftover engine.toml and
+           its folder) — the engine's purge-mode uninstall wipes device state, and the file can be
+           deleted by hand. -->
+      <Component Permanent="yes" NeverOverwrite="yes">
         <File Id="EngineToml" Name="engine.toml" Source="$(EngineToml)" KeyPath="yes" />
       </Component>
     </ComponentGroup>

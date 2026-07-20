@@ -82,14 +82,42 @@ pub fn main() -> Result<()> {
     }
 }
 
+/// Config written to the default path by [`install`] when none exists there — byte-for-byte the
+/// shipped Windows `engine.toml` (the same file the MSI installs), so a service bootstrapped this way
+/// is identical to a fresh install: hosted coordinator, `%ProgramData%\UnityLAN` state dir,
+/// enrollment interactive via the GUI. Embedding the file keeps the two defaults from drifting.
+const DEFAULT_SERVICE_CONFIG: &str = include_str!("../../../packaging/windows/engine.toml");
+
 /// Register an auto-start service whose command line carries the (absolute) config path.
 fn install(config: Option<String>) -> Result<()> {
     let exe = std::env::current_exe().context("locating the engine executable")?;
-    let config = config.unwrap_or_else(|| default_config_path().to_string_lossy().into_owned());
-    // The service runs with CWD = System32, so the config must be an absolute path.
-    let config = std::fs::canonicalize(&config).with_context(|| {
-        format!("config '{config}' not found — create it before installing the service")
-    })?;
+
+    // The service runs with CWD = System32, so the config path baked into its command line must be
+    // absolute. An *explicitly* passed path is never second-guessed — a missing one is a typo, so it
+    // still errors. But for the default path (no arg — how the MSI invokes us) we lay down the shipped
+    // default when it's absent, then use it: a major upgrade's RemoveExistingProducts can delete the
+    // old, `NeverOverwrite`'d engine.toml before this action runs, and with no config `service install`
+    // used to fail and roll the *whole upgrade* back, leaving the machine with no service at all.
+    // Writing the default instead lets the upgrade complete with a working (if not-yet-enrolled)
+    // service — the same state a fresh install lands in, with the GUI prompting login.
+    let config = match config {
+        Some(path) => std::fs::canonicalize(&path).with_context(|| {
+            format!("config '{path}' not found — create it before installing the service")
+        })?,
+        None => {
+            let path = default_config_path();
+            if !path.exists() {
+                std::fs::write(&path, DEFAULT_SERVICE_CONFIG)
+                    .with_context(|| format!("writing the default config to {}", path.display()))?;
+                println!(
+                    "No config at {} — wrote the shipped default (edit coordinator/enrollment_key if self-hosting).",
+                    path.display()
+                );
+            }
+            std::fs::canonicalize(&path)
+                .with_context(|| format!("resolving the default config path {}", path.display()))?
+        }
+    };
 
     let manager = ServiceManager::local_computer(
         None::<&str>,
@@ -416,6 +444,20 @@ fn default_config_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::TempDir;
+
+    /// `install` writes [`DEFAULT_SERVICE_CONFIG`] verbatim when a config is missing (an upgrade's
+    /// teardown, or a first run), and the service then loads that file at startup — so if the
+    /// embedded default ever stopped parsing or failed coordinator validation, a bootstrapped
+    /// service would be registered but unable to start. Pin that it round-trips through the real
+    /// loader.
+    #[test]
+    fn default_service_config_loads_and_validates() {
+        let dir = TempDir::new("svc-default-cfg");
+        let path = dir.join("engine.toml");
+        std::fs::write(&path, DEFAULT_SERVICE_CONFIG).unwrap();
+        Config::load(&path).expect("embedded default config must load + validate");
+    }
 
     /// `create_or_adopt` branches entirely on this classification: misread the code and a
     /// recoverable SCM state becomes a failed custom action, which the MSI (`Return="check"`) turns

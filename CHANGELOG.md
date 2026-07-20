@@ -113,6 +113,19 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   comparing, so an unchanged membership does no work and logs nothing. This was always cosmetic —
   the reshuffling never touched any tunnel, so existing connections were never interrupted by it.
 
+- **Upgrading UnityLAN on Windows wiped your config and failed the install.** Every in-place upgrade
+  (and the automatic update) deleted `engine.toml` mid-install and never put it back, so the engine
+  service couldn't be registered and the whole installer rolled back — leaving the previous version's
+  files on disk but no running service, and your coordinator/enrollment settings gone. Two changes fix
+  it: the installer now marks `engine.toml` permanent so an upgrade leaves it untouched (your edits
+  survive), and `service install` writes the default config when it finds none, so the install always
+  finishes with a running service instead of rolling back. Upgrading *from* a version before this fix
+  (0.3.1 or earlier) still resets `engine.toml` to the default that one time — the old installer
+  deletes it on the way out and nothing downstream can recover it — but the upgrade now completes and
+  the service comes up (re-enter coordinator/enrollment once via the GUI); every upgrade after that
+  keeps your edits. One consequence: `engine.toml` is now also left behind by a plain uninstall
+  (previously removed) — the engine's purge-mode uninstall still wipes device state, or you can delete
+  the file by hand.
 - **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
   Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
   never opened its own UDP listen port on the host firewall. Windows Defender then dropped every
