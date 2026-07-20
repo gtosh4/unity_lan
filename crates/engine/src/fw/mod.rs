@@ -212,8 +212,35 @@ impl Firewall {
     /// Refresh the peer source sets (called on every membership change). Rescopes any scoped
     /// exposure to the current peers of its scope.
     pub fn update_peers(&self, peers: PeerSets) -> anyhow::Result<()> {
+        self.warn_on_ambiguous(&peers);
         *self.peers.lock().unwrap() = peers;
         self.reconcile()
+    }
+
+    /// Warn about an exposure that names a role two networks carry. It admits nobody by design —
+    /// there is no way to tell which was meant — but a port that never opens needs to say why.
+    ///
+    /// Only ambiguity is reported, never "no match": before the first refresh, and for a network
+    /// whose members are all offline, zero matches is the normal case and would cry wolf every
+    /// reconcile. A scope added through the control socket is resolved to ids up front, so this
+    /// only ever fires for a config-seeded `net =` or a state file written before ids.
+    fn warn_on_ambiguous(&self, peers: &PeerSets) {
+        for e in self.exposed.lock().unwrap().iter() {
+            let ExposeScope::Unresolved { guild, name } = &e.scope else {
+                continue;
+            };
+            let hits = peers.matching(guild.as_deref(), name);
+            if hits.len() > 1 {
+                tracing::warn!(
+                    port = e.port,
+                    proto = e.proto.as_str(),
+                    network = %name,
+                    communities = ?hits.iter().map(|n| n.guild.as_str()).collect::<Vec<_>>(),
+                    "this port names a network that exists in more than one community, so it is \
+                     open to nobody; name one (config `guild = `, or `ctl expose --guild`)"
+                );
+            }
+        }
     }
 
     /// Open a port (idempotent). Returns the resulting exposed set.
