@@ -83,8 +83,10 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         (12, UiAction::ArmBlockPeer(2001)),
         (16, UiAction::Cancel),
         (18, UiAction::CloseMenu),
+        // Manage holds the exposed-ports UI, so it dwells long enough to read the scope chips and
+        // to cut the `exposed.png` still from the middle of the pause.
         (22, UiAction::SelectTab(UiTab::Manage)),
-        (27, UiAction::SelectTab(UiTab::Networks)),
+        (31, UiAction::SelectTab(UiTab::Networks)),
     ]
 }
 
@@ -110,7 +112,7 @@ impl State {
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
-                    scope: ExposeScope::Net("Game Night".into()),
+                    scope: ExposeScope::Net("Gaming".into()),
                     active: true,
                 },
                 ExposedPort {
@@ -170,7 +172,10 @@ impl State {
             identity: Some("alice#4021".into()),
             coordinator_online: true,
             blocked: self.blocked.clone(),
-            engine_version: "0.4.0".into(),
+            // Our own version, so the demo shows a settled install. A hardcoded one drifts out of
+            // date and trips the relaunch banner, which would put a release that doesn't exist
+            // into the README screenshots.
+            engine_version: common::VERSION.into(),
             directive: self.directive(secs),
             ..Default::default()
         }
@@ -456,7 +461,7 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
         }),
 
         ControlRequest::ApplyUpdate => ControlResponse::Update(UpdateResp {
-            version: "0.4.0".into(),
+            version: common::VERSION.into(),
             message: "no update staged".into(),
         }),
     }

@@ -23,9 +23,10 @@ GSR_COMM="gpu-screen-reco" # Linux truncates comm to 15 chars — pkill/pgrep ma
 SOCK="$(mktemp -u /tmp/unitylan-demo.XXXXXX.sock)"
 TOKEN="${XDG_CACHE_HOME:-$HOME/.cache}/unitylan-readme-demo.token" # persists so only the first run prompts
 WORK="$(mktemp -d)"
-OUT="$ROOT/assets"
+# Overridable so a capture can be staged and reviewed before it lands in the repo.
+OUT="${OUT:-$ROOT/assets}"
 
-SECS="${SECS:-31}"   # recording length; the scripted tour runs ~30s
+SECS="${SECS:-36}"   # recording length; the scripted tour runs ~34s
 FPS="${FPS:-15}"     # GIF frame rate
 WIDTH="${WIDTH:-400}" # GIF width (height auto)
 
@@ -82,11 +83,12 @@ ffmpeg -y -v error -i "$WORK/tour.mkv" -vf "$VF,palettegen=max_colors=128" "$WOR
 ffmpeg -y -v error -i "$WORK/tour.mkv" -i "$WORK/palette.png" \
   -lavfi "$VF[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" "$OUT/demo.gif"
 # Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
-# list in the menu-closed window (tour ~18-22s), and Networks from the tour's end (it returns to
-# the Networks tab at tour t=27 and dwells there — the initial Networks view is gone before the
-# recording starts).
+# list in the menu-closed window (tour ~18-22s), the Manage tab mid-dwell for the exposed ports
+# (tour 22-31s), and Networks from the tour's end (it returns to the Networks tab at tour t=31 and
+# dwells there — the initial Networks view is gone before the recording starts).
 ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/peers.png"
-ffmpeg -y -v error -ss 26 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
+ffmpeg -y -v error -ss 27 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
+ffmpeg -y -v error -ss 32 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
-ls -la "$OUT/demo.gif" "$OUT/peers.png" "$OUT/networks.png"
+ls -la "$OUT/demo.gif" "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"

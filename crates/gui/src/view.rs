@@ -739,7 +739,10 @@ impl App {
             // One row per port, with a chip per scope that can reach it. The wire keeps these as
             // separate exposures; collapsing them here is what makes "who can reach this port"
             // answerable at a glance instead of by reading three rows that share a number.
-            let mut list = Column::new().spacing(6);
+            // The chips sit on their own line below the port. A port can carry any number of
+            // scopes, so sharing one line with the port label and the close button only fits until
+            // it doesn't — at the window's 440px it already breaks at two.
+            let mut list = Column::new().spacing(10);
             for (proto, port) in self.exposed_ports() {
                 let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
                 for e in self
@@ -749,13 +752,11 @@ impl App {
                 {
                     chips = chips.push(scope_chip(e));
                 }
-                let r = row![
+                let head = row![
                     text(format!("{}/{}", proto.as_str(), port))
                         .size(14)
-                        .width(Length::Fixed(110.0)),
-                    chips,
-                    horizontal_space(),
-                    button(text("close all").size(13))
+                        .width(Length::Fill),
+                    button(text("close").size(13))
                         .style(button::secondary)
                         .on_press(Message::Unexpose {
                             proto,
@@ -765,7 +766,7 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
-                list = list.push(r);
+                list = list.push(column![head, chips].spacing(4));
             }
             list.into()
         };
@@ -781,10 +782,9 @@ impl App {
             text_input("port", &self.expose_port_input)
                 .on_input(Message::ExposePortInput)
                 .on_submit(Message::ExposeSubmit)
-                .width(Length::Fixed(110.0)),
+                .width(Length::Fixed(64.0)),
             proto_toggle(self.expose_proto),
             self.scope_picker(),
-            horizontal_space(),
             {
                 let b = button(text("expose").size(13)).style(button::secondary);
                 // Disabled until the draft is actually sendable, so the failure shows up as a
@@ -825,12 +825,13 @@ impl App {
     /// all-peers, own-devices, and every network this device holds.
     fn scope_picker(&self) -> Element<'_, Message> {
         let summary = match self.expose_scopes.as_slice() {
-            [] => "who can reach it".to_string(),
+            [] => "scope".to_string(),
             [one] => one.label().to_string(),
             many => format!("{} scopes", many.len()),
         };
         let toggle = button(text(summary).size(13))
             .style(button::secondary)
+            .width(Length::Fill)
             .on_press(Message::ExposeScopeToggleOpen);
         if !self.expose_scope_open {
             return toggle.into();

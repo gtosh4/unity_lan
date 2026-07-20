@@ -18,7 +18,7 @@ bob@nas       ~ $
 ```
 
 <p align="center">
-  <img src="assets/demo.gif" alt="UnityLAN desktop app: live mesh status, peers, and per-network peering" width="400">
+  <img src="assets/demo.gif" alt="UnityLAN desktop app: live mesh status, peers, per-network peering, and exposed ports" width="400">
 </p>
 
 ---
@@ -202,7 +202,12 @@ the box, only HTTP to the coordinator.
    ```
 
    Repeat the command with a different network to open one port to several at once; each scope can
-   then be closed on its own with `ctl unexpose … --net <name>`.
+   then be closed on its own with `ctl unexpose … --net <name>`. The desktop app shows the same
+   thing — every exposed port with a chip per scope that can reach it:
+
+   <p align="center">
+     <img src="assets/exposed.png" alt="The Manage tab: exposed ports, each with a chip per scope that can reach it" width="360">
+   </p>
 
 ## Building from source
 
