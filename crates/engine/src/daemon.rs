@@ -1161,8 +1161,9 @@ async fn register_until_ready(
     }
 }
 
-/// Build the firewall's source sets from the active seeds: peer IPs grouped by shared-network
-/// name, plus the owner's own other devices.
+/// Build the firewall's source sets from the active seeds: peer IPs grouped by network — keyed by
+/// `(community, role)` so two guilds' same-named roles stay separate — plus the owner's own other
+/// devices.
 ///
 /// Own devices are *not* a network — the coordinator never sends one, and a peer's `networks` stays
 /// empty for the own-device relationship. They're recognized by identity instead: a seed carrying
@@ -1172,7 +1173,10 @@ fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
     let mut sets = crate::fw::PeerSets::default();
     for s in seeds {
         for n in &s.networks {
-            sets.by_net.entry(n.name.clone()).or_default().push(s.ip);
+            sets.by_net
+                .entry((n.community.clone(), n.name.clone()))
+                .or_default()
+                .push(s.ip);
         }
         if owner.is_some_and(|me| me == s.user_id) {
             sets.own_devices.push(s.ip);
@@ -1292,7 +1296,7 @@ mod tests {
                 .iter()
                 .map(|n| common::api::SharedNetwork {
                     name: (*n).into(),
-                    community: "c".into(),
+                    community: "acme".into(),
                 })
                 .collect(),
             relay: None,
@@ -1320,7 +1324,8 @@ mod tests {
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
         assert_eq!(
-            sets.by_net.get("minecraft"),
+            sets.by_net
+                .get(&("acme".to_string(), "minecraft".to_string())),
             Some(&vec![
                 Ipv4Addr::new(100, 64, 0, 2),
                 Ipv4Addr::new(100, 64, 0, 4)

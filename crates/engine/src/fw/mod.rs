@@ -52,12 +52,17 @@ pub struct Exposed {
     pub scope: ExposeScope,
 }
 
-/// The current source sets a scoped exposure can be filtered against: peer IPs grouped by
-/// shared-network name, plus the owner's own devices (which are not a network — the daemon derives
-/// them from peer identity, see [`crate::daemon`]).
+/// The current source sets a scoped exposure can be filtered against: peer IPs grouped by network,
+/// plus the owner's own devices (which are not a network — the daemon derives them from peer
+/// identity, see [`crate::daemon`]).
+///
+/// Networks are keyed by `(guild, role)`, not role name: role names are Discord display names in
+/// independent guilds, so two guilds may each have an `Engineering`, and keying on the name alone
+/// would merge them into one source set — letting a port scoped to one guild's role be reached by
+/// the other's members.
 #[derive(Clone, Debug, Default)]
 pub struct PeerSets {
-    pub by_net: HashMap<String, Vec<Ipv4Addr>>,
+    pub by_net: HashMap<(String, String), Vec<Ipv4Addr>>,
     pub own_devices: Vec<Ipv4Addr>,
 }
 
@@ -71,8 +76,30 @@ impl PeerSets {
         match scope {
             ExposeScope::AllPeers => None,
             ExposeScope::OwnDevices => Some(&self.own_devices),
-            ExposeScope::Net(n) => Some(self.by_net.get(n).map_or(&[], Vec::as_slice)),
+            ExposeScope::Net { guild, name } => Some(
+                self.by_net
+                    .get(&(guild.clone(), name.clone()))
+                    .map_or(&[], Vec::as_slice),
+            ),
+            // Stored before scopes carried a guild. It means *the* network with this name while
+            // exactly one matches; once two do, there is no way to tell which was meant, so it
+            // admits nobody rather than both. See `unqualified_matches`.
+            ExposeScope::NetUnqualified(name) => {
+                Some(match self.unqualified_matches(name).as_slice() {
+                    [only] => self.by_net.get(*only).map_or(&[], Vec::as_slice),
+                    _ => &[],
+                })
+            }
         }
+    }
+
+    /// Every known network whose role name is `name` — one entry unless two guilds share a role
+    /// name, which is the ambiguity a legacy unqualified scope can no longer resolve.
+    pub fn unqualified_matches(&self, name: &str) -> Vec<&(String, String)> {
+        let mut hits: Vec<&(String, String)> =
+            self.by_net.keys().filter(|(_, n)| n == name).collect();
+        hits.sort();
+        hits
     }
 }
 
@@ -252,12 +279,15 @@ mod tests {
     }
 
     fn net(name: &str) -> ExposeScope {
-        ExposeScope::Net(name.into())
+        ExposeScope::Net {
+            guild: "acme".into(),
+            name: name.into(),
+        }
     }
 
     fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
         PeerSets {
-            by_net: HashMap::from([(name.to_string(), ips)]),
+            by_net: HashMap::from([(("acme".to_string(), name.to_string()), ips)]),
             own_devices: Vec::new(),
         }
     }
@@ -382,7 +412,72 @@ mod tests {
         let listed = fw(&dir, Vec::new()).list();
         assert_eq!(
             listed.iter().map(|e| e.scope.clone()).collect::<Vec<_>>(),
-            vec![ExposeScope::AllPeers, net("factorio")],
+            vec![
+                ExposeScope::AllPeers,
+                ExposeScope::NetUnqualified("factorio".into()),
+            ],
+            "a bare name stays unqualified until it can be resolved against held networks",
+        );
+    }
+
+    /// The reason scopes carry a guild. Two guilds may each have a role named `Engineering`; they
+    /// are different networks with different members, so a port scoped to one must not admit the
+    /// other's peers.
+    #[test]
+    fn same_role_name_in_two_guilds_are_separate_source_sets() {
+        let acme = Ipv4Addr::new(100, 64, 0, 2);
+        let playhouse = Ipv4Addr::new(100, 64, 0, 3);
+        let peers = PeerSets {
+            by_net: HashMap::from([
+                (("acme".to_string(), "Engineering".to_string()), vec![acme]),
+                (
+                    ("playhouse".to_string(), "Engineering".to_string()),
+                    vec![playhouse],
+                ),
+            ]),
+            own_devices: Vec::new(),
+        };
+
+        let scoped = |guild: &str| ExposeScope::Net {
+            guild: guild.into(),
+            name: "Engineering".into(),
+        };
+        assert_eq!(peers.sources(&scoped("acme")), Some(&[acme][..]));
+        assert_eq!(peers.sources(&scoped("playhouse")), Some(&[playhouse][..]));
+    }
+
+    /// A scope stored before guilds were carried names only the role. It resolves while exactly one
+    /// guild has that role — and once two do, there is no way to tell which was meant, so it admits
+    /// nobody rather than both.
+    #[test]
+    fn an_unqualified_scope_resolves_alone_and_fails_closed_when_ambiguous() {
+        let acme = Ipv4Addr::new(100, 64, 0, 2);
+        let scope = ExposeScope::NetUnqualified("Engineering".into());
+
+        let mut by_net =
+            HashMap::from([(("acme".to_string(), "Engineering".to_string()), vec![acme])]);
+        let one = PeerSets {
+            by_net: by_net.clone(),
+            own_devices: Vec::new(),
+        };
+        assert_eq!(
+            one.sources(&scope),
+            Some(&[acme][..]),
+            "sole match resolves"
+        );
+
+        by_net.insert(
+            ("playhouse".to_string(), "Engineering".to_string()),
+            vec![Ipv4Addr::new(100, 64, 0, 3)],
+        );
+        let ambiguous = PeerSets {
+            by_net,
+            own_devices: Vec::new(),
+        };
+        assert_eq!(
+            ambiguous.sources(&scope),
+            Some(&[][..]),
+            "ambiguous must admit nobody, never both guilds",
         );
     }
 }

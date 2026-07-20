@@ -31,20 +31,20 @@ impl FirewallBackend for NftBackend {
 /// named "own devices" becomes `net_own_devices`, never `own_devices`.
 ///
 /// **Known issue (not addressed, see `docs/technical.md` §5.3): this sanitization is not
-/// injective.** Every non-alphanumeric character maps to `_`, so `game-night` and `game_night` both
-/// become `net_game_night` and share one source set — each network's peers would reach the other's
-/// scoped ports. Role names are user-chosen, so it's reachable; it needs two near-identical roles
-/// in guilds you hold both of. A hash suffix or an index-keyed name would fix it.
+/// injective.** Every non-alphanumeric character maps to `_`, so `game-night` and `game_night` in
+/// one guild both become `net_<guild>_game_night` and share a source set — each network's peers
+/// would reach the other's scoped ports. Role names are user-chosen, so it's reachable; it needs
+/// two near-identical roles in a guild you hold. A hash suffix or an index-keyed name would fix it.
 fn set_name(scope: &ExposeScope) -> String {
+    let san = |s: &str| -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    };
     match scope {
         ExposeScope::OwnDevices => "own_devices".to_string(),
-        ExposeScope::Net(net) => {
-            let s: String = net
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect();
-            format!("net_{s}")
-        }
+        ExposeScope::Net { guild, name } => format!("net_{}_{}", san(guild), san(name)),
+        ExposeScope::NetUnqualified(name) => format!("net_{}", san(name)),
         // Unscoped: no source set, so no name. Callers filter these out first.
         ExposeScope::AllPeers => String::new(),
     }
@@ -209,7 +209,10 @@ mod tests {
 
     fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
         PeerSets {
-            by_net: std::collections::HashMap::from([(name.to_string(), ips)]),
+            by_net: std::collections::HashMap::from([(
+                ("acme".to_string(), name.to_string()),
+                ips,
+            )]),
             own_devices: Vec::new(),
         }
     }
@@ -241,14 +244,21 @@ mod tests {
         );
         let rs = ruleset(
             "unl0",
-            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &[exp(
+                Proto::Tcp,
+                9001,
+                ExposeScope::Net {
+                    guild: "acme".into(),
+                    name: "mesh".into(),
+                },
+            )],
             &peers,
         );
         // Named set populated with the network's peer IPs.
-        assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
-        assert!(rs.contains("add element inet unitylan net_mesh { 100.64.0.2, 100.64.0.3 }"));
+        assert!(rs.contains("add set inet unitylan net_acme_mesh { type ipv4_addr ; }"));
+        assert!(rs.contains("add element inet unitylan net_acme_mesh { 100.64.0.2, 100.64.0.3 }"));
         // Port scoped to that set.
-        assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
+        assert!(rs.contains("ip saddr @net_acme_mesh tcp dport 9001 accept"));
         // Not a global port accept.
         assert!(!rs.contains("tcp dport { 9001 } accept"));
     }
@@ -277,12 +287,19 @@ mod tests {
     fn scoped_expose_with_no_peers_still_defines_empty_set() {
         let rs = ruleset(
             "unl0",
-            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &[exp(
+                Proto::Tcp,
+                9001,
+                ExposeScope::Net {
+                    guild: "acme".into(),
+                    name: "mesh".into(),
+                },
+            )],
             &PeerSets::default(),
         );
-        assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
+        assert!(rs.contains("add set inet unitylan net_acme_mesh { type ipv4_addr ; }"));
         assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
-        assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
+        assert!(rs.contains("ip saddr @net_acme_mesh tcp dport 9001 accept"));
     }
 
     /// The own-device scope gets its own source set, fed from the owner's devices rather than any
@@ -291,7 +308,7 @@ mod tests {
     fn own_device_scope_has_its_own_set_that_a_role_name_cannot_collide_with() {
         let peers = PeerSets {
             by_net: std::collections::HashMap::from([(
-                "own devices".to_string(),
+                ("acme".to_string(), "own devices".to_string()),
                 vec![Ipv4Addr::new(100, 64, 0, 9)],
             )]),
             own_devices: vec![Ipv4Addr::new(100, 64, 0, 2)],
@@ -300,13 +317,20 @@ mod tests {
             "unl0",
             &[
                 exp(Proto::Tcp, 9001, ExposeScope::OwnDevices),
-                exp(Proto::Tcp, 9002, ExposeScope::Net("own devices".into())),
+                exp(
+                    Proto::Tcp,
+                    9002,
+                    ExposeScope::Net {
+                        guild: "acme".into(),
+                        name: "own devices".into(),
+                    },
+                ),
             ],
             &peers,
         );
         assert!(rs.contains("add element inet unitylan own_devices { 100.64.0.2 }"));
-        assert!(rs.contains("add element inet unitylan net_own_devices { 100.64.0.9 }"));
+        assert!(rs.contains("add element inet unitylan net_acme_own_devices { 100.64.0.9 }"));
         assert!(rs.contains("ip saddr @own_devices tcp dport 9001 accept"));
-        assert!(rs.contains("ip saddr @net_own_devices tcp dport 9002 accept"));
+        assert!(rs.contains("ip saddr @net_acme_own_devices tcp dport 9002 accept"));
     }
 }

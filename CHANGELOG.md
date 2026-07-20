@@ -19,6 +19,19 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 - **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
   its own exposure, so you can close one later without disturbing the rest.
 
+### Fixed
+
+- **A port scoped to one community's network could be reached from another community's.** Networks
+  were matched by role name alone, so if two of your Discord servers each had a role with the same
+  name — an `Engineering` in both — a port you opened to one was reachable by the *other* server's
+  members too. Scopes now carry the community as well as the role, and are listed and labelled as
+  `role @ community` so you can tell them apart. If you had exposed a port to a role name that
+  exists in two of your communities, that exposure now admits **nobody** until you re-open it
+  against the community you meant: the old setting cannot say which one it was, and guessing is how
+  the wrong people got in. Exposures naming a role unique to one community keep working untouched,
+  and `ctl expose <port> <role>` still takes a bare name — it resolves on its own unless the name is
+  ambiguous, in which case it now refuses and asks for `--guild`.
+
 ### Changed
 
 - **The exposed-ports list now shows who can actually reach each port.** Every port is one row with

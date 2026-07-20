@@ -854,6 +854,10 @@ impl App {
     /// Scopes offered in the picker: all-peers, the owner's own devices, then each network this
     /// device holds. Building the list from held networks is what keeps a typo — or a network the
     /// engine would reject — from being expressible at all.
+    ///
+    /// Networks are listed per `(guild, role)`, never merged by role name: two guilds may each have
+    /// an `Engineering`, they are different networks with different members, and collapsing them
+    /// into one row would offer a scope that admits both.
     fn selectable_scopes(&self) -> Vec<ExposeScope> {
         let mut out = vec![ExposeScope::AllPeers, ExposeScope::OwnDevices];
         let nets = self
@@ -862,9 +866,10 @@ impl App {
             .map(|s| s.networks.as_slice())
             .unwrap_or(&[]);
         for n in nets {
-            // The firewall scopes by network *name*, so same-named roles in two guilds are one
-            // choice here rather than two identical-looking rows.
-            let scope = ExposeScope::Net(n.name.clone());
+            let scope = ExposeScope::Net {
+                guild: n.guild_name.clone(),
+                name: n.name.clone(),
+            };
             if !out.contains(&scope) {
                 out.push(scope);
             }

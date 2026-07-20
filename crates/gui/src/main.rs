@@ -926,7 +926,10 @@ mod tests {
             exposed: vec![ExposedPort {
                 proto: Proto::Tcp,
                 port: 25565,
-                scope: ExposeScope::Net("mesh".into()),
+                scope: ExposeScope::Net {
+                    guild: "acme".into(),
+                    name: "mesh".into(),
+                },
                 active: true,
             }],
         };
@@ -940,7 +943,10 @@ mod tests {
         let mut a = app();
         a.expose_port_input = "34197".into();
         a.expose_proto = Proto::Udp;
-        a.expose_scopes = vec![ExposeScope::Net("mesh".into())];
+        a.expose_scopes = vec![ExposeScope::Net {
+            guild: "acme".into(),
+            name: "mesh".into(),
+        }];
         let _ = a.update(Message::ExposeSubmit); // dispatches the expose task
         assert!(a.expose_port_input.is_empty());
         assert!(a.expose_scopes.is_empty());
@@ -977,7 +983,10 @@ mod tests {
     #[test]
     fn all_peers_is_exclusive_with_the_narrower_scopes() {
         let mut a = app();
-        let net = ExposeScope::Net("mesh".into());
+        let net = ExposeScope::Net {
+            guild: "acme".into(),
+            name: "mesh".into(),
+        };
 
         let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
         let _ = a.update(Message::ExposeScopeToggle(ExposeScope::OwnDevices, true));
@@ -997,7 +1006,13 @@ mod tests {
     fn each_ticked_scope_becomes_its_own_exposure() {
         let mut a = app();
         a.expose_port_input = "8080".into();
-        a.expose_scopes = vec![ExposeScope::OwnDevices, ExposeScope::Net("mesh".into())];
+        a.expose_scopes = vec![
+            ExposeScope::OwnDevices,
+            ExposeScope::Net {
+                guild: "acme".into(),
+                name: "mesh".into(),
+            },
+        ];
         let _ = a.update(Message::ExposeSubmit);
         // The draft is consumed once, not once per scope.
         assert!(a.expose_scopes.is_empty());

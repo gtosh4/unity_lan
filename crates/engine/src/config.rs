@@ -140,6 +140,11 @@ pub struct ExposeSeed {
     pub proto: String,
     #[serde(default)]
     pub net: Option<String>,
+    /// The guild (community label) `net` belongs to. Two guilds may each have a role of the same
+    /// name, so an unqualified `net` is only unambiguous while exactly one of your networks
+    /// carries it; name the guild to pin it.
+    #[serde(default)]
+    pub guild: Option<String>,
     #[serde(default)]
     pub own_devices: bool,
 }
@@ -148,7 +153,15 @@ impl ExposeSeed {
     /// The scope this seed names, or an error if it names two.
     pub fn scope(&self) -> anyhow::Result<common::control::ExposeScope> {
         match (&self.net, self.own_devices) {
-            (Some(n), false) => Ok(common::control::ExposeScope::Net(n.clone())),
+            // Without a guild this stays unqualified, and the engine resolves it against the
+            // held networks at startup — refusing rather than guessing if two guilds match.
+            (Some(n), false) => Ok(match &self.guild {
+                Some(g) => common::control::ExposeScope::Net {
+                    guild: g.clone(),
+                    name: n.clone(),
+                },
+                None => common::control::ExposeScope::NetUnqualified(n.clone()),
+            }),
             (None, true) => Ok(common::control::ExposeScope::OwnDevices),
             (None, false) => Ok(common::control::ExposeScope::AllPeers),
             (Some(_), true) => anyhow::bail!(
@@ -318,6 +331,10 @@ port = 25565
 port = 9001
 net = "minecraft"
 [[expose]]
+port = 9002
+net = "Engineering"
+guild = "acme"
+[[expose]]
 port = 22
 proto = "tcp"
 own_devices = true
@@ -329,7 +346,11 @@ own_devices = true
             scopes,
             vec![
                 common::control::ExposeScope::AllPeers,
-                common::control::ExposeScope::Net("minecraft".into()),
+                common::control::ExposeScope::NetUnqualified("minecraft".into()),
+                common::control::ExposeScope::Net {
+                    guild: "acme".into(),
+                    name: "Engineering".into(),
+                },
                 common::control::ExposeScope::OwnDevices,
             ],
         );

@@ -106,13 +106,19 @@ impl State {
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
-                    scope: ExposeScope::Net("Engineering".into()),
+                    scope: ExposeScope::Net {
+                        guild: "acme".into(),
+                        name: "Engineering".into(),
+                    },
                     active: true,
                 },
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
-                    scope: ExposeScope::Net("Gaming".into()),
+                    scope: ExposeScope::Net {
+                        guild: "playhouse".into(),
+                        name: "Gaming".into(),
+                    },
                     active: true,
                 },
                 ExposedPort {

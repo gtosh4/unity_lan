@@ -155,6 +155,12 @@ impl Proto {
 /// several networks means several exposures (the firewall unions their source sets), which is what
 /// lets one scope be closed while the others stay — see [`RemoveScope`].
 ///
+/// **A network is `(guild, role)`, not a role name.** Role names are Discord display names in
+/// independent guilds, so two guilds on one coordinator may both have an `Engineering` — which is
+/// exactly why [`crate::api::SharedNetwork`] carries a `community` alongside the name. A scope that
+/// named only the role would admit *both* guilds' members, so [`Net`](ExposeScope::Net) carries the
+/// guild too.
+///
 /// **Wire format.** This replaced a plain `net: Option<String>`, and both sides of that change are
 /// live traffic: the engine swaps itself and restarts while an older GUI is still running (that's
 /// what the relaunch prompt is for), so a new frontend meets an old engine and vice versa. The
@@ -164,18 +170,19 @@ impl Proto {
 /// | scope | JSON | an old engine reads it as |
 /// | --- | --- | --- |
 /// | [`AllPeers`](ExposeScope::AllPeers) | `null` | all peers ✓ |
-/// | [`Net`](ExposeScope::Net) | `"minecraft"` | that network ✓ |
+/// | [`NetUnqualified`](ExposeScope::NetUnqualified) | `"minecraft"` | that network ✓ |
+/// | [`Net`](ExposeScope::Net) | `{"kind":"net","guild":…,"name":…}` | **type error — rejected** |
 /// | [`OwnDevices`](ExposeScope::OwnDevices) | `{"kind":"own_devices"}` | **type error — rejected** |
 ///
-/// That last row is the point, not an oversight. [`OwnDevices`](ExposeScope::OwnDevices) has no
-/// legacy spelling, and the tempting compat move — sending `null` so the field still parses —
-/// would have an old engine open the port to *every peer* when the user asked for their own
-/// devices only. A rejected request is the safe failure; silent over-exposure is not.
+/// Those last two rows are the point, not an oversight. Neither scope has a legacy spelling, and
+/// the tempting compat move — sending `null`, or the bare role name — would have an old engine open
+/// the port to *every peer*, or to every guild's same-named role, when the user asked for something
+/// narrower. A rejected request is the safe failure; silent over-exposure is not.
 ///
-/// Deserialization accepts all three forms, so an old frontend's `null`/`"minecraft"` still reads
+/// Deserialization accepts all forms, so an old frontend's `null`/`"minecraft"` still reads
 /// correctly here. The legacy forms are a bare `null` or string and the modern one is always an
-/// object, so the two can never be confused — which matters because a network name is a Discord
-/// role's display name and may be any string at all, including `own_devices`.
+/// object, so the two can never be confused — which matters because a role name may be any string
+/// at all, including `own_devices`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ExposeScope {
     /// Every peer the mesh has. Only peers can deliver to the wg interface, so this is still not
@@ -184,8 +191,19 @@ pub enum ExposeScope {
     /// Only the owner's other devices (same Discord user). Not a network — the engine derives the
     /// source set from peer identity, so it needs no coordinator support.
     OwnDevices,
-    /// One network's peers, by role display name.
-    Net(String),
+    /// One network: a role in a specific guild, named by the guild's community label. `guild` is
+    /// empty when the coordinator predates community labels, in which case it matches peers whose
+    /// own community is likewise empty.
+    Net { guild: String, name: String },
+    /// A network named by role alone — what versions before guild qualification stored on disk and
+    /// sent on the wire, and what `ctl expose <port> <role>` means when no guild is given.
+    ///
+    /// Kept as a distinct variant rather than silently promoted, because resolving it needs the
+    /// caller's held networks: it means *the* network with this name when exactly one matches, and
+    /// is **ambiguous** when several do. An ambiguous one admits nobody (see
+    /// `PeerSets::sources` in the engine) rather than falling back to every match, which is the
+    /// over-exposure this qualification exists to remove.
+    NetUnqualified(String),
 }
 
 /// The tagged-object form, used for scopes with no legacy spelling.
@@ -193,22 +211,26 @@ pub enum ExposeScope {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ScopeTagged {
     OwnDevices,
+    Net { guild: String, name: String },
 }
 
 impl ExposeScope {
-    /// The label shown in UIs and CLI output.
-    pub fn label(&self) -> &str {
+    /// The label shown in UIs and CLI output. A qualified network reads `role @ guild`, so two
+    /// same-named roles are told apart wherever they're listed.
+    pub fn label(&self) -> String {
         match self {
-            ExposeScope::AllPeers => "all peers",
-            ExposeScope::OwnDevices => OWN_DEVICES_LABEL,
-            ExposeScope::Net(n) => n,
+            ExposeScope::AllPeers => "all peers".to_string(),
+            ExposeScope::OwnDevices => OWN_DEVICES_LABEL.to_string(),
+            ExposeScope::Net { guild, name } if guild.is_empty() => name.clone(),
+            ExposeScope::Net { guild, name } => format!("{name} @ {guild}"),
+            ExposeScope::NetUnqualified(n) => n.clone(),
         }
     }
 
-    /// The network name, if this scope is one — for callers that only care about `--net` scoping.
+    /// The role name, if this scope is a network — for callers that only care about membership.
     pub fn net(&self) -> Option<&str> {
         match self {
-            ExposeScope::Net(n) => Some(n),
+            ExposeScope::Net { name, .. } | ExposeScope::NetUnqualified(name) => Some(name),
             _ => None,
         }
     }
@@ -218,8 +240,13 @@ impl Serialize for ExposeScope {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             ExposeScope::AllPeers => s.serialize_none(),
-            ExposeScope::Net(n) => s.serialize_some(n),
+            ExposeScope::NetUnqualified(n) => s.serialize_some(n),
             ExposeScope::OwnDevices => ScopeTagged::OwnDevices.serialize(s),
+            ExposeScope::Net { guild, name } => ScopeTagged::Net {
+                guild: guild.clone(),
+                name: name.clone(),
+            }
+            .serialize(s),
         }
     }
 }
@@ -235,8 +262,9 @@ impl<'de> Deserialize<'de> for ExposeScope {
         }
         Ok(match Any::deserialize(d)? {
             Any::Legacy(None) => ExposeScope::AllPeers,
-            Any::Legacy(Some(n)) => ExposeScope::Net(n),
+            Any::Legacy(Some(n)) => ExposeScope::NetUnqualified(n),
             Any::Tagged(ScopeTagged::OwnDevices) => ExposeScope::OwnDevices,
+            Any::Tagged(ScopeTagged::Net { guild, name }) => ExposeScope::Net { guild, name },
         })
     }
 }
@@ -532,7 +560,11 @@ mod tests {
         for scope in [
             ExposeScope::AllPeers,
             ExposeScope::OwnDevices,
-            ExposeScope::Net("minecraft".into()),
+            ExposeScope::Net {
+                guild: "acme".into(),
+                name: "minecraft".into(),
+            },
+            ExposeScope::NetUnqualified("minecraft".into()),
         ] {
             let json = serde_json::to_string(&scope).expect("encodes");
             let back: ExposeScope = serde_json::from_str(&json).expect("decodes");
@@ -543,7 +575,7 @@ mod tests {
         let all: ExposeScope = serde_json::from_str("null").expect("decodes legacy null");
         assert_eq!(all, ExposeScope::AllPeers);
         let net: ExposeScope = serde_json::from_str(r#""minecraft""#).expect("decodes legacy name");
-        assert_eq!(net, ExposeScope::Net("minecraft".into()));
+        assert_eq!(net, ExposeScope::NetUnqualified("minecraft".into()));
     }
 
     /// A network name is a Discord role's display name, so it may be any string — including one
@@ -552,7 +584,7 @@ mod tests {
     #[test]
     fn a_role_named_like_a_keyword_is_still_a_network() {
         let scope: ExposeScope = serde_json::from_str(r#""own_devices""#).expect("decodes");
-        assert_eq!(scope, ExposeScope::Net("own_devices".into()));
+        assert_eq!(scope, ExposeScope::NetUnqualified("own_devices".into()));
     }
 
     /// The compat contract with an engine that predates `ExposeScope`, asserted from that engine's
@@ -591,7 +623,7 @@ mod tests {
             .net
             .is_none());
 
-        let net = encode(ExposeScope::Net("minecraft".into()));
+        let net = encode(ExposeScope::NetUnqualified("minecraft".into()));
         assert_eq!(
             serde_json::from_value::<OldAdd>(net)
                 .expect("old engine parses a network scope")
@@ -605,6 +637,18 @@ mod tests {
             serde_json::from_value::<OldAdd>(own).is_err(),
             "an old engine must reject the own-device scope, not read it as all-peers",
         );
+
+        // A guild-qualified network is likewise unrepresentable to an old engine. Degrading it to
+        // the bare role name would re-introduce exactly the over-exposure the guild removes: that
+        // engine keys its source set on the name, so it would admit every guild's same-named role.
+        let qualified = encode(ExposeScope::Net {
+            guild: "acme".into(),
+            name: "Engineering".into(),
+        });
+        assert!(
+            serde_json::from_value::<OldAdd>(qualified).is_err(),
+            "an old engine must reject a guild-qualified scope, not widen it to every guild",
+        );
     }
 
     /// `Remove` carries a scope too, and an old *frontend* closing a port must keep working —
@@ -616,7 +660,9 @@ mod tests {
         assert!(matches!(all, RemoveScope::Exact(ExposeScope::AllPeers)));
         let net: RemoveScope =
             serde_json::from_str(r#"{"Exact":"minecraft"}"#).expect("decodes legacy network");
-        assert!(matches!(net, RemoveScope::Exact(ExposeScope::Net(n)) if n == "minecraft"));
+        assert!(
+            matches!(net, RemoveScope::Exact(ExposeScope::NetUnqualified(n)) if n == "minecraft")
+        );
     }
 
     /// `Default` and the wire must agree on what "unspecified" means. A derived `Default` would

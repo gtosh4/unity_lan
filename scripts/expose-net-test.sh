@@ -82,6 +82,23 @@ name = "mesh"
 guild_id = 1
 role_id = 20
 name = "mesh2"
+# A second guild whose role is *also* called "mesh". A and C are both in it; B is not. Two
+# networks, same role name — the collision that guild-qualified scopes exist to keep apart.
+[[fake.guild]]
+id = 2
+name = "Other"
+[[fake.guild.member]]
+user_id = 1
+nick = "nodea"
+role_ids = [30]
+[[fake.guild.member]]
+user_id = 3
+nick = "nodec"
+role_ids = [30]
+[[network]]
+guild_id = 2
+role_id = 30
+name = "mesh"
 [[enroll]]
 key = "key-a"
 user_id = 1
@@ -98,6 +115,9 @@ user_id = 1
 [[community]]
 guild_id = 1
 slug = "lan"
+[[community]]
+guild_id = 2
+slug = "other"
 EOF
 
 node_toml() { # $1=name $2=iface $3=port $4=endpoint_ip $5=key
@@ -143,14 +163,19 @@ echo "A=$A_IP (mesh,mesh2)  B=$B_IP (mesh)  C=$C_IP (mesh2)  D=$D_IP (A's other 
 socat TCP-LISTEN:9001,fork,reuseaddr /dev/null >/dev/null 2>&1 &
 socat TCP-LISTEN:9002,fork,reuseaddr /dev/null >/dev/null 2>&1 &
 socat TCP-LISTEN:9004,fork,reuseaddr /dev/null >/dev/null 2>&1 &
+socat TCP-LISTEN:9005,fork,reuseaddr /dev/null >/dev/null 2>&1 &
 sleep 0.5
 # probe <netns-prefix> <port> → exit 0 if a new TCP connect to A succeeds (dropped port → timeout).
 probe() { $1 timeout 3 bash -c "exec 3<>/dev/tcp/$A_IP/$2" >/dev/null 2>&1; }
 
-echo "=== expose 9001 --net mesh, 9002 --net mesh2, 9004 --own-devices on A ==="
-"$ENG" ctl expose "$TMP/a.toml" 9001 mesh
+echo "=== expose 9001 mesh@lan, 9002 mesh2 (bare), 9004 --own-devices on A ==="
+# Pinned: "mesh" exists in both of A's guilds. 9002 stays bare on purpose — "mesh2" is unique to
+# one guild, so it exercises the unqualified path still resolving when there's no ambiguity.
+"$ENG" ctl expose "$TMP/a.toml" 9001 mesh --guild lan
 "$ENG" ctl expose "$TMP/a.toml" 9002 mesh2
 "$ENG" ctl expose "$TMP/a.toml" 9004 --own-devices
+# "mesh" exists in both guilds, so it must be pinned to one; B is in lan/mesh, C is in other/mesh.
+"$ENG" ctl expose "$TMP/a.toml" 9005 mesh --guild lan
 
 fail=0
 check() { # <desc> <expect open|blocked> <netns> <port>
@@ -165,6 +190,10 @@ check "B (mesh) -> 9002 [scoped to mesh2]"  blocked "$NSB" 9002
 check "D (A's device) -> 9004 [own-devices]" open    "$NSD" 9004
 check "B (co-member)  -> 9004 [own-devices]" blocked "$NSB" 9004
 check "C (co-member)  -> 9004 [own-devices]" blocked "$NSC" 9004
+# Guild-qualified: B is in lan/mesh; C is in other/mesh, a different network with the same role
+# name. Keying the source set on the name alone would let C in here.
+check "B (lan/mesh)   -> 9005 [mesh @ lan]"  open    "$NSB" 9005
+check "C (other/mesh) -> 9005 [mesh @ lan]"  blocked "$NSC" 9005
 
 # Sanity: a --net for a network A doesn't hold must be rejected. Capture first — `ctl` exits
 # non-zero by design, and under pipefail that would mask grep's match in an `if … | grep`.
@@ -175,5 +204,14 @@ else
   echo "  FAIL: expose to a non-held network was not rejected ($reject_out)"; fail=1
 fi
 
-[ "$fail" = 0 ] && { echo "RESULT: PASS ✓  per-network + own-device expose scoping enforced"; exit 0; }
+# A bare "mesh" names a role A holds in *two* guilds. Guessing either would expose the port to a
+# community the caller never named, so it must refuse and say so.
+ambig_out=$("$ENG" ctl expose "$TMP/a.toml" 9006 mesh 2>&1 || true)
+if echo "$ambig_out" | grep -q "ambiguous"; then
+  echo "  ok: bare 'mesh' refused as ambiguous across guilds"
+else
+  echo "  FAIL: ambiguous network name was not refused ($ambig_out)"; fail=1
+fi
+
+[ "$fail" = 0 ] && { echo "RESULT: PASS ✓  per-network, per-guild and own-device expose scoping enforced"; exit 0; }
 echo "RESULT: FAIL ✗"; tail -n 20 "$TMP"/*.log; exit 1

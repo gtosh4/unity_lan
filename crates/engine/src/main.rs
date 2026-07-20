@@ -129,6 +129,9 @@ enum CtlCmd {
         port: String,
         /// Restrict the port to this network's peers; omit to open it to every peer.
         net: Option<String>,
+        /// The guild `net` belongs to, when two of your guilds share the role name.
+        #[arg(long, requires = "net")]
+        guild: Option<String>,
         /// Restrict the port to the owner's own other devices instead of a network.
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
@@ -139,6 +142,9 @@ enum CtlCmd {
         /// Close only the exposure scoped to this network; omit to close every scope of the port.
         #[arg(long)]
         net: Option<String>,
+        /// The guild `--net` belongs to, when two of your guilds share the role name.
+        #[arg(long, requires = "net")]
+        guild: Option<String>,
         /// Close only the own-devices exposure of this port.
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
@@ -543,10 +549,11 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             config,
             port,
             net,
+            guild,
             own_devices,
         } => {
             let (proto, port) = parse_port(&port)?;
-            let scope = expose_scope(net, own_devices);
+            let scope = expose_scope(net, guild, own_devices);
             print_exposed(
                 control::client_expose(
                     &socket_for(&config)?,
@@ -559,13 +566,14 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             config,
             port,
             net,
+            guild,
             own_devices,
         } => {
             let (proto, port) = parse_port(&port)?;
             // No scope named at all still means "close every scope of this port".
             let scope = match (net, own_devices) {
                 (None, false) => common::control::RemoveScope::All,
-                (net, own) => common::control::RemoveScope::Exact(expose_scope(net, own)),
+                (net, own) => common::control::RemoveScope::Exact(expose_scope(net, guild, own)),
             };
             print_exposed(
                 control::client_expose(
@@ -700,10 +708,19 @@ fn parse_port(arg: &str) -> anyhow::Result<(common::control::Proto, u16)> {
 
 /// The scope named by an `expose`/`unexpose` invocation. The two flags are mutually exclusive at
 /// the clap level, so `--own-devices` and a network name can't both arrive.
-fn expose_scope(net: Option<String>, own_devices: bool) -> common::control::ExposeScope {
+fn expose_scope(
+    net: Option<String>,
+    guild: Option<String>,
+    own_devices: bool,
+) -> common::control::ExposeScope {
     match (net, own_devices) {
         (_, true) => common::control::ExposeScope::OwnDevices,
-        (Some(n), false) => common::control::ExposeScope::Net(n),
+        // No `--guild`: the engine resolves it against the caller's held networks, and refuses
+        // if two guilds share the role name rather than guessing.
+        (Some(n), false) => match guild {
+            Some(g) => common::control::ExposeScope::Net { guild: g, name: n },
+            None => common::control::ExposeScope::NetUnqualified(n),
+        },
         (None, false) => common::control::ExposeScope::AllPeers,
     }
 }

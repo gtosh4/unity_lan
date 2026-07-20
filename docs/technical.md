@@ -364,14 +364,24 @@ membership: the coordinator has no own-device network, and such peers arrive wit
 `networks` list. Opening a port to several networks means several exposures, whose source sets the
 ruleset unions — which is what lets one scope be closed while its siblings stay.
 
-**Known issue: nft set names can collide.** `set_name` sanitizes a network name to a valid nft
-identifier by mapping every non-alphanumeric character to `_`, so two networks whose names differ
-only in punctuation (`game-night` and `game_night`) map to the same `net_game_night` set and would
-share one source set — each admitting the other's peers. Discord role names are user-chosen, so this
-is reachable, though it needs an admin to create two near-identical roles in guilds you're both in.
-Unfixed. A hash suffix or an index-keyed name would resolve it. Note the own-device set is *not*
-exposed to this: network sets keep the `net_` prefix, so a role named `own devices` becomes
-`net_own_devices` and never `own_devices` (asserted in `fw::nftables::tests`).
+**A network scope is `(guild, role)`, never a bare role name.** Role names are Discord display names
+in independent guilds, so two guilds on one coordinator may each have an `Engineering` — which is
+why `SharedNetwork` carries a `community`. Keying the source set on the name alone merged them, so a
+port scoped to one guild's role admitted the other guild's members too; `PeerSets::by_net` is keyed
+by the pair. A scope written before this (`ExposeScope::NetUnqualified`, what a bare
+`ctl expose <port> <role>` still means) resolves to the guild that carries the role **only while
+exactly one does**: `apply_expose` promotes it on the way in and refuses an ambiguous one with the
+candidates listed, and a stale unqualified entry already on disk admits *nobody* once a second guild
+matches, rather than falling back to both. Fail closed, never widen.
+
+**Known issue: nft set names can collide.** `set_name` sanitizes guild and role into a valid nft
+identifier by mapping every non-alphanumeric character to `_`, so networks whose names differ only in
+punctuation (`game-night` and `game_night` in one guild) map to the same `net_<guild>_game_night` set
+and would share one source set — each admitting the other's peers. Discord role names are
+user-chosen, so this is reachable, though it needs an admin to create two near-identical roles in a
+guild you're in. Unfixed. A hash suffix or an index-keyed name would resolve it. Note the own-device
+set is *not* exposed to this: network sets keep the `net_` prefix, so a role named `own devices`
+becomes `net_<guild>_own_devices` and never `own_devices` (asserted in `fw::nftables::tests`).
 
 ### 5.4 Discovery client (`coord.rs`, `daemon.rs`, `p2p.rs`)
 Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned

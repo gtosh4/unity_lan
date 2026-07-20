@@ -4,8 +4,8 @@
 use anyhow::Context;
 use common::api::NetworkStatus;
 use common::control::{
-    ConnectedResp, ControlRequest, ControlResponse, ExposeOp, ExposeResp, LoginResp, LogoutResp,
-    NetworkResp, StatusReport,
+    ConnectedResp, ControlRequest, ControlResponse, ExposeOp, ExposeResp, ExposeScope, LoginResp,
+    LogoutResp, NetworkResp, StatusReport,
 };
 use interprocess::local_socket::tokio::prelude::*;
 use interprocess::local_socket::tokio::Stream as LocalStream;
@@ -155,10 +155,10 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 let held = ctx
                     .status
                     .borrow()
-                    .device
-                    .as_ref()
-                    .map(|d| d.networks.clone())
-                    .unwrap_or_default();
+                    .networks
+                    .iter()
+                    .map(|n| (n.guild_name.clone(), n.name.clone()))
+                    .collect::<Vec<_>>();
                 match apply_expose(fw, op, &held) {
                     Ok(r) => ControlResponse::Expose(r),
                     Err(e) => ControlResponse::Error(format!("{e:#}")),
@@ -355,22 +355,79 @@ async fn stream_status(
     }
 }
 
-/// Apply an expose op to the local firewall and report the resulting exposed set. A network scope
-/// must name a network this device actually holds; the other scopes need no membership.
-fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Result<ExposeResp> {
+/// Resolve and validate the scope of an `Add` against the networks this device holds, as
+/// `(guild, role)` pairs.
+///
+/// A network scope must name a network the device actually holds; `OwnDevices` is derived from our
+/// own identity and `AllPeers` names nothing, so neither is checkable here.
+///
+/// An unqualified scope (`ctl expose <port> <role>`, or a pre-qualification config seed) is
+/// promoted to the guild that carries it — but only when exactly one does. Two guilds may each have
+/// a role of the same name, and picking either would silently expose the port to a guild the caller
+/// never named, so an ambiguous one is refused with the candidates listed.
+fn resolve_scope(scope: ExposeScope, held: &[(String, String)]) -> anyhow::Result<ExposeScope> {
+    let listing = || {
+        held.iter()
+            .map(|(g, n)| ExposeScope::Net {
+                guild: g.clone(),
+                name: n.clone(),
+            })
+            .map(|s| s.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    match scope {
+        ExposeScope::Net { guild, name } => {
+            if !held.iter().any(|(g, n)| g == &guild && n == &name) {
+                anyhow::bail!(
+                    "not a member of network '{}' (your networks: {})",
+                    ExposeScope::Net {
+                        guild: guild.clone(),
+                        name: name.clone()
+                    }
+                    .label(),
+                    listing(),
+                );
+            }
+            Ok(ExposeScope::Net { guild, name })
+        }
+        ExposeScope::NetUnqualified(name) => {
+            let mut hits = held.iter().filter(|(_, n)| n == &name);
+            let first = hits
+                .next()
+                .with_context(|| {
+                    format!(
+                        "not a member of network '{name}' (your networks: {})",
+                        listing()
+                    )
+                })?
+                .clone();
+            if let Some(second) = hits.next() {
+                anyhow::bail!(
+                    "network '{name}' is ambiguous — you hold it in more than one community                      ({}, {}, …). Name one with `--guild`.",
+                    first.0,
+                    second.0,
+                );
+            }
+            Ok(ExposeScope::Net {
+                guild: first.0,
+                name: first.1,
+            })
+        }
+        other => Ok(other),
+    }
+}
+
+/// Apply an expose op to the local firewall and report the resulting exposed set.
+fn apply_expose(
+    fw: &Firewall,
+    op: ExposeOp,
+    held_nets: &[(String, String)],
+) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
         ExposeOp::Add { proto, port, scope } => {
-            // Only a network scope can name something we might not hold. `OwnDevices` is derived
-            // from our own identity and `AllPeers` names nothing, so neither is checkable here.
-            if let Some(n) = scope.net() {
-                if !held_nets.iter().any(|h| h == n) {
-                    anyhow::bail!(
-                        "not a member of network '{n}' (your networks: {})",
-                        held_nets.join(", ")
-                    );
-                }
-            }
+            let scope = resolve_scope(scope, held_nets)?;
             (
                 format!("exposed {}/{port} ({})", proto.as_str(), scope.label()),
                 fw.expose(proto, port, scope)?,
