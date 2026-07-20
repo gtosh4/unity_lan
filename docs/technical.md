@@ -405,8 +405,10 @@ only when it's genuinely stale: we have a reflexive/relay/ICE report, our grant 
 local opt-out/paused state changed — exactly the cases that also want an immediate (`since = None`)
 return. Idle cost is one request per hold. **Delta merge**
 (`merge_seeds`): a partial response upserts changed peers by pubkey, drops `removed`, keeps the rest
-untouched; the client echoes `held: [(pubkey, rev)]` and forces a full refresh (empty `held`) when
-its soonest-expiring peer attestation nears expiry (Option A).
+untouched; the client echoes `held: [(pubkey, rev)]` and forces a full refresh (empty `held`) only
+once its soonest-expiring peer attestation is within `COORD_FULL_MARGIN` (120s) of expiry and
+peer-direct hasn't refreshed it (Option A) — a completing poll (`since = None`), so the full returns
+at once rather than holding out the long-poll.
 
 **Peer-direct attestation refresh (`p2p.rs`, gossip — `docs/gossip-refresh.md`, default on).** The
 engine serves its own coordinator-minted attestation to co-members over the WG tunnel (a small typed

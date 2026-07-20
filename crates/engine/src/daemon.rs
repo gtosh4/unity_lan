@@ -39,6 +39,13 @@ const DNS_PORT: u16 = 53;
 const P2P_REFRESH_MARGIN: u64 = common::LONGPOLL_HOLD_SECS;
 /// How long to wait on a peer-direct pull before giving up on that peer (the coordinator covers it).
 const P2P_PULL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Last-ditch margin: only when a held peer's attestation is within this of expiry do we concede and
+/// force a **full** coordinator refresh (empty `held`, Option A). Kept well below `P2P_REFRESH_MARGIN`
+/// so peer-direct owns nearly the whole pre-expiry window — the coordinator only re-sends attestations
+/// the mesh genuinely couldn't refresh peer-to-peer (peer offline/revoked for ~13 min). The forced
+/// full is issued as a *completing* poll (returns at once), so this small margin still leaves ample
+/// slack for the round-trip, unlike an empty-`held` poll that would otherwise hold out the long-poll.
+const COORD_FULL_MARGIN: u64 = 120;
 
 /// Retry interval after the coordinator refuses us on wire protocol version. Deliberately far longer
 /// than `refresh_secs`: the refusal is a version gap, not a blip, so it clears only when an operator
@@ -690,11 +697,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 .as_ref()
                 .map(|d| d.grant_expires_at <= common::now_unix() + common::LONGPOLL_HOLD_SECS)
                 .unwrap_or(false);
-            // Anything new to tell the coordinator (a reflexive/relay/ICE report) or a grant that
-            // needs renewing means the currently-held request is stale: drop it so the re-issue below
-            // carries the report and returns immediately (no hold). Otherwise keep holding the
-            // existing request — the local re-check below must not cost a coordinator round-trip.
-            let have_report = changed || relay_changed || ice_changed || own_grant_stale;
+            // Delta sync: echo our held peers' revs so the coordinator sends only what changed. Goes
+            // empty only once a peer's attestation is within `COORD_FULL_MARGIN` of expiry and
+            // peer-direct still hasn't refreshed it (Option A) — that empty set forces a full. Peer-
+            // direct (above) owns the whole window before this margin, so a healthy mesh reaches here
+            // with a non-empty (delta) set and never triggers a full.
+            let held = coord::held_for_refresh(&last_seeds, common::now_unix(), COORD_FULL_MARGIN);
+            // We conceded to the coordinator for at least one peer: an empty `held` with peers present
+            // means a near-expiry forced full. That poll must *complete* (not hold), or the full could
+            // arrive only after the long-poll elapses — too late this close to expiry. Treat it like a
+            // report so `poll_since` goes `None`.
+            let forced_full = !last_seeds.is_empty() && held.is_empty();
+            // Anything new to tell the coordinator (a reflexive/relay/ICE report), a grant that needs
+            // renewing, or a conceded attestation full means the currently-held request is stale: drop
+            // it so the re-issue below carries the report and returns immediately (no hold). Otherwise
+            // keep holding the existing request — the local re-check below must not cost a round-trip.
+            let have_report =
+                changed || relay_changed || ice_changed || own_grant_stale || forced_full;
             if have_report {
                 pending_refresh = None;
             }
@@ -714,13 +733,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     localnet.peer_own_devices(),
                     relay_iter,
                     ice_offers.clone(),
-                    // Delta sync: echo our held peers' revs so the coordinator sends only what
-                    // changed. Empty near attestation expiry (Option A) forces a full refresh.
-                    coord::held_for_refresh(
-                        &last_seeds,
-                        common::now_unix(),
-                        common::LONGPOLL_HOLD_SECS,
-                    ),
+                    held,
                 )));
             }
             // Set by arms that invalidate the held request; applied after the select, since the arms

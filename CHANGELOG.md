@@ -38,6 +38,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- **The mesh now leans on peer-to-peer attestation refresh far longer before falling back to the
+  coordinator.** With peer-direct refresh (gossip) on, a peer's credential is renewed straight from
+  that peer over the tunnel; only when peer-direct can't refresh it and it's within two minutes of
+  expiring does the client concede and pull a full renewal from the coordinator. Before, that
+  concession window was a full long-poll hold (~15 min) and overlapped the entire peer-direct
+  window, so the coordinator was made to re-sign and re-send every attestation on most renewals even
+  when the peers could have carried it themselves. The coordinator now does that work only for
+  credentials the mesh genuinely couldn't refresh — less load on a busy coordinator, no change to
+  how quickly an offline or revoked peer drops (still on attestation expiry).
+
 - **The config file moved out of the middle of every command.** It used to be a positional argument
   wedged between the verb and what you were acting on — `ctl expose /etc/unitylan/engine.toml 25565
   minecraft` — and it was mandatory on some subcommands but optional on others, with no way to tell

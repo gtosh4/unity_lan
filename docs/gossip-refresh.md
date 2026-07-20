@@ -93,10 +93,15 @@ distribution cost is spread across the mesh: each node answers ~`N` cheap reques
 window (one per co-member) = **O(N) per node**, which is inherent to already holding `N` tunnels.
 The square term is decentralized, not eliminated — exactly the goal.
 
-**Refresh trigger (ties to the sign-cache's Option A).** A device refreshes a peer's attestation
-when it enters a refresh window before expiry (e.g. `ATTESTATION_TTL_SECS − SIGN_CACHE_TTL_SECS`
-remaining). Triggers stagger across peers/nodes by join time → no synchronized herd. The same
-window drives the client's coordinator fallback, so the two paths share one clock.
+**Refresh trigger (ties to the sign-cache's Option A).** A device starts refreshing a peer's
+attestation peer-direct when it enters a refresh window before expiry (`P2P_REFRESH_MARGIN`, a full
+long-poll hold). Triggers stagger across peers/nodes by join time → no synchronized herd. The
+coordinator fallback is deliberately on a **tighter** clock: the client only concedes and forces a
+full coordinator refresh (empty `held`) once a peer is within `COORD_FULL_MARGIN` (120s) of expiry
+and peer-direct still hasn't refreshed it — so peer-direct owns nearly the whole pre-expiry window
+and the coordinator re-signs an attestation only for credentials the mesh genuinely couldn't carry.
+That forced full is issued as a *completing* poll (returns at once), so the small margin still
+leaves ample slack for the round-trip.
 
 ## 5. Transport
 
