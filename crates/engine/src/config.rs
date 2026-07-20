@@ -63,6 +63,11 @@ pub struct Config {
     /// daemon. Set by packaged installs (e.g. `"unitylan"`). When unset, the socket is handed to
     /// the `sudo`-invoking user if launched via sudo, else left root-only.
     pub control_group: Option<String>,
+    /// Also append the daemon's logs to this file, in addition to stdout (plain text, no colour
+    /// codes). A relative path is resolved under `state_dir`; leave unset to log to stdout only.
+    /// The `--log-file` CLI flag, when given, overrides this.
+    #[serde(default)]
+    pub log_file: Option<PathBuf>,
     /// Enforce the host firewall (default-deny inbound on the wg iface + explicit `expose`).
     /// On by default — secure posture. Set `false` on platforms without a firewall backend.
     #[serde(default = "default_true")]
@@ -280,6 +285,18 @@ impl Config {
         Self::load(path)
     }
 
+    /// Log-file path if configured: the value as-is when absolute, else resolved under `state_dir`.
+    /// `None` means log to stdout only.
+    pub fn log_file_path(&self) -> Option<PathBuf> {
+        self.log_file.as_ref().map(|p| {
+            if p.is_absolute() {
+                p.clone()
+            } else {
+                self.state_dir.join(p)
+            }
+        })
+    }
+
     /// Control-socket path: the configured value, else `<state_dir>/control.sock`. Used as the
     /// unix-domain socket path (on Windows the transport is a named pipe — see `control_name`).
     #[cfg(not(windows))]
@@ -325,6 +342,30 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A relative `log_file` lands under `state_dir` (its natural home), an absolute one is left
+    /// as-is, and an unset one means stdout-only.
+    #[test]
+    fn log_file_resolves_relative_paths_under_the_state_dir() {
+        let rel: Config = toml::from_str(
+            "coordinator = \"https://c\"\nstate_dir = \"s\"\nlog_file = \"engine.log\"",
+        )
+        .unwrap();
+        assert_eq!(rel.log_file_path(), Some(PathBuf::from("s/engine.log")));
+
+        let abs: Config = toml::from_str(
+            "coordinator = \"https://c\"\nstate_dir = \"s\"\nlog_file = \"/var/log/engine.log\"",
+        )
+        .unwrap();
+        assert_eq!(
+            abs.log_file_path(),
+            Some(PathBuf::from("/var/log/engine.log"))
+        );
+
+        let none: Config =
+            toml::from_str("coordinator = \"https://c\"\nstate_dir = \"s\"").unwrap();
+        assert_eq!(none.log_file_path(), None);
+    }
 
     /// A config-seeded exposure gets the same three scopes as `ctl expose`, defaulting to the
     /// behaviour config seeds always had (every peer).

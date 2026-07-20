@@ -7,6 +7,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
+- **The engine can also write its logs to a file.** Logs still print to the console as before;
+  now they can additionally be appended (plain text, no colour codes) to a file, so a foreground
+  `unitylan-engine run` whose output would otherwise scroll away is kept for later. Set it in
+  `engine.toml` with `log_file = "engine.log"` — a relative path lands in the state directory
+  alongside the keys — or per-invocation with `--log-file <path>`, which overrides the config.
 - **Ports can be exposed to just your own devices.** A new scope sits alongside "all peers" and the
   per-network ones, and it goes by identity rather than membership: only your other devices reach
   the port, no matter what networks you and everyone else share. Useful for the things you run for
@@ -46,6 +51,10 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   subcommand and its arguments (most had no description at all), `ctl net` and `ctl own-devices`
   list their valid actions instead of failing at runtime, and the WireGuard/DNS/resolver commands
   meant only for the test scripts no longer clutter the top-level command list.
+- **The peer list stops reshuffling on every latency update.** Peers are still ordered by ping,
+  but the ordering now follows a smoothed (rolling-average) latency instead of the raw reading, so
+  normal probe-to-probe jitter no longer swaps near-equal peers back and forth each poll. The number
+  shown on each row is still the latest measured round-trip — only the list order is damped.
 
 ### Fixed
 

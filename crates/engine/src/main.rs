@@ -60,6 +60,10 @@ struct Cli {
     /// `ExecStart`, an env-substituted arg, or an interactive first run).
     #[arg(long, value_name = "KEY")]
     token: Option<String>,
+    /// Also append logs to this file (in addition to stdout), overriding the config's `log_file`.
+    /// Useful for a foreground `run` whose console output would otherwise be lost.
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -230,14 +234,44 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // boringtun WARN-spams HANDSHAKE(REKEY_TIMEOUT) every ~5s while retrying a handshake
-                // with a peer whose device is down — not actionable; reachability is surfaced in status.
-                .unwrap_or_else(|_| "info,defguard_boringtun::noise::timers=error".into()),
-        )
-        .init();
+    // An explicit `--log-file` wins; otherwise fall back to the config's `log_file` (resolved under
+    // its state_dir). The config is peeked read-only here — a missing/bad one just means no file
+    // logging, and the command's own config load surfaces any real error.
+    let log_file = match &cli.log_file {
+        Some(p) => Some(std::path::PathBuf::from(p)),
+        None => config_log_file(cli.config.as_deref()),
+    };
+
+    // Two independent sinks rather than one tee'd writer: stdout keeps its ANSI colours while the
+    // optional log file stays plain text — a single writer can't hold both ANSI settings at once.
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            // boringtun WARN-spams HANDSHAKE(REKEY_TIMEOUT) every ~5s while retrying a handshake
+            // with a peer whose device is down — not actionable; reachability is surfaced in status.
+            .unwrap_or_else(|_| "info,defguard_boringtun::noise::timers=error".into());
+        let stdout_layer = tracing_subscriber::fmt::layer();
+        let file_layer = log_file
+            .as_deref()
+            .map(|path| -> anyhow::Result<_> {
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .with_context(|| format!("opening log file {}", path.display()))?;
+                // Dup'd per event (`try_clone`) so the subscriber needs no lock.
+                Ok(tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(move || file.try_clone().expect("clone log file handle")))
+            })
+            .transpose()?;
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(stdout_layer)
+            .with(file_layer)
+            .init();
+    }
 
     // Everything else runs on a multi-threaded runtime (as `#[tokio::main]` did before).
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -257,7 +291,12 @@ fn main() -> anyhow::Result<()> {
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
     // `--config`/`--token` are top-level args shared by every arm: the first names the config (and
     // hence the control socket), the second overrides the config's `enrollment_key`.
-    let Cli { cmd, config, token } = cli;
+    let Cli {
+        cmd,
+        config,
+        token,
+        log_file: _,
+    } = cli;
     match cmd {
         Some(Cmd::WgSmoke { ifname }) => wg_smoke(&ifname),
         Some(Cmd::WgKeygen) => {
@@ -463,6 +502,17 @@ fn config_search_paths() -> Vec<std::path::PathBuf> {
 /// The first candidate that exists, or `None` when the search came up empty.
 fn first_existing(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
     paths.iter().find(|p| p.is_file()).cloned()
+}
+
+/// Peek the config (read-only, no bootstrap) for its resolved `log_file`, so the subscriber can be
+/// set up before any command loads the config for real. Best-effort: an absent config on the search
+/// path, or one that won't parse, simply yields no file logging.
+fn config_log_file(config_arg: Option<&str>) -> Option<std::path::PathBuf> {
+    let path = match config_arg {
+        Some(p) => std::path::PathBuf::from(p),
+        None => first_existing(&config_search_paths())?,
+    };
+    Config::load(&path).ok()?.log_file_path()
 }
 
 /// Resolve the config an invocation reads. An explicit `-c` is taken as-is (so a typo'd path fails
@@ -955,6 +1005,16 @@ mod tests {
     fn an_explicit_path_is_taken_as_is_even_when_it_does_not_exist() {
         let p = resolve_existing_config(Some("/nonexistent/typo.toml".into())).unwrap();
         assert_eq!(p, std::path::Path::new("/nonexistent/typo.toml"));
+    }
+
+    /// `--log-file` is a global flag, so it must parse whether it comes before or after the
+    /// subcommand — the two spots a user naturally reaches for.
+    #[test]
+    fn log_file_is_accepted_on_either_side_of_the_subcommand() {
+        let before = Cli::parse_from(["unitylan-engine", "--log-file", "/var/log/x", "run"]);
+        assert_eq!(before.log_file.as_deref(), Some("/var/log/x"));
+        let after = Cli::parse_from(["unitylan-engine", "run", "--log-file", "/var/log/x"]);
+        assert_eq!(after.log_file.as_deref(), Some("/var/log/x"));
     }
 
     /// Coming up empty has to say where it looked, or the user has no idea what to fix.
