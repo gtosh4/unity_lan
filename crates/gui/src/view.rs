@@ -180,14 +180,6 @@ impl App {
         column![header("engine"), muted(msg)].spacing(6).into()
     }
 
-    /// Mesh connect/disconnect over the control socket. Disconnect keeps the engine resident and
-    /// polling (instant reconnect) but brings the interface's link administratively down and drops
-    /// all peers, withdrawing us from co-members' seed lists. Connect brings the link back up.
-    /// Hidden until we have a status (need the socket) and only when enrolled (`!needs_login`).
-    /// The always-visible compact status strip above the tabs: coordinator + mesh health as two
-    /// dotted items, a connect/disconnect toggle, and (when offered) the update button. The verbose
-    /// account/version detail lives in the Manage tab's [`account_section`](Self::account_section)
-    /// instead, so this stays one line.
     /// A prominent top-of-window banner shown once the engine is already running a newer version than
     /// this GUI process — the update swapped both binaries on disk but this window is still the old
     /// code, and the control protocol carries no version, so an unknown field reads as a parse error
@@ -219,6 +211,14 @@ impl App {
         )
     }
 
+    /// The always-visible compact status strip above the tabs: coordinator + mesh health as two
+    /// dotted items, a connect/disconnect toggle, and (when offered) the update button. The verbose
+    /// account/version detail lives in the Manage tab's [`account_section`](Self::account_section)
+    /// instead, so this stays one line. The toggle drives mesh connect/disconnect over the control
+    /// socket: disconnect keeps the engine resident and polling (instant reconnect) but brings the
+    /// interface's link administratively down and drops all peers, withdrawing us from co-members'
+    /// seed lists; connect brings the link back up. Hidden until we have a status (need the socket)
+    /// and only when enrolled (`!needs_login`).
     fn status_strip(&self) -> Option<Element<'_, Message>> {
         let status = self.status.as_ref()?;
         let connected = status.connected;
@@ -955,10 +955,6 @@ fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
         .into()
 }
 
-/// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
-/// A peer's status as a single health color plus a label. One color axis: green = the tunnel is up
-/// (however it's reached), amber = still connecting, red = down. The label carries the path detail
-/// (`direct`/`relayed`/`ice`) or the reason it's not up — so the dot never contradicts the word.
 /// Sort key ordering peers within a group: most shared networks first, then lowest latency, then
 /// handle (case-insensitive) as a stable tiebreak. `latency` is the caller's *smoothed* (EWMA) RTT,
 /// not the raw per-poll reading, so the order settles instead of flickering; `None` (offline / no
@@ -974,6 +970,10 @@ pub(crate) fn peer_sort_key(
     )
 }
 
+/// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
+/// One color axis: green = the tunnel is up (however it's reached), amber = still connecting,
+/// red = down. The label carries the path detail (`direct`/`relayed`/`ice`) or the reason it's not
+/// up — so the dot never contradicts the word.
 fn peer_status(reach: PeerReach, up: bool) -> (Color, &'static str) {
     match (up, reach) {
         (true, PeerReach::Relayed) => (GREEN, "relayed"),

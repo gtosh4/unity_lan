@@ -18,7 +18,7 @@ other **via the coordinator (long-poll)** and form direct P2P tunnels. Hostnames
 | **User** | A Discord identity (global `@handle`) = the **owner** of devices. |
 | **Device** | A WireGuard keypair = one machine. A user owns 1..N devices; one is **primary**. |
 | **Network** | A Discord **role** an admin **registered** as a network. An **ACL group** (who may peer), *not* a subnet. Not every role is a network. |
-| **Attestation** | A short-lived coordinator-signed token proving `user + role + device_name + ip + wg_pubkey (+ is_primary)`. The unit of membership. |
+| **Attestation** | A short-lived coordinator-signed token proving `guild + user + device_name + ip + wg_pubkey (+ is_primary)`. Binds identity to a guild — **not** to a role; network membership rides separately in the snapshot. The unit of identity. |
 | **Mesh** | Direct WireGuard tunnels between all online devices that share ≥1 network. |
 
 Networks may **overlap** (a device in several roles). Since the data plane is P2P, a device
@@ -105,14 +105,16 @@ mesh state and the coordinator session. One device = one engine:
 - **GUI** — unprivileged **iced** desktop app + tray, for non-technical users. Login, device
   name/primary, join networks, expose ports, status. Mesh keeps running when the window closes.
 - **CLI** — same operations, for **headless dedicated game-server hosts** (no desktop). E.g.
-  `unitylan enroll --name gameserver`, `unitylan expose 25565 --net minecraft`, `unitylan status`.
+  `unitylan-engine ctl expose 25565 minecraft`, `unitylan-engine ctl status`; a headless box
+  enrolls by registering with a one-time key (`unitylan-engine run --token <key>`).
 
 ### 3.3 Device enrollment ✅
 A device proves it belongs to a user in one of two ways (Tailscale-style):
 - **Interactive** (has a browser/Discord): OAuth `identify` → session → register the device's
   pubkey.
 - **Headless** (game-server box): the user, on an already-authed device, mints a one-time
-  **enrollment key** (`unitylan enroll-key`); the box registers with it → coordinator binds
+  **enrollment key** (the `/unitylan enroll` Discord command); the box registers with it
+  (`--token`) → coordinator binds
   its pubkey to the user. **No Discord client needed on the box** — only HTTP to the coordinator.
   A stolen key lets an attacker bind **their** pubkey as a device of the victim's user (all that
   user's networks), so it is a **bearer secret**: ≥128-bit random, **short expiry** (minutes,
@@ -132,15 +134,20 @@ of the hot path.
 ### 4.1 Attestation (bot-signed, stable)
 ```
 Attestation  (Ed25519-signed by the guild coordinator)
-  guild_id
-  role_id        # = the network
+  guild_id       # which guild's key signed this; checked against the pinned anchor
   user_id
-  nick           # guild nickname, sanitized (DNS label)
+  username       # global @handle, sanitized (DNS label) — NOT the guild nickname
+  device_name    # sanitized (DNS label)
+  is_primary     # is this the user's <user>.unity.internal primary device
   wg_ip          # coordinator-allocated, stable
+  wg_net         # the mesh CIDR wg_ip must fall within
   wg_pubkey      # binds identity → key
   issued_at
   expires_at     # TTL = 30 min (default)
 ```
+- **No role/network is signed.** A device in N guilds gets N attestations (same identity,
+  different guild signer). Which networks it shares with you rides separately in the snapshot;
+  the coordinator gates access by only listing peers you share a network with.
 - **Trust anchor**: the guild's Ed25519 public key, pinned by the client on first OAuth
   (delivered over TLS). **Verification rule (MUST):** accept an attestation iff it is **signed by
   the pinned guild key**, its **`guild_id` == the pinned guild**, **and** it is **unexpired**. The
@@ -347,9 +354,9 @@ laptop.alice.unity.internal          ← another device
 
 ### 6.3 Primary device
 The `<user>.unity.internal` alias is a *global* name, so **primary is authoritative at the
-coordinator** (`primary_device` per `(community, user)`) and propagated in register/refresh
+coordinator** (`primary_device`, one per `user`) and propagated in register/refresh
 (an `is_primary` flag per device). Default = first enrolled. Owner-updatable from **any** of
-their devices (`unitylan primary <device>`) — no need for the old/dead one; on primary
+their devices (`unitylan-engine ctl set-primary <device>`) — no need for the old/dead one; on primary
 removal the coordinator auto-promotes. Moving networks = an endpoint refresh, not a device
 change.
 
@@ -440,7 +447,7 @@ engine via its control socket (no privilege in the front-ends):
 - **Devices** — this device's name, set/see **primary**, list/remove the user's devices.
 - **Networks** — list networks you're entitled to; toggle participation locally (you must
   already hold the role; this does not grant Discord roles).
-- **Expose** — expose a local port to a network (e.g. `expose 25565 --net minecraft`).
+- **Expose** — expose a local port to a network (e.g. `ctl expose 25565 minecraft`).
 - **Status** — networks, co-devices, tunnels, resolved names, NAT state (live event stream).
 
 ## 9. Security & Trust

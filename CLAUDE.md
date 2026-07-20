@@ -113,7 +113,7 @@ with into your snapshot. Peers **pin one anchor per guild** (TOFU) and verify ea
 attestation against the matching guild anchor, checking `guild_id` — so a compromised guild key's
 blast radius is one guild. The coordinator never sees peer traffic.
 
-**Discovery is coordinator-mediated long-poll, not gossip** (`coordinator/src/api.rs`,
+**Discovery is coordinator-mediated long-poll, not gossip** (`coordinator/src/api/`,
 `engine/src/coord.rs`). Clients long-poll `/register` + `/refresh`; the coordinator holds each
 request `LONGPOLL_HOLD_SECS` (≈ attestation TTL / 2) then rebuilds a fresh, re-signed snapshot.
 A membership change bumps a shared `watch` **version**, which wakes every parked client at once.

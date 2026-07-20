@@ -89,7 +89,7 @@ The engine is a **public PKCE client** — it holds no secret, and it owns the l
 - **Role IDs** — registered per guild via `/unitylan network add` (D), stored in SQLite.
 - **Your User ID** — only handy for ad-hoc testing.
 
-🔒 Bot token + client secret are secrets. `.gitignore` excludes `coordinator.toml`, `*.key`,
+🔒 Bot token + admin token are secrets. `.gitignore` excludes `coordinator.toml`, `*.key`,
 `*.db`. Put secrets straight in the file; don't paste in chat.
 
 For the optional monitoring surface (`[admin]` block → dashboard + Prometheus `/metrics`), see

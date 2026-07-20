@@ -207,8 +207,9 @@ backends on an elevated box: `wg-smoke` (bring a WG interface up/down) and
 ## Packaging
 
 Linux `.deb`/`.rpm` and the coordinator Docker image are built from `packaging/` — see
-`packaging/README.md`. A Windows MSI/WiX installer (bundling engine + GUI + `wireguard.dll` and
-registering the service) is still TODO.
+`packaging/README.md`. The Windows MSI/WiX installer (bundling engine + GUI + `wireguard.dll`,
+registering the service, and launching the GUI) is built from `packaging/windows/`
+(`unitylan.wxs` + `build.ps1`).
 
 ## Changing a wire type
 

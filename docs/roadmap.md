@@ -93,16 +93,17 @@ rejects.
 - [x] `scripts/mesh-test.sh`: coordinator + two engine daemons in separate netns mesh and
       ping across — **PASS**, no host root, no manual link-up/routes.
 
-### M3b — P2P gossip (attempted, deferred)
-Prototyped a bidirectional gossip exchange over the mesh, then reverted. **Finding:** gossip
-runs *over* WG tunnels, and WireGuard needs **reciprocal** peer knowledge to open a tunnel
-(a peer drops handshakes from pubkeys it hasn't been told about). So a node can only gossip
-with peers that already know it — gossip cannot bootstrap discovery of a peer that doesn't
-know you. The coordinator's full-seed `/register` is therefore the real discovery mechanism
-(and it already yields a full reciprocal mesh). Gossip's remaining value here is only
-endpoint-freshness + less coordinator polling — marginal — and the prototype had a 3-node
-convergence bug. **Deferred** until there's a concrete need (e.g. very large meshes, or
-frequent roaming) and a reciprocity-aware bootstrap (ring/hub seed selection).
+### M3b — P2P gossip refresh ✅ (shipped, default-on)
+An early gossip *discovery* prototype was reverted. **Finding:** gossip runs *over* WG tunnels,
+and WireGuard needs **reciprocal** peer knowledge to open a tunnel (a peer drops handshakes from
+pubkeys it hasn't been told about). So a node can only gossip with peers that already know it —
+gossip cannot bootstrap discovery of a peer that doesn't know you. Discovery therefore stays
+coordinator-mediated: the full-seed `/register` yields a reciprocal mesh.
+
+What shipped instead is gossip **refresh**: already-connected peers pull each other's fresh
+attestations directly over the mesh, cutting coordinator polling and speeding endpoint updates
+without adding a discovery path. It is **on by default** (`gossip = true`) — see
+`docs/gossip-refresh.md`, `crates/engine/src/p2p.rs`, and `scripts/gossip-test.sh`.
 
 **Verify (M3a):** ✅ two daemons mesh via coordinator seeds and ping across
 (`scripts/mesh-test.sh`).

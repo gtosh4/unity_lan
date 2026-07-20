@@ -33,8 +33,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tray::TrayMsg;
 use view::parse_port;
 
-/// The main window's settings. `exit_on_close_request(false)` so the close button hits our
-/// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
 /// The app icon (titlebar + taskbar/dock while running), rendered from the shared squircle SVG via
 /// resvg. Straight-alpha RGBA is what winit's `from_rgba` wants; `None` if rendering ever fails so a
 /// missing icon never blocks the window from opening.
@@ -63,6 +61,8 @@ fn app_icon() -> Option<window::Icon> {
     window::icon::from_rgba(px, N, N).ok()
 }
 
+/// The main window's settings. `exit_on_close_request(false)` so the close button hits our
+/// `CloseRequested` handler (hide-to-tray) instead of destroying the window out from under us.
 fn window_settings() -> window::Settings {
     #[allow(unused_mut)]
     let mut settings = window::Settings {

@@ -7,6 +7,10 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
+- **A peer changing reachability is now logged.** When a peer goes down or comes back — or shifts
+  between direct, ICE, relayed, and unreachable — the engine logs the transition with the peer and
+  how long since its last handshake, so a peer that intermittently drops leaves a timestamped trail
+  instead of only showing up as a fluctuating `ctl status`.
 - **The engine can also write its logs to a file.** Logs still print to the console as before;
   now they can additionally be appended (plain text, no colour codes) to a file, so a foreground
   `unitylan-engine run` whose output would otherwise scroll away is kept for later. Set it in
@@ -55,6 +59,24 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   but the ordering now follows a smoothed (rolling-average) latency instead of the raw reading, so
   normal probe-to-probe jitter no longer swaps near-equal peers back and forth each poll. The number
   shown on each row is still the latest measured round-trip — only the list order is damped.
+- **Name lookups stayed broken on hosts running Tailscale even once traffic flowed.** Clearing
+  Tailscale's block let peers reach each other, but `.unity.internal` names still failed: a lookup
+  goes to this machine's *own* mesh address, and the kernel loops that back on the loopback
+  interface, where an exemption written for the mesh interface never applies. Both paths are now
+  exempt — the loopback one scoped to just this host's own address.
+- **Tailscale's mesh-range block is now cleared automatically.** Tailscale installs a firewall rule
+  that drops UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, which
+  blackholes the entire mesh while peers still look perfectly reachable. The engine already spotted
+  this and told you the command to run; it now inserts the exemption itself, re-checks it whenever
+  the firewall reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it
+  on shutdown. Set `tailscale_compat = false` to go back to being told rather than fixed. Linux only.
+- **The exposed-ports list now shows who can actually reach each port.** Every port is one row with
+  a labelled chip per scope that can reach it, instead of one look-alike row per scope; a chip whose
+  peers are all offline is marked, since the port is open but nothing can currently connect. Each
+  chip closes just that scope, and the row closes all of them.
+- **Exposing a port no longer means typing the network name.** The scope is a picker built from the
+  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and the port
+  field reports a bad value as you type instead of after you submit.
 
 ### Fixed
 
@@ -120,29 +142,21 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   newer**: an older one doesn't send those ids, and rather than guess, the client treats such a
   network as un-exposable — a port scoped to one stays closed until the coordinator is updated.
   Upgrade the coordinator before, or together with, the clients.
-
-### Changed
-
-- **Name lookups stayed broken on hosts running Tailscale even once traffic flowed.** Clearing
-  Tailscale's block let peers reach each other, but `.unity.internal` names still failed: a lookup
-  goes to this machine's *own* mesh address, and the kernel loops that back on the loopback
-  interface, where an exemption written for the mesh interface never applies. Both paths are now
-  exempt — the loopback one scoped to just this host's own address.
-- **Tailscale's mesh-range block is now cleared automatically.** Tailscale installs a firewall rule
-  that drops UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, which
-  blackholes the entire mesh while peers still look perfectly reachable. The engine already spotted
-  this and told you the command to run; it now inserts the exemption itself, re-checks it whenever
-  the firewall reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it
-  on shutdown. Set `tailscale_compat = false` to go back to being told rather than fixed. Linux only.
-
-||||||| 11d81f8
-- **The exposed-ports list now shows who can actually reach each port.** Every port is one row with
-  a labelled chip per scope that can reach it, instead of one look-alike row per scope; a chip whose
-  peers are all offline is marked, since the port is open but nothing can currently connect. Each
-  chip closes just that scope, and the row closes all of them.
-- **Exposing a port no longer means typing the network name.** The scope is a picker built from the
-  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and the port
-  field reports a bad value as you type instead of after you submit.
+- **A one-time enrollment key could enrol more than one device.** The coordinator checked whether a
+  key was still unused and then bound it in two separate steps, so two registrations that raced —
+  the same leaked key presented with two different device keys at once — could both slip past the
+  check and both enrol, each as a device of the key's owner. The claim is now a single atomic step,
+  so exactly one of any racing pair wins and a "one-time" key really does admit only one device.
+- **The engine's control socket was briefly world-reachable as it started.** On Linux the socket was
+  created at the process's default permissions and only tightened to owner/group a moment later,
+  leaving a window in which any local user could connect and drive the daemon. It is now created
+  locked down from the outset, and if the tightening that opens it to the intended group ever fails
+  the socket stays private rather than falling open.
+- **A downgrade couldn't be forced by replaying an old update.** The engine already refused to
+  "update" to a version at or below the one it runs, but a stale, still-validly-signed release
+  offer for a version between the two could have been replayed to walk a client back onto a release
+  with a known flaw. Once the engine has seen a given release it now refuses any older one, signed
+  or not.
 
 ## v0.3.1
 
