@@ -118,12 +118,46 @@ pub struct Config {
     pub gossip: bool,
 }
 
-/// A config-seeded port exposure. `proto` defaults to `tcp`.
+/// A config-seeded port exposure. `proto` defaults to `tcp`, and the scope to every peer.
+///
+/// Scope mirrors the `ctl expose` flags: `net = "<name>"` restricts the port to that network's
+/// peers, `own_devices = true` to the owner's other devices. They're mutually exclusive — an
+/// exposure has exactly one scope — and naming both is a config error rather than a silent
+/// precedence rule.
+///
+/// ```toml
+/// [[expose]]
+/// port = 25565            # every peer
+///
+/// [[expose]]
+/// port = 22
+/// own_devices = true      # only this owner's other devices
+/// ```
 #[derive(Debug, Deserialize)]
 pub struct ExposeSeed {
     pub port: u16,
     #[serde(default = "default_proto")]
     pub proto: String,
+    #[serde(default)]
+    pub net: Option<String>,
+    #[serde(default)]
+    pub own_devices: bool,
+}
+
+impl ExposeSeed {
+    /// The scope this seed names, or an error if it names two.
+    pub fn scope(&self) -> anyhow::Result<common::control::ExposeScope> {
+        match (&self.net, self.own_devices) {
+            (Some(n), false) => Ok(common::control::ExposeScope::Net(n.clone())),
+            (None, true) => Ok(common::control::ExposeScope::OwnDevices),
+            (None, false) => Ok(common::control::ExposeScope::AllPeers),
+            (Some(_), true) => anyhow::bail!(
+                "expose entry for port {} sets both `net` and `own_devices`; an exposure has one \
+                 scope, so pick one (repeat the entry to open a port to both)",
+                self.port
+            ),
+        }
+    }
 }
 
 fn default_true() -> bool {
@@ -269,6 +303,56 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config-seeded exposure gets the same three scopes as `ctl expose`, defaulting to the
+    /// behaviour config seeds always had (every peer).
+    #[test]
+    fn expose_seeds_carry_a_scope() {
+        let cfg: Config = toml::from_str(
+            r#"
+coordinator = "https://c"
+state_dir = "s"
+[[expose]]
+port = 25565
+[[expose]]
+port = 9001
+net = "minecraft"
+[[expose]]
+port = 22
+proto = "tcp"
+own_devices = true
+"#,
+        )
+        .unwrap();
+        let scopes: Vec<_> = cfg.expose.iter().map(|e| e.scope().unwrap()).collect();
+        assert_eq!(
+            scopes,
+            vec![
+                common::control::ExposeScope::AllPeers,
+                common::control::ExposeScope::Net("minecraft".into()),
+                common::control::ExposeScope::OwnDevices,
+            ],
+        );
+    }
+
+    /// Naming two scopes is ambiguous, and the tempting resolutions (last wins, `net` wins) would
+    /// each silently pick a different audience than half of readers expect. Refuse instead.
+    #[test]
+    fn an_expose_seed_naming_two_scopes_is_refused() {
+        let cfg: Config = toml::from_str(
+            r#"
+coordinator = "https://c"
+state_dir = "s"
+[[expose]]
+port = 22
+net = "minecraft"
+own_devices = true
+"#,
+        )
+        .unwrap();
+        let err = cfg.expose[0].scope().unwrap_err().to_string();
+        assert!(err.contains("both"), "{err}");
+    }
 
     fn validate(url: &str, allow: bool) -> anyhow::Result<()> {
         let toml =

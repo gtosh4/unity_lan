@@ -357,6 +357,22 @@ trait WgBackend { ensure_iface, set_peer, remove_peer, gen_keypair, ... }
 `nftables.rs` (Linux) / `windows.rs` (PowerShell) enforce **default-deny on `unl0`** — a second gate
 beyond role membership. Both sides of the platform split are tested (arg-construction unit tests).
 
+An exposure carries one `ExposeScope` — all peers, the owner's own devices, or one network — and the
+scoped ones are source-IP filtered against a set the daemon rebuilds on every membership change
+(`PeerSets`). Own devices are matched by **identity** (a seed carrying our own `user_id`), not
+membership: the coordinator has no own-device network, and such peers arrive with an empty
+`networks` list. Opening a port to several networks means several exposures, whose source sets the
+ruleset unions — which is what lets one scope be closed while its siblings stay.
+
+**Known issue: nft set names can collide.** `set_name` sanitizes a network name to a valid nft
+identifier by mapping every non-alphanumeric character to `_`, so two networks whose names differ
+only in punctuation (`game-night` and `game_night`) map to the same `net_game_night` set and would
+share one source set — each admitting the other's peers. Discord role names are user-chosen, so this
+is reachable, though it needs an admin to create two near-identical roles in guilds you're both in.
+Unfixed. A hash suffix or an index-keyed name would resolve it. Note the own-device set is *not*
+exposed to this: network sets keep the `net_` prefix, so a role named `own devices` becomes
+`net_own_devices` and never `own_devices` (asserted in `fw::nftables::tests`).
+
 ### 5.4 Discovery client (`coord.rs`, `daemon.rs`, `p2p.rs`)
 Long-poll register/refresh (§4.2); verify each `Seed`'s attestation(s) against the matching pinned
 guild anchor; diff the desired peer-set against WG → `set_peer`/`remove_peer`.

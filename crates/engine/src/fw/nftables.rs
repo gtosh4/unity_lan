@@ -29,6 +29,12 @@ impl FirewallBackend for NftBackend {
 ///
 /// Network names keep the `net_` prefix, which is what keeps the own-device set distinct: a role
 /// named "own devices" becomes `net_own_devices`, never `own_devices`.
+///
+/// **Known issue (not addressed, see `docs/technical.md` §5.3): this sanitization is not
+/// injective.** Every non-alphanumeric character maps to `_`, so `game-night` and `game_night` both
+/// become `net_game_night` and share one source set — each network's peers would reach the other's
+/// scoped ports. Role names are user-chosen, so it's reachable; it needs two near-identical roles
+/// in guilds you hold both of. A hash suffix or an index-keyed name would fix it.
 fn set_name(scope: &ExposeScope) -> String {
     match scope {
         ExposeScope::OwnDevices => "own_devices".to_string(),

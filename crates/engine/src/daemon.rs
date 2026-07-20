@@ -104,16 +104,18 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         let seeds: Vec<Exposed> = cfg
             .expose
             .iter()
-            .map(|e| Exposed {
-                proto: match e.proto.to_ascii_lowercase().as_str() {
-                    "udp" => common::control::Proto::Udp,
-                    _ => common::control::Proto::Tcp,
-                },
-                port: e.port,
-                // Config seeds carry no scope, so they stay all-peers as they always have.
-                scope: common::control::ExposeScope::AllPeers,
+            .map(|e| {
+                Ok(Exposed {
+                    proto: match e.proto.to_ascii_lowercase().as_str() {
+                        "udp" => common::control::Proto::Udp,
+                        _ => common::control::Proto::Tcp,
+                    },
+                    port: e.port,
+                    scope: e.scope()?,
+                })
             })
-            .collect();
+            .collect::<anyhow::Result<_>>()
+            .context("reading the `expose` list")?;
         let f = Arc::new(Firewall::load(
             fw::default_backend(),
             cfg.iface.clone(),
