@@ -177,10 +177,21 @@ impl Firewall {
         state_dir: &Path,
     ) -> Self {
         let path = state_dir.join("exposed.json");
-        let exposed = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Vec<Exposed>>(&b).ok())
-            .unwrap_or(seeds);
+        // A file that exists but won't parse is a real signal, not a missing file: it means a
+        // rollback met a state file a newer version wrote (scopes it has no variant for). Falling
+        // back to the config seeds is right — never guess at intent — but do it loudly, or every
+        // runtime exposure vanishes with no trace of why.
+        let exposed = match std::fs::read(&path) {
+            Ok(b) => serde_json::from_slice::<Vec<Exposed>>(&b).unwrap_or_else(|e| {
+                tracing::warn!(
+                    path = %path.display(),
+                    "could not read the exposed-port state ({e}); falling back to the config \
+                     `expose` list. Ports opened at runtime are closed until re-exposed"
+                );
+                seeds.clone()
+            }),
+            Err(_) => seeds.clone(),
+        };
         Self {
             backend,
             iface,

@@ -1173,12 +1173,16 @@ async fn register_until_ready(
 /// yet know who we are and so admit nobody.
 fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
     let mut sets = crate::fw::PeerSets::default();
+    let mut unidentified: Vec<&str> = Vec::new();
     for s in seeds {
         for n in &s.networks {
             // A network with no `(guild_id, role_id)` comes from a coordinator that predates the
             // ids. It stays displayable but unscopable: inventing an identity for it (say `0/0`)
             // would merge every such network into one source set and cross-admit all of them.
             let Some((guild_id, role_id)) = n.id() else {
+                if !unidentified.contains(&n.name.as_str()) {
+                    unidentified.push(&n.name);
+                }
                 continue;
             };
             match sets
@@ -1201,6 +1205,15 @@ fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
         }
     }
     sets.nets.sort_by_key(|n| (n.guild_id, n.role_id));
+    // Say so once per rebuild rather than leaving a port that never opens with no explanation
+    // anywhere: an exposure scoped to one of these admits nobody until the coordinator is updated.
+    if !unidentified.is_empty() {
+        tracing::warn!(
+            networks = ?unidentified,
+            "coordinator did not send guild/role ids for these networks, so ports cannot be exposed \
+             to them (an existing exposure scoped to one stays closed); update the coordinator"
+        );
+    }
     sets
 }
 

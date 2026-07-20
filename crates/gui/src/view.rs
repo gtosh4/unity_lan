@@ -921,11 +921,18 @@ fn proto_toggle(current: Proto) -> Element<'static, Message> {
 /// offline is dimmed and marked — the rule is installed but nothing can currently reach it, and a
 /// chip that looked identical to a live one would read as working.
 fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
-    // The engine resolved the ids to a name for us; a frontend can't do that lookup itself.
-    let label = if e.active {
-        e.label.clone()
+    // The engine resolves the scope's ids to a name for us; a frontend can't do that lookup itself.
+    // An engine older than the `label` field sends none, so fall back to what the scope can say on
+    // its own — an unlabelled chip would render as an empty box with a close button.
+    let name = if e.label.is_empty() {
+        e.scope.fallback_label()
     } else {
-        format!("{} (nobody online)", e.label)
+        e.label.clone()
+    };
+    let label = if e.active {
+        name
+    } else {
+        format!("{name} (nobody online)")
     };
     let body = row![
         text(label)
