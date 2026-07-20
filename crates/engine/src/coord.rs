@@ -339,6 +339,24 @@ fn verify_against_pinned(
     None
 }
 
+/// The first attestation in `blobs` that both verifies against a pinned guild anchor and satisfies
+/// `accept`, paired with the source `GuildAttestation`. The shared trust gate behind grant, seed,
+/// and pull verification — keeping the three from drifting apart. Undecodable or unverifiable blobs
+/// (and ones `accept` rejects) are skipped, so `None` means *none* cleared: fail closed, and one bad
+/// blob never rejects the rest of the batch.
+fn first_verified<'a>(
+    blobs: &'a [GuildAttestation],
+    pinned: &[(u64, [u8; 32])],
+    now: u64,
+    accept: impl Fn(&Attestation) -> bool,
+) -> Option<(&'a GuildAttestation, Attestation)> {
+    blobs.iter().find_map(|ga| {
+        let signed = Signed::from_base64(&ga.attestation).ok()?;
+        let att = verify_against_pinned(&signed, pinned, now, ga.att_schema)?;
+        accept(&att).then_some((ga, att))
+    })
+}
+
 /// Verify our grant: return the first per-guild attestation that verifies against its pinned anchor,
 /// with its community name (the representative hostname for this device). Fails closed if none do.
 fn verify_grant(
@@ -346,13 +364,11 @@ fn verify_grant(
     pinned: &[(u64, [u8; 32])],
     now: u64,
 ) -> anyhow::Result<(Attestation, String)> {
-    for ga in &grant.attestations {
-        let signed = Signed::from_base64(&ga.attestation).context("decoding grant attestation")?;
-        if let Some(att) = verify_against_pinned(&signed, pinned, now, ga.att_schema) {
-            return Ok((att, ga.community_name.clone()));
-        }
-    }
-    bail!("no grant attestation verified against a pinned guild anchor")
+    first_verified(&grant.attestations, pinned, now, |_| true)
+        .map(|(ga, att)| (att, ga.community_name.clone()))
+        .ok_or_else(|| {
+            anyhow::anyhow!("no grant attestation verified against a pinned guild anchor")
+        })
 }
 
 /// Verify a peer's self-served attestations (from a p2p pull, `docs/gossip-refresh.md`) against our
@@ -368,20 +384,12 @@ pub fn verify_pulled(
     now: u64,
 ) -> Option<Attestation> {
     let pinned = keys::load_all_pinned(state_dir);
-    for ga in blobs {
-        let Ok(signed) = Signed::from_base64(&ga.attestation) else {
-            continue;
-        };
-        if let Some(att) = verify_against_pinned(&signed, &pinned, now, ga.att_schema) {
-            if att.wg_pubkey == expected_pubkey
-                && att.wg_net.contains(&att.wg_ip)
-                && att.expires_at > current_expiry
-            {
-                return Some(att);
-            }
-        }
-    }
-    None
+    first_verified(blobs, &pinned, now, |att| {
+        att.wg_pubkey == expected_pubkey
+            && att.wg_net.contains(&att.wg_ip)
+            && att.expires_at > current_expiry
+    })
+    .map(|(_, att)| att)
 }
 
 /// Fold a peer-direct-verified attestation into a held seed: advance its expiry and re-derive the
@@ -473,17 +481,8 @@ pub fn verified_seeds(resp: &RegisterResp, state_dir: &Path) -> anyhow::Result<V
         // Any one of the peer's shared-guild attestations verifying admits it; the hostname no longer
         // depends on which guild (community left the name — see `Attestation::hostname`), so we just
         // need the first that clears a pinned anchor.
-        let mut verified: Option<Attestation> = None;
-        for ga in &seed.attestations {
-            let Ok(signed) = Signed::from_base64(&ga.attestation) else {
-                tracing::warn!("seed attestation is not decodable — ignoring it");
-                continue;
-            };
-            if let Some(att) = verify_against_pinned(&signed, &pinned, now, ga.att_schema) {
-                verified = Some(att);
-                break;
-            }
-        }
+        let verified =
+            first_verified(&seed.attestations, &pinned, now, |_| true).map(|(_, att)| att);
         // Still fail closed — an unverifiable seed is never peered — but per *peer*, not per batch.
         // A `?` here let one peer deny the whole mesh: a single co-member running a build whose
         // attestation layout we can't read (or mid-rotation, or corrupt) would drop every other peer
