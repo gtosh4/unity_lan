@@ -124,16 +124,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 - **Upgrading UnityLAN on Windows wiped your config and failed the install.** Every in-place upgrade
   (and the automatic update) deleted `engine.toml` mid-install and never put it back, so the engine
   service couldn't be registered and the whole installer rolled back — leaving the previous version's
-  files on disk but no running service, and your coordinator/enrollment settings gone. Two changes fix
-  it: the installer now marks `engine.toml` permanent so an upgrade leaves it untouched (your edits
-  survive), and `service install` writes the default config when it finds none, so the install always
-  finishes with a running service instead of rolling back. Upgrading *from* a version before this fix
-  (0.3.1 or earlier) still resets `engine.toml` to the default that one time — the old installer
-  deletes it on the way out and nothing downstream can recover it — but the upgrade now completes and
-  the service comes up (re-enter coordinator/enrollment once via the GUI); every upgrade after that
-  keeps your edits. One consequence: `engine.toml` is now also left behind by a plain uninstall
-  (previously removed) — the engine's purge-mode uninstall still wipes device state, or you can delete
-  the file by hand.
+  files on disk but no running service, and your coordinator/enrollment settings gone. The config now
+  lives at `%ProgramData%\UnityLAN\engine.toml`, created and owned by the engine rather than the
+  installer — so an upgrade (or uninstall) never touches it and your edits simply persist. A config
+  from an older install (which kept it next to the program files) is migrated to the new location
+  automatically. The installer also no longer fails when the config is briefly absent: it writes a
+  working default so a fresh install or a recovery always comes up with a running service. Upgrading
+  *from* a version before this fix (0.3.1 or earlier) still resets the config to the default that one
+  time — the old installer deletes its own copy on the way out, before the new engine can rescue it —
+  but the upgrade now completes and the service starts (re-enter coordinator/enrollment once via the
+  GUI); every upgrade after that keeps your edits.
 - **A Windows upgrade no longer risks wedging on the service itself.** The installer used to delete
   and recreate the engine service on every upgrade; if anything held the old service open (an open
   Services console was enough), the deletion lingered and blocked the recreate, failing the upgrade

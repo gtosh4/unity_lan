@@ -480,19 +480,21 @@ fn config_search_paths() -> Vec<std::path::PathBuf> {
     let mut paths = vec![std::path::PathBuf::from("engine.toml")];
     #[cfg(windows)]
     {
-        // The MSI drops engine.toml beside the exe; the service resolves the same way.
-        if let Some(dir) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        {
-            paths.push(dir.join("engine.toml"));
-        }
+        // Canonical home: %ProgramData%\UnityLAN\engine.toml, where the service writes/migrates it.
         if let Some(pd) = std::env::var_os("ProgramData") {
             paths.push(
                 std::path::Path::new(&pd)
                     .join("UnityLAN")
                     .join("engine.toml"),
             );
+        }
+        // Legacy: beside the exe, where installs before the ProgramData move dropped it. Searched
+        // last so a migrated ProgramData config wins over a leftover next to the exe.
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        {
+            paths.push(dir.join("engine.toml"));
         }
     }
     #[cfg(not(windows))]
@@ -969,6 +971,24 @@ mod tests {
         assert!(paths.len() > 1, "no installed location to fall back to");
         #[cfg(not(windows))]
         assert!(paths.contains(&std::path::PathBuf::from("/etc/unitylan/engine.toml")));
+        #[cfg(windows)]
+        {
+            // The ProgramData home is canonical and must be searched before the legacy beside-exe
+            // path, so a config migrated to ProgramData wins over a leftover next to the exe.
+            let program_data = paths
+                .iter()
+                .position(|p| p.to_string_lossy().contains(r"UnityLAN\engine.toml"))
+                .expect("ProgramData\\UnityLAN config on the search path");
+            let exe_dir = std::env::current_exe().unwrap();
+            let legacy = paths
+                .iter()
+                .position(|p| p.parent() == exe_dir.parent())
+                .expect("legacy beside-exe config on the search path");
+            assert!(
+                program_data < legacy,
+                "ProgramData must be searched before the legacy beside-exe path"
+            );
+        }
     }
 
     /// The engine runs as root, so a config planted in a user-writable home directory must never

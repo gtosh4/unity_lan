@@ -5,12 +5,14 @@
     - stages the wireguard-nt DLL where defguard loads it (resources-windows\binaries\, relative to
       the engine exe — the service pins its CWD there so the relative load resolves),
     - drops a Start-menu shortcut to the GUI,
-    - installs a default engine.toml (never overwritten on upgrade so edits survive),
     - registers + removes the LocalSystem service by calling the engine's own `service install`/
       `service uninstall`.
 
+  It does NOT install engine.toml — the engine owns its config at %ProgramData%\UnityLAN\engine.toml
+  (created/migrated by `service install`), so upgrades and uninstalls never touch it.
+
   Build (see build.ps1) supplies these preprocessor vars via `wix build -d`:
-    Version, EngineExe, GuiExe, WgDll, EngineToml
+    Version, EngineExe, GuiExe, WgDll
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="UnityLAN"
@@ -59,20 +61,12 @@
       <Component>
         <File Id="GuiExeStaged" Name="unitylan-gui.new.exe" Source="$(GuiExe)" KeyPath="yes" />
       </Component>
-      <!-- Default config, laid down only on a fresh install. Marked Permanent + NeverOverwrite so a
-           user's edited coordinator/enrollment_key survives an upgrade verbatim. This is subtle:
-           without Permanent, the major upgrade's RemoveExistingProducts (scheduled
-           afterInstallInitialize) DELETES this file, and NeverOverwrite then declines to recreate it
-           (its keypath was present at costing time) — so the upgrade reaches the post-InstallFiles
-           `service install` custom action with no engine.toml, `service install` aborts ("config
-           not found"), and Return="check" rolls the whole upgrade back. Permanent keeps RExP from
-           touching the file at all; NeverOverwrite keeps a reinstall from clobbering edits. Trade-
-           off: Permanent means the file also survives a plain uninstall (a leftover engine.toml and
-           its folder) — the engine's purge-mode uninstall wipes device state, and the file can be
-           deleted by hand. -->
-      <Component Permanent="yes" NeverOverwrite="yes">
-        <File Id="EngineToml" Name="engine.toml" Source="$(EngineToml)" KeyPath="yes" />
-      </Component>
+      <!-- No engine.toml here on purpose. Config lives at %ProgramData%\UnityLAN\engine.toml, written
+           and owned by the engine (`service install` / the service's own startup — see
+           `service::ensure_config`), not the installer. Keeping it out of the MSI's file list means an
+           upgrade or uninstall never touches it, which is what finally retires the bug where
+           RemoveExistingProducts deleted the config out from under `service install`. A legacy config
+           beside the exe (from installs before this move) is migrated to ProgramData on first run. -->
     </ComponentGroup>
 
     <Component Id="WgDllComponent" Directory="BinariesDir">
@@ -86,8 +80,9 @@
 
     <!-- Register/adopt/remove the service via the engine's own installer path. Deferred + no
          impersonation => runs as LocalSystem, which the service create needs. `service install`
-         with no config arg uses engine.toml next to the exe (which we just installed); it
-         canonicalizes that path, so CWD does not matter.
+         with no config arg bootstraps %ProgramData%\UnityLAN\engine.toml (migrating a legacy
+         beside-exe config, else writing the shipped default — see `service::ensure_config`) and bakes
+         that absolute path into the service command line, so CWD does not matter.
 
          On a major upgrade we deliberately do NOT delete the outgoing service — StopService only
          *stops* it (freeing the exe for RemoveFiles) and leaves the registration in place, so the

@@ -66,7 +66,6 @@ finally { Pop-Location }
 $bin = Join-Path $Root 'target\release'
 $engineExe = Join-Path $bin 'unitylan-engine.exe'
 $guiExe = Join-Path $bin 'unitylan-gui.exe'
-$engineToml = Join-Path $Here 'engine.toml'
 
 # --- fetch + stage the wireguard-nt DLL ---
 $wgDll = Join-Path $Root 'resources-windows\binaries\wireguard-amd64.dll'
@@ -87,7 +86,7 @@ if (-not (Test-Path $wgDll)) {
 }
 
 # --- WiX ---
-foreach ($f in @($engineExe, $guiExe, $engineToml, $wgDll)) {
+foreach ($f in @($engineExe, $guiExe, $wgDll)) {
     if (-not (Test-Path $f)) { throw "missing input: $f" }
 }
 
@@ -117,7 +116,6 @@ wix build (Join-Path $Here 'unitylan.wxs') `
     -d "EngineExe=$engineExe" `
     -d "GuiExe=$guiExe" `
     -d "WgDll=$wgDll" `
-    -d "EngineToml=$engineToml" `
     -o $Output
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 

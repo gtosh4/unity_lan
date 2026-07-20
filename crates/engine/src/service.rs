@@ -101,26 +101,17 @@ fn install(config: Option<String>) -> Result<()> {
 
     // The service runs with CWD = System32, so the config path baked into its command line must be
     // absolute. An *explicitly* passed path is never second-guessed — a missing one is a typo, so it
-    // still errors. But for the default path (no arg — how the MSI invokes us) we lay down the shipped
-    // default when it's absent, then use it: a major upgrade's RemoveExistingProducts can delete the
-    // old, `NeverOverwrite`'d engine.toml before this action runs, and with no config `service install`
-    // used to fail and roll the *whole upgrade* back, leaving the machine with no service at all.
-    // Writing the default instead lets the upgrade complete with a working (if not-yet-enrolled)
-    // service — the same state a fresh install lands in, with the GUI prompting login.
+    // still errors. For the default path (no arg — how the MSI invokes us) we bootstrap the config in
+    // `%ProgramData%\UnityLAN`: migrate a legacy beside-the-exe config, else write the shipped default
+    // (see `ensure_config`). The MSI no longer ships `engine.toml` at all, so this is the sole place a
+    // fresh install's config is created.
     let config = match config {
         Some(path) => std::fs::canonicalize(&path).with_context(|| {
             format!("config '{path}' not found — create it before installing the service")
         })?,
         None => {
             let path = default_config_path();
-            if !path.exists() {
-                std::fs::write(&path, DEFAULT_SERVICE_CONFIG)
-                    .with_context(|| format!("writing the default config to {}", path.display()))?;
-                println!(
-                    "No config at {} — wrote the shipped default (edit coordinator/enrollment_key if self-hosting).",
-                    path.display()
-                );
-            }
+            ensure_config(&path)?;
             std::fs::canonicalize(&path)
                 .with_context(|| format!("resolving the default config path {}", path.display()))?
         }
@@ -368,6 +359,11 @@ fn run_service() -> Result<()> {
         }
     }
 
+    // Bootstrap/migrate the config before loading it, so a service whose config went missing (an
+    // upgrade off a build that didn't keep it, or a hand-deleted file) still starts on a sane default
+    // rather than failing — and a legacy beside-the-exe config is imported to the new ProgramData home.
+    ensure_config(Path::new(&cfg_path))
+        .with_context(|| format!("ensuring config at {cfg_path}"))?;
     let cfg =
         Config::load(Path::new(&cfg_path)).with_context(|| format!("loading config {cfg_path}"))?;
 
@@ -468,12 +464,75 @@ fn init_service_logging() {
     }
 }
 
-/// Default config location when none is baked in: alongside the executable.
+/// `%ProgramData%` (e.g. `C:\ProgramData`), with a literal fallback for the impossible case of the
+/// env var being unset — it is always present for a LocalSystem service.
+fn program_data_dir() -> PathBuf {
+    std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+}
+
+/// Where the engine keeps its config: `%ProgramData%\UnityLAN\engine.toml`, alongside its state and
+/// **owned by the engine, not the installer**. Living outside the MSI's file list is deliberate — a
+/// major upgrade (or uninstall) never touches it, so the whole class of bug where RemoveExistingProducts
+/// deleted `engine.toml` out from under `service install` cannot recur once a build stores it here.
 fn default_config_path() -> PathBuf {
+    program_data_dir().join("UnityLAN").join("engine.toml")
+}
+
+/// The pre-ProgramData location: `engine.toml` beside the executable, where the MSI used to install
+/// it. Kept only so [`ensure_config`] can migrate a config an older build left there.
+fn legacy_config_path() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("engine.toml")))
-        .unwrap_or_else(|| PathBuf::from("engine.toml"))
+}
+
+/// Guarantee a config exists at `path`, creating it if missing — the engine, not the installer, owns
+/// `engine.toml` now, so both `install` and the service's own startup bootstrap it. When it's absent:
+///  1. migrate a legacy beside-the-exe config verbatim, so a user's coordinator/enrollment survives
+///     the move to ProgramData (this is the general "run an upgrade step in the new binary" hook —
+///     add future migrations here);
+///  2. otherwise write the shipped [`DEFAULT_SERVICE_CONFIG`].
+///
+/// Idempotent: an existing `path` is left untouched. Creates the parent directory as needed.
+fn ensure_config(path: &Path) -> Result<()> {
+    ensure_config_from(path, legacy_config_path().as_deref())
+}
+
+/// Testable core of [`ensure_config`] with the legacy source injected.
+fn ensure_config_from(path: &Path, legacy: Option<&Path>) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating config directory {}", parent.display()))?;
+    }
+    if let Some(legacy) = legacy {
+        if legacy != path && legacy.is_file() {
+            std::fs::copy(legacy, path).with_context(|| {
+                format!(
+                    "migrating config {} -> {}",
+                    legacy.display(),
+                    path.display()
+                )
+            })?;
+            println!(
+                "Migrated config from {} to {}.",
+                legacy.display(),
+                path.display()
+            );
+            return Ok(());
+        }
+    }
+    std::fs::write(path, DEFAULT_SERVICE_CONFIG)
+        .with_context(|| format!("writing the default config to {}", path.display()))?;
+    println!(
+        "No config at {} — wrote the shipped default (edit coordinator/enrollment_key if self-hosting).",
+        path.display()
+    );
+    Ok(())
 }
 
 #[cfg(test)]
@@ -486,6 +545,46 @@ mod tests {
     /// embedded default ever stopped parsing or failed coordinator validation, a bootstrapped
     /// service would be registered but unable to start. Pin that it round-trips through the real
     /// loader.
+    #[test]
+    fn ensure_config_writes_default_when_nothing_exists() {
+        let dir = TempDir::new("svc-ensure-default");
+        // A nested target whose parent does not exist yet — ensure_config must create it.
+        let target = dir.join("UnityLAN").join("engine.toml");
+        ensure_config_from(&target, None).unwrap();
+        assert!(target.is_file());
+        Config::load(&target).expect("the written default must load + validate");
+    }
+
+    #[test]
+    fn ensure_config_migrates_a_legacy_config() {
+        let dir = TempDir::new("svc-ensure-migrate");
+        let legacy = dir.join("legacy-engine.toml");
+        // A distinctive coordinator so we can tell a migration from a default-write.
+        std::fs::write(&legacy, "coordinator = \"https://mine.example.com\"\n").unwrap();
+        let target = dir.join("pd").join("engine.toml");
+        ensure_config_from(&target, Some(&legacy)).unwrap();
+        let got = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            got.contains("mine.example.com"),
+            "expected the legacy config migrated verbatim, got: {got}"
+        );
+    }
+
+    #[test]
+    fn ensure_config_leaves_an_existing_config_untouched() {
+        let dir = TempDir::new("svc-ensure-idem");
+        let target = dir.join("engine.toml");
+        std::fs::write(&target, "coordinator = \"https://kept.example.com\"\n").unwrap();
+        let legacy = dir.join("legacy.toml");
+        std::fs::write(&legacy, "coordinator = \"https://other.example.com\"\n").unwrap();
+        ensure_config_from(&target, Some(&legacy)).unwrap();
+        let got = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            got.contains("kept.example.com") && !got.contains("other.example.com"),
+            "an existing config must not be overwritten by migration/default, got: {got}"
+        );
+    }
+
     #[test]
     fn default_service_config_loads_and_validates() {
         let dir = TempDir::new("svc-default-cfg");
