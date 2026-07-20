@@ -124,38 +124,171 @@ fn unscoped_ports(exposed: &[Exposed], proto: Proto) -> String {
         .join(", ")
 }
 
-/// The mesh addresses live in `100.64.0.0/10` (RFC 6598 / CGNAT). Tailscale — and potentially
-/// other tools that share this range — install an nftables anti-spoof rule that DROPs any packet
-/// whose source is in that block when it arrives on a non-Tailscale interface. That rule silently
-/// blackholes *all* UnityLAN traffic on the wg interface (a `drop` in any base chain wins over our
-/// `accept`), so peers appear reachable in the coordinator yet every ping is lost.
-///
-/// Heuristic: an `nft` rule that both drops/rejects and references the CGNAT block, outside our own
-/// table (our default-deny is a bare `drop`, so it never matches). Returns the offending line.
-fn cgnat_conflict(ruleset: &str) -> Option<String> {
-    ruleset
-        .lines()
-        .map(str::trim)
-        .find(|l| (l.contains("drop") || l.contains("reject")) && l.contains("100.64.0.0/10"))
-        .map(str::to_string)
+// The mesh addresses live in `100.64.0.0/10` (RFC 6598 / CGNAT). Tailscale — and potentially other
+// tools that share this range — install an nftables anti-spoof rule that DROPs any packet whose
+// source is in that block when it arrives on a non-Tailscale interface. That rule silently
+// blackholes *all* UnityLAN traffic on the wg interface (a `drop` in any base chain wins over our
+// `accept`), so peers appear reachable in the coordinator yet every ping is lost.
+
+/// Marks the exemption rule we insert into the *foreign* chain, so we can find it again to avoid
+/// duplicates and to remove it on teardown. It is the only handle we have on a rule that isn't ours.
+const COMPAT_COMMENT: &str = "unitylan-cgnat-compat";
+
+/// A foreign rule that blackholes the mesh range, and the chain it lives in — we need the location
+/// to insert our exemption ahead of it.
+#[derive(Debug, PartialEq)]
+struct CgnatConflict {
+    family: String,
+    table: String,
+    chain: String,
+    rule: String,
 }
 
-/// Scan the live nftables ruleset for a foreign rule that would blackhole the mesh CGNAT range and,
-/// if found, log an operator warning with remediation. Best-effort: any `nft` failure is ignored.
+/// Heuristic: an `nft` rule that both drops/rejects and references the CGNAT block, outside our own
+/// table (our default-deny is a bare `drop`, so it never matches). Walks the ruleset tracking the
+/// enclosing `table`/`chain` so the caller knows where to insert the exemption.
+fn cgnat_conflict(ruleset: &str) -> Option<CgnatConflict> {
+    let (mut family, mut table, mut chain) = (String::new(), String::new(), String::new());
+    for line in ruleset.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("table ") {
+            let mut it = rest.split_whitespace();
+            family = it.next().unwrap_or_default().to_string();
+            table = it.next().unwrap_or_default().to_string();
+        } else if let Some(rest) = l.strip_prefix("chain ") {
+            chain = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+        } else if (l.contains("drop") || l.contains("reject")) && l.contains("100.64.0.0/10") {
+            return Some(CgnatConflict {
+                family: family.clone(),
+                table: table.clone(),
+                chain: chain.clone(),
+                rule: l.to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// Whether our exemption for `iface` is already installed (so we don't stack a duplicate on every
+/// reconcile).
+fn compat_present(ruleset: &str, iface: &str) -> bool {
+    ruleset
+        .lines()
+        .any(|l| l.contains(COMPAT_COMMENT) && l.contains(&format!("\"{iface}\"")))
+}
+
+/// Locate our previously-inserted exemption, returning the coordinates `nft delete rule` needs.
+fn compat_handle(ruleset: &str, iface: &str) -> Option<(String, String, String, String)> {
+    let (mut family, mut table, mut chain) = (String::new(), String::new(), String::new());
+    for line in ruleset.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("table ") {
+            let mut it = rest.split_whitespace();
+            family = it.next().unwrap_or_default().to_string();
+            table = it.next().unwrap_or_default().to_string();
+        } else if let Some(rest) = l.strip_prefix("chain ") {
+            chain = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string();
+        } else if l.contains(COMPAT_COMMENT) && l.contains(&format!("\"{iface}\"")) {
+            let handle = l.rsplit("# handle ").next()?.trim().to_string();
+            return Some((family.clone(), table.clone(), chain.clone(), handle));
+        }
+    }
+    None
+}
+
+fn nft_ruleset(args: &[&str]) -> Option<String> {
+    let out = Command::new("nft").args(args).output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Scan the live ruleset for a foreign rule that would blackhole the mesh CGNAT range. When `auto`,
+/// exempt our interface in that same chain; otherwise just warn with the manual remediation.
+///
+/// The exemption only re-permits what the foreign rule over-broadly dropped — our own `inet unitylan`
+/// table still independently gates that traffic, so both must accept for a packet to land. Re-run on
+/// every reconcile because the owner of that chain (Tailscale) rebuilds it on restart, silently
+/// dropping our rule; the `compat_present` check keeps that idempotent.
+///
+/// Best-effort throughout: any `nft` failure degrades to the warning rather than failing the reconcile.
 #[cfg(target_os = "linux")]
-pub fn warn_on_cgnat_conflict(iface: &str) {
-    let Ok(out) = Command::new("nft").args(["list", "ruleset"]).output() else {
+pub fn ensure_cgnat_compat(iface: &str, auto: bool) {
+    let Some(ruleset) = nft_ruleset(&["list", "ruleset"]) else {
         return;
     };
-    let ruleset = String::from_utf8_lossy(&out.stdout);
-    if let Some(rule) = cgnat_conflict(&ruleset) {
+    let Some(c) = cgnat_conflict(&ruleset) else {
+        return;
+    };
+    if compat_present(&ruleset, iface) {
+        return;
+    }
+    let manual = format!(
+        "nft insert rule {} {} {} iifname \"{iface}\" accept",
+        c.family, c.table, c.chain
+    );
+    if !auto {
         tracing::warn!(
-            offending_rule = %rule,
+            offending_rule = %c.rule,
             "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
              interfaces; UnityLAN traffic on {iface} will be silently blackholed. Exempt the mesh \
-             interface, e.g. for Tailscale: `nft insert rule ip filter ts-input iifname \"{iface}\" accept`"
+             interface: `{manual}` (or set tailscale_compat = true to do this automatically)"
+        );
+        return;
+    }
+    // Built as argv, never a shell string, so the interface name is not subject to quoting.
+    let ok = Command::new("nft")
+        .args([
+            "insert",
+            "rule",
+            &c.family,
+            &c.table,
+            &c.chain,
+            "iifname",
+            iface,
+            "accept",
+            "comment",
+            COMPAT_COMMENT,
+        ])
+        .status()
+        .is_ok_and(|s| s.success());
+    if ok {
+        tracing::info!(
+            offending_rule = %c.rule,
+            "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
+             interfaces; inserted an exemption for {iface} in {} {} {} (removed on shutdown; set \
+             tailscale_compat = false to manage this yourself)",
+            c.family, c.table, c.chain
+        );
+    } else {
+        tracing::warn!(
+            offending_rule = %c.rule,
+            "another firewall (likely Tailscale) drops the mesh range 100.64.0.0/10 on non-mesh \
+             interfaces and the automatic exemption failed; UnityLAN traffic on {iface} will be \
+             silently blackholed. Run: `{manual}`"
         );
     }
+}
+
+/// Remove the exemption we inserted into the foreign chain. Called on teardown — that rule is not in
+/// our table, so nothing else would ever clean it up.
+#[cfg(target_os = "linux")]
+pub fn remove_cgnat_compat(iface: &str) {
+    let Some(ruleset) = nft_ruleset(&["-a", "list", "ruleset"]) else {
+        return;
+    };
+    let Some((family, table, chain, handle)) = compat_handle(&ruleset, iface) else {
+        return;
+    };
+    let _ = Command::new("nft")
+        .args(["delete", "rule", &family, &table, &chain, "handle", &handle])
+        .status();
 }
 
 fn run_nft(script: &str) -> anyhow::Result<()> {
@@ -229,13 +362,19 @@ mod tests {
         assert!(!rs.contains("tcp dport { 9001 } accept"));
     }
 
+    /// A realistic slice of `nft list ruleset` with Tailscale's anti-spoof rule in place.
+    const TS_RULESET: &str = r#"table ip filter {
+	chain ts-input {
+		iifname "lo" accept
+		iifname != "tailscale0" ip saddr 100.64.0.0/10 counter packets 289 bytes 33404 drop
+	}
+}"#;
+
     #[test]
     fn cgnat_conflict_flags_tailscale_drop_but_not_our_own_ruleset() {
         // Tailscale's anti-spoof rule blackholes the mesh range on non-tailscale interfaces.
-        let ts = r#"chain ts-input {
-            iifname != "tailscale0*" ip saddr 100.64.0.0/10 counter packets 289 bytes 33404 drop
-        }"#;
-        assert!(cgnat_conflict(ts).unwrap().contains("drop"));
+        let c = cgnat_conflict(TS_RULESET).expect("detects the drop");
+        assert!(c.rule.contains("drop"));
 
         // Our own ruleset drops with a bare verdict (no CGNAT match) → no false positive.
         let ours = ruleset("unl0", &[exp(Proto::Tcp, 25565, None)], &PeersByNet::new());
@@ -243,6 +382,50 @@ mod tests {
 
         // A benign accept referencing the range must not trip it either.
         assert!(cgnat_conflict("ip saddr 100.64.0.0/10 accept").is_none());
+    }
+
+    /// The auto-fix inserts into someone else's chain, so it has to locate that chain exactly —
+    /// a wrong family/table/chain either errors or lands the exemption where it does nothing.
+    #[test]
+    fn cgnat_conflict_reports_the_enclosing_chain() {
+        let c = cgnat_conflict(TS_RULESET).expect("detects the drop");
+        assert_eq!(c.family, "ip");
+        assert_eq!(c.table, "filter");
+        assert_eq!(c.chain, "ts-input");
+    }
+
+    /// Idempotency: the reconcile re-runs constantly, and a per-reconcile duplicate would stack
+    /// exemptions in a foreign chain without bound.
+    #[test]
+    fn compat_rule_is_detected_only_for_its_own_interface() {
+        let installed = r#"table ip filter {
+	chain ts-input {
+		iifname "unl0" accept comment "unitylan-cgnat-compat"
+		iifname != "tailscale0" ip saddr 100.64.0.0/10 counter drop
+	}
+}"#;
+        assert!(compat_present(installed, "unl0"));
+        // A different interface's exemption is not ours.
+        assert!(!compat_present(installed, "unl1"));
+        assert!(!compat_present(TS_RULESET, "unl0"));
+    }
+
+    /// Teardown needs the handle plus the same coordinates, or the rule outlives the engine.
+    #[test]
+    fn compat_handle_locates_the_rule_for_deletion() {
+        let listed = r#"table ip filter {
+	chain ts-input {
+		iifname "unl0" accept comment "unitylan-cgnat-compat" # handle 42
+		iifname != "tailscale0" ip saddr 100.64.0.0/10 counter drop # handle 7
+	}
+}"#;
+        let (family, table, chain, handle) = compat_handle(listed, "unl0").expect("finds our rule");
+        assert_eq!(
+            (family.as_str(), table.as_str(), chain.as_str()),
+            ("ip", "filter", "ts-input")
+        );
+        assert_eq!(handle, "42");
+        assert!(compat_handle(listed, "unl1").is_none());
     }
 
     #[test]

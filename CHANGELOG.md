@@ -3,6 +3,35 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- **Two devices on the same network could never reach each other if the router wouldn't hairpin.**
+  Both got handed the router's public address, dialed it, and the handshake quietly never landed —
+  yet status kept reporting them as `Direct`, so nothing ever escalated to ICE and there was nothing
+  in the log to explain it. A peer that never completes a handshake is now treated as stuck no
+  matter how it was reached, which both tells the truth in `ctl status` and lets ICE take over,
+  where the local addresses the two devices already share can be used directly.
+- **A stalled ICE attempt hung forever instead of retrying.** Waiting on a peer that never answered,
+  or a negotiation that failed outright, parked the agent silently for the life of the process — the
+  only trace was an `ice: agent started` line with nothing after it. A failed negotiation now ends
+  as soon as it fails, the agent is replaced (with a growing delay, so a peer that has actually gone
+  away isn't retried at full tilt), and the reason it gave up is logged.
+- **A connected ICE path sat unused for up to a full refresh cycle.** Once ICE found a working route
+  to a peer, nothing told the tunnel to start using it — the new path was only picked up the next
+  time the engine heard from the coordinator, which for an otherwise-idle mesh could be many minutes
+  of a peer staying unreachable after it had become reachable. The engine now notices within seconds.
+
+### Changed
+
+- **Tailscale's mesh-range block is now cleared automatically.** Tailscale installs a firewall rule
+  that drops UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, which
+  blackholes the entire mesh while peers still look perfectly reachable. The engine already spotted
+  this and told you the command to run; it now inserts the exemption itself, re-checks it whenever
+  the firewall reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it
+  on shutdown. Set `tailscale_compat = false` to go back to being told rather than fixed. Linux only.
+
 ## v0.3.1
 
 ### Added

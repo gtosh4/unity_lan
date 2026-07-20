@@ -77,6 +77,8 @@ pub struct Firewall {
     /// process. Without it a restart silently reverts to the config seeds and every port the
     /// owner opened at runtime falls through to the default `drop`.
     path: PathBuf,
+    /// Auto-exempt the mesh interface from a foreign CGNAT drop (see `Config::tailscale_compat`).
+    tailscale_compat: bool,
 }
 
 impl Firewall {
@@ -90,6 +92,7 @@ impl Firewall {
         iface: String,
         seeds: Vec<Exposed>,
         state_dir: &Path,
+        tailscale_compat: bool,
     ) -> Self {
         let path = state_dir.join("exposed.json");
         let exposed = std::fs::read(&path)
@@ -102,14 +105,12 @@ impl Firewall {
             exposed: Mutex::new(exposed),
             peers_by_net: Mutex::new(HashMap::new()),
             path,
+            tailscale_compat,
         }
     }
 
     /// Install the base policy + any seeded exposures. Call once at startup.
     pub fn init(&self) -> anyhow::Result<()> {
-        // Warn if another firewall (e.g. Tailscale) blackholes our CGNAT range on the wg interface.
-        #[cfg(target_os = "linux")]
-        nftables::warn_on_cgnat_conflict(&self.iface);
         self.reconcile()
     }
 
@@ -192,12 +193,19 @@ impl Firewall {
         Ok(())
     }
 
-    /// Tear down all firewall rules (clean shutdown).
+    /// Tear down all firewall rules (clean shutdown). Includes the CGNAT exemption, which lives in a
+    /// *foreign* chain and so is not covered by the backend's own table teardown.
     pub fn reset(&self) -> anyhow::Result<()> {
+        #[cfg(target_os = "linux")]
+        nftables::remove_cgnat_compat(&self.iface);
         self.backend.reset()
     }
 
     fn reconcile(&self) -> anyhow::Result<()> {
+        // Re-checked on every reconcile, not just at startup: the owner of that chain (Tailscale)
+        // rebuilds it on restart, silently dropping our exemption. Idempotent.
+        #[cfg(target_os = "linux")]
+        nftables::ensure_cgnat_compat(&self.iface, self.tailscale_compat);
         let exposed = self.exposed.lock().unwrap().clone();
         let peers = self.peers_by_net.lock().unwrap().clone();
         self.backend.apply(&self.iface, &exposed, &peers)
@@ -221,7 +229,9 @@ mod tests {
     }
 
     fn fw(dir: &Path, seeds: Vec<Exposed>) -> Firewall {
-        Firewall::load(Box::new(NullBackend), "unl0".into(), seeds, dir)
+        // `false`: these run on a dev machine that may have a live Tailscale, and the unit tests have
+        // no business mutating its chain.
+        Firewall::load(Box::new(NullBackend), "unl0".into(), seeds, dir, false)
     }
 
     fn seed(port: u16) -> Exposed {

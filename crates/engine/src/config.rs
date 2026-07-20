@@ -116,6 +116,15 @@ pub struct Config {
     /// Set `false` to disable (revert to coordinator-only refresh + coordinator-snapshot revocation).
     #[serde(default = "default_true")]
     pub gossip: bool,
+    /// Automatically exempt the mesh interface when another firewall (in practice Tailscale) installs
+    /// an nftables rule dropping the mesh's `100.64.0.0/10` range on non-its-own interfaces — which
+    /// silently blackholes every UnityLAN packet while peers still look reachable. Default on: the
+    /// failure is invisible and the exemption is narrow (it only re-permits what that rule
+    /// over-broadly dropped; our own table still gates the traffic independently). The rule is
+    /// re-checked on every reconcile, since Tailscale rebuilds its chain on restart, and removed on
+    /// shutdown. Set `false` to manage the exemption yourself — the engine then only warns. Linux only.
+    #[serde(default = "default_true")]
+    pub tailscale_compat: bool,
 }
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`.

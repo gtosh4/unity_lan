@@ -412,16 +412,28 @@ pub enum PeerReach {
     Ice,
 }
 
+/// How long a peer may go without a completed handshake before we call its path dead.
+pub const STUCK_AFTER_SECS: u64 = 30;
+
 /// Classify a peer's reachability from whether it needed a hole punch, whether a WG handshake has
-/// completed, and how long the punch has been outstanding. Pure, so it's unit-testable.
-pub fn classify_reach(punched: bool, connected: bool, punch_age_secs: u64) -> PeerReach {
-    if connected || !punched {
-        // Connected (directly or via a completed punch), or a normal peer still bootstrapping.
+/// completed, and how long we've been attempting the current path. Pure, so it's unit-testable.
+///
+/// `attempt_age_secs` counts from when we last had no handshake — for a punched peer that's the age
+/// of the punch, for a directly-dialable one the age of the dial. Both go `Unreachable` once they
+/// outlive the grace: a dialable endpoint that never handshakes is exactly as stuck as a punch that
+/// never lands, and reporting it as `Direct` forever was how two peers behind one NAT whose router
+/// won't hairpin ended up with no escalation to ICE and no diagnosis in status.
+pub fn classify_reach(punched: bool, connected: bool, attempt_age_secs: u64) -> PeerReach {
+    if connected {
+        // Connected, directly or via a completed punch.
         PeerReach::Direct
-    } else if punch_age_secs >= 30 {
+    } else if attempt_age_secs >= STUCK_AFTER_SECS {
         PeerReach::Unreachable
-    } else {
+    } else if punched {
         PeerReach::Punching
+    } else {
+        // A normal peer still bootstrapping, inside the grace window.
+        PeerReach::Direct
     }
 }
 
@@ -464,5 +476,10 @@ mod tests {
         // Punch outstanding past the window with no handshake → unreachable (likely symmetric).
         assert_eq!(classify_reach(true, false, 30), PeerReach::Unreachable);
         assert_eq!(classify_reach(true, false, 120), PeerReach::Unreachable);
+        // A *dialable* peer that never handshakes is stuck too — the same-NAT/no-hairpin case. It
+        // reads Direct inside the grace, then Unreachable, which is what escalates it to ICE.
+        assert_eq!(classify_reach(false, false, 29), PeerReach::Direct);
+        assert_eq!(classify_reach(false, false, 30), PeerReach::Unreachable);
+        assert_eq!(classify_reach(false, false, 600), PeerReach::Unreachable);
     }
 }

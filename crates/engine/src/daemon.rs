@@ -118,6 +118,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             cfg.iface.clone(),
             seeds,
             &cfg.state_dir,
+            cfg.tailscale_compat,
         ));
         f.init()
             .context("installing firewall (default-deny); set `firewall = false` to disable")?;
@@ -413,8 +414,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         // The last ICE offers we reported — a change (new candidates / creds) must break the hold too,
         // so a freshly-gathered candidate reaches the peer promptly instead of waiting out the hold.
         let mut last_ice_offers: Vec<common::api::IceEndpoint> = Vec::new();
-        // When we first started punching each peer (endpoint from `punch`), for the reach classifier.
-        let mut punch_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
+        // When we last had *no* handshake with each peer — the age fed to the reach classifier. Armed
+        // for any unconnected peer, punched or directly dialable, and cleared the moment a handshake
+        // lands: a dialable endpoint that never completes (same-NAT peers behind a router that won't
+        // hairpin) has to age out to `Unreachable` too, or nothing ever escalates it to ICE.
+        let mut attempt_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
         // When a peer first became *unpunchable* (no endpoint, no reflexive → no punch target) and
         // still unconnected — the bootstrap case (no observer online to report a reflexive). After a
         // grace we run ICE for it (userspace), whose STUN gets a reflexive with no observer needed.
@@ -534,11 +538,6 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 let punched = last_seeds
                     .iter()
                     .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
-                if punched {
-                    punch_since.entry(*pk).or_insert(now);
-                } else {
-                    punch_since.remove(pk);
-                }
                 let last_handshake = stats
                     .as_ref()
                     .and_then(|m| m.get(pk))
@@ -548,14 +547,19 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     .map(|d| d.as_secs());
                 let connected = last_handshake
                     .is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
-                let age = punch_since
+                if connected {
+                    attempt_since.remove(pk);
+                } else {
+                    attempt_since.entry(*pk).or_insert(now);
+                }
+                let age = attempt_since
                     .get(pk)
                     .map_or(0, |t| now.duration_since(*t).as_secs());
                 // Bootstrap case: a peer with no dialable endpoint *and* no punch target (no observer
-                // reported a reflexive) that hasn't connected. `classify_reach` reads this as `Direct`
-                // (a normal peer still bootstrapping), so it never becomes `Unreachable`; track it
-                // separately and, after a grace, run ICE — whose STUN yields a reflexive with no
-                // observer needed. Cleared the moment a punch target or handshake appears.
+                // reported a reflexive) that hasn't connected. Tracked separately from the classifier's
+                // grace because it gets a shorter one — there is nothing to wait for, so we run ICE
+                // sooner, its STUN yielding a reflexive with no observer needed. Cleared the moment a
+                // punch target or handshake appears.
                 let unpunchable = last_seeds
                     .iter()
                     .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_none());
@@ -604,6 +608,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     );
                 }
             }
+            // Drop attempt bookkeeping for peers that have left the mesh.
+            attempt_since.retain(|pk, _| peers.contains_key(pk));
             control::set_live(&status, &live);
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
@@ -764,7 +770,23 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                 // noticed promptly (it only appears after a handshake — later than a hold would
                 // return). Purely local: the held request above keeps waiting, so an idle client
                 // costs the coordinator one request per hold, not one per re-check.
-                _ = tokio::time::sleep(STATS_RECHECK) => None,
+                _ = tokio::time::sleep(STATS_RECHECK) => {
+                    // ICE connects asynchronously and nothing about that transition wakes the
+                    // long-poll, so the shim would otherwise sit unused until the next refresh
+                    // completed — up to a whole hold after the path was actually ready. Re-sync here
+                    // and apply the moment the endpoint set changes. Purely local: no coordinator
+                    // traffic, so an idle client still costs one request per hold.
+                    if ice_enabled {
+                        let eps = sync_ice(&mut ice, &last_seeds, wg_pub, coord_stun, &want_set).await;
+                        if eps != ice_eps {
+                            ice_eps = eps;
+                            apply_state(
+                                backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps,
+                            ).await?;
+                        }
+                    }
+                    None
+                }
                 r = pending_refresh.as_mut().expect("a request is always in flight here") => Some(r),
             };
             if drop_pending {
