@@ -92,6 +92,19 @@ fn script(
         iface = ps_quote(iface),
     ));
 
+    // Peer-direct attestation refresh (docs/gossip-refresh.md): co-members pull our own attestation
+    // from this UDP port over the tunnel. Mesh infrastructure — only an authenticated WG peer reaches
+    // the wg iface at all — so it's allowed on the wg iface like ICMP (parity with nft's dport accept);
+    // inert when gossip is off (no listener). Without it, Windows' default-deny drops the pull and the
+    // peer can never self-serve, forcing every renewal onto the coordinator.
+    s.push_str(&format!(
+        "New-NetFirewallRule -DisplayName 'UnityLAN p2p {p2p}/udp' -Group '{GROUP}' \
+         -Direction Inbound -Action Allow -Protocol UDP -LocalPort {p2p} -InterfaceAlias {iface} \
+         -ErrorAction SilentlyContinue | Out-Null\n",
+        p2p = common::p2p::P2P_PORT,
+        iface = ps_quote(iface),
+    ));
+
     // WireGuard's listen port on the host interfaces (no -InterfaceAlias) — see the fn docs.
     s.push_str(&format!(
         "New-NetFirewallRule -DisplayName 'UnityLAN WireGuard {listen_port}/udp' -Group '{GROUP}' \
@@ -273,6 +286,23 @@ mod tests {
         // Disabled → no beacon rule at all.
         let off = script("unl0", 51820, None, &[], &PeerSets::default());
         assert!(!off.contains("-LocalPort 51821"));
+    }
+
+    /// The peer-direct attestation port (51830) is opened on the wg interface — parity with the
+    /// nftables backend's `udp dport 51830 accept`. Without it a Windows peer default-denies the
+    /// pull and can never self-serve its attestation, forcing every renewal onto the coordinator.
+    #[test]
+    fn script_opens_p2p_port_wg_scoped() {
+        let s = script("unl0", 51820, None, &[], &PeerSets::default());
+        let line = s
+            .lines()
+            .find(|l| l.contains(&format!("-LocalPort {}", common::p2p::P2P_PORT)))
+            .expect("a rule for the p2p attestation port");
+        assert!(
+            line.contains("-Protocol UDP") && line.contains("-InterfaceAlias 'unl0'"),
+            "the p2p port must be UDP and wg-scoped: {line}"
+        );
+        assert!(line.contains("-Group 'UnityLAN'"), "so reset() removes it");
     }
 
     #[test]

@@ -99,6 +99,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **Windows devices now refresh their credentials directly from peers, not only through the
+  coordinator.** The peer-direct refresh (where co-members renew each other's short-lived
+  attestations straight over the tunnel, sparing the coordinator) never worked toward a Windows
+  peer: the Windows firewall backend opened the WireGuard and beacon ports but not the peer-direct
+  port, so every such request to a Windows device was silently dropped. Those peers fell back to the
+  coordinator for every renewal (and logged repeated peer-direct failures). The port is now opened
+  on the mesh interface, matching the Linux backend.
+
 - **Peers no longer flash offline in the GUI when another member comes online.** Every mesh refresh
   rebuilt the status snapshot with all peers momentarily marked down, restoring their real state a
   beat later — invisible normally, but a member coming online triggers a burst of refreshes, so the
