@@ -83,6 +83,36 @@ unprivileged user. Run them directly — `sudo` is unnecessary and, in a Claude 
 The last three the user must run themselves via the `! <cmd>` prefix; ask rather than attempting.
 Wrap the rest in `timeout` — a hung daemon otherwise blocks until the tool timeout.
 
+### Debugging a live engine (subscribe, don't poll)
+
+The engine's control socket (`<state_dir>/control.sock`, e.g. `engine-state-prod/control.sock`)
+speaks **newline-delimited JSON** — a `ControlRequest` line in, `ControlResponse` line(s) out (see
+`common/src/control.rs`). A unit-variant request serializes to a bare string. So no client build is
+needed; `socat` + `jq` reach it directly:
+
+```sh
+sock=engine-state-prod/control.sock
+# One-shot snapshot, one peer's row:
+printf '"Status"\n' | socat -t2 UNIX-CONNECT:$sock - \
+  | jq -c '.Status.peers[]? | select(.wg_ip=="100.73.61.1")'
+# Live subscription — the daemon holds the conn open and pushes a fresh StatusReport on EVERY change
+# (the same push channel the GUI's `ctl::watch_status` uses). Prefer this over polling `Status`:
+printf '"Watch"\n' | socat -t 86400 UNIX-CONNECT:$sock - \
+  | jq --unbuffered -c '.Status.peers[]? | select(.wg_ip=="100.73.61.1")
+        | {up, reach, ep:.endpoint, hs:.last_handshake_secs, lat:.latency_ms, rx:.rx_bytes, tx:.tx_bytes}'
+```
+
+Pair `Watch` with a `Monitor` over the dedup'd output to wake on a specific edge (a down, an endpoint
+landing) instead of re-polling. **`Watch` and `engine.log` are complementary, and the gap between
+them is itself a diagnostic.** A "peer reachability changed" log line is emitted **only** by the main
+liveness loop, and only when the WG-stats-derived `up`/`reach` actually flips (`daemon.rs`,
+`prev_reach`). The status snapshot the GUI/`Watch` sees is a *separate* surface: `control::update`
+(inside `apply_state`) rebuilds it from seeds and `send_replace`s it **before** `set_live` re-overlays
+the live WG stats. So a peer can **flash** in the GUI/`Watch` stream — a momentary all-null row
+(`up:false, hs:null, rx:0`) at an `apply_state` timestamp — with **no** log line, because the tunnel
+never actually dropped. GUI-flaps-but-log-silent ⇒ suspect a snapshot rebuild, not the data plane;
+subscribing is what makes that transient visible (polling `Status` will usually miss it).
+
 ## Architecture
 
 Four crates (`crates/*`), two planes:
