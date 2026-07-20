@@ -26,14 +26,20 @@ use serde::{Deserialize, Serialize};
 
 /// The host-firewall backend for this platform: Linux/other-unix nftables, Windows Defender
 /// Firewall (via PowerShell). Both enforce the same port-ACL policy behind [`FirewallBackend`].
-pub fn default_backend() -> Box<dyn FirewallBackend> {
+///
+/// `listen_port` is the WireGuard UDP port. Only the Windows backend needs it — it opens that port
+/// on the host interfaces so inbound handshakes arrive (Defender default-denies it otherwise). The
+/// nftables backend already leaves non-wg interfaces untouched, so it ignores the argument; a Linux
+/// host that runs its own firewall (firewalld/ufw) must permit the port there.
+pub fn default_backend(listen_port: u16) -> Box<dyn FirewallBackend> {
     #[cfg(not(windows))]
     {
+        let _ = listen_port;
         Box::new(NftBackend)
     }
     #[cfg(windows)]
     {
-        Box::new(windows::WindowsFwBackend)
+        Box::new(windows::WindowsFwBackend { listen_port })
     }
 }
 

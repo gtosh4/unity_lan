@@ -30,7 +30,10 @@ pub struct Config {
     /// WireGuard interface name.
     #[serde(default = "default_iface")]
     pub iface: String,
-    /// WireGuard UDP listen port.
+    /// WireGuard UDP listen port. Inbound handshakes from off-LAN peers arrive here, so it must be
+    /// reachable: the Windows backend opens it on the host firewall automatically (when `firewall`
+    /// is on), but a Linux host running its own firewall (firewalld/ufw) must permit this port
+    /// there — the engine's nftables table deliberately leaves non-wg interfaces untouched.
     #[serde(default = "default_port")]
     pub listen_port: u16,
     /// Reachable endpoint reported to the coordinator. If set, it is advertised as-is (manual

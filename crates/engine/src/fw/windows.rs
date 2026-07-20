@@ -1,10 +1,12 @@
 //! Windows host-firewall backend, driving Windows Defender Firewall through PowerShell's
 //! `NetSecurity` module (`New-NetFirewallRule` / `Remove-NetFirewallRule`).
 //!
-//! Every rule is an *inbound allow* scoped to the wg interface (`-InterfaceAlias`), so — like the
-//! nftables backend — only traffic arriving on the wg adapter is opened, never the host's other
-//! interfaces. All rules share `-Group UnityLAN`, so a reset is a single group removal and every
-//! `apply` is an idempotent full replace (rebuild = pure function of the exposed set + peer IPs).
+//! Every rule is an *inbound allow*; all but one are scoped to the wg interface (`-InterfaceAlias`),
+//! so — like the nftables backend — only traffic arriving on the wg adapter is opened, never the
+//! host's other interfaces. The exception is the WireGuard listen port, opened host-wide so inbound
+//! handshakes reach the tunnel at all (see [`script`]). All rules share `-Group UnityLAN`, so a
+//! reset is a single group removal and every `apply` is an idempotent full replace (rebuild = pure
+//! function of the listen port + exposed set + peer IPs).
 //!
 //! We rely on two properties of Windows Defender Firewall for the base policy nftables builds
 //! explicitly: it is **stateful** (replies to our own outbound connections are auto-allowed, so no
@@ -24,14 +26,17 @@ use common::control::{ExposeScope, Proto};
 
 use super::{Exposed, FirewallBackend, PeerSets};
 
-pub struct WindowsFwBackend;
+pub struct WindowsFwBackend {
+    /// WireGuard's UDP listen port, opened on the host interfaces (see [`script`]).
+    pub listen_port: u16,
+}
 
 /// Shared `-Group` tag on every rule, so cleanup is one `Remove-NetFirewallRule -Group`.
 const GROUP: &str = "UnityLAN";
 
 impl FirewallBackend for WindowsFwBackend {
     fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
-        run_fw_ps(&script(iface, exposed, peers))
+        run_fw_ps(&script(iface, self.listen_port, exposed, peers))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -48,7 +53,15 @@ fn remove_group() -> String {
 /// port (plus ICMPv4 echo for ping/diagnostics), each scoped to the wg interface. A scoped expose
 /// carries `-RemoteAddress` restricting it to that scope's peer IPs; a scoped expose whose peers
 /// are all offline is omitted entirely (reachable by nobody — the default-deny covers it).
-fn script(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
+///
+/// One rule is deliberately *not* wg-scoped: `listen_port`, WireGuard's own UDP transport port,
+/// opened on the host interfaces so inbound handshakes from off-LAN peers arrive. Every exposed
+/// port governs already-decrypted traffic on the wg adapter; this one governs the encrypted
+/// transport on the physical NIC, which Windows Defender default-denies. Opening it host-wide adds
+/// no real surface — WireGuard authenticates every datagram and drops non-peer traffic itself — and
+/// mirrors the reference `wireguard.exe`, which permits its listen port via WFP; UnityLAN skipped
+/// that by driving wireguard-nt directly. It shares the group, so `reset` removes it too.
+fn script(iface: &str, listen_port: u16, exposed: &[Exposed], peers: &PeerSets) -> String {
     let mut s = String::new();
     s.push_str(&remove_group());
     s.push('\n');
@@ -59,6 +72,13 @@ fn script(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
          -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 -InterfaceAlias {iface} \
          -ErrorAction SilentlyContinue | Out-Null\n",
         iface = ps_quote(iface),
+    ));
+
+    // WireGuard's listen port on the host interfaces (no -InterfaceAlias) — see the fn docs.
+    s.push_str(&format!(
+        "New-NetFirewallRule -DisplayName 'UnityLAN WireGuard {listen_port}/udp' -Group '{GROUP}' \
+         -Direction Inbound -Action Allow -Protocol UDP -LocalPort {listen_port} \
+         -ErrorAction SilentlyContinue | Out-Null\n",
     ));
 
     for e in exposed {
@@ -84,7 +104,7 @@ fn script(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
                         "UnityLAN {}/{} scope:{}",
                         e.proto.as_str(),
                         e.port,
-                        e.scope.label()
+                        peers.label(&e.scope)
                     ),
                     Some(list),
                 )
@@ -134,8 +154,15 @@ fn run_fw_ps(script: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::NetInfo;
     use super::*;
     use std::net::Ipv4Addr;
+
+    /// A resolved network scope, matching the ids the `by_net` fixture assigns.
+    const MESH: ExposeScope = ExposeScope::Net {
+        guild_id: 900_100,
+        role_id: 7001,
+    };
 
     fn exp(proto: Proto, port: u16, scope: ExposeScope) -> Exposed {
         Exposed { proto, port, scope }
@@ -143,7 +170,13 @@ mod tests {
 
     fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
         PeerSets {
-            by_net: std::collections::HashMap::from([(name.to_string(), ips)]),
+            nets: vec![NetInfo {
+                guild_id: 900_100,
+                role_id: 7001,
+                guild: "acme".into(),
+                name: name.into(),
+                ips,
+            }],
             own_devices: Vec::new(),
         }
     }
@@ -152,6 +185,7 @@ mod tests {
     fn script_resets_group_and_opens_unscoped_ports() {
         let s = script(
             "unl0",
+            51820,
             &[
                 exp(Proto::Tcp, 25565, ExposeScope::AllPeers),
                 exp(Proto::Udp, 34197, ExposeScope::AllPeers),
@@ -164,13 +198,30 @@ mod tests {
         assert!(s.contains("-Action Allow -Protocol UDP -LocalPort 34197 -InterfaceAlias 'unl0'"));
         // Unscoped exposes reach any peer — no remote-address restriction.
         assert!(!s.contains("-RemoteAddress"));
-        // Every New-NetFirewallRule tolerates a missing interface (pre-up install): one
-        // `-ErrorAction SilentlyContinue` per rule (ICMP echo + the two ports).
+        // One `-ErrorAction SilentlyContinue` per rule: ICMP echo, the wg listen port, the two ports.
         assert_eq!(
             s.matches("-ErrorAction SilentlyContinue | Out-Null")
                 .count(),
-            3
+            4
         );
+    }
+
+    /// The wg listen port is opened on the host, *not* scoped to the wg interface, so inbound
+    /// handshakes arriving on the physical NIC reach it — the one rule here that is not
+    /// `-InterfaceAlias`'d. Without it, Windows Defender's default-deny drops every inbound
+    /// handshake and the device is unreachable to the mesh.
+    #[test]
+    fn script_opens_wg_listen_port_host_wide() {
+        let s = script("unl0", 51820, &[], &PeerSets::default());
+        let line = s
+            .lines()
+            .find(|l| l.contains("-Protocol UDP -LocalPort 51820"))
+            .expect("a rule for the wg listen port");
+        assert!(
+            !line.contains("-InterfaceAlias"),
+            "the listen port must be open on the host, not just the wg iface: {line}"
+        );
+        assert!(line.contains("-Group 'UnityLAN'"), "so reset() removes it");
     }
 
     #[test]
@@ -179,11 +230,7 @@ mod tests {
             "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let s = script(
-            "unl0",
-            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
-            &peers,
-        );
+        let s = script("unl0", 51820, &[exp(Proto::Tcp, 9001, MESH)], &peers);
         assert!(s.contains(
             "-LocalPort 9001 -InterfaceAlias 'unl0' -RemoteAddress 100.64.0.2,100.64.0.3"
         ));
@@ -195,14 +242,18 @@ mod tests {
     #[test]
     fn own_device_scope_restricts_to_the_owners_devices() {
         let peers = PeerSets {
-            by_net: std::collections::HashMap::from([(
-                "mesh".to_string(),
-                vec![Ipv4Addr::new(100, 64, 0, 9)],
-            )]),
+            nets: vec![NetInfo {
+                guild_id: 900_100,
+                role_id: 7001,
+                guild: "acme".into(),
+                name: "mesh".into(),
+                ips: vec![Ipv4Addr::new(100, 64, 0, 9)],
+            }],
             own_devices: vec![Ipv4Addr::new(100, 64, 0, 2)],
         };
         let s = script(
             "unl0",
+            51820,
             &[exp(Proto::Tcp, 9001, ExposeScope::OwnDevices)],
             &peers,
         );
@@ -217,7 +268,8 @@ mod tests {
     fn scoped_expose_with_no_peers_is_omitted() {
         let s = script(
             "unl0",
-            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            51820,
+            &[exp(Proto::Tcp, 9001, MESH)],
             &PeerSets::default(),
         );
         // No peers in the network → the port is opened to nobody (relies on default-deny).

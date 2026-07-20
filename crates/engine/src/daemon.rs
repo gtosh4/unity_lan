@@ -117,7 +117,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             .collect::<anyhow::Result<_>>()
             .context("reading the `expose` list")?;
         let f = Arc::new(Firewall::load(
-            fw::default_backend(),
+            fw::default_backend(cfg.listen_port),
             cfg.iface.clone(),
             seeds,
             &cfg.state_dir,

@@ -41,6 +41,22 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
+  Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
+  never opened its own UDP listen port on the host firewall. Windows Defender then dropped every
+  inbound handshake before it reached the tunnel, so peers could see the device but never connect to
+  it, and `ctl status` reported it as `unreachable: symmetric NAT?` even when the real cause was the
+  firewall. The engine now opens the listen port automatically (while the host firewall is enabled),
+  matching what it already relies on the distro firewall to allow on Linux. If you run your own
+  firewall on a Linux host, note that it still must permit the WireGuard `listen_port` — the engine
+  only manages the Windows side. The misleading status hint now names all three possible causes
+  (NAT, a blocked UDP port, or no relay) instead of guessing at symmetric NAT.
+- **Two UnityLAN devices behind one router would fight over the same port, and one lost silently.**
+  Every device asks its router to forward port 51820 by default, but a router can forward that port
+  to only one device — so the second device's request was refused and it fell back to advertising no
+  endpoint, going unreachable to the mesh with only a single log line to show for it. When the
+  preferred port is already taken the engine now asks for the next one up (and reports the swap), so
+  a second (or third) device behind the same NAT becomes reachable without any manual port juggling.
 - **One interrupted shutdown could leave the engine unable to start ever again.** If tearing down the
   interface wedged, systemd eventually killed the engine outright, and the killed process left its
   WireGuard control socket behind — after which every start failed with `Address already in use` and

@@ -600,7 +600,9 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
                 let nat = match p.reach {
                     common::control::PeerReach::Direct => "",
                     common::control::PeerReach::Punching => "  [hole-punching…]",
-                    common::control::PeerReach::Unreachable => "  [unreachable: symmetric NAT?]",
+                    common::control::PeerReach::Unreachable => {
+                        "  [unreachable: no direct path — symmetric NAT, a blocked UDP port, or no relay]"
+                    }
                     common::control::PeerReach::Relayed => "  [relayed]",
                     common::control::PeerReach::Ice => "  [ice]",
                 };
