@@ -35,6 +35,8 @@ struct AdminStats {
     total_networks: usize,
     online_devices: usize,
     online_users: usize,
+    /// Of `online_devices`, how many are reachable only as own-devices (on no network).
+    off_network_devices: usize,
     enrolled_devices: u64,
     longpoll_waiters: usize,
     version: u64,
@@ -88,6 +90,7 @@ async fn gather_stats(st: &AppState) -> Result<AdminStats, ApiError> {
         total_networks: networks.len(),
         online_devices: pres.online_devices,
         online_users: pres.online_users,
+        off_network_devices: pres.off_network_devices,
         enrolled_devices,
         longpoll_waiters: st.versions.waiters(),
         version: st.versions.global(),
@@ -220,6 +223,7 @@ fn stats_json(s: &AdminStats) -> serde_json::Value {
             "networks": s.total_networks,
             "devices_online": s.online_devices,
             "users_online": s.online_users,
+            "devices_off_network": s.off_network_devices,
             "devices_enrolled": s.enrolled_devices,
             "longpoll_waiters": s.longpoll_waiters,
         },
@@ -442,6 +446,12 @@ fn render_metrics(s: &AdminStats) -> String {
     );
     gauge(
         &mut out,
+        "unitylan_devices_off_network",
+        "Online devices reachable only as own-devices (on no network). Subset of devices_online.",
+        s.off_network_devices,
+    );
+    gauge(
+        &mut out,
         "unitylan_longpoll_waiters",
         "Parked long-poll requests.",
         s.longpoll_waiters,
@@ -653,6 +663,7 @@ mod tests {
             total_networks: 1,
             online_devices: 3,
             online_users: 2,
+            off_network_devices: 1,
             enrolled_devices: 9,
             longpoll_waiters: 1,
             version: 42,
@@ -684,6 +695,9 @@ mod tests {
             "version series missing from metrics"
         );
         assert!(json.contains("0.3.0") && json.contains("unknown"));
+        // Off-network devices surface on both totals views.
+        assert!(json.contains("devices_off_network"));
+        assert!(metrics.contains("unitylan_devices_off_network 1"));
     }
 
     /// The listing shows only what's live: zero-online networks drop out, and a guild left with
@@ -724,6 +738,7 @@ mod tests {
             total_networks: 3,
             online_devices: 3,
             online_users: 2,
+            off_network_devices: 0,
             enrolled_devices: 9,
             longpoll_waiters: 1,
             version: 42,

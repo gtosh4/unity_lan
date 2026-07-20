@@ -203,7 +203,10 @@ impl Presence {
     /// one `online_device` and its owner one `online_user`; a user with several devices in the
     /// same network counts once in that network's user count.
     pub fn stats(&self) -> PresenceStats {
+        // Both locks, in the same order the reaper takes them (map then self_map) so the two paths
+        // can't deadlock against each other.
         let map = self.map.lock().unwrap();
+        let self_map = self.self_map.lock().unwrap();
         let mut online_per_network: HashMap<(u64, u64), usize> = HashMap::new();
         let mut users_by_network: HashMap<(u64, u64), std::collections::HashSet<u64>> =
             HashMap::new();
@@ -212,6 +215,9 @@ impl Presence {
         // Each device reports one version; it appears in one map row per network, so collapse to
         // pubkey first, then tally — otherwise a device in N networks would count N times.
         let mut device_version: HashMap<[u8; 32], String> = HashMap::new();
+        // Pubkeys recorded in ≥1 network, so the own-device pass below can tell which of its devices
+        // are *only* reachable as own-devices (on no network) — the off-network bucket.
+        let mut network_pubkeys = std::collections::HashSet::new();
         for ((g, r, pk), e) in map.iter() {
             *online_per_network.entry((*g, *r)).or_default() += 1;
             users_by_network
@@ -220,9 +226,26 @@ impl Presence {
                 .insert(e.p.user_id);
             devices.insert(*pk);
             users.insert(e.p.user_id);
+            network_pubkeys.insert(*pk);
             device_version
                 .entry(*pk)
                 .or_insert_with(|| e.client_version.clone());
+        }
+        // Fold in own-device presence: a device on no *enabled* network still long-polls and stays
+        // reachable to its owner's other devices, so it's genuinely online — it must count toward the
+        // deployment totals and the version fleet, or a mesh living entirely on own-device peering
+        // reads as empty. A pubkey already seen in a network is deduped by the sets; one seen only
+        // here is an off-network device.
+        let mut off_network = std::collections::HashSet::new();
+        for ((uid, pk), e) in self_map.iter() {
+            devices.insert(*pk);
+            users.insert(*uid);
+            device_version
+                .entry(*pk)
+                .or_insert_with(|| e.client_version.clone());
+            if !network_pubkeys.contains(pk) {
+                off_network.insert(*pk);
+            }
         }
         // Tally distinct devices per version. An empty string (a pre-versioning client) buckets as
         // "unknown" so both the JSON feed and the Prometheus label carry a clean value.
@@ -243,6 +266,7 @@ impl Presence {
                 .collect(),
             online_devices: devices.len(),
             online_users: users.len(),
+            off_network_devices: off_network.len(),
             client_versions,
         }
     }
@@ -268,10 +292,17 @@ pub struct PresenceStats {
     /// Distinct online *users* keyed by `(guild_id, role_id)` — a user's several devices in one
     /// network collapse to one.
     pub users_per_network: HashMap<(u64, u64), usize>,
-    /// Distinct devices currently online across the deployment.
+    /// Distinct devices currently online across the deployment — on a network *or* reachable only
+    /// as an own-device (on no enabled network). A device that has opted out of own-device peering
+    /// *and* holds no enabled network peers with nobody, so it isn't in presence at all and isn't
+    /// counted here.
     pub online_devices: usize,
-    /// Distinct users currently online across the deployment.
+    /// Distinct users currently online across the deployment (same union as `online_devices`).
     pub online_users: usize,
+    /// Distinct online devices present *only* via own-device peering — on no network. Counted in
+    /// `online_devices`; broken out so the dashboard's per-network breakdown plus this reconciles to
+    /// the total, and so version tracking accounts for a fleet that lives on own-device peering.
+    pub off_network_devices: usize,
     /// Distinct online devices per reported client version (`""` bucketed as `"unknown"`), sorted
     /// by version. The operator's fleet view — how many of each release are live, so a phased wire
     /// change (e.g. retiring an attestation layout) can be gated on "no old client remains".
@@ -340,16 +371,23 @@ mod tests {
         p.record(1, 3, mp([1; 32], 42), "0.3.0".into(), 0);
         p.record(1, 2, mp([2; 32], 42), "0.3.0".into(), 0);
         p.record(1, 2, mp([3; 32], 99), "".into(), 0);
+        // A is also in the own-device set (as a real device on a network would be) — it must not
+        // double-count nor read as off-network. Device D (user 77, version 0.4.0) is own-device
+        // *only*: on no network, yet online and reachable to its owner's siblings.
+        p.record_self(42, mp([1; 32], 42), "0.3.0".into(), 0);
+        p.record_self(77, mp([4; 32], 77), "0.4.0".into(), 0);
         let s = p.stats();
         assert_eq!(s.online_per_network[&(1, 2)], 3); // A, B, C
         assert_eq!(s.online_per_network[&(1, 3)], 1); // A only
         assert_eq!(s.users_per_network[&(1, 2)], 2); // 42 (A+B collapse), 99
         assert_eq!(s.users_per_network[&(1, 3)], 1); // 42 only
-        assert_eq!(s.online_devices, 3); // A, B, C distinct
-        assert_eq!(s.online_users, 2); // 42, 99
-                                       // A (in two networks) counts once, not twice; empty version buckets as "unknown".
+        assert_eq!(s.online_devices, 4); // A, B, C, D — D folds in from own-device presence
+        assert_eq!(s.online_users, 3); // 42, 99, 77
+        assert_eq!(s.off_network_devices, 1); // D only (A is on a network, so not off-network)
+                                              // A (in two networks + own-device) counts once; D's version joins the fleet view.
         assert_eq!(s.client_versions[&"0.3.0".to_string()], 2); // A, B
         assert_eq!(s.client_versions[&"unknown".to_string()], 1); // C
+        assert_eq!(s.client_versions[&"0.4.0".to_string()], 1); // D
     }
 
     #[test]

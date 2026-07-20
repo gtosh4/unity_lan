@@ -18,6 +18,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   before they could only ever open a port to every peer.
 - **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
   its own exposure, so you can close one later without disturbing the rest.
+- **The admin dashboard now counts devices that are online but on no network.** A device whose
+  networks are all toggled off is still live — it long-polls the coordinator and stays reachable to
+  its owner's other devices via own-device peering — but it used to be missing from the "devices
+  online" total and the per-version fleet breakdown, so the numbers didn't add up and a client on no
+  network was invisible when checking whether the fleet had finished updating. Such devices are now
+  included in the totals, with a new **off-network devices** card (and a `devices_off_network` field
+  / `unitylan_devices_off_network` metric) breaking out how many so the per-network table plus that
+  figure reconciles to the total.
 
 ### Changed
 
