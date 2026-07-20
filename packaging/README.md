@@ -223,7 +223,7 @@ To support another init system, add its unit under `init/<system>/` and referenc
 ```
 init/systemd/unitylan-engine.service   systemd unit (root; CAP_NET_ADMIN + CAP_NET_BIND_SERVICE)
 config/engine.toml                     installed to /etc/unitylan/engine.toml (config, noreplace)
-scripts/engine-*.sh                    maintainer scripts (daemon-reload, stop/disable on remove, wipe state on purge)
+scripts/engine-*.sh                    maintainer scripts (daemon-reload, restart on upgrade, stop/disable on remove, wipe state on purge)
 gui/unitylan-gui.desktop               desktop launcher (points at /run/unitylan/control.sock)
 nfpm/engine.yaml, nfpm/desktop.yaml    package specs → deb + rpm
 docker/coordinator.Dockerfile          coordinator image
@@ -253,7 +253,7 @@ Runtime deps (`iproute2`, `nftables`) install automatically. The daemon runs as 
 ```powershell
 msiexec /i unitylan-<ver>-x64.msi          # installs to Program Files\UnityLAN, registers + starts the service
 # Self-hosting? Repoint the coordinator first, then restart the service:
-# notepad "$env:ProgramFiles\UnityLAN\engine.toml"   # set coordinator (+ enrollment_key) as admin
+# notepad "$env:ProgramData\UnityLAN\engine.toml"    # set coordinator (+ enrollment_key) as admin
 # sc.exe stop UnityLANEngine; sc.exe start UnityLANEngine
 ```
 
@@ -263,10 +263,12 @@ final wizard page has a **"Launch UnityLAN now"** checkbox (checked by default) 
 your desktop session so you can log in straight away; the GUI connects to the engine over the
 `\\.\pipe\unitylan-control` named pipe. Re-open it any time from the **UnityLAN** Start-menu shortcut.
 
-The shipped `engine.toml` points at the hosted coordinator, so a hosted-coordinator user is meshing
-after login with no config edit. A **self-hoster** should repoint `coordinator` in `engine.toml`
-(elevated) and restart the service — the first auto-start harmlessly fails to enroll against the
-wrong coordinator (the start action is best-effort and never blocks the install).
+On first install the engine writes a default `engine.toml` at `%ProgramData%\UnityLAN\engine.toml`
+(the MSI itself ships no config — the engine owns it, so upgrades never touch it) pointing at the
+hosted coordinator, so a hosted-coordinator user is meshing after login with no config edit. A
+**self-hoster** should repoint `coordinator` there (elevated) and restart the service — the first
+auto-start harmlessly fails to enroll against the wrong coordinator (the start action is best-effort
+and never blocks the install).
 
 > The silent auto-update path (`msiexec /quiet`) shows none of this wizard UI: it swaps the files and
 > restarts the service, but does **not** pop the GUI.
@@ -275,6 +277,55 @@ The wireguard-nt DLL ships inside the MSI at
 `Program Files\UnityLAN\resources-windows\binaries\wireguard-amd64.dll` — defguard loads it by that
 path relative to the engine exe, and the service pins its working directory to the install folder so
 it resolves. Uninstalling (Add/Remove Programs) stops and removes the service.
+
+## Upgrading
+
+Two independent paths land a node on a new version; both **preserve your config and device identity**
+and both end with the new engine binary running as the service.
+
+The **in-app auto-update** (opt-in, user-triggered from the GUI) is documented above under
+[Signed auto-update](#signed-auto-update): the engine verifies a signed manifest, the GUI shows an
+**Update** button, and applying it swaps the binary (Linux) or runs the new MSI (Windows) and
+restarts. This section is the other path — an admin upgrading the **OS package** directly.
+
+### Linux (`.deb` / `.rpm`)
+
+```sh
+sudo apt install ./dist/unitylan_<newver>_amd64.deb    # or: rpm -U dist/unitylan-<newver>.x86_64.rpm
+```
+
+- **Binary + unit** are replaced (`/usr/lib/unitylan/unitylan-engine`, the systemd unit).
+- **Config is preserved.** `/etc/unitylan/engine.toml` is a `noreplace` conffile, so dpkg/rpm never
+  overwrite your edits (a changed default arrives as `engine.toml.dpkg-dist` / `.rpmnew` to merge by
+  hand). This is the package manager's native equivalent of Windows' ProgramData ownership below.
+- **State is preserved.** Keys, token, and pinned anchors under `/var/lib/unitylan` survive.
+- **The engine restarts** onto the new binary if it was running — `postinstall` runs `systemctl
+  try-restart`, which no-ops on a stopped or never-enabled node (so a first install is never started
+  unconfigured). A running node blips: the tunnel, firewall, and resolver tear down and rebuild in a
+  second or two, then re-establish.
+
+### Windows (`.msi`)
+
+```powershell
+msiexec /i unitylan-<newver>-x64.msi          # a MajorUpgrade over the installed version
+```
+
+- **The service is adopted in place.** The upgrade *stops* the running service (freeing its exe to be
+  replaced), lays the new files, then reconfigures and restarts the **same** registration — it is not
+  deleted and recreated, so an open `services.msc` or a mid-upgrade failure can't wedge it.
+- **Config is preserved.** `engine.toml` lives at `%ProgramData%\UnityLAN\engine.toml`, owned by the
+  engine and kept out of the installer's file list, so an upgrade (or uninstall) never touches it.
+- **State is preserved** under `%ProgramData%\UnityLAN`.
+- Engine, GUI, and the wireguard-nt DLL are replaced and the daemon restarts — no reboot. A `/quiet`
+  auto-update does the same with no wizard UI.
+
+**Version skew.** Both paths update the engine *and* GUI together: the GUI↔engine control protocol
+carries no version of its own, so a newer daemon must never be left talking to an older GUI.
+
+**Upgrading off a pre-0.3.2 Windows build** is the one rough edge. 0.3.1 and earlier deleted their own
+`engine.toml` during the upgrade before the new engine could rescue it, so that single transition
+resets the config to the shipped default — re-enter coordinator/enrollment once via the GUI (device
+identity in `%ProgramData%` survives). Every upgrade from 0.3.2 onward keeps your config untouched.
 
 ## Uninstall & cleanup
 
