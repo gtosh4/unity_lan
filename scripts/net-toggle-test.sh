@@ -104,9 +104,9 @@ node_toml c unlc 51822 10.0.0.3 key-c
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 & COORD_PID=$!
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
-"$ENG"     run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
-$NSB "$ENG" run "$TMP/b.toml" >"$TMP/b.log" 2>&1 &
-$NSC "$ENG" run "$TMP/c.toml" >"$TMP/c.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
+$NSB "$ENG" -c "$TMP/b.toml" run >"$TMP/b.log" 2>&1 &
+$NSC "$ENG" -c "$TMP/c.toml" run >"$TMP/c.log" 2>&1 &
 
 for _ in $(seq 1 60); do
   [ "$(grep -c 'peer set' "$TMP/a.log" 2>/dev/null)" -ge 2 ] && break
@@ -119,7 +119,7 @@ A_IP=$(wg_ip a); B_IP=$(wg_ip b); C_IP=$(wg_ip c)
 echo "A=$A_IP (mesh,mesh2)  B=$B_IP (mesh)  C=$C_IP (mesh2)"
 
 # A's status must list a given peer IP.
-a_has_peer() { "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q "$1"; }
+a_has_peer() { "$ENG" -c "$TMP/a.toml" ctl status 2>/dev/null | grep -q "$1"; }
 # Wait up to ~15s for a predicate.
 wait_for() { for _ in $(seq 1 30); do "$@" && return 0; sleep 0.5; done; return 1; }
 
@@ -128,17 +128,17 @@ a_has_peer "$B_IP" && a_has_peer "$C_IP" || { echo "FAIL: A didn't start peering
 echo "initial: A peers B (mesh) and C (mesh2) ✓"
 
 echo "=== disable mesh2 on A ==="
-"$ENG" ctl net "$TMP/a.toml" disable mesh2
+"$ENG" -c "$TMP/a.toml" ctl net disable mesh2
 # C must drop out of A's mesh; B must remain.
-wait_for bash -c '! '"$ENG"' ctl status "'"$TMP"'/a.toml" 2>/dev/null | grep -q "'"$C_IP"'"' \
+wait_for bash -c '! '"$ENG"' -c "'"$TMP"'/a.toml" ctl status 2>/dev/null | grep -q "'"$C_IP"'"' \
   && echo "  ok: C dropped from A after disabling mesh2" || { echo "  FAIL: C still peered"; fail=1; }
 a_has_peer "$B_IP" && echo "  ok: B (mesh) still peered" || { echo "  FAIL: B dropped too"; fail=1; }
 # Symmetric: C loses its only peer (A).
-wait_for bash -c '! '"$ENG"' ctl status "'"$TMP"'/c.toml" 2>/dev/null | grep -q "'"$A_IP"'"' \
+wait_for bash -c '! '"$ENG"' -c "'"$TMP"'/c.toml" ctl status 2>/dev/null | grep -q "'"$A_IP"'"' \
   && echo "  ok: A dropped from C (symmetric)" || { echo "  FAIL: A still in C's mesh"; fail=1; }
 
 echo "=== re-enable mesh2 on A ==="
-"$ENG" ctl net "$TMP/a.toml" enable mesh2
+"$ENG" -c "$TMP/a.toml" ctl net enable mesh2
 wait_for a_has_peer "$C_IP" && echo "  ok: C re-peered after enabling mesh2" || { echo "  FAIL: C did not return"; fail=1; }
 
 # The point: opt-out must work even when the coordinator is unreachable. Kill it, then disable
@@ -146,12 +146,12 @@ wait_for a_has_peer "$C_IP" && echo "  ok: C re-peered after enabling mesh2" || 
 # coordinator in the loop.
 echo "=== coordinator DOWN: local opt-out still works ==="
 kill "$COORD_PID" 2>/dev/null; wait "$COORD_PID" 2>/dev/null
-if "$ENG" ctl net "$TMP/a.toml" disable mesh2; then
+if "$ENG" -c "$TMP/a.toml" ctl net disable mesh2; then
   echo "  ok: 'ctl net disable' succeeded with coordinator down"
 else
   echo "  FAIL: toggle command failed when coordinator down"; fail=1
 fi
-wait_for bash -c '! '"$ENG"' ctl status "'"$TMP"'/a.toml" 2>/dev/null | grep -q "'"$C_IP"'"' \
+wait_for bash -c '! '"$ENG"' -c "'"$TMP"'/a.toml" ctl status 2>/dev/null | grep -q "'"$C_IP"'"' \
   && echo "  ok: A dropped C locally while coordinator down" || { echo "  FAIL: C still peered offline"; fail=1; }
 a_has_peer "$B_IP" && echo "  ok: B (mesh) still peered offline" || { echo "  FAIL: B dropped offline"; fail=1; }
 

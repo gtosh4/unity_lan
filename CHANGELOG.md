@@ -12,12 +12,26 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   the port, no matter what networks you and everyone else share. Useful for the things you run for
   yourself — a syncthing instance, an SSH port on a home server — that until now had to be opened to
   every co-member of a network to be reachable at all. In the GUI it's a checkbox in the new scope
-  picker; from the command line it's `unitylan-engine ctl expose <config> <port> --own-devices`
+  picker; from the command line it's `unitylan-engine ctl expose <port> --own-devices`
   (and `ctl unexpose … --own-devices` to close it again). Startup exposures in `engine.toml` can
   name a scope too — `net = "<name>"` or `own_devices = true` on an `[[expose]]` entry — where
   before they could only ever open a port to every peer.
 - **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
   its own exposure, so you can close one later without disturbing the rest.
+
+### Changed
+
+- **The config file moved out of the middle of every command.** It used to be a positional argument
+  wedged between the verb and what you were acting on — `ctl expose /etc/unitylan/engine.toml 25565
+  minecraft` — and it was mandatory on some subcommands but optional on others, with no way to tell
+  which from `--help`. It's now a single `-c/--config` option that defaults to `engine.toml` in the
+  working directory, so the common case is just `unitylan-engine ctl status` and the argument you
+  care about comes first: `unitylan-engine ctl expose 25565 minecraft`. **This breaks existing
+  scripts and unit files**, which need the path moved ahead of the subcommand as `-c <path>`; the
+  packaged systemd unit is updated for you. Alongside it, `--help` now documents every `ctl`
+  subcommand and its arguments (most had no description at all), `ctl net` and `ctl own-devices`
+  list their valid actions instead of failing at runtime, and the WireGuard/DNS/resolver commands
+  meant only for the test scripts no longer clutter the top-level command list.
 
 ### Fixed
 

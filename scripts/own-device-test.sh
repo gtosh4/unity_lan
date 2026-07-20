@@ -81,9 +81,9 @@ mkcfg b1 key-b1 unlb1 51822   # user 2, device 1
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a1.toml" >"$TMP/a1.log" 2>&1 &
-"$ENG" run "$TMP/a2.toml" >"$TMP/a2.log" 2>&1 &
-"$ENG" run "$TMP/b1.toml" >"$TMP/b1.log" 2>&1 &
+"$ENG" -c "$TMP/a1.toml" run >"$TMP/a1.log" 2>&1 &
+"$ENG" -c "$TMP/a2.toml" run >"$TMP/a2.log" 2>&1 &
+"$ENG" -c "$TMP/b1.toml" run >"$TMP/b1.log" 2>&1 &
 
 # Wait for user 1's two devices to mesh (peer set on both). If own-device peering were off they'd
 # never mesh — the shared network is disabled on both ends.
@@ -112,7 +112,7 @@ fi
 echo "=== per-user scoping: user 2's device must not appear on user 1's node ==="
 B1_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b1.log" | head -1 | awk '{print $1}')
 echo "b1 (user 2) self IP = ${B1_IP:-<none>}"
-CTL=$("$ENG" ctl status "$TMP/a1.toml" 2>&1)
+CTL=$("$ENG" -c "$TMP/a1.toml" ctl status 2>&1)
 echo "$CTL" | grep -q "$A2_IP" || { echo "FAIL: a1 status did not list its own sibling a2"; echo "$CTL"; exit 1; }
 if [ -n "$B1_IP" ] && echo "$CTL" | grep -q "$B1_IP"; then
   echo "FAIL: user 2's device leaked into user 1's mesh via own-device peering"; echo "$CTL"; exit 1
@@ -122,24 +122,24 @@ echo "scoping: a1 sees sibling a2 but never user 2's b1 ✓"
 # CLI toggle: turn own-device peering off on a1. The coordinator evicts a1's per-user presence and
 # stops seeding its siblings, so a1 and a2 drop each other on the next refresh.
 echo "=== cli toggle: 'ctl own-devices off' drops the own-device mesh ==="
-"$ENG" ctl own-devices "$TMP/a1.toml" off
+"$ENG" -c "$TMP/a1.toml" ctl own-devices off
 for _ in $(seq 1 20); do
-  "$ENG" ctl status "$TMP/a1.toml" 2>/dev/null | grep -q "$A2_IP" || break
+  "$ENG" -c "$TMP/a1.toml" ctl status 2>/dev/null | grep -q "$A2_IP" || break
   sleep 0.5
 done
-"$ENG" ctl status "$TMP/a1.toml" 2>&1 | grep -q "$A2_IP" && {
+"$ENG" -c "$TMP/a1.toml" ctl status 2>&1 | grep -q "$A2_IP" && {
   echo "FAIL: a1 still lists a2 after own-device peering turned off"; exit 1
 }
 echo "toggle off: a1 no longer meshes its sibling a2 ✓"
 
 # Turn it back on → they re-mesh.
 echo "=== cli toggle: 'ctl own-devices on' restores it ==="
-"$ENG" ctl own-devices "$TMP/a1.toml" on
+"$ENG" -c "$TMP/a1.toml" ctl own-devices on
 for _ in $(seq 1 20); do
-  "$ENG" ctl status "$TMP/a1.toml" 2>/dev/null | grep -q "$A2_IP" && break
+  "$ENG" -c "$TMP/a1.toml" ctl status 2>/dev/null | grep -q "$A2_IP" && break
   sleep 0.5
 done
-"$ENG" ctl status "$TMP/a1.toml" 2>&1 | grep -q "$A2_IP" || {
+"$ENG" -c "$TMP/a1.toml" ctl status 2>&1 | grep -q "$A2_IP" || {
   echo "FAIL: a1 did not re-mesh a2 after own-device peering turned back on"; exit 1
 }
 echo "toggle on: a1 re-meshes sibling a2 ✓"

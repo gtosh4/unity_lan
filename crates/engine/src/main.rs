@@ -28,31 +28,45 @@ mod wg;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 
 /// UnityLAN engine — headless data-plane daemon.
 #[derive(Parser)]
-#[command(name = "unitylan-engine", version, about)]
+#[command(
+    name = "unitylan-engine",
+    version,
+    about,
+    after_help = "\
+Examples:
+  unitylan-engine login                    log in with Discord, then enroll this device
+  unitylan-engine run                      run the daemon in the foreground
+  unitylan-engine ctl status               show device, networks, and peer reachability
+  unitylan-engine ctl expose 25565 gaming  open TCP 25565 to the 'gaming' network's peers
+
+Every command reads engine.toml from the working directory; pass -c to point elsewhere:
+  unitylan-engine -c /etc/unitylan/engine.toml ctl status"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
-    /// Bare invocation (register-once): config path (defaults to engine.toml).
+    /// Config file to use (also names the control socket `ctl` talks to).
+    #[arg(short, long, global = true, value_name = "PATH")]
     config: Option<String>,
     /// One-time enrollment key, overriding `enrollment_key` in the config. Lets a headless box
     /// enroll without writing the bearer secret to disk (e.g. pass it once via a systemd unit
     /// `ExecStart`, an env-substituted arg, or an interactive first run).
-    #[arg(long, global = true, value_name = "KEY")]
+    #[arg(long, value_name = "KEY")]
     token: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
     /// Run the engine daemon (console mode; Ctrl-C shuts down).
-    Run { config: Option<String> },
+    Run,
     /// Interactive Discord login, then confirm this device.
-    Login { config: Option<String> },
+    Login,
     /// Talk to a running daemon over its control socket.
     Ctl {
         #[command(subcommand)]
@@ -61,11 +75,13 @@ enum Cmd {
     /// Print a fresh WireGuard keypair as `priv pub` (base64).
     WgKeygen,
     /// Bring a WG iface up, add a dummy peer, tear down (needs CAP_NET_ADMIN).
+    #[command(hide = true)]
     WgSmoke {
         #[arg(default_value = "unl-smoke")]
         ifname: String,
     },
     /// Bring up one WG node, hold it up, then tear down (netns tunnel test).
+    #[command(hide = true)]
     WgNode {
         iface: String,
         priv_b64: String,
@@ -79,53 +95,56 @@ enum Cmd {
         hold_secs: u64,
     },
     /// Serve a single `<name> <ip>` record on `<bind>` (dev/test).
+    #[command(hide = true)]
     DnsServe {
         bind: SocketAddr,
         name: String,
         ip: Ipv4Addr,
     },
-    /// Un-enroll this device at the coordinator; with `--purge`, also wipe all local state (keys,
-    /// token, pinned anchors) — the "forget me" teardown a package purge invokes. Stop the daemon
-    /// first (it reverts the interface/firewall/DNS on shutdown); this handles the coordinator + disk.
+    /// Un-enroll this device at the coordinator, and optionally wipe local state.
+    #[command(long_about = "\
+Un-enroll this device at the coordinator; with `--purge`, also wipe all local state (keys, token,
+pinned anchors) — the \"forget me\" teardown a package purge invokes. Stop the daemon first (it
+reverts the interface/firewall/DNS on shutdown); this handles the coordinator + disk.")]
     Uninstall {
-        #[arg(default_value = "engine.toml")]
-        config: String,
         /// Also delete local state (device identity). Without this, state is kept for reinstall.
         #[arg(long)]
         purge: bool,
     },
     /// Install this platform's OS resolver hook.
+    #[command(hide = true)]
     ResolverInstall { iface: String, server: SocketAddr },
     /// Revert this platform's OS resolver hook.
+    #[command(hide = true)]
     ResolverRevert { iface: String },
 }
 
-/// `ctl` subcommands. Each takes the config path first (defaults to engine.toml where the
-/// subcommand has no other required argument).
+/// `ctl` subcommands. All of them reach the daemon over the control socket named by the global
+/// `-c/--config` (default `engine.toml`).
 #[derive(Subcommand)]
 enum CtlCmd {
-    Status {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
-    Devices {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
+    /// Show this device, its networks, and every peer's address and reachability.
+    Status,
+    /// List the devices enrolled under your account.
+    Devices,
+    /// Rename this device (changes its `<device>.<user>.unity.internal` hostname).
     Rename {
-        config: String,
+        /// New name for this device.
         new_name: String,
     },
+    /// Make one of your devices the primary — the one the bare `<user>.unity.internal` resolves to.
     SetPrimary {
-        config: String,
+        /// Name of the device to promote, as shown by `ctl devices`.
         device: String,
     },
+    /// Un-enroll one of your devices at the coordinator.
     Remove {
-        config: String,
+        /// Name of the device to drop, as shown by `ctl devices`.
         device: String,
     },
+    /// Open a local port to mesh peers through the host firewall.
     Expose {
-        config: String,
+        /// Port to open: `25565` (tcp), or `tcp/25565` / `udp/34197`.
         port: String,
         /// Restrict the port to this network's peers; omit to open it to every peer.
         net: Option<String>,
@@ -136,8 +155,9 @@ enum CtlCmd {
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
     },
+    /// Close a port opened with `expose`.
     Unexpose {
-        config: String,
+        /// Port to close: `25565` (tcp), or `tcp/25565` / `udp/34197`.
         port: String,
         /// Close only the exposure scoped to this network; omit to close every scope of the port.
         #[arg(long)]
@@ -149,48 +169,53 @@ enum CtlCmd {
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
     },
-    Exposes {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
-    Login {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
-    Connect {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
-    Disconnect {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
+    /// List the ports this device currently exposes, and to whom.
+    Exposes,
+    /// Start a Discord login: prints the URL to open; the daemon finishes the binding.
+    Login,
+    /// Bring the mesh up (build tunnels to peers).
+    Connect,
+    /// Take the mesh down without stopping the daemon.
+    Disconnect,
     /// Apply the staged auto-update (download → verify → swap → restart). Headless equivalent of
     /// the GUI's update button; errors if no verified update is staged.
-    Update {
-        #[arg(default_value = "engine.toml")]
-        config: String,
-    },
+    Update,
+    /// Enable or disable peering with one of your networks.
     Net {
-        config: String,
-        action: String,
+        /// `enable` to peer with the network again, `disable` to stop.
+        action: Toggle,
+        /// Network name, as shown by `ctl status`.
         network: String,
     },
-    /// Toggle always peering with your own other devices (regardless of networks): `on` | `off`.
+    /// Turn peering with your own other devices (regardless of networks) on or off.
     OwnDevices {
-        config: String,
-        action: String,
+        /// `on` to always peer with your own devices, `off` to peer only via shared networks.
+        action: OnOff,
     },
     /// Locally block a peer's owner (all their devices) by handle — drops them from the mesh.
     Block {
-        config: String,
+        /// Discord handle of the person to block, as shown by `ctl status`.
         user: String,
     },
     /// Un-block a previously-blocked user by handle.
     Unblock {
-        config: String,
+        /// Discord handle to un-block, as shown in `ctl status`'s blocked list.
         user: String,
     },
+}
+
+/// `ctl net` action.
+#[derive(Clone, Copy, ValueEnum)]
+enum Toggle {
+    Enable,
+    Disable,
+}
+
+/// `ctl own-devices` action.
+#[derive(Clone, Copy, ValueEnum)]
+enum OnOff {
+    On,
+    Off,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -229,13 +254,9 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main(cli: Cli) -> anyhow::Result<()> {
-    // `--token` is a global arg; pull it out so every config-loading arm can override the config's
-    // `enrollment_key` with it. Each match arm is exclusive, so moving `token` into an arm is fine.
-    let Cli {
-        cmd,
-        config: bare_config,
-        token,
-    } = cli;
+    // `--config`/`--token` are top-level args shared by every arm: the first names the config (and
+    // hence the control socket), the second overrides the config's `enrollment_key`.
+    let Cli { cmd, config, token } = cli;
     match cmd {
         Some(Cmd::WgSmoke { ifname }) => wg_smoke(&ifname),
         Some(Cmd::WgKeygen) => {
@@ -282,7 +303,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
             hook.revert(&iface)
         }
-        Some(Cmd::Run { config }) => {
+        Some(Cmd::Run) => {
             let cfg = load_config(config, token)?;
             // Latch the shutdown signal so the daemon runs its teardown (revert interface/firewall/
             // DNS, withdraw presence) rather than being hard-killed: Ctrl-C (SIGINT) everywhere, plus
@@ -294,12 +315,17 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             });
             daemon::run(cfg, shutdown).await
         }
-        Some(Cmd::Ctl { sub }) => ctl(sub).await,
-        Some(Cmd::Uninstall { config, purge }) => {
-            uninstall(load_config(Some(config), token)?, purge).await
+        Some(Cmd::Ctl { sub }) => ctl(sub, config).await,
+        // Uninstall reads an existing deployment; unlike `run`/`login` it must never bootstrap a
+        // starter config, so it loads the resolved path directly instead of via `load_config`.
+        Some(Cmd::Uninstall { purge }) => {
+            let path = config_path(config);
+            let cfg = Config::load(std::path::Path::new(&path))
+                .with_context(|| format!("loading config {path}"))?;
+            uninstall(cfg, purge).await
         }
-        Some(Cmd::Login { config }) => login(load_config(config, token)?).await,
-        None => register_once(bare_config, token).await,
+        Some(Cmd::Login) => login(load_config(config, token)?).await,
+        None => register_once(config, token).await,
     }
 }
 
@@ -401,6 +427,11 @@ async fn uninstall(cfg: Config, purge: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The config path a run resolves to: `-c/--config` if given, else `engine.toml` in the cwd.
+fn config_path(arg: Option<String>) -> String {
+    arg.unwrap_or_else(|| "engine.toml".to_string())
+}
+
 /// Load config from an optional CLI path. An explicit path must exist; the default `engine.toml`
 /// is created with starter values on first run so a bare `run`/`login` bootstraps a dev config.
 fn load_config(arg: Option<String>, token_override: Option<String>) -> anyhow::Result<Config> {
@@ -460,27 +491,26 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Talk to a running daemon over its control socket. Each subcommand's config path resolves the
-/// socket; see [`CtlCmd`].
-async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
+/// Talk to a running daemon over its control socket. The global `-c/--config` resolves the socket
+/// for every subcommand; see [`CtlCmd`].
+async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
     use common::api::ManageOp;
 
-    // Resolve the control socket for a subcommand's config path.
-    let socket_for = |cfg_path: &str| -> anyhow::Result<String> {
-        Ok(Config::load(std::path::Path::new(cfg_path))
-            .with_context(|| format!("loading config {cfg_path}"))?
-            .control_name())
-    };
+    // The daemon must already be configured, so an absent config is an error here rather than a
+    // cue to write a starter one.
+    let cfg_path = config_path(config);
+    let socket = Config::load(std::path::Path::new(&cfg_path))
+        .with_context(|| format!("loading config {cfg_path}"))?
+        .control_name();
 
     match sub {
-        CtlCmd::Status { config } => {
-            let socket = socket_for(&config)?;
+        CtlCmd::Status => {
             let report = control::client_status(&socket).await?;
             if report.needs_login {
-                println!("not logged in — run `unitylan ctl login {config}`");
+                println!("not logged in — run `unitylan-engine ctl login`");
             }
             if !report.connected {
-                println!("mesh: disconnected — run `unitylan ctl connect {config}`");
+                println!("mesh: disconnected — run `unitylan-engine ctl connect`");
             }
             match &report.device {
                 None => println!("not joined to any network"),
@@ -492,7 +522,7 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             }
             if let Some(v) = &report.update_available {
                 let staged = if report.update_ready {
-                    " (staged — run `unitylan ctl update`)"
+                    " (staged — run `unitylan-engine ctl update`)"
                 } else {
                     ""
                 };
@@ -521,24 +551,22 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        CtlCmd::Devices { config } => {
-            print_devices(control::client_manage(&socket_for(&config)?, ManageOp::List).await?)
+        CtlCmd::Devices => print_devices(control::client_manage(&socket, ManageOp::List).await?),
+        CtlCmd::Rename { new_name } => {
+            print_devices(control::client_manage(&socket, ManageOp::Rename { new_name }).await?)
         }
-        CtlCmd::Rename { config, new_name } => print_devices(
-            control::client_manage(&socket_for(&config)?, ManageOp::Rename { new_name }).await?,
-        ),
-        CtlCmd::SetPrimary { config, device } => print_devices(
+        CtlCmd::SetPrimary { device } => print_devices(
             control::client_manage(
-                &socket_for(&config)?,
+                &socket,
                 ManageOp::SetPrimary {
                     device_name: device,
                 },
             )
             .await?,
         ),
-        CtlCmd::Remove { config, device } => print_devices(
+        CtlCmd::Remove { device } => print_devices(
             control::client_manage(
-                &socket_for(&config)?,
+                &socket,
                 ManageOp::Remove {
                     device_name: device,
                 },
@@ -546,7 +574,6 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             .await?,
         ),
         CtlCmd::Expose {
-            config,
             port,
             net,
             guild,
@@ -556,14 +583,13 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             let scope = expose_scope(net, guild, own_devices);
             print_exposed(
                 control::client_expose(
-                    &socket_for(&config)?,
+                    &socket,
                     common::control::ExposeOp::Add { proto, port, scope },
                 )
                 .await?,
             )
         }
         CtlCmd::Unexpose {
-            config,
             port,
             net,
             guild,
@@ -577,17 +603,17 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             };
             print_exposed(
                 control::client_expose(
-                    &socket_for(&config)?,
+                    &socket,
                     common::control::ExposeOp::Remove { proto, port, scope },
                 )
                 .await?,
             )
         }
-        CtlCmd::Exposes { config } => print_exposed(
-            control::client_expose(&socket_for(&config)?, common::control::ExposeOp::List).await?,
-        ),
-        CtlCmd::Login { config } => {
-            let resp = control::client_login(&socket_for(&config)?).await?;
+        CtlCmd::Exposes => {
+            print_exposed(control::client_expose(&socket, common::control::ExposeOp::List).await?)
+        }
+        CtlCmd::Login => {
+            let resp = control::client_login(&socket).await?;
             println!(
                 "Open this URL to log in with Discord:\n\n  {}\n",
                 resp.authorize_url
@@ -595,32 +621,23 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             println!("The daemon binds this device once you complete the browser step.");
             Ok(())
         }
-        CtlCmd::Connect { config } => {
-            let resp = control::client_set_connected(&socket_for(&config)?, true).await?;
+        CtlCmd::Connect => {
+            let resp = control::client_set_connected(&socket, true).await?;
             println!("{}", resp.message);
             Ok(())
         }
-        CtlCmd::Update { config } => {
-            let resp = control::client_apply_update(&socket_for(&config)?).await?;
+        CtlCmd::Update => {
+            let resp = control::client_apply_update(&socket).await?;
             println!("{} (v{})", resp.message, resp.version);
             Ok(())
         }
-        CtlCmd::Disconnect { config } => {
-            let resp = control::client_set_connected(&socket_for(&config)?, false).await?;
+        CtlCmd::Disconnect => {
+            let resp = control::client_set_connected(&socket, false).await?;
             println!("{}", resp.message);
             Ok(())
         }
-        CtlCmd::Net {
-            config,
-            action,
-            network,
-        } => {
-            let socket = socket_for(&config)?;
-            let enabled = match action.as_str() {
-                "enable" => true,
-                "disable" => false,
-                _ => anyhow::bail!("use 'enable' or 'disable'"),
-            };
+        CtlCmd::Net { action, network } => {
+            let enabled = matches!(action, Toggle::Enable);
             let status = control::client_status(&socket).await?;
             let net = status
                 .networks
@@ -640,22 +657,16 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        CtlCmd::OwnDevices { config, action } => {
-            let enabled = match action.as_str() {
-                "on" => true,
-                "off" => false,
-                _ => anyhow::bail!("use 'on' or 'off'"),
-            };
-            let status =
-                control::client_set_own_device_peering(&socket_for(&config)?, enabled).await?;
+        CtlCmd::OwnDevices { action } => {
+            let enabled = matches!(action, OnOff::On);
+            let status = control::client_set_own_device_peering(&socket, enabled).await?;
             println!(
                 "own-device peering {} (locally; syncs to coordinator on next refresh)",
                 if status.peer_own_devices { "on" } else { "off" }
             );
             Ok(())
         }
-        CtlCmd::Block { config, user } => {
-            let socket = socket_for(&config)?;
+        CtlCmd::Block { user } => {
             // Resolve the handle to a user_id from the live peer set (a block acts on the person).
             let status = control::client_status(&socket).await?;
             let peer = status
@@ -669,8 +680,7 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             println!("blocked {user} ({} user(s) blocked)", updated.blocked.len());
             Ok(())
         }
-        CtlCmd::Unblock { config, user } => {
-            let socket = socket_for(&config)?;
+        CtlCmd::Unblock { user } => {
             // Resolve from the blocked list, so an offline (filtered-out) user can still be un-blocked.
             let status = control::client_status(&socket).await?;
             let blocked = status

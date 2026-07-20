@@ -145,22 +145,22 @@ for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1 
 curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1 || { echo "FAIL: coordinator never came up"; cat "$WORK/coord.log"; exit 1; }
 
 echo "=== baseline engine v$OLDVER running; waiting for it to stage the v$TIPVER update ==="
-"$ENG" run "$WORK/eng.toml" >"$WORK/eng.log" 2>&1 &
+"$ENG" -c "$WORK/eng.toml" run >"$WORK/eng.log" 2>&1 &
 ENG_PID=$!
 
 # The engine pins the anchor on register, then each refresh verifies the manifest + stages it.
 staged=""
 for _ in $(seq 1 40); do
   kill -0 "$ENG_PID" 2>/dev/null || { echo "FAIL: engine exited early"; cat "$WORK/eng.log"; exit 1; }
-  out="$("$ENG" ctl status "$WORK/eng.toml" 2>/dev/null)"
+  out="$("$ENG" -c "$WORK/eng.toml" ctl status 2>/dev/null)"
   if echo "$out" | grep -q "v$TIPVER available (staged"; then staged="1"; echo "$out" | grep "update:"; break; fi
   sleep 0.5
 done
-[ -n "$staged" ] || { echo "FAIL: update never staged"; echo "--- status ---"; "$ENG" ctl status "$WORK/eng.toml"; echo "--- eng.log ---"; tail -20 "$WORK/eng.log"; exit 1; }
+[ -n "$staged" ] || { echo "FAIL: update never staged"; echo "--- status ---"; "$ENG" -c "$WORK/eng.toml" ctl status; echo "--- eng.log ---"; tail -20 "$WORK/eng.log"; exit 1; }
 echo "stage: baseline verified + staged the tip manifest against its pinned anchor ✓"
 
 echo "=== applying the update (ctl update) ==="
-"$ENG" ctl update "$WORK/eng.toml" || { echo "FAIL: ctl update rejected"; exit 1; }
+"$ENG" -c "$WORK/eng.toml" ctl update || { echo "FAIL: ctl update rejected"; exit 1; }
 
 # The daemon downloads over HTTPS, re-verifies the SHA-256, swaps the binary, and exit(0)s. Wait for
 # the running exe on disk to have become the tip version.

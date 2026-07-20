@@ -183,9 +183,9 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a.toml"      >"$TMP/a.log" 2>&1 &
-$IB "$ENG" run "$TMP/b.toml"  >"$TMP/b.log" 2>&1 &
-$IC "$ENG" run "$TMP/c.toml"  >"$TMP/c.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run      >"$TMP/a.log" 2>&1 &
+$IB "$ENG" -c "$TMP/b.toml" run  >"$TMP/b.log" 2>&1 &
+$IC "$ENG" -c "$TMP/c.toml" run  >"$TMP/c.log" 2>&1 &
 
 # A's embedded TURN relay must come up. (Generous wait: webrtc-ice pulls the engine binary heavier,
 # so cold boot under load can take a while.)
@@ -233,8 +233,8 @@ echo "data-plane ✓  ping traversed the ICE-negotiated path through A"
 
 # The daemon marks an ICE-routed peer `[ice]` over the control socket.
 echo "=== diagnostics: B's view of C via ctl status ==="
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -E "peers|$C_IP" || echo "  (ctl status unavailable)"
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -q "ice" && echo "ctl status: C shown [ice] ✓"
+"$ENG" -c "$TMP/b.toml" ctl status 2>&1 | grep -E "peers|$C_IP" || echo "  (ctl status unavailable)"
+"$ENG" -c "$TMP/b.toml" ctl status 2>&1 | grep -q "ice" && echo "ctl status: C shown [ice] ✓"
 
 echo "RESULT: PASS ✓  punch isolated → ICE negotiated → relay pair selected → WG ciphertext rides ICE end-to-end"
 exit 0

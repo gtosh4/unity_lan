@@ -90,8 +90,8 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 & COORD_PID=$!
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
-$NS1 "$ENG" run "$TMP/b.toml" >"$TMP/b.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
+$NS1 "$ENG" -c "$TMP/b.toml" run >"$TMP/b.log" 2>&1 &
 
 for _ in $(seq 1 40); do
   grep -q "peer set" "$TMP/a.log" 2>/dev/null && grep -q "peer set" "$TMP/b.log" 2>/dev/null && break
@@ -126,15 +126,15 @@ echo "dns: peer hostname + primary alias resolve to B ✓"
 
 # Control socket: query node A's daemon for its status; it must list peer B.
 echo "=== control socket: ctl status on node A ==="
-CTL=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
+CTL=$("$ENG" -c "$TMP/a.toml" ctl status 2>&1)
 echo "$CTL"
 echo "$CTL" | grep -q "$B_IP" || { echo "FAIL: ctl status did not list peer B"; exit 1; }
 echo "ctl: status lists peer B ✓"
 
 # Control mutations: rename node A's device (authenticated by its bearer token) and confirm.
 echo "=== control mutations: ctl rename on node A ==="
-"$ENG" ctl rename "$TMP/a.toml" workstation
-"$ENG" ctl devices "$TMP/a.toml" | grep -q 'workstation.*this device' || { echo "FAIL: rename not reflected in devices"; exit 1; }
+"$ENG" -c "$TMP/a.toml" ctl rename workstation
+"$ENG" -c "$TMP/a.toml" ctl devices | grep -q 'workstation.*this device' || { echo "FAIL: rename not reflected in devices"; exit 1; }
 echo "ctl: rename applied + listed ✓"
 
 # No manual plumbing: the daemon brings its own link up and installs routes.
@@ -157,12 +157,12 @@ probe() { timeout 3 bash -c "exec 3<>/dev/tcp/$B_IP/$1" >/dev/null 2>&1; }
 
 probe 9001 && { echo "FAIL: 9001 reachable before expose (default-deny not enforced)"; exit 1; }
 echo "pre-expose: 9001 blocked by default-deny ✓"
-"$ENG" ctl expose "$TMP/b.toml" 9001
+"$ENG" -c "$TMP/b.toml" ctl expose 9001
 probe 9001 || { echo "FAIL: 9001 unreachable after expose"; exit 1; }
 echo "post-expose: 9001 reachable ✓"
 probe 9002 && { echo "FAIL: never-exposed 9002 reachable"; exit 1; }
 echo "unexposed 9002 still blocked ✓"
-"$ENG" ctl unexpose "$TMP/b.toml" 9001
+"$ENG" -c "$TMP/b.toml" ctl unexpose 9001
 probe 9001 && { echo "FAIL: 9001 still reachable after unexpose"; exit 1; }
 echo "post-unexpose: 9001 blocked again ✓"
 
@@ -179,7 +179,7 @@ grep -q "peer removed" "$TMP/a.log" || { echo "FAIL: node A did not prune revoke
 echo "prune: node A dropped peer B after revocation ✓"
 
 # Node A's status must no longer list B.
-CTL=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
+CTL=$("$ENG" -c "$TMP/a.toml" ctl status 2>&1)
 if echo "$CTL" | grep -q "$B_IP"; then echo "FAIL: ctl status still lists revoked peer B"; echo "$CTL"; exit 1; fi
 echo "ctl: status no longer lists B ✓"
 

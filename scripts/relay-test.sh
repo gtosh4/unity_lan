@@ -183,9 +183,9 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a.toml"      >"$TMP/a.log" 2>&1 &
-$IB "$ENG" run "$TMP/b.toml"  >"$TMP/b.log" 2>&1 &
-$IC "$ENG" run "$TMP/c.toml"  >"$TMP/c.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run      >"$TMP/a.log" 2>&1 &
+$IB "$ENG" -c "$TMP/b.toml" run  >"$TMP/b.log" 2>&1 &
+$IC "$ENG" -c "$TMP/c.toml" run  >"$TMP/c.log" 2>&1 &
 
 # A's embedded TURN relay must come up.
 for _ in $(seq 1 40); do grep -q "TURN server up" "$TMP/a.log" 2>/dev/null && break; sleep 0.25; done
@@ -231,8 +231,8 @@ echo "data-plane ✓  ping traversed the ciphertext relay through A"
 
 # The daemon marks a relayed peer `[relayed]` over the control socket.
 echo "=== diagnostics: B's view of C via ctl status ==="
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -E "peers|$C_IP" || echo "  (ctl status unavailable)"
-"$ENG" ctl status "$TMP/b.toml" 2>&1 | grep -q "relayed" && echo "ctl status: C shown [relayed] ✓"
+"$ENG" -c "$TMP/b.toml" ctl status 2>&1 | grep -E "peers|$C_IP" || echo "  (ctl status unavailable)"
+"$ENG" -c "$TMP/b.toml" ctl status 2>&1 | grep -q "relayed" && echo "ctl status: C shown [relayed] ✓"
 
 echo "RESULT: PASS ✓  punch isolated → relay matched → TURN allocated → WG ciphertext relayed end-to-end"
 exit 0

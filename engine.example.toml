@@ -10,7 +10,7 @@ state_dir = "engine-state"
 # Enrollment: bind this device to its owner via a one-time key (minted by `/unitylan enroll`, or
 # seeded in the coordinator's [[enroll]] block for local dev). The key is single-use and short-lived
 # (~15 min). Alternatively, pass it once on the command line with `--token <key>` to keep the bearer
-# secret off disk, or omit it and run `unitylan-engine login engine.toml` for interactive Discord login.
+# secret off disk, or omit it and run `unitylan-engine login` for interactive Discord login.
 # enrollment_key = "dev-key-1"
 
 # Interactive-login (Discord PKCE) loopback redirect. Defaults to this if omitted; register the

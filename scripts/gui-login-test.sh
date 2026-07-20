@@ -60,17 +60,17 @@ EOF
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8088/healthz >/dev/null 2>&1 && break; sleep 0.25; done
 
-"$ENG" run "$TMP/a.toml" >"$TMP/a.log" 2>&1 &
+"$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
 
 # The daemon should come up (control socket) and report needs_login, without meshing.
-for _ in $(seq 1 40); do "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q 'not logged in' && break; sleep 0.5; done
-"$ENG" ctl status "$TMP/a.toml" 2>&1 | grep -q 'not logged in' \
-  || { echo "FAIL: daemon did not report needs_login"; "$ENG" ctl status "$TMP/a.toml"; tail -10 "$TMP/a.log"; exit 1; }
+for _ in $(seq 1 40); do "$ENG" -c "$TMP/a.toml" ctl status 2>/dev/null | grep -q 'not logged in' && break; sleep 0.5; done
+"$ENG" -c "$TMP/a.toml" ctl status 2>&1 | grep -q 'not logged in' \
+  || { echo "FAIL: daemon did not report needs_login"; "$ENG" -c "$TMP/a.toml" ctl status; tail -10 "$TMP/a.log"; exit 1; }
 echo "daemon up, not enrolled: reports needs_login ✓"
 
 # The GUI "Log in" button == this control op: the daemon builds the authorize URL + binds its
 # loopback listener, and finishes the exchange in the background once the browser hits the redirect.
-LOGIN=$("$ENG" ctl login "$TMP/a.toml" 2>&1)
+LOGIN=$("$ENG" -c "$TMP/a.toml" ctl login 2>&1)
 echo "$LOGIN" | grep -q 'oauth2/authorize' || { echo "FAIL: ctl login returned no authorize URL"; echo "$LOGIN"; exit 1; }
 STATE=$(echo "$LOGIN" | grep -oE 'state=[A-Za-z0-9]+' | head -1 | cut -d= -f2)
 [ -n "$STATE" ] || { echo "FAIL: no state in authorize URL"; echo "$LOGIN"; exit 1; }
@@ -84,8 +84,8 @@ echo "callback: device bound ✓"
 # The daemon's register loop now succeeds → brings up the interface and clears needs_login.
 # Hostname is <device>.<user>.unity.internal — the community/guild is NOT in the name.
 HOST="host-a.nodea.unity.internal"
-for _ in $(seq 1 30); do "$ENG" ctl status "$TMP/a.toml" 2>/dev/null | grep -q "$HOST" && break; sleep 0.5; done
-ST=$("$ENG" ctl status "$TMP/a.toml" 2>&1)
+for _ in $(seq 1 30); do "$ENG" -c "$TMP/a.toml" ctl status 2>/dev/null | grep -q "$HOST" && break; sleep 0.5; done
+ST=$("$ENG" -c "$TMP/a.toml" ctl status 2>&1)
 if echo "$ST" | grep -q "$HOST" && ! echo "$ST" | grep -q 'not logged in'; then
   echo "$ST" | grep -E 'device:'
   echo "RESULT: PASS ✓  daemon-mediated login bound the device and brought up the mesh"

@@ -179,7 +179,7 @@ the box, only HTTP to the coordinator.
    - **Off disk (recommended):** pass it on the command line — it never gets written to the config.
 
      ```sh
-     sudo unitylan-engine run --token unl_a1b2… /etc/unitylan/engine.toml
+     sudo unitylan-engine --token unl_a1b2… -c /etc/unitylan/engine.toml run
      ```
 
    - **In the config:** add `enrollment_key = "unl_a1b2…"` to `engine.toml`, then start the service:
@@ -196,9 +196,9 @@ the box, only HTTP to the coordinator.
    expose the service's port — to every peer, to one network's members, or to just your own devices:
 
    ```sh
-   sudo unitylan-engine ctl status /etc/unitylan/engine.toml
-   sudo unitylan-engine ctl expose /etc/unitylan/engine.toml 25565 minecraft
-   sudo unitylan-engine ctl expose /etc/unitylan/engine.toml 22 --own-devices
+   sudo unitylan-engine -c /etc/unitylan/engine.toml ctl status
+   sudo unitylan-engine -c /etc/unitylan/engine.toml ctl expose 25565 minecraft
+   sudo unitylan-engine -c /etc/unitylan/engine.toml ctl expose 22 --own-devices
    ```
 
    Repeat the command with a different network to open one port to several at once; each scope can
