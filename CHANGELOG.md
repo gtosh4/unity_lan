@@ -126,6 +126,12 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   keeps your edits. One consequence: `engine.toml` is now also left behind by a plain uninstall
   (previously removed) — the engine's purge-mode uninstall still wipes device state, or you can delete
   the file by hand.
+- **A Windows upgrade no longer risks wedging on the service itself.** The installer used to delete
+  and recreate the engine service on every upgrade; if anything held the old service open (an open
+  Services console was enough), the deletion lingered and blocked the recreate, failing the upgrade
+  and leaving no service behind. Upgrades now stop the old service and reconfigure it in place instead
+  of deleting it — so there is nothing to linger, and a failed upgrade leaves the service intact
+  rather than gone.
 - **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
   Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
   never opened its own UDP listen port on the host firewall. Windows Defender then dropped every

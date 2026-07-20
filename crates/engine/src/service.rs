@@ -7,6 +7,9 @@
 //! - `install [config.toml]` — register an auto-start service (needs an elevated shell).
 //! - `start` — start the (already-registered) service now; used by the MSI after a major upgrade so
 //!   an auto-update relaunches the engine without waiting for a reboot. Idempotent.
+//! - `stop` — stop the running service but leave it registered; the MSI runs this while removing the
+//!   old build during a major upgrade, so the exe unlocks for replacement and `install` adopts +
+//!   repoints the same registration in place — no delete, hence no marked-for-delete husk. Idempotent.
 //! - `uninstall` — stop and remove it (needs an elevated shell).
 //! - `run [config.toml]` — the SCM-invoked entry point; not for interactive use. The config path is
 //!   baked into the service's command line at install time, so users never pass it themselves.
@@ -49,6 +52,9 @@ const ERROR_SERVICE_EXISTS: i32 = 1073;
 /// `CreateService` failed because the name is still reserved by a service that has been deleted but
 /// whose last SCM handle hasn't closed yet. Transient — it clears on its own.
 const ERROR_SERVICE_MARKED_FOR_DELETE: i32 = 1072;
+/// `OpenService` failed because no service of this name is registered. Treated as a no-op by [`stop`]
+/// (nothing to stop) rather than an error.
+const ERROR_SERVICE_DOES_NOT_EXIST: i32 = 1060;
 
 /// How long to wait for a service to reach `Stopped`, and for a marked-for-delete name to free up.
 /// Matches the stop wait hint `run_service` reports to the SCM, since a clean stop tears down the
@@ -74,10 +80,11 @@ pub fn main() -> Result<()> {
     match std::env::args().nth(2).unwrap_or_default().as_str() {
         "install" => install(std::env::args().nth(3)),
         "start" => start(),
+        "stop" => stop(),
         "uninstall" => uninstall(),
         "run" => run_dispatch(),
         other => anyhow::bail!(
-            "unknown `service` subcommand '{other}' (use: install [config.toml], start, uninstall, run)"
+            "unknown `service` subcommand '{other}' (use: install [config.toml], start, stop, uninstall, run)"
         ),
     }
 }
@@ -295,6 +302,34 @@ fn start() -> Result<()> {
     Ok(())
 }
 
+/// Stop the service but leave it registered — the upgrade counterpart to [`uninstall`]'s stop+delete.
+///
+/// The MSI runs this while removing the *old* build during a major upgrade: stopping frees the
+/// running exe so `RemoveFiles` can replace it, while keeping the registration means the incoming
+/// build's `install` finds it via [`create_or_adopt`]'s `ERROR_SERVICE_EXISTS` path and reconfigures
+/// it in place. Deleting instead (the pre-adopt design) risked a marked-for-delete husk that wedged
+/// the reinstall, and a failed upgrade left no service at all. Idempotent and best-effort: no such
+/// service (never installed, or already gone) and an already-stopped one are both success, so a stray
+/// stop never fails an install.
+fn stop() -> Result<()> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager (run this from an elevated/Administrator shell)")?;
+    let service = match manager.open_service(
+        SERVICE_NAME,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP,
+    ) {
+        Ok(service) => service,
+        Err(e) if winapi_code(&e) == Some(ERROR_SERVICE_DOES_NOT_EXIST) => {
+            println!("Service '{SERVICE_NAME}' is not installed; nothing to stop.");
+            return Ok(());
+        }
+        Err(e) => return Err(anyhow::Error::new(e).context("opening the service to stop it")),
+    };
+    stop_and_wait(&service)?;
+    println!("Stopped service '{SERVICE_NAME}' (left registered).");
+    Ok(())
+}
+
 /// Hand the thread to the SCM dispatcher; it calls `ffi_service_main` and blocks until we stop.
 fn run_dispatch() -> Result<()> {
     service_dispatcher::start(SERVICE_NAME, ffi_service_main).context(
@@ -491,5 +526,6 @@ mod tests {
     fn scm_error_constants_match_win32() {
         assert_eq!(ERROR_SERVICE_EXISTS, 1073);
         assert_eq!(ERROR_SERVICE_MARKED_FOR_DELETE, 1072);
+        assert_eq!(ERROR_SERVICE_DOES_NOT_EXIST, 1060);
     }
 }

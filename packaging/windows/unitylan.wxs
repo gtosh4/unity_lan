@@ -84,12 +84,21 @@
       <ComponentRef Id="WgDllComponent" />
     </Feature>
 
-    <!-- Register/unregister the service via the engine's own installer path. Deferred + no
+    <!-- Register/adopt/remove the service via the engine's own installer path. Deferred + no
          impersonation => runs as LocalSystem, which the service create needs. `service install`
          with no config arg uses engine.toml next to the exe (which we just installed); it
-         canonicalizes that path, so CWD does not matter. -->
+         canonicalizes that path, so CWD does not matter.
+
+         On a major upgrade we deliberately do NOT delete the outgoing service — StopService only
+         *stops* it (freeing the exe for RemoveFiles) and leaves the registration in place, so the
+         incoming build's `service install` adopts and repoints it (create_or_adopt's
+         ERROR_SERVICE_EXISTS path) rather than creating a fresh one. Deleting-then-recreating (the
+         old design) risked a marked-for-delete husk that wedged the reinstall, and a failed upgrade
+         left the machine with no service at all. A genuine uninstall still removes it outright. -->
     <CustomAction Id="InstallService" FileRef="EngineExe" ExeCommand="service install"
                   Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="StopService" FileRef="EngineExe" ExeCommand="service stop"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
     <CustomAction Id="UninstallService" FileRef="EngineExe" ExeCommand="service uninstall"
                   Execute="deferred" Impersonate="no" Return="ignore" />
     <!-- Start the freshly-installed service on any install that lays it down — both a first-time
@@ -114,9 +123,16 @@
                   Impersonate="yes" Return="asyncNoWait" />
 
     <InstallExecuteSequence>
-      <!-- Remove the service while the exe is still on disk. -->
-      <Custom Action="UninstallService" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
-      <!-- Create it once the files are in place. -->
+      <!-- While removing this product's files (both before the exe is deleted): an *upgrade* teardown
+           only STOPS the service, leaving it registered for the incoming build to adopt; a genuine
+           uninstall removes it. UPGRADINGPRODUCTCODE is set only while RemoveExistingProducts tears
+           this product down for a newer build, so the two conditions are mutually exclusive and
+           exactly one runs. -->
+      <Custom Action="StopService" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND UPGRADINGPRODUCTCODE" />
+      <Custom Action="UninstallService" Before="RemoveFiles"
+              Condition="REMOVE=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <!-- Create it (fresh install) or adopt + repoint it at the new exe (upgrade), once files land. -->
       <Custom Action="InstallService" After="InstallFiles" Condition="NOT Installed" />
       <!-- Start it on install and on upgrade (NOT Installed covers both), but not on repair/remove. -->
       <Custom Action="StartService" After="InstallService" Condition="NOT Installed" />
