@@ -1283,7 +1283,15 @@ fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
             sets.own_devices.push(s.ip);
         }
     }
+    // Canonicalize member ordering so an unchanged membership compares equal across refreshes: the
+    // coordinator delivers seeds in varying order (HashMap iteration), and `PeerSets`'s derived
+    // `PartialEq` is order-sensitive on these `Vec`s — without this a herd of refreshes reorders the
+    // ip lists and churns the firewall (reconcile + log) every cycle for no real change.
     sets.nets.sort_by_key(|n| (n.guild_id, n.role_id));
+    for n in &mut sets.nets {
+        n.ips.sort();
+    }
+    sets.own_devices.sort();
     // Say so once per rebuild rather than leaving a port that never opens with no explanation
     // anywhere: an exposure scoped to one of these admits nobody until the coordinator is updated.
     if !unidentified.is_empty() {

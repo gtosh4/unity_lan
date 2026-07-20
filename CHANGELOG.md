@@ -90,6 +90,20 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **Peers no longer flash offline in the GUI when another member comes online.** Every mesh refresh
+  rebuilt the status snapshot with all peers momentarily marked down, restoring their real state a
+  beat later — invisible normally, but a member coming online triggers a burst of refreshes, so the
+  whole peer list would blink offline and back several times. The engine now carries each peer's
+  last-known liveness across the rebuild, so a steady peer stays steady. This was always cosmetic —
+  the tunnels themselves never dropped.
+
+- **A member coming online no longer floods the log with firewall churn.** When a device joined the
+  mesh, every other member would re-log an `apply_state` line and rewrite its firewall rules several
+  times a second for a few seconds — the coordinator sends each refresh's peers in a different order,
+  and the engine treated the reordering as a real membership change. It now sorts members before
+  comparing, so an unchanged membership does no work and logs nothing. This was always cosmetic —
+  the reshuffling never touched any tunnel, so existing connections were never interrupted by it.
+
 - **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
   Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
   never opened its own UDP listen port on the host firewall. Windows Defender then dropped every

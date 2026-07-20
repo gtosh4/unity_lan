@@ -2,6 +2,7 @@
 //! channel, the setters the daemon drives it through, and the snapshot rebuild.
 
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 
 use common::api::NetworkStatus;
@@ -127,13 +128,27 @@ pub fn update(
     coordinator_online: bool,
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
-    let (prev_update_available, prev_update_ready, prev_lan_overlap, prev_proto_mismatch) = {
+    // Also carry each peer's last-known live telemetry (keyed by wg_ip) across the rebuild: this
+    // `send_replace` publishes to the watch channel *before* the next `set_live` re-overlays, so
+    // rebuilding peers as `up=false` would flash every peer offline in the GUI each refresh — a whole
+    // herd of them when a member coming online wakes a burst of refreshes. Preserving prior liveness
+    // keeps a steady peer steady; a genuinely-new peer has no prior entry and correctly starts down.
+    let (
+        prev_update_available,
+        prev_update_ready,
+        prev_lan_overlap,
+        prev_proto_mismatch,
+        prev_live,
+    ) = {
         let prev = shared.borrow();
+        let prev_live: HashMap<Ipv4Addr, PeerStatus> =
+            prev.peers.iter().map(|p| (p.wg_ip, p.clone())).collect();
         (
             prev.update_available.clone(),
             prev.update_ready,
             prev.lan_overlap.clone(),
             prev.proto_mismatch.clone(),
+            prev_live,
         )
     };
     let report = StatusReport {
@@ -155,15 +170,19 @@ pub fn update(
                     .unwrap_or_else(|| s.hostname.clone()),
                 wg_ip: s.ip,
                 endpoint: s.endpoint,
-                reach: common::control::PeerReach::Direct, // overlaid by `set_live`
                 user_id: s.user_id,
                 username: s.username.clone(),
-                // Live telemetry — all overlaid by `set_live` on the next refresh loop.
-                up: false,
-                latency_ms: None,
-                rx_bytes: 0,
-                tx_bytes: 0,
-                last_handshake_secs: None,
+                // Live telemetry: carry the peer's last-known values across the rebuild (so a steady
+                // peer doesn't flash offline before the next `set_live` refreshes them), defaulting to
+                // down for a peer we've not seen before.
+                reach: prev_live
+                    .get(&s.ip)
+                    .map_or(common::control::PeerReach::Direct, |p| p.reach),
+                up: prev_live.get(&s.ip).is_some_and(|p| p.up),
+                latency_ms: prev_live.get(&s.ip).and_then(|p| p.latency_ms),
+                rx_bytes: prev_live.get(&s.ip).map_or(0, |p| p.rx_bytes),
+                tx_bytes: prev_live.get(&s.ip).map_or(0, |p| p.tx_bytes),
+                last_handshake_secs: prev_live.get(&s.ip).and_then(|p| p.last_handshake_secs),
                 // Own devices (same owner) carry a synthetic "My devices" tag for display, so they
                 // group like a network in the peer view — matching the special networks-list row.
                 // Display-only: `SeedPeer.networks` stays empty, so firewall/DNS/expose are untouched.
