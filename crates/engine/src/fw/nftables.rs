@@ -2,26 +2,21 @@
 //! `nft -f -` in one atomic load, so the ruleset is always a pure function of (exposed set,
 //! per-network peer IPs).
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use common::control::Proto;
+use common::control::{ExposeScope, Proto};
 
-use super::{Exposed, FirewallBackend, PeersByNet};
+use super::{Exposed, FirewallBackend, PeerSets};
 
 pub struct NftBackend;
 
 const TABLE: &str = "inet unitylan";
 
 impl FirewallBackend for NftBackend {
-    fn apply(
-        &self,
-        iface: &str,
-        exposed: &[Exposed],
-        peers_by_net: &PeersByNet,
-    ) -> anyhow::Result<()> {
-        run_nft(&ruleset(iface, exposed, peers_by_net))
+    fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
+        run_nft(&ruleset(iface, exposed, peers))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -30,30 +25,44 @@ impl FirewallBackend for NftBackend {
     }
 }
 
-/// nft set name for a network's peer IPs. Sanitized to a valid identifier.
-fn set_name(net: &str) -> String {
-    let s: String = net
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    format!("net_{s}")
+/// nft set name for a scope's peer IPs, sanitized to a valid identifier.
+///
+/// Network names keep the `net_` prefix, which is what keeps the own-device set distinct: a role
+/// named "own devices" becomes `net_own_devices`, never `own_devices`.
+fn set_name(scope: &ExposeScope) -> String {
+    match scope {
+        ExposeScope::OwnDevices => "own_devices".to_string(),
+        ExposeScope::Net(net) => {
+            let s: String = net
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            format!("net_{s}")
+        }
+        // Unscoped: no source set, so no name. Callers filter these out first.
+        ExposeScope::AllPeers => String::new(),
+    }
 }
 
 /// Build the nft script. Only `iif <iface>` traffic is policed; everything else is accepted so
 /// the host's other interfaces are untouched.
-fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> String {
+fn ruleset(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
     let mut s = String::new();
     // Atomic replace: ensure the table exists, drop it, recreate empty.
     s.push_str(&format!("add table {TABLE}\n"));
     s.push_str(&format!("delete table {TABLE}\n"));
     s.push_str(&format!("add table {TABLE}\n"));
 
-    // A named set of source IPs per network referenced by a scoped expose.
-    let scoped_nets: BTreeSet<&str> = exposed.iter().filter_map(|e| e.net.as_deref()).collect();
-    for net in &scoped_nets {
-        let name = set_name(net);
+    // A named set of source IPs per scope referenced by a scoped expose. Ordered by set name so
+    // the script is deterministic (the tests compare it verbatim).
+    let scoped: BTreeMap<String, &ExposeScope> = exposed
+        .iter()
+        .filter(|e| e.scope != ExposeScope::AllPeers)
+        .map(|e| (set_name(&e.scope), &e.scope))
+        .collect();
+    for (name, scope) in &scoped {
         s.push_str(&format!("add set {TABLE} {name} {{ type ipv4_addr ; }}\n"));
-        let ips = peers_by_net.get(*net).map(Vec::as_slice).unwrap_or(&[]);
+        let ips = peers.sources(scope).unwrap_or(&[]);
         if !ips.is_empty() {
             let elems = ips
                 .iter()
@@ -100,9 +109,9 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> Strin
             "add rule {TABLE} input udp dport {{ {udp} }} accept\n"
         ));
     }
-    // Scoped exposes: only peers in the named network's source set reach the port.
-    for e in exposed.iter().filter(|e| e.net.is_some()) {
-        let name = set_name(e.net.as_deref().unwrap());
+    // Scoped exposes: only peers in the scope's source set reach the port.
+    for e in exposed.iter().filter(|e| e.scope != ExposeScope::AllPeers) {
+        let name = set_name(&e.scope);
         s.push_str(&format!(
             "add rule {TABLE} input ip saddr @{name} {} dport {} accept\n",
             e.proto.as_str(),
@@ -118,7 +127,7 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers_by_net: &PeersByNet) -> Strin
 fn unscoped_ports(exposed: &[Exposed], proto: Proto) -> String {
     exposed
         .iter()
-        .filter(|e| e.net.is_none() && e.proto == proto)
+        .filter(|e| e.scope == ExposeScope::AllPeers && e.proto == proto)
         .map(|e| e.port.to_string())
         .collect::<Vec<_>>()
         .join(", ")
@@ -188,11 +197,14 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
-    fn exp(proto: Proto, port: u16, net: Option<&str>) -> Exposed {
-        Exposed {
-            proto,
-            port,
-            net: net.map(String::from),
+    fn exp(proto: Proto, port: u16, scope: ExposeScope) -> Exposed {
+        Exposed { proto, port, scope }
+    }
+
+    fn by_net(name: &str, ips: Vec<Ipv4Addr>) -> PeerSets {
+        PeerSets {
+            by_net: std::collections::HashMap::from([(name.to_string(), ips)]),
+            own_devices: Vec::new(),
         }
     }
 
@@ -200,8 +212,11 @@ mod tests {
     fn ruleset_has_default_deny_and_unscoped_ports() {
         let rs = ruleset(
             "unl0",
-            &[exp(Proto::Tcp, 25565, None), exp(Proto::Udp, 34197, None)],
-            &PeersByNet::new(),
+            &[
+                exp(Proto::Tcp, 25565, ExposeScope::AllPeers),
+                exp(Proto::Udp, 34197, ExposeScope::AllPeers),
+            ],
+            &PeerSets::default(),
         );
         assert!(rs.contains("iifname != \"unl0\" accept"));
         assert!(rs.contains("ct state established,related accept"));
@@ -214,12 +229,15 @@ mod tests {
 
     #[test]
     fn scoped_expose_builds_source_set_and_rule() {
-        let mut peers = PeersByNet::new();
-        peers.insert(
-            "mesh".into(),
+        let peers = by_net(
+            "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, Some("mesh"))], &peers);
+        let rs = ruleset(
+            "unl0",
+            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &peers,
+        );
         // Named set populated with the network's peer IPs.
         assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
         assert!(rs.contains("add element inet unitylan net_mesh { 100.64.0.2, 100.64.0.3 }"));
@@ -238,7 +256,11 @@ mod tests {
         assert!(cgnat_conflict(ts).unwrap().contains("drop"));
 
         // Our own ruleset drops with a bare verdict (no CGNAT match) → no false positive.
-        let ours = ruleset("unl0", &[exp(Proto::Tcp, 25565, None)], &PeersByNet::new());
+        let ours = ruleset(
+            "unl0",
+            &[exp(Proto::Tcp, 25565, ExposeScope::AllPeers)],
+            &PeerSets::default(),
+        );
         assert!(cgnat_conflict(&ours).is_none());
 
         // A benign accept referencing the range must not trip it either.
@@ -249,11 +271,36 @@ mod tests {
     fn scoped_expose_with_no_peers_still_defines_empty_set() {
         let rs = ruleset(
             "unl0",
-            &[exp(Proto::Tcp, 9001, Some("mesh"))],
-            &PeersByNet::new(),
+            &[exp(Proto::Tcp, 9001, ExposeScope::Net("mesh".into()))],
+            &PeerSets::default(),
         );
         assert!(rs.contains("add set inet unitylan net_mesh { type ipv4_addr ; }"));
         assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
         assert!(rs.contains("ip saddr @net_mesh tcp dport 9001 accept"));
+    }
+
+    /// The own-device scope gets its own source set, fed from the owner's devices rather than any
+    /// network — and a role *named* like the own-device set must not land in the same nft set.
+    #[test]
+    fn own_device_scope_has_its_own_set_that_a_role_name_cannot_collide_with() {
+        let peers = PeerSets {
+            by_net: std::collections::HashMap::from([(
+                "own devices".to_string(),
+                vec![Ipv4Addr::new(100, 64, 0, 9)],
+            )]),
+            own_devices: vec![Ipv4Addr::new(100, 64, 0, 2)],
+        };
+        let rs = ruleset(
+            "unl0",
+            &[
+                exp(Proto::Tcp, 9001, ExposeScope::OwnDevices),
+                exp(Proto::Tcp, 9002, ExposeScope::Net("own devices".into())),
+            ],
+            &peers,
+        );
+        assert!(rs.contains("add element inet unitylan own_devices { 100.64.0.2 }"));
+        assert!(rs.contains("add element inet unitylan net_own_devices { 100.64.0.9 }"));
+        assert!(rs.contains("ip saddr @own_devices tcp dport 9001 accept"));
+        assert!(rs.contains("ip saddr @net_own_devices tcp dport 9002 accept"));
     }
 }

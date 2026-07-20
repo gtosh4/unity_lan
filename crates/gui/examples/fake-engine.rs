@@ -27,8 +27,8 @@ use std::time::Instant;
 use common::api::{DeviceInfo, ManageOp, ManageResp, NetworkStatus, SharedNetwork};
 use common::control::{
     BlockedUser, ConnectedResp, ControlRequest, ControlResponse, DeviceStatus, ExposeOp,
-    ExposeResp, ExposedPort, LoginResp, LogoutResp, NetworkResp, PeerReach, PeerStatus, Proto,
-    StatusReport, UiAction, UiDirective, UiTab, UpdateResp,
+    ExposeResp, ExposeScope, ExposedPort, LoginResp, LogoutResp, NetworkResp, PeerReach,
+    PeerStatus, Proto, RemoveScope, StatusReport, UiAction, UiDirective, UiTab, UpdateResp,
 };
 use interprocess::local_socket::tokio::prelude::*;
 #[cfg(not(windows))]
@@ -98,17 +98,25 @@ impl State {
             peers: fixture_peers(),
             networks: fixture_networks(),
             devices: fixture_devices(),
+            // Three scopes across two ports, so the stills show what the chips are for: a port
+            // shared with two networks at once, and one kept to the owner's own devices.
             exposed: vec![
                 ExposedPort {
                     proto: Proto::Tcp,
                     port: 8080,
-                    net: None,
+                    scope: ExposeScope::Net("Engineering".into()),
+                    active: true,
+                },
+                ExposedPort {
+                    proto: Proto::Tcp,
+                    port: 8080,
+                    scope: ExposeScope::Net("Game Night".into()),
                     active: true,
                 },
                 ExposedPort {
                     proto: Proto::Udp,
                     port: 51820,
-                    net: Some("Engineering".into()),
+                    scope: ExposeScope::OwnDevices,
                     active: true,
                 },
             ],
@@ -348,18 +356,26 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
         ControlRequest::Expose(op) => {
             let message = match op {
                 ExposeOp::List => "exposed".into(),
-                ExposeOp::Add { proto, port, net } => {
-                    s.exposed.retain(|e| !(e.proto == proto && e.port == port));
+                ExposeOp::Add { proto, port, scope } => {
+                    s.exposed
+                        .retain(|e| !(e.proto == proto && e.port == port && e.scope == scope));
                     s.exposed.push(ExposedPort {
                         proto,
                         port,
-                        net,
+                        scope,
                         active: true,
                     });
                     format!("exposed {}/{port}", proto.as_str())
                 }
-                ExposeOp::Remove { proto, port, .. } => {
-                    s.exposed.retain(|e| !(e.proto == proto && e.port == port));
+                ExposeOp::Remove { proto, port, scope } => {
+                    s.exposed.retain(|e| {
+                        !(e.proto == proto
+                            && e.port == port
+                            && match &scope {
+                                RemoveScope::All => true,
+                                RemoveScope::Exact(s) => &e.scope == s,
+                            })
+                    });
                     format!("unexposed {}/{port}", proto.as_str())
                 }
             };

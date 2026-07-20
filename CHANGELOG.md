@@ -3,6 +3,30 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Added
+
+- **Ports can be exposed to just your own devices.** A new scope sits alongside "all peers" and the
+  per-network ones, and it goes by identity rather than membership: only your other devices reach
+  the port, no matter what networks you and everyone else share. Useful for the things you run for
+  yourself — a syncthing instance, an SSH port on a home server — that until now had to be opened to
+  every co-member of a network to be reachable at all. In the GUI it's a checkbox in the new scope
+  picker; from the command line it's `unitylan-engine ctl expose <config> <port> --own-devices`
+  (and `ctl unexpose … --own-devices` to close it again).
+- **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
+  its own exposure, so you can close one later without disturbing the rest.
+
+### Changed
+
+- **The exposed-ports list now shows who can actually reach each port.** Every port is one row with
+  a labelled chip per scope that can reach it, instead of one look-alike row per scope; a chip whose
+  peers are all offline is marked, since the port is open but nothing can currently connect. Each
+  chip closes just that scope, and the row closes all of them.
+- **Exposing a port no longer means typing the network name.** The scope is a picker built from the
+  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and the port
+  field reports a bad value as you type instead of after you submit.
+
 ## v0.3.1
 
 ### Added

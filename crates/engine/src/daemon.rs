@@ -110,7 +110,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
                     _ => common::control::Proto::Tcp,
                 },
                 port: e.port,
-                net: None,
+                // Config seeds carry no scope, so they stay all-peers as they always have.
+                scope: common::control::ExposeScope::AllPeers,
             })
             .collect();
         let f = Arc::new(Firewall::load(
@@ -876,7 +877,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             tracing::warn!("logout: interface down: {e:#}");
         }
         if let Some(fw) = &fw {
-            if let Err(e) = fw.update_peers(crate::fw::PeersByNet::new()) {
+            if let Err(e) = fw.update_peers(crate::fw::PeerSets::default()) {
                 tracing::warn!("logout: clearing firewall peers: {e:#}");
             }
         }
@@ -971,7 +972,7 @@ async fn apply_state(
         );
     }
     if let Some(fw) = fw {
-        fw.update_peers(peers_by_net(&active))?;
+        fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;
     }
     apply_seeds(backend, active, peers, relay_eps, ice_eps)?;
     Ok(())
@@ -1158,15 +1159,24 @@ async fn register_until_ready(
     }
 }
 
-/// Group seed peer IPs by shared-network name → the source sets for `--net`-scoped exposes.
-fn peers_by_net(seeds: &[SeedPeer]) -> crate::fw::PeersByNet {
-    let mut map: crate::fw::PeersByNet = HashMap::new();
+/// Build the firewall's source sets from the active seeds: peer IPs grouped by shared-network
+/// name, plus the owner's own other devices.
+///
+/// Own devices are *not* a network — the coordinator never sends one, and a peer's `networks` stays
+/// empty for the own-device relationship. They're recognized by identity instead: a seed carrying
+/// our own `user_id` is another device of ours. `owner` is `None` before enrollment, when we don't
+/// yet know who we are and so admit nobody.
+fn peer_sets(seeds: &[SeedPeer], owner: Option<u64>) -> crate::fw::PeerSets {
+    let mut sets = crate::fw::PeerSets::default();
     for s in seeds {
         for n in &s.networks {
-            map.entry(n.name.clone()).or_default().push(s.ip);
+            sets.by_net.entry(n.name.clone()).or_default().push(s.ip);
+        }
+        if owner.is_some_and(|me| me == s.user_id) {
+            sets.own_devices.push(s.ip);
         }
     }
-    map
+    sets
 }
 
 /// Fold seeds (one per co-member per shared network) into peers keyed by pubkey, then push
@@ -1259,4 +1269,68 @@ fn apply_seeds(
         tracing::info!(peers = all.len(), "mesh updated");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coord::SeedPeer;
+
+    fn seed(user_id: u64, last_octet: u8, nets: &[&str]) -> SeedPeer {
+        SeedPeer {
+            pubkey: [0; 32],
+            user_id,
+            username: "u".into(),
+            ip: Ipv4Addr::new(100, 64, 0, last_octet),
+            endpoint: None,
+            punch: None,
+            hostname: "d.u.unity.internal".into(),
+            primary_alias: None,
+            networks: nets
+                .iter()
+                .map(|n| common::api::SharedNetwork {
+                    name: (*n).into(),
+                    community: "c".into(),
+                })
+                .collect(),
+            relay: None,
+            ice: None,
+            rev: 0,
+            expires_at: 0,
+        }
+    }
+
+    /// The own-device source set is drawn from peer *identity*, not from any network — so it admits
+    /// our other devices (whatever networks they're in) and nobody else. Getting this wrong would
+    /// hand a stranger a port the owner scoped to themselves.
+    #[test]
+    fn own_device_sources_are_the_owners_devices_only() {
+        let me = 7;
+        let seeds = [
+            seed(me, 2, &["minecraft"]), // another device of ours
+            seed(me, 3, &[]),            // ...and one sharing no network at all
+            seed(99, 4, &["minecraft"]), // a co-member, not us
+        ];
+
+        let sets = peer_sets(&seeds, Some(me));
+        assert_eq!(
+            sets.own_devices,
+            vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
+        );
+        assert_eq!(
+            sets.by_net.get("minecraft"),
+            Some(&vec![
+                Ipv4Addr::new(100, 64, 0, 2),
+                Ipv4Addr::new(100, 64, 0, 4)
+            ]),
+            "network grouping is unaffected by the own-device split",
+        );
+    }
+
+    /// Before enrollment we don't know who we are, so nothing qualifies as our own device.
+    #[test]
+    fn own_device_sources_are_empty_without_an_identity() {
+        let sets = peer_sets(&[seed(7, 2, &["minecraft"])], None);
+        assert!(sets.own_devices.is_empty());
+    }
 }

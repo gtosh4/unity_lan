@@ -355,13 +355,15 @@ async fn stream_status(
     }
 }
 
-/// Apply an expose op to the local firewall and report the resulting exposed set. A `--net` scope
-/// must name a network this device actually holds.
+/// Apply an expose op to the local firewall and report the resulting exposed set. A network scope
+/// must name a network this device actually holds; the other scopes need no membership.
 fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
-        ExposeOp::Add { proto, port, net } => {
-            if let Some(n) = &net {
+        ExposeOp::Add { proto, port, scope } => {
+            // Only a network scope can name something we might not hold. `OwnDevices` is derived
+            // from our own identity and `AllPeers` names nothing, so neither is checkable here.
+            if let Some(n) = scope.net() {
                 if !held_nets.iter().any(|h| h == n) {
                     anyhow::bail!(
                         "not a member of network '{n}' (your networks: {})",
@@ -369,19 +371,15 @@ fn apply_expose(fw: &Firewall, op: ExposeOp, held_nets: &[String]) -> anyhow::Re
                     );
                 }
             }
-            let scope = net
-                .as_deref()
-                .map(|n| format!(" (net: {n})"))
-                .unwrap_or_default();
             (
-                format!("exposed {}/{port}{scope}", proto.as_str()),
-                fw.expose(proto, port, net)?,
+                format!("exposed {}/{port} ({})", proto.as_str(), scope.label()),
+                fw.expose(proto, port, scope)?,
             )
         }
         ExposeOp::Remove { proto, port, scope } => {
             let label = match &scope {
-                common::control::RemoveScope::Exact(Some(n)) => format!(" (net: {n})"),
-                _ => String::new(),
+                common::control::RemoveScope::Exact(s) => format!(" ({})", s.label()),
+                common::control::RemoveScope::All => String::new(),
             };
             (
                 format!("closed {}/{port}{label}", proto.as_str()),

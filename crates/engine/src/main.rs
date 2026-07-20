@@ -127,7 +127,11 @@ enum CtlCmd {
     Expose {
         config: String,
         port: String,
+        /// Restrict the port to this network's peers; omit to open it to every peer.
         net: Option<String>,
+        /// Restrict the port to the owner's own other devices instead of a network.
+        #[arg(long, conflicts_with = "net")]
+        own_devices: bool,
     },
     Unexpose {
         config: String,
@@ -135,6 +139,9 @@ enum CtlCmd {
         /// Close only the exposure scoped to this network; omit to close every scope of the port.
         #[arg(long)]
         net: Option<String>,
+        /// Close only the own-devices exposure of this port.
+        #[arg(long, conflicts_with = "net")]
+        own_devices: bool,
     },
     Exposes {
         #[arg(default_value = "engine.toml")]
@@ -532,21 +539,33 @@ async fn ctl(sub: CtlCmd) -> anyhow::Result<()> {
             )
             .await?,
         ),
-        CtlCmd::Expose { config, port, net } => {
+        CtlCmd::Expose {
+            config,
+            port,
+            net,
+            own_devices,
+        } => {
             let (proto, port) = parse_port(&port)?;
+            let scope = expose_scope(net, own_devices);
             print_exposed(
                 control::client_expose(
                     &socket_for(&config)?,
-                    common::control::ExposeOp::Add { proto, port, net },
+                    common::control::ExposeOp::Add { proto, port, scope },
                 )
                 .await?,
             )
         }
-        CtlCmd::Unexpose { config, port, net } => {
+        CtlCmd::Unexpose {
+            config,
+            port,
+            net,
+            own_devices,
+        } => {
             let (proto, port) = parse_port(&port)?;
-            let scope = match net {
-                Some(n) => common::control::RemoveScope::Exact(Some(n)),
-                None => common::control::RemoveScope::All,
+            // No scope named at all still means "close every scope of this port".
+            let scope = match (net, own_devices) {
+                (None, false) => common::control::RemoveScope::All,
+                (net, own) => common::control::RemoveScope::Exact(expose_scope(net, own)),
             };
             print_exposed(
                 control::client_expose(
@@ -679,16 +698,27 @@ fn parse_port(arg: &str) -> anyhow::Result<(common::control::Proto, u16)> {
     ))
 }
 
+/// The scope named by an `expose`/`unexpose` invocation. The two flags are mutually exclusive at
+/// the clap level, so `--own-devices` and a network name can't both arrive.
+fn expose_scope(net: Option<String>, own_devices: bool) -> common::control::ExposeScope {
+    match (net, own_devices) {
+        (_, true) => common::control::ExposeScope::OwnDevices,
+        (Some(n), false) => common::control::ExposeScope::Net(n),
+        (None, false) => common::control::ExposeScope::AllPeers,
+    }
+}
+
 fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
     println!("{}", resp.message);
     for e in &resp.exposed {
-        let scope = e
-            .net
-            .as_deref()
-            .map(|n| format!(" (net: {n})"))
-            .unwrap_or_default();
         let idle = if e.active { "" } else { "  [no peers online]" };
-        println!("  {}/{}{}{}", e.proto.as_str(), e.port, scope, idle);
+        println!(
+            "  {}/{} ({}){}",
+            e.proto.as_str(),
+            e.port,
+            e.scope.label(),
+            idle
+        );
     }
     Ok(())
 }

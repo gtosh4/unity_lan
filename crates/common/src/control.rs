@@ -151,15 +151,107 @@ impl Proto {
     }
 }
 
-/// A firewall exposure op over the control socket. `net` scopes the exposure to one network's
-/// peers (source-IP filtered); `None` opens the port to every peer.
+/// Who may reach an exposed port. One exposure carries exactly one scope; opening a port to
+/// several networks means several exposures (the firewall unions their source sets), which is what
+/// lets one scope be closed while the others stay — see [`RemoveScope`].
+///
+/// **Wire format.** This replaced a plain `net: Option<String>`, and both sides of that change are
+/// live traffic: the engine swaps itself and restarts while an older GUI is still running (that's
+/// what the relaunch prompt is for), so a new frontend meets an old engine and vice versa. The
+/// codec below is hand-written to serve both, under one rule — *emit the legacy spelling when the
+/// scope has one, a tagged object when it doesn't*:
+///
+/// | scope | JSON | an old engine reads it as |
+/// | --- | --- | --- |
+/// | [`AllPeers`](ExposeScope::AllPeers) | `null` | all peers ✓ |
+/// | [`Net`](ExposeScope::Net) | `"minecraft"` | that network ✓ |
+/// | [`OwnDevices`](ExposeScope::OwnDevices) | `{"kind":"own_devices"}` | **type error — rejected** |
+///
+/// That last row is the point, not an oversight. [`OwnDevices`](ExposeScope::OwnDevices) has no
+/// legacy spelling, and the tempting compat move — sending `null` so the field still parses —
+/// would have an old engine open the port to *every peer* when the user asked for their own
+/// devices only. A rejected request is the safe failure; silent over-exposure is not.
+///
+/// Deserialization accepts all three forms, so an old frontend's `null`/`"minecraft"` still reads
+/// correctly here. The legacy forms are a bare `null` or string and the modern one is always an
+/// object, so the two can never be confused — which matters because a network name is a Discord
+/// role's display name and may be any string at all, including `own_devices`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExposeScope {
+    /// Every peer the mesh has. Only peers can deliver to the wg interface, so this is still not
+    /// the public internet — but it is every co-member of every network you're in.
+    AllPeers,
+    /// Only the owner's other devices (same Discord user). Not a network — the engine derives the
+    /// source set from peer identity, so it needs no coordinator support.
+    OwnDevices,
+    /// One network's peers, by role display name.
+    Net(String),
+}
+
+/// The tagged-object form, used for scopes with no legacy spelling.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ScopeTagged {
+    OwnDevices,
+}
+
+impl ExposeScope {
+    /// The label shown in UIs and CLI output.
+    pub fn label(&self) -> &str {
+        match self {
+            ExposeScope::AllPeers => "all peers",
+            ExposeScope::OwnDevices => OWN_DEVICES_LABEL,
+            ExposeScope::Net(n) => n,
+        }
+    }
+
+    /// The network name, if this scope is one — for callers that only care about `--net` scoping.
+    pub fn net(&self) -> Option<&str> {
+        match self {
+            ExposeScope::Net(n) => Some(n),
+            _ => None,
+        }
+    }
+}
+
+impl Serialize for ExposeScope {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            ExposeScope::AllPeers => s.serialize_none(),
+            ExposeScope::Net(n) => s.serialize_some(n),
+            ExposeScope::OwnDevices => ScopeTagged::OwnDevices.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ExposeScope {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        /// `null` and a bare string are the legacy spellings; an object is the modern tagged form.
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Any {
+            Legacy(Option<String>),
+            Tagged(ScopeTagged),
+        }
+        Ok(match Any::deserialize(d)? {
+            Any::Legacy(None) => ExposeScope::AllPeers,
+            Any::Legacy(Some(n)) => ExposeScope::Net(n),
+            Any::Tagged(ScopeTagged::OwnDevices) => ExposeScope::OwnDevices,
+        })
+    }
+}
+
+/// A firewall exposure op over the control socket.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ExposeOp {
     List,
     Add {
         proto: Proto,
         port: u16,
-        net: Option<String>,
+        /// Still named `net` on the wire — see [`ExposeScope`] for why the rename stops at the
+        /// Rust field.
+        #[serde(rename = "net")]
+        scope: ExposeScope,
     },
     Remove {
         proto: Proto,
@@ -169,12 +261,12 @@ pub enum ExposeOp {
 }
 
 /// Which exposure(s) a `Remove` closes. `All` drops every scope of that (proto, port); `Exact`
-/// drops just the one whose `net` matches — so closing `8082 → net:minecraft` leaves an
+/// drops just the one whose scope matches — so closing `8082 → net:minecraft` leaves an
 /// all-peers `8082` alone (and vice versa).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RemoveScope {
     All,
-    Exact(Option<String>),
+    Exact(ExposeScope),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -187,11 +279,13 @@ pub struct ExposeResp {
 pub struct ExposedPort {
     pub proto: Proto,
     pub port: u16,
-    /// The network this port is scoped to, or `None` for all peers.
-    pub net: Option<String>,
-    /// Whether the exposure is currently reachable. A `--net`-scoped port whose network has no
-    /// online peers has an empty source set, so nothing can reach it even though it stays
-    /// exposed; unscoped ports are always active.
+    /// Who may reach this port. Still named `net` on the wire for compatibility — see
+    /// [`ExposeScope`].
+    #[serde(rename = "net")]
+    pub scope: ExposeScope,
+    /// Whether the exposure is currently reachable. A scoped port whose network (or own-device
+    /// set) has no online peers has an empty source set, so nothing can reach it even though it
+    /// stays exposed; [`ExposeScope::AllPeers`] is always active.
     pub active: bool,
 }
 
@@ -427,7 +521,103 @@ pub fn classify_reach(punched: bool, connected: bool, punch_age_secs: u64) -> Pe
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_reach, PeerReach, StatusReport};
+    use super::{
+        classify_reach, ExposeOp, ExposeScope, PeerReach, Proto, RemoveScope, StatusReport,
+    };
+
+    /// The scope a frontend sends must be the scope the engine acts on. Both spellings of each
+    /// legacy scope decode, and every scope round-trips.
+    #[test]
+    fn expose_scope_round_trips_and_reads_the_legacy_spellings() {
+        for scope in [
+            ExposeScope::AllPeers,
+            ExposeScope::OwnDevices,
+            ExposeScope::Net("minecraft".into()),
+        ] {
+            let json = serde_json::to_string(&scope).expect("encodes");
+            let back: ExposeScope = serde_json::from_str(&json).expect("decodes");
+            assert_eq!(scope, back, "round-trip via {json}");
+        }
+
+        // What a pre-`ExposeScope` frontend puts on the wire.
+        let all: ExposeScope = serde_json::from_str("null").expect("decodes legacy null");
+        assert_eq!(all, ExposeScope::AllPeers);
+        let net: ExposeScope = serde_json::from_str(r#""minecraft""#).expect("decodes legacy name");
+        assert_eq!(net, ExposeScope::Net("minecraft".into()));
+    }
+
+    /// A network name is a Discord role's display name, so it may be any string — including one
+    /// that collides with a scope keyword. The legacy forms are `null`/string and the modern one is
+    /// an object, so a role named `own_devices` stays a *network*, not the own-device scope.
+    #[test]
+    fn a_role_named_like_a_keyword_is_still_a_network() {
+        let scope: ExposeScope = serde_json::from_str(r#""own_devices""#).expect("decodes");
+        assert_eq!(scope, ExposeScope::Net("own_devices".into()));
+    }
+
+    /// The compat contract with an engine that predates `ExposeScope`, asserted from that engine's
+    /// point of view: it reads the `net` field as an `Option<String>`.
+    ///
+    /// `AllPeers`/`Net` must still parse there and mean the same thing. `OwnDevices` must **not**
+    /// parse — an old engine has no own-device scope, and the only shape it could parse (`null`)
+    /// would open the port to every peer, which is the opposite of what the user asked for. So the
+    /// request has to be rejected rather than silently widened.
+    #[test]
+    fn own_devices_is_unparseable_to_an_old_engine_rather_than_silently_widened() {
+        /// `ExposeOp::Add` as it was before this change.
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct OldAdd {
+            proto: Proto,
+            port: u16,
+            net: Option<String>,
+        }
+
+        let encode = |scope: ExposeScope| {
+            let op = ExposeOp::Add {
+                proto: Proto::Tcp,
+                port: 8080,
+                scope,
+            };
+            // Reach past the `ExposeOp` enum tag to the payload the old struct would see.
+            let v = serde_json::to_value(&op).expect("encodes");
+            v["Add"].clone()
+        };
+
+        let all = encode(ExposeScope::AllPeers);
+        assert_eq!(all["net"], serde_json::Value::Null);
+        assert!(serde_json::from_value::<OldAdd>(all)
+            .expect("old engine parses all-peers")
+            .net
+            .is_none());
+
+        let net = encode(ExposeScope::Net("minecraft".into()));
+        assert_eq!(
+            serde_json::from_value::<OldAdd>(net)
+                .expect("old engine parses a network scope")
+                .net
+                .as_deref(),
+            Some("minecraft"),
+        );
+
+        let own = encode(ExposeScope::OwnDevices);
+        assert!(
+            serde_json::from_value::<OldAdd>(own).is_err(),
+            "an old engine must reject the own-device scope, not read it as all-peers",
+        );
+    }
+
+    /// `Remove` carries a scope too, and an old *frontend* closing a port must keep working —
+    /// failing to close is the unsafe direction (the port stays open).
+    #[test]
+    fn remove_reads_the_legacy_scope_spellings() {
+        let all: RemoveScope =
+            serde_json::from_str(r#"{"Exact":null}"#).expect("decodes legacy all-peers");
+        assert!(matches!(all, RemoveScope::Exact(ExposeScope::AllPeers)));
+        let net: RemoveScope =
+            serde_json::from_str(r#"{"Exact":"minecraft"}"#).expect("decodes legacy network");
+        assert!(matches!(net, RemoveScope::Exact(ExposeScope::Net(n)) if n == "minecraft"));
+    }
 
     /// `Default` and the wire must agree on what "unspecified" means. A derived `Default` would
     /// give `false` for the four `default_true` fields — including `disable_new_networks`, whose

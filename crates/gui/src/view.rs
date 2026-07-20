@@ -11,7 +11,7 @@ use iced::widget::{
 use iced::window;
 use iced::{Color, Element, Length};
 
-use common::control::{PeerReach, PeerStatus, Proto};
+use common::control::{ExposeScope, ExposedPort, PeerReach, PeerStatus, Proto, RemoveScope};
 
 use crate::widgets::{
     card, collapsible_header, confirm_controls, dot, fmt_bytes, header, modal, muted, peer_menu,
@@ -736,25 +736,32 @@ impl App {
         let inner: Element<'_, Message> = if self.exposed.is_empty() {
             muted("No ports exposed.").into()
         } else {
+            // One row per port, with a chip per scope that can reach it. The wire keeps these as
+            // separate exposures; collapsing them here is what makes "who can reach this port"
+            // answerable at a glance instead of by reading three rows that share a number.
             let mut list = Column::new().spacing(6);
-            for e in &self.exposed {
-                let scope = e
-                    .net
-                    .as_deref()
-                    .map(|n| format!("  → net: {n}"))
-                    .unwrap_or_default();
-                // A scoped port with no online peers is open in the ruleset but unreachable —
-                // say so, or the row reads as working.
-                let idle = if e.active { "" } else { "  (no peers online)" };
+            for (proto, port) in self.exposed_ports() {
+                let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
+                for e in self
+                    .exposed
+                    .iter()
+                    .filter(|e| e.proto == proto && e.port == port)
+                {
+                    chips = chips.push(scope_chip(e));
+                }
                 let r = row![
-                    text(format!("{}/{}{}{}", e.proto.as_str(), e.port, scope, idle))
+                    text(format!("{}/{}", proto.as_str(), port))
                         .size(14)
-                        .width(Length::Fill),
-                    button(text("unexpose").size(13)).on_press(Message::Unexpose {
-                        proto: e.proto,
-                        port: e.port,
-                        net: e.net.clone(),
-                    }),
+                        .width(Length::Fixed(110.0)),
+                    chips,
+                    horizontal_space(),
+                    button(text("close all").size(13))
+                        .style(button::secondary)
+                        .on_press(Message::Unexpose {
+                            proto,
+                            port,
+                            scope: RemoveScope::All,
+                        }),
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
@@ -763,29 +770,152 @@ impl App {
             list.into()
         };
 
-        // Add row: port (e.g. `25565` or `udp/34197`) + optional network to scope it to.
+        // Compose row: the port number, the protocol, and who may reach it.
+        let port_err = (!self.expose_port_input.trim().is_empty())
+            .then(|| parse_port(self.expose_port_input.trim()).err())
+            .flatten();
+        let ready = port_err.is_none()
+            && !self.expose_port_input.trim().is_empty()
+            && !self.expose_scopes.is_empty();
         let add = row![
-            text_input("port (e.g. 25565 or udp/34197)", &self.expose_port_input)
+            text_input("port", &self.expose_port_input)
                 .on_input(Message::ExposePortInput)
-                .on_submit(Message::ExposeSubmit),
-            text_input("net (optional)", &self.expose_net_input)
-                .on_input(Message::ExposeNetInput)
-                .on_submit(Message::ExposeSubmit),
-            button(text("expose").size(13))
-                .style(button::secondary)
-                .on_press(Message::ExposeSubmit),
-        ]
-        .spacing(8);
-
-        column![
-            header("exposed ports"),
-            inner,
-            add,
-            muted("tcp is the default; write udp/34197 for UDP. Leave net blank to expose on all."),
+                .on_submit(Message::ExposeSubmit)
+                .width(Length::Fixed(110.0)),
+            proto_toggle(self.expose_proto),
+            self.scope_picker(),
+            horizontal_space(),
+            {
+                let b = button(text("expose").size(13)).style(button::secondary);
+                // Disabled until the draft is actually sendable, so the failure shows up as a
+                // dimmed button rather than an error banner after the click.
+                if ready {
+                    b.on_press(Message::ExposeSubmit)
+                } else {
+                    b
+                }
+            },
         ]
         .spacing(8)
+        .align_y(Vertical::Center);
+
+        let mut col = column![header("exposed ports"), inner, add].spacing(8);
+        if let Some(e) = port_err {
+            col = col.push(text(e).size(13).color(RED));
+        }
+        col.push(muted(
+            "Exposed ports are reachable only over the mesh, and only by the scopes you pick.",
+        ))
         .into()
     }
+
+    /// The exposed (proto, port) pairs in first-seen order — the rows, each of which may carry
+    /// several scopes.
+    fn exposed_ports(&self) -> Vec<(Proto, u16)> {
+        let mut seen = Vec::new();
+        for e in &self.exposed {
+            if !seen.contains(&(e.proto, e.port)) {
+                seen.push((e.proto, e.port));
+            }
+        }
+        seen
+    }
+
+    /// The multi-select scope picker. Collapsed it reports the selection; expanded it offers
+    /// all-peers, own-devices, and every network this device holds.
+    fn scope_picker(&self) -> Element<'_, Message> {
+        let summary = match self.expose_scopes.as_slice() {
+            [] => "who can reach it".to_string(),
+            [one] => one.label().to_string(),
+            many => format!("{} scopes", many.len()),
+        };
+        let toggle = button(text(summary).size(13))
+            .style(button::secondary)
+            .on_press(Message::ExposeScopeToggleOpen);
+        if !self.expose_scope_open {
+            return toggle.into();
+        }
+
+        let mut opts = Column::new().spacing(4).push(toggle);
+        for scope in self.selectable_scopes() {
+            let on = self.expose_scopes.contains(&scope);
+            let label = scope.label().to_string();
+            opts = opts.push(
+                checkbox(label, on)
+                    .size(15)
+                    .text_size(13)
+                    .on_toggle(move |v| Message::ExposeScopeToggle(scope.clone(), v)),
+            );
+        }
+        opts.into()
+    }
+
+    /// Scopes offered in the picker: all-peers, the owner's own devices, then each network this
+    /// device holds. Building the list from held networks is what keeps a typo — or a network the
+    /// engine would reject — from being expressible at all.
+    fn selectable_scopes(&self) -> Vec<ExposeScope> {
+        let mut out = vec![ExposeScope::AllPeers, ExposeScope::OwnDevices];
+        let nets = self
+            .status
+            .as_ref()
+            .map(|s| s.networks.as_slice())
+            .unwrap_or(&[]);
+        for n in nets {
+            // The firewall scopes by network *name*, so same-named roles in two guilds are one
+            // choice here rather than two identical-looking rows.
+            let scope = ExposeScope::Net(n.name.clone());
+            if !out.contains(&scope) {
+                out.push(scope);
+            }
+        }
+        out
+    }
+}
+
+/// TCP/UDP as a two-button segmented control — the protocol is a binary choice, not something to
+/// spell correctly in a text field.
+fn proto_toggle(current: Proto) -> Element<'static, Message> {
+    let seg = |p: Proto, label: &str| {
+        let b = button(text(label.to_string()).size(13));
+        if p == current {
+            b.style(button::primary)
+        } else {
+            b.style(button::secondary).on_press(Message::ExposeProto(p))
+        }
+    };
+    row![seg(Proto::Tcp, "TCP"), seg(Proto::Udp, "UDP")]
+        .spacing(4)
+        .into()
+}
+
+/// One scope of an exposed port, with its own close button. An exposure whose peers are all
+/// offline is dimmed and marked — the rule is installed but nothing can currently reach it, and a
+/// chip that looked identical to a live one would read as working.
+fn scope_chip(e: &ExposedPort) -> Element<'_, Message> {
+    let label = if e.active {
+        e.scope.label().to_string()
+    } else {
+        format!("{} (nobody online)", e.scope.label())
+    };
+    let body = row![
+        text(label)
+            .size(13)
+            .color(if e.active { MUTED } else { AMBER }),
+        button(text("x").size(11))
+            .style(button::text)
+            .padding(0)
+            .on_press(Message::Unexpose {
+                proto: e.proto,
+                port: e.port,
+                scope: RemoveScope::Exact(e.scope.clone()),
+            }),
+    ]
+    .spacing(4)
+    .align_y(Vertical::Center);
+    container(body)
+        .padding([2, 6])
+        .style(container::bordered_box)
+        .into()
 }
 
 /// Status color + short label for a peer's reachability. Free fn so the palette stays in one place.
@@ -872,20 +1002,11 @@ fn error_banner<'a>(e: &str) -> Element<'a, Message> {
         .into()
 }
 
-/// Parse a port field: `25565` (tcp default) or `tcp/25565` / `udp/34197`.
-pub(crate) fn parse_port(s: &str) -> Result<(Proto, u16), String> {
-    let (proto, port) = match s.split_once('/') {
-        Some((p, n)) => {
-            let proto = match p.to_ascii_lowercase().as_str() {
-                "tcp" => Proto::Tcp,
-                "udp" => Proto::Udp,
-                other => return Err(format!("bad protocol '{other}' (use tcp or udp)")),
-            };
-            (proto, n)
-        }
-        None => (Proto::Tcp, s),
-    };
-    port.parse()
-        .map(|p| (proto, p))
-        .map_err(|_| format!("bad port '{port}'"))
+/// Parse the port field. The protocol is a separate control now, so this is just the number —
+/// 1..=65535, since 0 is not a port anything can listen on.
+pub(crate) fn parse_port(s: &str) -> Result<u16, String> {
+    match s.parse::<u16>() {
+        Ok(0) | Err(_) => Err(format!("'{s}' is not a port (1-65535)")),
+        Ok(p) => Ok(p),
+    }
 }
