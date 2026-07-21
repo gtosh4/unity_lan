@@ -143,6 +143,44 @@ impl PeerConn {
     }
 }
 
+/// What we last reported to the coordinator and are echoing on the currently-held `/refresh`. Each
+/// field has a freshly-computed counterpart every mesh-loop iteration; when [`SentReport::stale`]
+/// finds any of them changed, the held long-poll is stale and must be dropped so a fresh poll carries
+/// the update and returns at once (instead of the idle recheck silently sitting on old data until the
+/// hold elapses). Folds the four loop-scoped `last_*` locals that were committed together on every
+/// successful refresh. The echoed delta-sync version (`since`) is deliberately *not* here — it isn't
+/// diffed, only echoed and advanced on completion — nor are `own_grant_stale`/`forced_full`, which
+/// are derived from the seed set rather than from what we reported.
+#[derive(Default)]
+struct SentReport {
+    /// Observed reflexive endpoints (sorted for a stable compare).
+    observed: Vec<common::api::ObservedEndpoint>,
+    /// Peers we asked the coordinator to relay (sorted).
+    relay_need: Vec<[u8; 32]>,
+    /// Relayed addresses we've allocated for peers to learn (sorted).
+    relay_alloc: Vec<common::api::RelayAllocation>,
+    /// Our ICE offers — candidates + creds, growing as gathering completes (sorted).
+    ice_offers: Vec<common::api::IceEndpoint>,
+}
+
+impl SentReport {
+    /// True if any set we'd report now differs from what the coordinator already holds — meaning the
+    /// held request is stale. The inputs are already sorted at the call site, so this is a plain
+    /// order-sensitive compare (the sort is what makes it stable across iterations).
+    fn stale(
+        &self,
+        observed: &[common::api::ObservedEndpoint],
+        relay_need: &[[u8; 32]],
+        relay_alloc: &[common::api::RelayAllocation],
+        ice_offers: &[common::api::IceEndpoint],
+    ) -> bool {
+        self.observed != observed
+            || self.relay_need != relay_need
+            || self.relay_alloc != relay_alloc
+            || self.ice_offers != ice_offers
+    }
+}
+
 /// Reflect the coordinator's advertised version, and verify + stage a release manifest from `resp`
 /// for the control socket's `ApplyUpdate`.
 ///
@@ -633,15 +671,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         // build). So the request lives here and is dropped only when we actually have something new
         // to report (or the local opt-out state changed), which is exactly when it's stale anyway.
         let mut pending_refresh = None;
-        // The last observed-endpoint set we reported to the coordinator (sorted for stable compare).
-        let mut last_reported: Vec<common::api::ObservedEndpoint> = Vec::new();
-        // The last relay need/allocations we reported — a change must break the long-poll hold too,
-        // else a freshly-`Unreachable` peer's relay request would sit until the hold elapses.
-        let mut last_relay_need: Vec<[u8; 32]> = Vec::new();
-        let mut last_relay_alloc: Vec<common::api::RelayAllocation> = Vec::new();
-        // The last ICE offers we reported — a change (new candidates / creds) must break the hold too,
-        // so a freshly-gathered candidate reaches the peer promptly instead of waiting out the hold.
-        let mut last_ice_offers: Vec<common::api::IceEndpoint> = Vec::new();
+        // What we last reported to the coordinator (reflexive endpoints, relay need/allocations, ICE
+        // offers). A change in any of these must break the long-poll hold so the update reports at
+        // once — else a freshly-`Unreachable` peer's relay request, or a freshly-gathered ICE
+        // candidate, would sit until the hold elapses. All sets are sorted for a stable compare.
+        let mut sent = SentReport::default();
         // Per-peer connection bookkeeping (attempt/bootstrap timers + last reported reach), carried
         // across long-poll cycles and advanced each recheck by `PeerConn::step`.
         let mut conns: HashMap<[u8; 32], PeerConn> = HashMap::new();
@@ -735,7 +769,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     v.sort_by_key(|o| o.pubkey);
                     v
                 }
-                None => last_reported.clone(),
+                None => sent.observed.clone(),
             };
 
             // Reachability diagnostics (§7.2): classify each peer and overlay it onto the status so a
@@ -873,19 +907,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                 Vec::new()
             };
             ice_offers.sort_by_key(|e| e.peer);
-            let ice_changed = ice_offers != last_ice_offers;
 
-            let changed = observed != last_reported;
-            if changed {
+            // Worth logging when the observed reflexive set changes (the endpoints we hand the
+            // coordinator to pair peers); the relay/ICE report changes are silent.
+            if observed != sent.observed {
                 tracing::info!(
                     eps = ?observed.iter().map(|o| o.endpoint).collect::<Vec<_>>(),
                     "reflexive: reporting observed endpoints to coordinator"
                 );
             }
-            // A relay need/allocation change must also report at once (a new `Unreachable` peer's
-            // relay request, or a freshly-allocated relayed address the peer is waiting to learn).
-            let relay_changed =
-                this_relay_need != last_relay_need || this_relay_alloc != last_relay_alloc;
             // Our own grant is refreshed only when a poll *completes*; the idle re-poll above keeps
             // cancelling the held request, so near expiry we must force a completing (non-held) poll —
             // otherwise our own attestation goes stale and peers refreshing it from us (gossip) reject
@@ -910,7 +940,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             // it so the re-issue below carries the report and returns immediately (no hold). Otherwise
             // keep holding the existing request — the local re-check below must not cost a round-trip.
             let have_report =
-                changed || relay_changed || ice_changed || own_grant_stale || forced_full;
+                sent.stale(&observed, &this_relay_need, &this_relay_alloc, &ice_offers)
+                    || own_grant_stale
+                    || forced_full;
             if have_report {
                 pending_refresh = None;
             }
@@ -1041,11 +1073,14 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     control::set_proto_mismatch(&status, None);
                     note_update(&status, &resp, &cfg.state_dir, &pending_update);
                     since = Some(resp.version);
-                    last_reported = observed; // the coordinator now has this reflexive set
-                    last_relay_need = this_relay_need; // …and this relay need/allocation set
-                    last_relay_alloc = this_relay_alloc;
-                    last_ice_offers = ice_offers; // …and this ICE offer set
-                                                  // the STUN fallback may have (dis)appeared
+                    // The coordinator now has this reflexive / relay / ICE report.
+                    sent = SentReport {
+                        observed,
+                        relay_need: this_relay_need,
+                        relay_alloc: this_relay_alloc,
+                        ice_offers,
+                    };
+                    // the STUN fallback may have (dis)appeared
                     coord_stun = coord::stun_addr(&cfg.coordinator, resp.stun_port).await;
                     if cfg.gossip {
                         // Keep the p2p service handing out our freshest attestations (delta responses
@@ -1705,6 +1740,48 @@ mod tests {
             true,
         );
         assert_eq!(s.reach, PeerReach::Ice);
+    }
+
+    #[test]
+    fn sent_report_stale_on_each_reportable_change() {
+        use common::api::{IceEndpoint, IceParams, ObservedEndpoint, RelayAllocation};
+        let ep: SocketAddr = "1.2.3.4:5".parse().unwrap();
+        let observed = vec![ObservedEndpoint {
+            pubkey: [1; 32],
+            endpoint: ep,
+        }];
+        let relay_need = vec![[2u8; 32]];
+        let relay_alloc = vec![RelayAllocation {
+            peer: [3; 32],
+            relayed: ep,
+        }];
+        let ice = vec![IceEndpoint {
+            peer: [4; 32],
+            params: IceParams {
+                ufrag: "u".into(),
+                pwd: "p".into(),
+                candidates: vec![],
+            },
+        }];
+
+        // Already holding exactly these sets → not stale against them (the idle recheck keeps parking).
+        let sent = SentReport {
+            observed: observed.clone(),
+            relay_need: relay_need.clone(),
+            relay_alloc: relay_alloc.clone(),
+            ice_offers: ice.clone(),
+        };
+        assert!(!sent.stale(&observed, &relay_need, &relay_alloc, &ice));
+
+        // Any single set differing makes the held poll stale (must drop it and report at once).
+        assert!(sent.stale(&[], &relay_need, &relay_alloc, &ice), "observed");
+        assert!(sent.stale(&observed, &[], &relay_alloc, &ice), "relay_need");
+        assert!(sent.stale(&observed, &relay_need, &[], &ice), "relay_alloc");
+        assert!(sent.stale(&observed, &relay_need, &relay_alloc, &[]), "ice");
+
+        // Nothing reported yet is stale against any non-empty report, but not against an empty one.
+        assert!(SentReport::default().stale(&observed, &[], &[], &[]));
+        assert!(!SentReport::default().stale(&[], &[], &[], &[]));
     }
 
     const STUCK: u64 = common::control::STUCK_AFTER_SECS;
