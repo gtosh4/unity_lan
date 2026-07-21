@@ -354,7 +354,18 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                 wait_for_shutdown_signal().await;
                 trigger.trigger();
             });
-            daemon::run(cfg, shutdown).await
+            match daemon::run(cfg, shutdown).await? {
+                daemon::RunOutcome::Stopped => Ok(()),
+                // An auto-update swapped the binary and the daemon tore down fully; re-exec (same PID)
+                // onto the new engine so the update lands no matter how we were launched. `exec` only
+                // returns on failure — fall back to a clean exit so a supervisor can relaunch us.
+                #[cfg(unix)]
+                daemon::RunOutcome::ReExec(plan) => {
+                    let err = plan.exec();
+                    tracing::error!("re-exec into the updated engine failed: {err}; exiting");
+                    std::process::exit(0);
+                }
+            }
         }
         Some(Cmd::Ctl { sub }) => ctl(sub, config).await,
         // Uninstall reads an existing deployment; unlike `run`/`login` it must never bootstrap a

@@ -38,6 +38,48 @@ pub fn pending_slot() -> PendingSlot {
     Arc::new(Mutex::new(None))
 }
 
+/// What to re-exec after a Unix update: the new binary at its install path (captured *before*
+/// `self_replace` moves the old inode aside) plus the arguments to relaunch it with. Built by
+/// [`exec_plan`], performed by [`ExecPlan::exec`] once the daemon has fully torn down.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExecPlan {
+    pub exe: PathBuf,
+    pub args: Vec<std::ffi::OsString>,
+}
+
+/// The Unix apply path stashes the re-exec plan here for the daemon loop to pick up after teardown.
+#[cfg(unix)]
+pub type ExecSlot = Arc<Mutex<Option<ExecPlan>>>;
+
+#[cfg(unix)]
+pub fn exec_slot() -> ExecSlot {
+    Arc::new(Mutex::new(None))
+}
+
+/// Decide what to re-exec: the captured install path as the program, and the original argv with
+/// `argv[0]` dropped (the new binary supplies its own). `current_exe` must be captured *before*
+/// `self_replace` — `/proc/self/exe` would still point at the moved-aside old inode.
+#[cfg(unix)]
+pub(crate) fn exec_plan(current_exe: PathBuf, argv: Vec<std::ffi::OsString>) -> ExecPlan {
+    ExecPlan {
+        exe: current_exe,
+        args: argv.into_iter().skip(1).collect(),
+    }
+}
+
+#[cfg(unix)]
+impl ExecPlan {
+    /// Replace this process image with the new binary (same PID). Returns only on failure — a
+    /// successful `exec` never comes back.
+    pub fn exec(&self) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+        std::process::Command::new(&self.exe)
+            .args(&self.args)
+            .exec()
+    }
+}
+
 /// True iff `candidate` is a strictly newer semver than `current`. Unparseable input (an empty
 /// version from a pre-versioning coordinator, or garbage) is "not newer" — never offer an update we
 /// can't order, never a downgrade.
@@ -135,9 +177,21 @@ pub fn stage(resp: &RegisterResp, state_dir: &Path) -> Option<PendingUpdate> {
     })
 }
 
-/// Download the artifact, re-verify size + SHA-256 against the (signed) manifest, then apply and
-/// restart. Returns only on error; on success it swaps the binary/launches the installer and calls
-/// `std::process::exit`, so the caller (a spawned task) never continues.
+/// Download the artifact, re-verify size + SHA-256 against the (signed) manifest, then swap the
+/// binary in place. Returns the [`ExecPlan`] the daemon re-execs *after* a full teardown — so the
+/// new engine inherits no live TUN fd or bound socket. Any verification failure aborts before a
+/// byte is applied.
+#[cfg(unix)]
+pub async fn apply(artifact: &ReleaseArtifact, state_dir: &Path) -> anyhow::Result<ExecPlan> {
+    let bytes = download_verified(artifact).await?;
+    std::fs::create_dir_all(state_dir)
+        .with_context(|| format!("creating {}", state_dir.display()))?;
+    apply_bytes(&bytes, state_dir)
+}
+
+/// Download the artifact, re-verify size + SHA-256 against the (signed) manifest, then launch the
+/// MSI and exit. Returns only on error; on success it never continues (see `apply_bytes`).
+#[cfg(windows)]
 pub async fn apply(artifact: &ReleaseArtifact, state_dir: &Path) -> anyhow::Result<()> {
     let bytes = download_verified(artifact).await?;
     std::fs::create_dir_all(state_dir)
@@ -193,7 +247,7 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
 /// A bare (non-gzip) artifact is still accepted as the engine binary alone, so a manifest published
 /// before this change keeps applying.
 #[cfg(unix)]
-fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
+fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<ExecPlan> {
     let engine = if bytes.starts_with(&[0x1f, 0x8b]) {
         let bundle = unpack_bundle(bytes, state_dir)?;
         // Best-effort: a headless install has no GUI to replace, and failing the engine update over
@@ -214,10 +268,15 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
         make_executable(&tmp)?;
         tmp
     };
+    // Capture the install path *before* the swap: `self_replace` overwrites the file at the exe
+    // path but leaves `/proc/self/exe` pointing at the moved-aside old inode, so we can't re-exec
+    // that. `current_exe()` resolves the path that will hold the new binary once swapped.
+    let current_exe = std::env::current_exe().context("resolving the engine's install path")?;
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     self_replace::self_replace(&engine).context("replacing the running engine binary")?;
     let _ = std::fs::remove_file(&engine);
-    tracing::info!("engine binary replaced; exiting for service restart onto the new version");
-    std::process::exit(0);
+    tracing::info!("engine binary replaced; re-execing onto the new version after teardown");
+    Ok(exec_plan(current_exe, argv))
 }
 
 /// The staged files extracted from an update bundle.
@@ -398,6 +457,23 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(written, vec!["unitylan-engine.update"]);
+    }
+
+    // The re-exec must use the captured install path (where `self_replace` put the new binary),
+    // not `/proc/self/exe`, and forward the original argv minus argv[0] (the new binary is its own
+    // argv[0]). Getting the path or the arg-shift wrong silently re-runs the old binary or drops
+    // flags, so pin both here without actually exec-ing.
+    #[cfg(unix)]
+    #[test]
+    fn exec_plan_uses_install_path_and_drops_argv0() {
+        use std::ffi::OsString;
+        let argv: Vec<OsString> = ["unitylan-engine", "run", "--config", "/etc/x.toml"]
+            .iter()
+            .map(OsString::from)
+            .collect();
+        let plan = exec_plan(PathBuf::from("/usr/lib/unitylan/unitylan-engine"), argv);
+        assert_eq!(plan.exe, PathBuf::from("/usr/lib/unitylan/unitylan-engine"));
+        assert_eq!(plan.args, vec!["run", "--config", "/etc/x.toml"]);
     }
 
     #[test]

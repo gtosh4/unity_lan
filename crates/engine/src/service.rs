@@ -438,7 +438,8 @@ fn run_service() -> Result<()> {
     // Abandon such stragglers after a short grace.
     rt.shutdown_timeout(Duration::from_secs(2));
     stopped?;
-    result
+    // The service never re-execs (Windows updates via msiexec + exit), so any clean outcome is a stop.
+    result.map(|_| ())
 }
 
 /// The engine service has no console, so append logs to a file next to the executable.

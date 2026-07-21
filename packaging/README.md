@@ -172,8 +172,13 @@ artifact, re-checks the SHA-256 against the signed manifest, then:
 
 - **Linux** — unpacks the `.tar.gz`, self-replaces the engine binary
   (`/usr/lib/unitylan/unitylan-engine`, symlinked onto PATH) in place, replaces the GUI at
-  `/usr/bin/unitylan-gui` if one is installed, and exits; systemd (`Restart=always`, with
-  `ReadWritePaths=/usr/lib/unitylan`) relaunches onto the new binary. **Both** binaries, because the
+  `/usr/bin/unitylan-gui` if one is installed, then tears down its tunnel/firewall/DNS cleanly and
+  **re-execs the new binary in place** (same PID), so the update takes effect regardless of how the
+  engine was started — a foreground `run`, a container entrypoint, or any supervisor, not just one
+  that restarts on a clean exit. systemd (`Restart=always`, with `ReadWritePaths=/usr/lib/unitylan`)
+  sees one continuously-running process — no restart gap — and still covers a crash; if the `exec`
+  itself fails the engine falls back to `exit(0)` so a restart-on-exit supervisor recovers. **Both**
+  binaries, because the
   GUI↔engine control protocol carries no version of its own — updating the engine alone left an
   older GUI talking to a newer daemon. A headless install (no GUI present) updates the engine only,
   and a bare (non-gzip) artifact is still accepted as the engine binary so manifests published

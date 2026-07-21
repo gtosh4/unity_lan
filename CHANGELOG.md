@@ -47,6 +47,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- **An auto-update now switches to the new version on its own, without help from a service manager.**
+  On Linux, applying an update used to swap the engine on disk and then just exit, relying on
+  systemd's `Restart=always` to bring the new version back up. An engine started any other way — in
+  the foreground, from a container entrypoint, under a supervisor that doesn't restart on a clean
+  exit — would swap the binary and then simply stop. The engine now tears down its tunnel, firewall,
+  and DNS cleanly and relaunches itself in place onto the new version, so the update completes no
+  matter how the engine was started (and systemd still sees one continuously-running process, with no
+  restart gap). Windows, which updates through its MSI installer, is unchanged.
+
 - **The mesh now leans on peer-to-peer attestation refresh far longer before falling back to the
   coordinator.** With peer-direct refresh (gossip) on, a peer's credential is renewed straight from
   that peer over the tunnel; only when peer-direct can't refresh it and it's within two minutes of

@@ -337,11 +337,33 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 None => ControlResponse::Error("no verified update is staged".into()),
                 Some(pu) => {
                     let state_dir = ctx.state_dir.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = crate::selfupdate::apply(&pu.artifact, &state_dir).await {
-                            tracing::error!("auto-update failed: {e:#}");
-                        }
-                    });
+                    // Unix: download + verify + swap the binary, then hand the daemon a re-exec plan
+                    // and signal it to tear down and relaunch onto the new version (server.rs never
+                    // exits the process itself). Windows: `apply` launches msiexec and exits.
+                    #[cfg(unix)]
+                    {
+                        let exec_slot = ctx.exec_slot.clone();
+                        let restart = ctx.restart_for_update.clone();
+                        tokio::spawn(async move {
+                            match crate::selfupdate::apply(&pu.artifact, &state_dir).await {
+                                Ok(plan) => {
+                                    *exec_slot.lock().unwrap() = Some(plan);
+                                    restart.notify_one();
+                                }
+                                // Swap failed — leave the running engine as-is; do not signal a restart.
+                                Err(e) => tracing::error!("auto-update failed: {e:#}"),
+                            }
+                        });
+                    }
+                    #[cfg(windows)]
+                    {
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::selfupdate::apply(&pu.artifact, &state_dir).await
+                            {
+                                tracing::error!("auto-update failed: {e:#}");
+                            }
+                        });
+                    }
                     ControlResponse::Update(common::control::UpdateResp {
                         version: pu.version,
                         message: "downloading and applying the update; the engine will restart"

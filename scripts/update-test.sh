@@ -4,8 +4,8 @@
 # Proves the whole design-phase-3 chain on one node, offline: coordinator signs a release manifest
 # under its guild anchor -> the (older) engine verifies it against the anchor it TOFU-pinned ->
 # stages a strictly-newer, platform-matching artifact -> `ctl update` downloads it over HTTPS ->
-# re-verifies the SHA-256 -> swaps the engine + bundled GUI on disk -> exits for the restart onto the
-# new version. Only the network hop is simulated: a self-signed localhost HTTPS server stands in for
+# re-verifies the SHA-256 -> swaps the engine + bundled GUI on disk -> tears down fully and re-execs
+# (same pid) onto the new version. Only the network hop is simulated: a self-signed localhost HTTPS server stands in for
 # the GitHub Release host (the update client trusts only compiled-in webpki roots, so the baseline
 # engine is built with the default-off `test-insecure-tls` feature for this test alone).
 #
@@ -162,8 +162,8 @@ echo "stage: baseline verified + staged the tip manifest against its pinned anch
 echo "=== applying the update (ctl update) ==="
 "$ENG" -c "$WORK/eng.toml" ctl update || { echo "FAIL: ctl update rejected"; exit 1; }
 
-# The daemon downloads over HTTPS, re-verifies the SHA-256, swaps the binary, and exit(0)s. Wait for
-# the running exe on disk to have become the tip version.
+# The daemon downloads over HTTPS, re-verifies the SHA-256, and swaps the binary. Wait for the exe
+# on disk to have become the tip version.
 swapped=""
 for _ in $(seq 1 40); do
   ver="$("$ENG" --version 2>/dev/null | awk '{print $2}')"
@@ -173,6 +173,18 @@ done
 [ -n "$swapped" ] || { echo "FAIL: engine binary not swapped to v$TIPVER (still '$ver')"; echo "--- eng.log ---"; tail -25 "$WORK/eng.log"; echo "--- https.log ---"; tail -10 "$WORK/https.log"; exit 1; }
 echo "swap: running engine binary is now v$TIPVER (was v$OLDVER) ✓"
 
+# The real proof of the re-exec: the daemon was started foreground with NO restart supervisor, so a
+# bare exit(0) would leave nothing running. After the full teardown it re-execs the new binary in
+# place, which preserves the pid — so the original pid staying alive is what distinguishes a relaunch
+# from an exit. Give teardown + exec a moment to settle.
+alive=""
+for _ in $(seq 1 20); do
+  kill -0 "$ENG_PID" 2>/dev/null && { alive="1"; break; }
+  sleep 0.5
+done
+[ -n "$alive" ] || { echo "FAIL: pid $ENG_PID did not survive the update — the re-exec did not relaunch"; echo "--- eng.log ---"; tail -25 "$WORK/eng.log"; exit 1; }
+echo "relaunch: same pid $ENG_PID re-exec'd in place onto v$TIPVER (no supervisor needed) ✓"
+
 # The bundle replaces the GUI in lockstep, so an old GUI never talks to a new daemon.
 if cmp -s "$WORK/baseline/unitylan-gui" "$WORK/tip/unitylan-gui"; then
   echo "bundle: co-located GUI replaced with the tip GUI in lockstep ✓"
@@ -180,5 +192,5 @@ else
   echo "FAIL: bundled GUI was not swapped"; exit 1
 fi
 
-echo "RESULT: PASS ✓  old client -> coordinator manifest -> verify -> download -> SHA-256 -> swap engine+gui -> restart onto tip"
+echo "RESULT: PASS ✓  old client -> coordinator manifest -> verify -> download -> SHA-256 -> swap engine+gui -> re-exec onto tip"
 exit 0

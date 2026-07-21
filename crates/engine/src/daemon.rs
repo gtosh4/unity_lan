@@ -78,7 +78,84 @@ fn note_update(
     *pending_update.lock().unwrap() = staged;
 }
 
-pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
+/// How [`run`] ended, so `main`/`service` know whether to just exit or to re-exec.
+pub enum RunOutcome {
+    /// Clean shutdown (signal or logout-then-interrupted) — the caller exits.
+    Stopped,
+    /// A Unix auto-update swapped the binary and the daemon tore down fully; the caller re-execs
+    /// this plan (same PID) so the update takes effect regardless of the supervisor.
+    #[cfg(unix)]
+    ReExec(crate::selfupdate::ExecPlan),
+}
+
+/// Reverse every host mutation this enrollment made — in the order that survives a SIGKILL
+/// mid-teardown: withdraw presence at the coordinator, then host-global state (firewall, resolver)
+/// *before* the interface, then stop the background tasks. Shared by the clean-shutdown and
+/// re-exec-for-update paths: both end the daemon and must leave no live TUN fd, bound socket, or
+/// stranded host state behind.
+#[allow(clippy::too_many_arguments)]
+async fn teardown(
+    cfg: &Config,
+    wg_pub: [u8; 32],
+    endpoint: Option<SocketAddr>,
+    localnet: &LocalNet,
+    fw: &Option<Arc<Firewall>>,
+    resolver: &Option<Box<dyn ResolverHook>>,
+    backend: &dyn WgBackend,
+    dns_task: &Option<tokio::task::JoinHandle<()>>,
+    p2p_task: &Option<tokio::task::JoinHandle<()>>,
+) {
+    // Best-effort: tell the coordinator we're leaving so co-members prune us within seconds instead
+    // of waiting out the presence reaper (~31 min). Bounded to 3s so an unreachable coordinator
+    // can't stall teardown; a crash/power-loss can't send this — the reaper is the backstop.
+    let withdraw = coord::refresh(
+        &cfg.coordinator,
+        &cfg.state_dir,
+        wg_pub,
+        cfg.device_name(),
+        endpoint,
+        cfg.enrollment_key.clone(),
+        None, // no long-poll hold: return as soon as the eviction is applied
+        Vec::new(),
+        Vec::new(),
+        true, // paused → evict from all networks
+        localnet.peer_own_devices(),
+        coord::RelayReport::default(),
+        Vec::new(),
+        Vec::new(), // withdrawing → no held set to diff against
+    );
+    match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
+        Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
+        Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
+        Err(_) => tracing::debug!("shutdown withdraw timed out"),
+    }
+    // Revert host-global state *before* the interface. `backend.down()` can wedge inside boringtun's
+    // uapi (seen in the field), and a SIGKILL runs nothing after it — stranding the firewall table,
+    // the resolved routing domain, and the exemption we inserted into another product's nft chain.
+    // Those outlive the process and nothing else cleans them; a leftover interface + uapi socket are
+    // both recovered on the next start.
+    if let Some(fw) = fw {
+        if let Err(e) = fw.reset() {
+            tracing::warn!("firewall reset on shutdown: {e:#}");
+        }
+    }
+    if let Some(r) = resolver {
+        if let Err(e) = r.revert(&cfg.iface) {
+            tracing::warn!("resolver revert on shutdown: {e:#}");
+        }
+    }
+    if let Err(e) = backend.down() {
+        tracing::warn!("interface down on shutdown: {e:#}");
+    }
+    if let Some(t) = dns_task {
+        t.abort();
+    }
+    if let Some(t) = p2p_task {
+        t.abort();
+    }
+}
+
+pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> {
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
@@ -95,6 +172,12 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
     let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = Arc::new(tokio::sync::Notify::new());
+    // Signalled by `ApplyUpdate` once a Unix update has swapped the binary: the mesh loop tears down
+    // fully and re-execs the plan left in `exec_slot`. (Windows applies via msiexec and exits.)
+    #[cfg(unix)]
+    let restart_for_update = Arc::new(tokio::sync::Notify::new());
+    #[cfg(unix)]
+    let exec_slot = crate::selfupdate::exec_slot();
     // Signalled once interactive login binds the device — wakes the enrollment loop out of its
     // `refresh_secs` backoff so the mesh comes up at once instead of on the next poll.
     let login_done = Arc::new(tokio::sync::Notify::new());
@@ -160,6 +243,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             login_done: login_done.clone(),
             state_dir: cfg.state_dir.clone(),
             pending_update: pending_update.clone(),
+            #[cfg(unix)]
+            restart_for_update: restart_for_update.clone(),
+            #[cfg(unix)]
+            exec_slot: exec_slot.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = control::serve(&name, control_group, ctx).await {
@@ -256,7 +343,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
         )
         .await?
         else {
-            return Ok(()); // interrupted before login
+            return Ok(RunOutcome::Stopped); // interrupted before login
         };
         // `register` already pinned/verified the anchor (via `coord::post`); no separate pin here.
         // The register response already carries the release manifest, so stage from it here rather
@@ -794,66 +881,49 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<()> {
             // Set by arms that invalidate the held request; applied after the select, since the arms
             // can't assign to `pending_refresh` while the refresh arm holds it borrowed.
             let mut drop_pending = false;
+            // The auto-update re-exec wake-up. `select!` won't take a `#[cfg]` on a branch, so the
+            // branch is unconditional and we vary its future instead: a real notify on Unix, a future
+            // that never resolves elsewhere (Windows updates via msiexec and exits, never this path).
+            #[cfg(unix)]
+            let restart_signal = restart_for_update.notified();
+            #[cfg(not(unix))]
+            let restart_signal = std::future::pending::<()>();
+            tokio::pin!(restart_signal);
             let refreshed = tokio::select! {
                 // Clean shutdown: reverse every host mutation so a stop leaves no trace — destroy the
                 // interface, tear down the firewall, revert the resolver. (UPnP unmaps via its own
                 // shutdown-aware task.)
                 _ = shutdown.wait() => {
-                    // Best-effort: tell the coordinator we're leaving so co-members prune us within
-                    // seconds instead of waiting out the presence reaper (~31 min). A paused refresh
-                    // evicts our presence from every network and bumps the version, waking parked
-                    // long-polls. Bounded to 3s so an unreachable coordinator can't stall shutdown;
-                    // reaches the coordinator over the internet, so tearing the WG iface below is
-                    // independent. A crash/power-loss can't send this — the reaper is the backstop.
-                    let withdraw = coord::refresh(
-                        &cfg.coordinator,
-                        &cfg.state_dir,
-                        wg_pub,
-                        cfg.device_name(),
-                        endpoint,
-                        cfg.enrollment_key.clone(),
-                        None, // no long-poll hold: return as soon as the eviction is applied
-                        Vec::new(),
-                        Vec::new(),
-                        true, // paused → evict from all networks
-                        localnet.peer_own_devices(),
-                        coord::RelayReport::default(),
-                        Vec::new(),
-                        Vec::new(), // withdrawing → no held set to diff against
-                    );
-                    match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
-                        Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
-                        Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
-                        Err(_) => tracing::debug!("shutdown withdraw timed out"),
-                    }
-                    // Revert host-global state *before* the interface. `backend.down()` can wedge
-                    // inside boringtun's uapi (seen in the field: `remove_interface` spinning until
-                    // systemd's stop timeout, then SIGKILL), and a SIGKILL runs nothing after it —
-                    // stranding the firewall table, the resolved routing domain, and the exemption
-                    // we inserted into *another* product's nft chain. Those outlive the process and
-                    // nothing else will clean them; a leftover interface and uapi socket are both
-                    // recovered on the next start.
-                    if let Some(fw) = &fw {
-                        if let Err(e) = fw.reset() {
-                            tracing::warn!("firewall reset on shutdown: {e:#}");
-                        }
-                    }
-                    if let Some(r) = &resolver {
-                        if let Err(e) = r.revert(&cfg.iface) {
-                            tracing::warn!("resolver revert on shutdown: {e:#}");
-                        }
-                    }
-                    if let Err(e) = backend.down() {
-                        tracing::warn!("interface down on shutdown: {e:#}");
-                    }
-                    if let Some(t) = &dns_task {
-                        t.abort();
-                    }
-                    if let Some(t) = &p2p_task {
-                        t.abort();
-                    }
+                    teardown(
+                        &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
+                        backend.as_ref(), &dns_task, &p2p_task,
+                    ).await;
                     tracing::info!("shutting down");
-                    return Ok(());
+                    return Ok(RunOutcome::Stopped);
+                }
+                // Auto-update: same full teardown as a clean shutdown, then re-exec (same PID) onto the
+                // new binary the `ApplyUpdate` task already swapped in — so the update takes effect
+                // regardless of how the engine was launched. Falls back to a clean stop if, impossibly,
+                // no plan was staged.
+                _ = &mut restart_signal => {
+                    #[cfg(unix)]
+                    {
+                        tracing::info!("auto-update: tearing down before re-execing onto the new engine");
+                        teardown(
+                            &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
+                            backend.as_ref(), &dns_task, &p2p_task,
+                        ).await;
+                        return match exec_slot.lock().unwrap().take() {
+                            Some(plan) => Ok(RunOutcome::ReExec(plan)),
+                            None => {
+                                tracing::error!("update restart signalled with no staged plan; stopping");
+                                Ok(RunOutcome::Stopped)
+                            }
+                        };
+                    }
+                    // Non-unix: `restart_signal` never resolves, so this is unreachable.
+                    #[cfg(not(unix))]
+                    unreachable!("auto-update re-exec is Unix-only");
                 }
                 // Logout: break out to the teardown path below, which un-enrolls, drops the mesh, and
                 // loops back to `'lifecycle` to re-key and await the next login.

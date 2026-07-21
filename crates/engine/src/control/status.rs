@@ -39,6 +39,13 @@ pub struct Ctx {
     pub state_dir: std::path::PathBuf,
     /// The verified auto-update the daemon has staged (if any), consumed by `ApplyUpdate`.
     pub pending_update: crate::selfupdate::PendingSlot,
+    /// Signalled once a Unix update has swapped the binary — wakes the daemon's mesh loop into its
+    /// teardown + re-exec path. (Windows applies via msiexec and exits directly, so it's unused there.)
+    #[cfg(unix)]
+    pub restart_for_update: Arc<Notify>,
+    /// Where the `ApplyUpdate` task stashes the re-exec plan for the daemon loop to pick up.
+    #[cfg(unix)]
+    pub exec_slot: crate::selfupdate::ExecSlot,
 }
 
 /// Flip the "needs login" flag the daemon exposes while it's up but not yet enrolled.
