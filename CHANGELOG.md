@@ -217,6 +217,21 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   version between the two could be replayed to walk a client back onto a release with a known flaw.
   Once the engine has seen a given release it now refuses any older one, signed or not.
 
+### Security
+
+- **A member could no longer pull another member's device-management token.** Because a device's
+  WireGuard *public* key travels in every co-member's peer list, anyone you share a network with
+  already knows it — and the coordinator used to hand back a device's control token to any request
+  that merely named its public key, letting a co-member rename, remove, or re-assign your devices.
+  The coordinator now returns that token only on the request that first enrolls a device (where the
+  caller proved ownership with a one-time enrollment key or an interactive login); the client keeps
+  it from there, so nothing legitimate changes.
+- **A member can no longer redirect another peer's hole-punch to an address of their choosing.**
+  When two peers are both behind NAT, the coordinator relays each one the other's observed address to
+  punch toward. It now accepts a reported address for a peer only when its IP matches where that peer
+  itself connects to the coordinator from, so a co-member can't feed everyone a made-up address and
+  make their connection attempts fire at an unrelated host.
+
 ## v0.3.1
 
 ### Added

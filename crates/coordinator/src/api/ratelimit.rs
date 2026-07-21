@@ -32,7 +32,7 @@ const RL_MAX_TRACKED_IPS: usize = 65_536;
 /// Entries are scanned right-to-left (each hop appends what it saw, so the rightmost is the most
 /// trustworthy) skipping addresses that are themselves trusted proxies; the first remaining entry is
 /// the client. Falls back to the peer if the header is absent or unparseable.
-fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> IpAddr {
+pub(crate) fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[ipnet::IpNet]) -> IpAddr {
     let is_trusted = |ip: &IpAddr| trusted.iter().any(|net| net.contains(ip));
     if !is_trusted(&peer) {
         return peer;

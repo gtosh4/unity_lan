@@ -6,8 +6,8 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use axum::extract::State;
-use axum::http::StatusCode;
+use axum::extract::{ConnectInfo, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -61,6 +61,15 @@ pub struct AppState {
     pub versions: Arc<Versions>,
     /// Interactive-login provider (Discord OAuth, or a fake in tests); `None` disables login.
     pub oauth: Option<Arc<dyn OauthProvider>>,
+    /// Proxy hops whose `X-Forwarded-For` we trust, so `client_ip` can recover a caller's real
+    /// address behind a reverse proxy. Shared with the rate-limit middleware; also used to record
+    /// each device's coordinator-observed source IP for reflexive validation (see [`source_ip`]).
+    pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
+    /// Each device's source IP as the coordinator itself observed it on that device's own
+    /// register/refresh (proxy-corrected via `client_ip`). A peer-reported reflexive for device `V`
+    /// is only accepted if its IP matches `source_ip[V]` — a co-member can't then redirect `V`'s
+    /// punch target to an arbitrary address it invents (§7.2). Last write wins; lost on restart.
+    pub source_ip: Arc<Mutex<HashMap<[u8; 32], std::net::IpAddr>>>,
     /// Peer-observed reflexive endpoints: device pubkey → the `ip:port` a peer last saw it send
     /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
     /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
@@ -114,10 +123,10 @@ pub struct RelayReg {
     pub secret: String,
 }
 
-pub fn router(state: AppState, trusted_proxies: Vec<ipnet::IpNet>) -> Router {
+pub fn router(state: AppState) -> Router {
     let limiter = RateLimitState {
         limiter: Arc::new(Mutex::new(RateLimiter::new(Instant::now()))),
-        trusted_proxies: Arc::new(trusted_proxies),
+        trusted_proxies: state.trusted_proxies.clone(),
     };
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -149,16 +158,21 @@ pub fn router(state: AppState, trusted_proxies: Vec<ipnet::IpNet>) -> Router {
 /// re-signed attestations — the renewal path). `since = None`/stale returns immediately.
 async fn register(
     State(st): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RegisterReq>,
 ) -> Result<Json<RegisterResp>, ApiError> {
     // Negotiate before doing any work: a client we can't speak to should cost us a range check, not
     // a snapshot build (and its Discord fan-out). Rejecting here is the whole point of the version —
     // serving a snapshot a client will misread is worse than telling it to upgrade.
     negotiate(&req)?;
+    // The caller's real source IP (proxy-corrected), recorded so a peer-reported reflexive for this
+    // device can be checked against where the device itself actually connects from.
+    let caller_ip = ratelimit::client_ip(peer.ip(), &headers, &st.trusted_proxies);
     // Subscribe to our targeted-wake channel *before* building, so a pair-specific update that
     // targets us while we build (or decide to park) isn't lost.
     let mut personal = st.wakers.subscribe(req.wg_pubkey);
-    let built = build_snapshot(&st, &req).await?;
+    let built = build_snapshot(&st, &req, caller_ip).await?;
     // Park only when the client is up to date *and* its own request changed nothing. A request that
     // reports data (reflexive/relay/ICE) returns immediately so the client can continue its report
     // loop — exactly as the old global bump made it — but now without waking the herd; the affected
@@ -178,7 +192,7 @@ async fn register(
         if matches!(woke, Woke::Herd) {
             tokio::time::sleep(wake_jitter(&req.wg_pubkey)).await;
         }
-        return Ok(Json(build_snapshot(&st, &req).await?.resp));
+        return Ok(Json(build_snapshot(&st, &req, caller_ip).await?.resp));
     }
     Ok(Json(built.resp))
 }
@@ -270,8 +284,18 @@ struct Built {
 /// versions for the guilds (and users) whose membership actually changed — waking only clients of
 /// those scopes — and fires **targeted** wakes for peers named in the caller's pair-specific reports
 /// (reflexive/relay/ICE). Re-signs all attestations with the current time (so a rebuild renews them).
-async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiError> {
-    let user_id = resolve_user(st, req).await?;
+async fn build_snapshot(
+    st: &AppState,
+    req: &RegisterReq,
+    caller_ip: std::net::IpAddr,
+) -> Result<Built, ApiError> {
+    let (user_id, already_enrolled) = resolve_user(st, req).await?;
+    // Record where this device connects from (as the coordinator sees it), so a peer's reflexive
+    // report about it can be validated against its real source address (see `accepted_reflexives`).
+    st.source_ip
+        .lock()
+        .unwrap()
+        .insert(req.wg_pubkey, caller_ip);
     let now = common::now_unix();
     // Which attestation layout this client gets. Gated on the client *saying* it can read V2: the
     // blob is postcard, so a client handed a layout it doesn't know decodes neither its own grant
@@ -597,8 +621,10 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
     // arbitrary pubkeys.
     let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
     {
+        // Lock order: source_ip before reflexive (the only site holding both).
+        let src = st.source_ip.lock().unwrap();
         let mut refl = st.reflexive.lock().unwrap();
-        for obs in accepted_reflexives(&req.observed, &comembers) {
+        for obs in accepted_reflexives(&req.observed, &comembers, &src) {
             if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
                 refl.insert(obs.pubkey, obs.endpoint);
                 wake_targets.insert(obs.pubkey);
@@ -775,11 +801,20 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
         (seeds, removed, true)
     };
 
-    let device_token = st
-        .store
-        .device_token(&req.wg_pubkey)
-        .await
-        .map_err(internal)?;
+    // Hand back the device's bearer token *only* on the register that first enrolls it — i.e. when
+    // the pubkey was resolved via a secret (enrollment key / OAuth binding), not by naming an
+    // already-enrolled pubkey. A WG public key is not a secret here (it rides in every co-member's
+    // seed), so re-issuing the token to anyone who names a known pubkey would let a co-member pull
+    // a victim's token and drive `/devices/manage` (rename/remove/set-primary) against them. The
+    // client persists the token from this first delivery; refresh never needs it re-sent.
+    let device_token = if already_enrolled {
+        None
+    } else {
+        st.store
+            .device_token(&req.wg_pubkey)
+            .await
+            .map_err(internal)?
+    };
 
     // Bump each scope whose membership changed → wake every parked client *of that scope*. A guild's
     // co-members wake; an unrelated guild's clients stay parked and cost nothing.
@@ -958,17 +993,19 @@ async fn community_of(st: &AppState, guild_id: u64) -> anyhow::Result<String> {
     }
 }
 
-/// Resolve the caller's user id: an already-enrolled device is known by its pubkey; a device bound
-/// via interactive login (OAuth) is known too; otherwise a new device must present a valid
-/// one-time enrollment key (which binds its pubkey to the owner on use).
-async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError> {
+/// Resolve the caller's user id, plus whether the device was **already enrolled** (resolved by its
+/// pubkey binding alone). `device_owner` is checked first, so a `true` flag means the device row
+/// already existed; `false` means this register is the one that binds the pubkey (via OAuth binding
+/// or a one-time enrollment key) and freshly mints the device row. Callers use the flag to gate the
+/// one-time `device_token` delivery — see `build_snapshot`.
+async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), ApiError> {
     if let Some(uid) = st
         .store
         .device_owner(&req.wg_pubkey)
         .await
         .map_err(internal)?
     {
-        return Ok(uid);
+        return Ok((uid, true));
     }
     if let Some(uid) = st
         .store
@@ -976,7 +1013,7 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError>
         .await
         .map_err(internal)?
     {
-        return Ok(uid);
+        return Ok((uid, false));
     }
     let Some(key) = req.enrollment_key.as_deref() else {
         return Err(ApiError::new(
@@ -984,10 +1021,12 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<u64, ApiError>
             "device not enrolled; log in (oauth) or provide an enrollment_key",
         ));
     };
-    st.store
+    let uid = st
+        .store
         .consume_enrollment_key(key, &req.wg_pubkey, common::now_unix())
         .await
-        .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))
+        .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    Ok((uid, false))
 }
 
 /// `GET /oauth/pkce-config`: the public bits the engine needs to run the PKCE flow itself.
@@ -1086,18 +1125,25 @@ fn should_supersede(
     token_owner == caller_user && old_pubkey != caller_pubkey
 }
 
-/// Peer-observed reflexives the caller may legitimately report: only those for a device the caller
-/// actually meshes with (`comembers` = the caller's co-member seed pubkeys). You can only observe a
-/// peer's reflexive across a tunnel you share, so a report about anyone else is spoofed/irrelevant.
-/// This bounds a forged endpoint to the victim's own co-members (the network trust boundary) rather
-/// than letting any authenticated member redirect any device's punch target.
+/// Peer-observed reflexives the caller may legitimately report. Two independent gates:
+/// 1. **Co-membership** — you can only observe a peer's reflexive across a tunnel you share, so the
+///    reported pubkey must be one of the caller's co-members (`comembers`).
+/// 2. **Source-IP correlation** — the reported reflexive IP must equal the IP the coordinator itself
+///    saw that peer connect from (`source_ip[pubkey]`, recorded on the peer's own register). A NAT'd
+///    peer egresses from one address, so its coordinator source IP and the reflexive its peers
+///    observe share that IP; a co-member that *invents* a reflexive can't make the victim's own
+///    traffic appear to originate there, so a mismatched (attacker-chosen) address is dropped. This
+///    is what stops a co-member redirecting a NAT'd peer's punch target to an arbitrary host (an
+///    SSRF/DoS lever). The port may differ (symmetric NAT), so only the IP is correlated. A peer we
+///    haven't seen register yet has no `source_ip` entry and its reports are held until it does.
 fn accepted_reflexives<'a>(
     observed: &'a [ObservedEndpoint],
     comembers: &'a std::collections::HashSet<[u8; 32]>,
+    source_ip: &'a HashMap<[u8; 32], std::net::IpAddr>,
 ) -> impl Iterator<Item = &'a ObservedEndpoint> {
-    observed
-        .iter()
-        .filter(move |o| comembers.contains(&o.pubkey))
+    observed.iter().filter(move |o| {
+        comembers.contains(&o.pubkey) && source_ip.get(&o.pubkey) == Some(&o.endpoint.ip())
+    })
 }
 
 #[derive(Debug)]
@@ -1248,14 +1294,53 @@ mod tests {
             },
         ];
         let comembers = std::collections::HashSet::from([comember]);
+        // The observed peer's coordinator-seen source IP matches the reported reflexive IP.
+        let source_ip = std::collections::HashMap::from([
+            (comember, addr("203.0.113.5:51820").ip()),
+            (stranger, addr("203.0.113.9:51820").ip()),
+        ]);
 
-        let accepted: Vec<_> = accepted_reflexives(&observed, &comembers).collect();
+        let accepted: Vec<_> = accepted_reflexives(&observed, &comembers, &source_ip).collect();
         assert_eq!(accepted.len(), 1, "only the co-member's report is accepted");
         assert_eq!(accepted[0].pubkey, comember);
 
         // With no co-members, every report is rejected.
         let none = std::collections::HashSet::new();
-        assert_eq!(accepted_reflexives(&observed, &none).count(), 0);
+        assert_eq!(accepted_reflexives(&observed, &none, &source_ip).count(), 0);
+    }
+
+    #[test]
+    fn reflexive_report_rejects_ip_the_peer_did_not_connect_from() {
+        let peer = [1u8; 32];
+        let comembers = std::collections::HashSet::from([peer]);
+        // The peer actually connects to the coordinator from 198.51.100.4.
+        let source_ip = std::collections::HashMap::from([(peer, addr("198.51.100.4:9999").ip())]);
+
+        // A co-member invents a different reflexive address for the peer → rejected (it isn't where
+        // the peer's own traffic originates), so the punch target can't be redirected.
+        let forged = vec![ObservedEndpoint {
+            pubkey: peer,
+            endpoint: addr("203.0.113.7:51820"),
+        }];
+        assert_eq!(
+            accepted_reflexives(&forged, &comembers, &source_ip).count(),
+            0
+        );
+
+        // A report whose IP matches the peer's source IP is accepted (the port may differ under
+        // symmetric NAT — only the IP is correlated).
+        let genuine = vec![ObservedEndpoint {
+            pubkey: peer,
+            endpoint: addr("198.51.100.4:41000"),
+        }];
+        assert_eq!(
+            accepted_reflexives(&genuine, &comembers, &source_ip).count(),
+            1
+        );
+
+        // A peer the coordinator has never seen register has no source_ip entry → held (rejected).
+        let empty = std::collections::HashMap::new();
+        assert_eq!(accepted_reflexives(&genuine, &comembers, &empty).count(), 0);
     }
 
     #[test]
