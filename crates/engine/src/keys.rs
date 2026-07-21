@@ -1,5 +1,6 @@
 //! Local WireGuard key custody + trust-anchor pinning.
 
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{bail, Context};
@@ -37,7 +38,7 @@ pub fn pin_anchor(
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{guild_id}.pub"));
     let Ok(existing) = std::fs::read(&path) else {
-        std::fs::write(&path, anchor)?;
+        write_private_atomic(&path, anchor)?;
         tracing::info!(guild_id, "pinned guild trust anchor");
         return Ok(());
     };
@@ -54,7 +55,7 @@ pub fn pin_anchor(
         .filter_map(|c| Signed::from_base64(c).ok())
         .collect();
     if walk_chain(pinned, *anchor, &chain) {
-        std::fs::write(&path, anchor)?;
+        write_private_atomic(&path, anchor)?;
         tracing::warn!(
             guild_id,
             "guild anchor rotated — re-pinned via rotation chain"
@@ -161,16 +162,127 @@ pub fn purge_state(state_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
-    std::fs::write(path, bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    write_private_atomic(path, bytes)
+}
+
+/// Atomically replace `path` with a regular owner-only file. The temporary file is created beside
+/// the destination so rename stays atomic; restrictive permissions are installed before any secret
+/// bytes are written, and rename replaces a destination symlink rather than following it.
+fn write_private_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let stem = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("secret");
+    let mut opened = None;
+    for _ in 0..16 {
+        let tmp = parent.join(format!(
+            ".{stem}.{}.tmp",
+            common::crypto::gen_enrollment_key()
+        ));
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&tmp) {
+            Ok(file) => {
+                opened = Some((tmp, file));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", tmp.display())),
+        }
     }
-    // Windows has no mode bits: restrict to owner + SYSTEM/Administrators and strip inherited ACEs
-    // so the key isn't left group/world-readable (e.g. under a ProgramData state dir).
-    #[cfg(windows)]
-    common::winsec::restrict_to_owner(path)
-        .with_context(|| format!("restricting permissions on {}", path.display()))?;
+    let (tmp, mut file) = opened.context("could not allocate a unique secret temporary file")?;
+
+    let result = (|| -> anyhow::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(windows)]
+        common::winsec::restrict_to_owner(&tmp)
+            .with_context(|| format!("restricting permissions on {}", tmp.display()))?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        install_private_file(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn install_private_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
+    std::fs::rename(tmp, path)
+        .with_context(|| format!("installing private file {}", path.display()))
+}
+
+#[cfg(windows)]
+fn install_private_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+    let wide = |p: &Path| {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let from = wide(tmp);
+    let to = wide(path);
+    // SAFETY: both pointers reference live, NUL-terminated UTF-16 buffers for the duration of the
+    // call. MOVEFILE_REPLACE_EXISTING atomically replaces an existing file rather than following it.
+    let ok = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("installing private file {}", path.display()));
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn private_write_is_owner_only_and_replaces_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!(
+            "unitylan-secret-write-{}-{}",
+            std::process::id(),
+            common::crypto::gen_enrollment_key()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"unchanged").unwrap();
+        let secret = dir.join("token");
+        symlink(&victim, &secret).unwrap();
+
+        write_secret(&secret, b"private").unwrap();
+
+        assert_eq!(std::fs::read(&victim).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read(&secret).unwrap(), b"private");
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

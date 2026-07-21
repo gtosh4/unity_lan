@@ -6835,6 +6835,7 @@ dependencies = [
  "libc",
  "reqwest",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sqlx",
@@ -6885,6 +6886,7 @@ dependencies = [
  "webrtc-util",
  "widestring 1.2.1",
  "windows-service",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -655,8 +655,6 @@ release plumbing, distribution docs, and a deliberate version decision — not b
   mitigated by the systemd capability-bounding + sandbox.
 - Attestation replay within its 30-min TTL is harmless (only re-adds a legitimate peer; WireGuard has
   its own handshake crypto).
-- write-then-chmod window on key files (`keys.rs`, `store.rs` write then `0600`) — low risk under the
-  `0700` state dir; optional `OpenOptions` mode-at-create tidy-up.
 
 ## Post-GA
 - [→] Symmetric-NAT-both relay — **promoted to M5.4** (now the planned next NAT increment, not

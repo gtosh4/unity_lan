@@ -60,3 +60,4 @@ windows-service = "0.7"
 # Build the control-pipe DACL as an SDDL wide-string (see control/server.rs). Version-matched to
 # interprocess's own widestring so `SecurityDescriptor::deserialize`'s `&U16CStr` type unifies.
 widestring = "1"
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

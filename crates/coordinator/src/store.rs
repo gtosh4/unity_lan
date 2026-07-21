@@ -67,6 +67,31 @@ fn restrict_db_perms(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Create the database file with owner-only permissions before SQLite opens it. Reject symlinks:
+/// this file eventually contains every guild signing seed and must never be redirected elsewhere.
+#[cfg(unix)]
+fn prepare_db_file(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_file() {
+            anyhow::bail!("sqlite path {} is not a regular file", path.display());
+        }
+        return restrict_db_perms(path);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("creating private sqlite file {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_db_file(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
 #[cfg(not(unix))]
 fn restrict_db_perms(_path: &Path) -> anyhow::Result<()> {
     Ok(())
@@ -78,6 +103,7 @@ pub struct Store {
 
 impl Store {
     pub async fn open(path: &Path) -> anyhow::Result<Self> {
+        prepare_db_file(path)?;
         let opts = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true);
@@ -85,10 +111,7 @@ impl Store {
             .connect_with(opts)
             .await
             .with_context(|| format!("opening sqlite {}", path.display()))?;
-        // The DB holds the Ed25519 signing seed — the deployment's entire trust anchor. SQLite
-        // creates the file at the process umask (commonly world-readable 0644); tighten it to
-        // owner-only before the seed is ever written. Anyone who can read this file can forge
-        // attestations for any user/role/ip/device.
+        // Re-assert after SQLite opens it, including any already-existing database.
         restrict_db_perms(path)?;
         let store = Self { pool };
         store.migrate().await?;
@@ -685,6 +708,37 @@ impl Store {
             Some(_) => Err(anyhow::anyhow!("enrollment key already used")),
             None => Err(anyhow::anyhow!("enrollment key expired")),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod security_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    #[tokio::test]
+    async fn database_is_created_private_and_symlinks_are_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "unitylan-db-security-{}-{}",
+            std::process::id(),
+            common::crypto::gen_enrollment_key()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("coordinator.db");
+        let store = Store::open(&db).await.unwrap();
+        drop(store);
+        assert_eq!(
+            std::fs::metadata(&db).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        let target = dir.join("target.db");
+        std::fs::write(&target, b"untouched").unwrap();
+        let link = dir.join("linked.db");
+        symlink(&target, &link).unwrap();
+        assert!(Store::open(&link).await.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

@@ -9,6 +9,11 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+const MIN_ADMIN_TOKEN_BYTES: usize = 32;
+const MIN_ATTESTATION_TTL_SECS: u64 = 60;
+const MAX_ATTESTATION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+const MAX_RELEASE_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Socket address to bind the HTTP API, e.g. "127.0.0.1:8080".
@@ -223,7 +228,52 @@ impl Config {
                 tokio::sync::Semaphore::MAX_PERMITS
             );
         }
+        if !(MIN_ATTESTATION_TTL_SECS..=MAX_ATTESTATION_TTL_SECS)
+            .contains(&cfg.attestation_ttl_secs)
+        {
+            anyhow::bail!(
+                "attestation_ttl_secs must be between {MIN_ATTESTATION_TTL_SECS} and {MAX_ATTESTATION_TTL_SECS}"
+            );
+        }
+        if let Some(admin) = &cfg.admin {
+            if admin.token.len() < MIN_ADMIN_TOKEN_BYTES {
+                anyhow::bail!(
+                    "admin token must be at least {MIN_ADMIN_TOKEN_BYTES} bytes of random data"
+                );
+            }
+        }
+        if let Some(release) = &cfg.release {
+            release.validate()?;
+        }
         Ok(cfg)
+    }
+}
+
+impl ReleaseConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        semver::Version::parse(&self.version).map_err(|e| {
+            anyhow::anyhow!("release version {:?} is not semver: {e}", self.version)
+        })?;
+        let mut platforms = std::collections::HashSet::new();
+        for artifact in &self.artifacts {
+            let url = reqwest::Url::parse(&artifact.url)
+                .map_err(|e| anyhow::anyhow!("invalid release URL {:?}: {e}", artifact.url))?;
+            if url.scheme() != "https" {
+                anyhow::bail!("release URL must use https: {}", artifact.url);
+            }
+            if artifact.size == 0 || artifact.size > MAX_RELEASE_ARTIFACT_BYTES {
+                anyhow::bail!(
+                    "release artifact size must be between 1 and {MAX_RELEASE_ARTIFACT_BYTES} bytes"
+                );
+            }
+            if !platforms.insert(artifact.platform) {
+                anyhow::bail!(
+                    "release contains duplicate platform {:?}",
+                    artifact.platform
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -273,5 +323,48 @@ mod tests {
         let err = Config::load(&path).unwrap_err();
         let _ = std::fs::remove_file(path);
         assert!(err.to_string().contains("max_longpolls must be at least 1"));
+    }
+
+    fn load_text(extra: &str) -> anyhow::Result<Config> {
+        let path = std::env::temp_dir().join(format!(
+            "unitylan-config-{}-{}.toml",
+            std::process::id(),
+            common::crypto::gen_enrollment_key()
+        ));
+        std::fs::write(
+            &path,
+            format!("bind = '127.0.0.1:8080'\ndatabase = 'test.db'\n{extra}"),
+        )?;
+        let result = Config::load(&path);
+        let _ = std::fs::remove_file(path);
+        result
+    }
+
+    #[test]
+    fn rejects_unsafe_security_configuration() {
+        assert!(load_text("attestation_ttl_secs = 0\n").is_err());
+        assert!(load_text("[admin]\ntoken = ''\n").is_err());
+        assert!(load_text("[admin]\ntoken = 'short'\n").is_err());
+    }
+
+    #[test]
+    fn validates_release_metadata_at_load() {
+        let artifact = |version: &str, url: &str, size: u64| {
+            format!(
+                "[release]\nversion = '{version}'\n[[release.artifact]]\nplatform = 'linux-amd64'\nurl = '{url}'\nsha256 = '{}'\nsize = {size}\n",
+                "ab".repeat(32)
+            )
+        };
+        assert!(load_text(&artifact("not-semver", "https://example.test/a", 1)).is_err());
+        assert!(load_text(&artifact("1.2.3", "http://example.test/a", 1)).is_err());
+        assert!(load_text(&artifact("1.2.3", "https://example.test/a", 0)).is_err());
+        assert!(load_text(&artifact("1.2.3", "https://example.test/a", 1024)).is_ok());
+
+        let duplicate = format!(
+            "{}[[release.artifact]]\nplatform = 'linux-amd64'\nurl = 'https://example.test/b'\nsha256 = '{}'\nsize = 1\n",
+            artifact("1.2.3", "https://example.test/a", 1),
+            "cd".repeat(32)
+        );
+        assert!(load_text(&duplicate).is_err());
     }
 }

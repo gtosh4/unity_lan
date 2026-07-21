@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// Postcard (the signed-payload format) encodes this by variant index, so **only append** new
 /// variants; reordering would break verification against already-signed manifests. The string names
 /// are for the coordinator's TOML/JSON config only.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Platform {
     #[serde(rename = "linux-amd64")]
     LinuxAmd64,

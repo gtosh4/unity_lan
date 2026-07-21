@@ -3,6 +3,17 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Security
+
+- Engine keys and bearer credentials are now created owner-only and installed atomically, closing
+  the write-before-chmod window and preventing a pre-existing symlink from redirecting a secret
+  write. The coordinator likewise creates its signing-key database privately before SQLite opens it.
+- Coordinators now refuse unsafe security settings at startup, including weak admin tokens,
+  unreasonable attestation lifetimes, and malformed, non-HTTPS, duplicate, or oversized update
+  artifacts.
+
 ## v0.4.0
 
 ### Added

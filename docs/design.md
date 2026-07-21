@@ -482,9 +482,9 @@ engine via its control socket (no privilege in the front-ends):
   credential / KMS — a stolen disk or leaked backup then yields nothing usable (unattended restart
   provisions the secret via `LoadCredential`/KMS). HSM/KMS-backed **non-exportable** signing is an
   optional deployment mode.
-- **Client secrets at rest.** The WG private key (never leaves the device), the OAuth
-  session/refresh token, and the pinned anchor are stored under OS-appropriate protection — a
-  keystore where available, else `0600` operator-owned files.
+- **Client secrets at rest.** The WG private key (never leaves the device), device bearer token,
+  relay secret, and pinned anchor are stored under OS-appropriate protection — a keystore where
+  available, else atomically installed `0600` operator-owned files.
 - **Coordinator abuse controls.** First enrollment requires Discord OAuth or a short-lived,
   single-use enrollment key. Enrolled devices receive a bearer token and send it on every
   register/refresh; missing or invalid tokens are rejected for every enrolled device. Legacy rows
