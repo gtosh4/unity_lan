@@ -58,6 +58,91 @@ const PROTO_MISMATCH_BACKOFF: Duration = Duration::from_secs(300);
 /// never cancels the held `/refresh`, so idle clients still park for the full hold.
 const STATS_RECHECK: Duration = Duration::from_secs(2);
 
+/// Grace before a bootstrap-stuck peer (unpunchable + unconnected) escalates to ICE. Shorter than the
+/// classifier's Punching→Unreachable grace because there is nothing to wait for — no observer will
+/// ever report a reflexive, so ICE's own STUN is the only way forward and delaying it just stalls.
+const BOOTSTRAP_STUCK_SECS: u64 = 15;
+
+/// Per-peer connection bookkeeping carried across mesh-loop iterations, folding the three parallel
+/// maps (`attempt_since`, `bootstrap_since`, last reported reach) that each keyed a peer's pubkey and
+/// were advanced together every recheck. [`PeerConn::step`] runs the whole per-peer transition.
+#[derive(Default)]
+struct PeerConn {
+    /// When the peer last had *no* fresh handshake — armed while unconnected, cleared on connect. Its
+    /// age is what the reach classifier grades Punching→Unreachable. A dialable endpoint that never
+    /// completes (same-NAT peers behind a router that won't hairpin) ages out this way too, or nothing
+    /// would ever escalate it to ICE.
+    attempt_since: Option<std::time::Instant>,
+    /// When the peer first became *unpunchable* (no endpoint, no reflexive → no punch target) and
+    /// still unconnected — the bootstrap case. Armed only then, cleared otherwise; its age gates ICE.
+    bootstrap_since: Option<std::time::Instant>,
+    /// Last (up, reach) reported, so `step` can flag the edge for logging: the recompute is otherwise
+    /// silent and a flap (up↔down / Direct↔Unreachable) leaves no trace but a `ctl status` poll.
+    last: Option<(bool, common::control::PeerReach)>,
+}
+
+/// One iteration's outcome for a peer, returned by [`PeerConn::step`].
+struct PeerStep {
+    /// This iteration's classified reachability (relay/ICE overrides applied).
+    reach: common::control::PeerReach,
+    /// `Some((was_up, was_reach))` when the (up, reach) pair changed — the caller logs the edge.
+    flipped: Option<(bool, common::control::PeerReach)>,
+    /// Whether the bootstrap timer has aged past [`BOOTSTRAP_STUCK_SECS`] (drives ICE escalation).
+    bootstrap_stuck: bool,
+}
+
+impl PeerConn {
+    /// Advance the FSM from this iteration's liveness: age the attempt/bootstrap timers, classify
+    /// reachability (relay/ICE win over the punch classifier), and report whether the reported pair
+    /// flipped since last iteration.
+    fn step(
+        &mut self,
+        now: std::time::Instant,
+        punched: bool,
+        connected: bool,
+        unpunchable: bool,
+        relaying: bool,
+        icing: bool,
+    ) -> PeerStep {
+        if connected {
+            self.attempt_since = None;
+        } else {
+            self.attempt_since.get_or_insert(now);
+        }
+        let age = self
+            .attempt_since
+            .map_or(0, |t| now.duration_since(t).as_secs());
+        if unpunchable && !connected {
+            self.bootstrap_since.get_or_insert(now);
+        } else {
+            self.bootstrap_since = None;
+        }
+        let bootstrap_stuck = self
+            .bootstrap_since
+            .is_some_and(|t| now.duration_since(t).as_secs() >= BOOTSTRAP_STUCK_SECS);
+        // On the userspace path a peer routed through relay/ICE reads as connected; mark it so its
+        // Seed.relay/Seed.ice keep flowing (else the coordinator withdraws them and the session flaps).
+        let reach = if relaying {
+            common::control::PeerReach::Relayed
+        } else if icing {
+            common::control::PeerReach::Ice
+        } else {
+            common::control::classify_reach(punched, connected, age)
+        };
+        let flipped = match self.last.replace((connected, reach)) {
+            Some((was_up, was_reach)) if was_up != connected || was_reach != reach => {
+                Some((was_up, was_reach))
+            }
+            _ => None,
+        };
+        PeerStep {
+            reach,
+            flipped,
+            bootstrap_stuck,
+        }
+    }
+}
+
 /// Reflect the coordinator's advertised version, and verify + stage a release manifest from `resp`
 /// for the control socket's `ApplyUpdate`.
 ///
@@ -557,18 +642,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         // The last ICE offers we reported — a change (new candidates / creds) must break the hold too,
         // so a freshly-gathered candidate reaches the peer promptly instead of waiting out the hold.
         let mut last_ice_offers: Vec<common::api::IceEndpoint> = Vec::new();
-        // When we last had *no* handshake with each peer — the age fed to the reach classifier. Armed
-        // for any unconnected peer, punched or directly dialable, and cleared the moment a handshake
-        // lands: a dialable endpoint that never completes (same-NAT peers behind a router that won't
-        // hairpin) has to age out to `Unreachable` too, or nothing ever escalates it to ICE.
-        let mut attempt_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
-        // When a peer first became *unpunchable* (no endpoint, no reflexive → no punch target) and
-        // still unconnected — the bootstrap case (no observer online to report a reflexive). After a
-        // grace we run ICE for it (userspace), whose STUN gets a reflexive with no observer needed.
-        let mut bootstrap_since: HashMap<[u8; 32], std::time::Instant> = HashMap::new();
-        // Last (up, reach) reported per peer, so a change can be logged: the recompute is otherwise
-        // silent and a flap (up↔down / Direct↔Unreachable) leaves no trace but a `ctl status` poll.
-        let mut prev_reach: HashMap<[u8; 32], (bool, common::control::PeerReach)> = HashMap::new();
+        // Per-peer connection bookkeeping (attempt/bootstrap timers + last reported reach), carried
+        // across long-poll cycles and advanced each recheck by `PeerConn::step`.
+        let mut conns: HashMap<[u8; 32], PeerConn> = HashMap::new();
         // Shared ICMP socket for the per-peer latency probe. Opening it needs privilege (we have it);
         // if it fails we run without latency numbers rather than aborting the daemon.
         let ping_client = match ping::client() {
@@ -698,63 +774,43 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     .map(|d| d.as_secs());
                 let connected = last_handshake
                     .is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
-                if connected {
-                    attempt_since.remove(pk);
-                } else {
-                    attempt_since.entry(*pk).or_insert(now);
-                }
-                let age = attempt_since
-                    .get(pk)
-                    .map_or(0, |t| now.duration_since(*t).as_secs());
-                // Bootstrap case: a peer with no dialable endpoint *and* no punch target (no observer
-                // reported a reflexive) that hasn't connected. Tracked separately from the classifier's
-                // grace because it gets a shorter one — there is nothing to wait for, so we run ICE
-                // sooner, its STUN yielding a reflexive with no observer needed. Cleared the moment a
-                // punch target or handshake appears.
+                // A peer with no dialable endpoint *and* no punch target (no observer reported a
+                // reflexive) that hasn't connected — the bootstrap case, cleared the moment a punch
+                // target or handshake appears.
                 let unpunchable = last_seeds
                     .iter()
                     .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_none());
-                if unpunchable && !connected {
-                    bootstrap_since.entry(*pk).or_insert(now);
-                } else {
-                    bootstrap_since.remove(pk);
-                }
-                let bootstrap_stuck = bootstrap_since
-                    .get(pk)
-                    .is_some_and(|t| now.duration_since(*t).as_secs() >= 15);
                 let relaying = relays.is_relaying(pk);
-                // On the userspace path a peer routed through ICE reads as connected; keep it in the
-                // want set so its Seed.relay (ICE's TURN candidate) + Seed.ice keep flowing, else the
-                // coordinator would withdraw them and the session would flap (mirrors `relaying`).
                 let icing = ice.is_connected(pk);
-                let r = if relaying {
-                    common::control::PeerReach::Relayed
-                } else if icing {
-                    common::control::PeerReach::Ice
-                } else {
-                    common::control::classify_reach(punched, connected, age)
-                };
+                // Advance this peer's connection FSM from the liveness above: age the attempt/bootstrap
+                // timers and classify reachability (relay/ICE override the punch classifier).
+                let step = conns.entry(*pk).or_default().step(
+                    now,
+                    punched,
+                    connected,
+                    unpunchable,
+                    relaying,
+                    icing,
+                );
+                let r = step.reach;
                 // Log the flip (not every recheck): the state is otherwise only visible via
                 // `ctl status`, so a peer flapping down leaves no trace. Carries the handshake age so
                 // a stale-read glitch (age tiny) reads differently from a real outage (age large).
-                match prev_reach.insert(*pk, (connected, r)) {
-                    Some((was_up, was_reach)) if was_up != connected || was_reach != r => {
-                        tracing::info!(
-                            peer = %hex8(pk),
-                            up = connected,
-                            was_up,
-                            reach = ?r,
-                            was_reach = ?was_reach,
-                            last_handshake_secs = ?last_handshake_secs,
-                            "peer reachability changed"
-                        );
-                    }
-                    _ => {}
+                if let Some((was_up, was_reach)) = step.flipped {
+                    tracing::info!(
+                        peer = %hex8(pk),
+                        up = connected,
+                        was_up,
+                        reach = ?r,
+                        was_reach = ?was_reach,
+                        last_handshake_secs = ?last_handshake_secs,
+                        "peer reachability changed"
+                    );
                 }
                 if relaying
                     || icing
                     || r == common::control::PeerReach::Unreachable
-                    || (ice_enabled && bootstrap_stuck)
+                    || (ice_enabled && step.bootstrap_stuck)
                 {
                     want_relay.push(*pk);
                 }
@@ -777,9 +833,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     );
                 }
             }
-            // Drop attempt bookkeeping for peers that have left the mesh.
-            attempt_since.retain(|pk, _| peers.contains_key(pk));
-            prev_reach.retain(|pk, _| peers.contains_key(pk));
+            // Drop bookkeeping for peers that have left the mesh.
+            conns.retain(|pk, _| peers.contains_key(pk));
             control::set_live(&status, &live);
 
             // Recompute direct LAN endpoints from received beacons + this iteration's ping health.
@@ -1547,6 +1602,112 @@ fn apply_seeds(
 mod tests {
     use super::*;
     use crate::coord::SeedPeer;
+    use common::control::PeerReach;
+    use std::time::Instant;
+
+    #[test]
+    fn step_ages_attempt_then_flags_the_flip() {
+        let t0 = Instant::now();
+        let mut c = PeerConn::default();
+        // First sight, unconnected inside the grace window: Direct, and never a flip (no prior).
+        let s = c.step(t0, false, false, false, false, false);
+        assert_eq!(s.reach, PeerReach::Direct);
+        assert!(s.flipped.is_none());
+        // Aged past the classifier grace with no handshake → Unreachable, and the edge is reported.
+        let s = c.step(
+            t0 + Duration::from_secs(STUCK),
+            false,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(s.reach, PeerReach::Unreachable);
+        assert_eq!(s.flipped, Some((false, PeerReach::Direct)));
+        // A handshake clears the attempt timer: back to Direct/up, flip reported once more.
+        let s = c.step(
+            t0 + Duration::from_secs(STUCK + 1),
+            false,
+            true,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(s.reach, PeerReach::Direct);
+        assert_eq!(s.flipped, Some((false, PeerReach::Unreachable)));
+        // Steady state re-reports the same pair without a flip.
+        assert!(c
+            .step(
+                t0 + Duration::from_secs(STUCK + 2),
+                false,
+                true,
+                false,
+                false,
+                false
+            )
+            .flipped
+            .is_none());
+    }
+
+    #[test]
+    fn step_bootstrap_timer_arms_and_clears() {
+        let t0 = Instant::now();
+        let mut c = PeerConn::default();
+        // Unpunchable + unconnected arms the bootstrap timer, but not stuck yet.
+        assert!(!c.step(t0, false, false, true, false, false).bootstrap_stuck);
+        // Aged past the bootstrap grace → stuck (drives ICE escalation).
+        assert!(
+            c.step(
+                t0 + Duration::from_secs(BOOTSTRAP_STUCK_SECS),
+                false,
+                false,
+                true,
+                false,
+                false
+            )
+            .bootstrap_stuck
+        );
+        // A handshake clears it even while still unpunchable.
+        assert!(
+            !c.step(
+                t0 + Duration::from_secs(BOOTSTRAP_STUCK_SECS + 1),
+                false,
+                true,
+                true,
+                false,
+                false
+            )
+            .bootstrap_stuck
+        );
+    }
+
+    #[test]
+    fn step_relay_and_ice_override_the_classifier() {
+        let t0 = Instant::now();
+        let mut c = PeerConn::default();
+        // Aged-out + punched would classify Unreachable, but an active relay wins.
+        let s = c.step(
+            t0 + Duration::from_secs(STUCK),
+            true,
+            false,
+            false,
+            true,
+            false,
+        );
+        assert_eq!(s.reach, PeerReach::Relayed);
+        // ICE likewise wins over the punch classifier.
+        let s = c.step(
+            t0 + Duration::from_secs(STUCK),
+            true,
+            false,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(s.reach, PeerReach::Ice);
+    }
+
+    const STUCK: u64 = common::control::STUCK_AFTER_SECS;
 
     /// Stable fake ids per role name, so two seeds naming the same network agree on its identity.
     fn ids(name: &str) -> (u64, u64) {
