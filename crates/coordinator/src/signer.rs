@@ -14,6 +14,18 @@ use ipnet::Ipv4Net;
 
 use crate::store::Store;
 
+/// The device-identity fields an attestation binds (`guild + user + device + ip + wg_pubkey +
+/// is_primary`). A borrowed view so signing and the sign-cache's freshness check take one value
+/// instead of six positional args, without forcing a clone on the hot cache-hit path.
+pub struct AttIdentity<'a> {
+    pub user_id: u64,
+    pub username: &'a str,
+    pub device_name: &'a str,
+    pub is_primary: bool,
+    pub ip: Ipv4Addr,
+    pub pubkey: WgPublicKey,
+}
+
 pub struct Signer {
     key: CoordinatorKey,
     /// The guild this key signs for; stamped into every attestation (`Attestation::guild_id`).
@@ -39,27 +51,17 @@ impl Signer {
     }
 
     /// Build and sign a device attestation for this guild with the default TTL.
-    #[allow(clippy::too_many_arguments)]
-    pub fn sign_attestation(
-        &self,
-        user_id: u64,
-        username: String,
-        device_name: String,
-        is_primary: bool,
-        wg_ip: std::net::Ipv4Addr,
-        wg_pubkey: WgPublicKey,
-        schema: u32,
-    ) -> anyhow::Result<Signed> {
+    pub fn sign_attestation(&self, id: &AttIdentity, schema: u32) -> anyhow::Result<Signed> {
         let now = now_unix();
         let att = Attestation {
             guild_id: self.guild_id,
-            user_id,
-            username,
-            device_name,
-            is_primary,
-            wg_ip,
+            user_id: id.user_id,
+            username: id.username.to_owned(),
+            device_name: id.device_name.to_owned(),
+            is_primary: id.is_primary,
+            wg_ip: id.ip,
             wg_net: self.wg_net,
-            wg_pubkey,
+            wg_pubkey: id.pubkey,
             issued_at: now,
             expires_at: now + self.ttl,
         };
@@ -193,41 +195,27 @@ impl SignCache {
 
     /// The base64 `Signed<Attestation>` for this peer in this guild, signing it only on a cold/stale
     /// miss. `now` is the caller's already-computed `now_unix()` (shared across the whole snapshot).
-    #[allow(clippy::too_many_arguments)]
     pub async fn attestation(
         &self,
         keys: &GuildKeys,
         guild_id: u64,
-        user_id: u64,
-        username: &str,
-        device_name: &str,
-        is_primary: bool,
-        ip: Ipv4Addr,
-        pubkey: WgPublicKey,
+        id: &AttIdentity<'_>,
         now: u64,
         schema: u32,
     ) -> anyhow::Result<Arc<str>> {
-        let key = (guild_id, pubkey, schema);
+        let key = (guild_id, id.pubkey, schema);
         // Fast path: concurrent read, no signing, no async lock.
-        if let Some(hit) = self.fresh(&key, now, username, device_name, is_primary, ip) {
+        if let Some(hit) = self.fresh(&key, now, id) {
             return Ok(hit);
         }
         // Miss: serialize signers so the herd signs this entry once, not N times.
         let _guard = self.sign_lock.lock().await;
         // Re-check — a peer that raced us here may have just filled it.
-        if let Some(hit) = self.fresh(&key, now, username, device_name, is_primary, ip) {
+        if let Some(hit) = self.fresh(&key, now, id) {
             return Ok(hit);
         }
         let gk = keys.get(guild_id).await?;
-        let signed = gk.signer.sign_attestation(
-            user_id,
-            username.to_owned(),
-            device_name.to_owned(),
-            is_primary,
-            ip,
-            pubkey,
-            schema,
-        )?;
+        let signed = gk.signer.sign_attestation(id, schema)?;
         let blob: Arc<str> = Arc::from(signed.to_base64());
         let mut inner = self.inner.write().unwrap();
         if now.saturating_sub(inner.last_prune) >= self.reuse_secs {
@@ -241,33 +229,31 @@ impl SignCache {
             CachedAtt {
                 blob: blob.clone(),
                 signed_at: now,
-                ip,
-                is_primary,
-                username: username.to_owned(),
-                device_name: device_name.to_owned(),
+                ip: id.ip,
+                is_primary: id.is_primary,
+                username: id.username.to_owned(),
+                device_name: id.device_name.to_owned(),
             },
         );
         Ok(blob)
     }
 
     /// A live cache hit for `key`: present, unexpired, and its stored identity still matches the
-    /// current one (else the attestation content changed and must be re-signed).
+    /// current one (else the attestation content changed and must be re-signed). `user_id`/`pubkey`
+    /// aren't compared — the pubkey is in the key, and it binds the owner.
     fn fresh(
         &self,
         key: &(u64, [u8; 32], u32),
         now: u64,
-        username: &str,
-        device_name: &str,
-        is_primary: bool,
-        ip: Ipv4Addr,
+        id: &AttIdentity<'_>,
     ) -> Option<Arc<str>> {
         let inner = self.inner.read().unwrap();
         let e = inner.map.get(key)?;
         (now.saturating_sub(e.signed_at) < self.reuse_secs
-            && e.ip == ip
-            && e.is_primary == is_primary
-            && e.username == username
-            && e.device_name == device_name)
+            && e.ip == id.ip
+            && e.is_primary == id.is_primary
+            && e.username == id.username
+            && e.device_name == id.device_name)
             .then(|| e.blob.clone())
     }
 }
@@ -293,12 +279,23 @@ mod tests {
         let cache = SignCache::new(1800);
         let pk = [7u8; 32];
         let addr = ip("100.72.0.5");
-        let sign = |name: &'static str, primary: bool, now: u64| {
-            cache.attestation(&keys, 1, 42, "alice", name, primary, addr, pk, now, V1)
+        let id = |name: &'static str, primary: bool| AttIdentity {
+            user_id: 42,
+            username: "alice",
+            device_name: name,
+            is_primary: primary,
+            ip: addr,
+            pubkey: pk,
         };
 
-        let a = sign("laptop", false, 1_000).await.unwrap();
-        let b = sign("laptop", false, 1_100).await.unwrap();
+        let a = cache
+            .attestation(&keys, 1, &id("laptop", false), 1_000, V1)
+            .await
+            .unwrap();
+        let b = cache
+            .attestation(&keys, 1, &id("laptop", false), 1_100, V1)
+            .await
+            .unwrap();
         // Second call within the cache window returns the *same* allocation — proof it was reused,
         // not re-signed (Ed25519 is deterministic, so equal bytes alone wouldn't prove a hit).
         assert!(
@@ -307,12 +304,22 @@ mod tests {
         );
 
         // A rename under the same pubkey changes the signed content → must re-sign.
-        let renamed = sign("desktop", false, 1_100).await.unwrap();
+        let renamed = cache
+            .attestation(&keys, 1, &id("desktop", false), 1_100, V1)
+            .await
+            .unwrap();
         assert!(!Arc::ptr_eq(&a, &renamed));
         assert_ne!(a.as_ref(), renamed.as_ref());
 
         // Crossing the cache TTL re-signs even with identical identity (fresh issued_at).
-        let later = sign("laptop", false, 1_000 + SIGN_CACHE_REUSE_CAP_SECS)
+        let later = cache
+            .attestation(
+                &keys,
+                1,
+                &id("laptop", false),
+                1_000 + SIGN_CACHE_REUSE_CAP_SECS,
+                V1,
+            )
             .await
             .unwrap();
         assert!(!Arc::ptr_eq(&a, &later));
@@ -322,37 +329,17 @@ mod tests {
     async fn distinct_peers_and_guilds_are_separate_entries() {
         let keys = keys().await;
         let cache = SignCache::new(1800);
-        let g1_pk1 = cache
-            .attestation(
-                &keys,
-                1,
-                1,
-                "a",
-                "d",
-                false,
-                ip("100.72.0.1"),
-                [1u8; 32],
-                0,
-                V1,
-            )
-            .await
-            .unwrap();
+        let id = AttIdentity {
+            user_id: 1,
+            username: "a",
+            device_name: "d",
+            is_primary: false,
+            ip: ip("100.72.0.1"),
+            pubkey: [1u8; 32],
+        };
+        let g1_pk1 = cache.attestation(&keys, 1, &id, 0, V1).await.unwrap();
         // Same peer, different guild → different signer → distinct blob.
-        let g2_pk1 = cache
-            .attestation(
-                &keys,
-                2,
-                1,
-                "a",
-                "d",
-                false,
-                ip("100.72.0.1"),
-                [1u8; 32],
-                0,
-                V1,
-            )
-            .await
-            .unwrap();
+        let g2_pk1 = cache.attestation(&keys, 2, &id, 0, V1).await.unwrap();
         assert!(!Arc::ptr_eq(&g1_pk1, &g2_pk1));
         assert_ne!(g1_pk1.as_ref(), g2_pk1.as_ref());
     }
@@ -363,26 +350,24 @@ mod tests {
     async fn layout_is_part_of_the_cache_key() {
         let keys = keys().await;
         let cache = SignCache::new(1800);
-        let sign = |schema: u32| {
-            cache.attestation(
-                &keys,
-                1,
-                1,
-                "a",
-                "d",
-                false,
-                ip("100.72.0.1"),
-                [1u8; 32],
-                0,
-                schema,
-            )
+        let id = AttIdentity {
+            user_id: 1,
+            username: "a",
+            device_name: "d",
+            is_primary: false,
+            ip: ip("100.72.0.1"),
+            pubkey: [1u8; 32],
         };
-        let v1 = sign(V1).await.unwrap();
-        let v2 = sign(common::attestation::ATTESTATION_SCHEMA_V2)
+        let v1 = cache.attestation(&keys, 1, &id, 0, V1).await.unwrap();
+        let v2 = cache
+            .attestation(&keys, 1, &id, 0, common::attestation::ATTESTATION_SCHEMA_V2)
             .await
             .unwrap();
         assert_ne!(v1.as_ref(), v2.as_ref(), "layouts must not share a blob");
         // …and each layout still caches on its own.
-        assert!(Arc::ptr_eq(&v1, &sign(V1).await.unwrap()));
+        assert!(Arc::ptr_eq(
+            &v1,
+            &cache.attestation(&keys, 1, &id, 0, V1).await.unwrap()
+        ));
     }
 }

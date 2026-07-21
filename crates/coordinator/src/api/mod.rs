@@ -521,12 +521,14 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
             let signed = key
                 .signer
                 .sign_attestation(
-                    user_id,
-                    username.clone(),
-                    device_name.clone(),
-                    is_primary,
-                    ip,
-                    req.wg_pubkey,
+                    &crate::signer::AttIdentity {
+                        user_id,
+                        username: &username,
+                        device_name: &device_name,
+                        is_primary,
+                        ip,
+                        pubkey: req.wg_pubkey,
+                    },
                     att_schema,
                 )
                 .map_err(internal)?;
@@ -708,22 +710,19 @@ async fn build_snapshot(st: &AppState, req: &RegisterReq) -> Result<Built, ApiEr
         };
         // One attestation per guild this peer shares with the caller, each signed by that guild's
         // key. The client admits the peer once any one verifies against the matching pinned anchor.
+        let peer_id = crate::signer::AttIdentity {
+            user_id: mp.user_id,
+            username: &mp.username,
+            device_name: &mp.device_name,
+            is_primary: mp.is_primary,
+            ip: mp.ip,
+            pubkey: mp.pubkey,
+        };
         let mut attestations = Vec::with_capacity(shared_guilds.len());
         for &g in &shared_guilds {
             let blob = st
                 .sign_cache
-                .attestation(
-                    &st.guild_keys,
-                    g,
-                    mp.user_id,
-                    &mp.username,
-                    &mp.device_name,
-                    mp.is_primary,
-                    mp.ip,
-                    mp.pubkey,
-                    now,
-                    att_schema,
-                )
+                .attestation(&st.guild_keys, g, &peer_id, now, att_schema)
                 .await
                 .map_err(internal)?;
             attestations.push(GuildAttestation {
