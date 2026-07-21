@@ -16,9 +16,12 @@ tag=$(gh release view --repo "$REPO" --json tagName -q .tagName)
 ver="${tag#v}"
 base="https://github.com/${REPO}/releases/download/${tag}"
 
-# Per-platform artifact names in the release (msi name embeds the version; the tarball name doesn't).
+# Per-platform auto-update bundles in the release (both version-agnostic tarball names). Windows
+# serves the tar.gz file-swap bundle now that the whole fleet is >= 0.4.0; a pre-0.4.0 engine's
+# updater expects the .msi and would write the gzip over its own exe, so never revert this while any
+# such client remains.
 lin_name="unitylan-linux-amd64.tar.gz"
-win_name="unitylan-${ver}-x64.msi"
+win_name="unitylan-windows-x64.tar.gz"
 
 # Sizes from the release asset list; SHA-256s from the checksum manifests CI attaches.
 sizes=$(gh release view "$tag" --repo "$REPO" --json assets -q '.assets[] | "\(.name) \(.size)"')
