@@ -33,8 +33,9 @@ their own devices (name, primary, remove) from the client app / CLI (§8).
 
 **Goals**
 - Membership = **Discord roles**, cryptographically **enforced** (a peer can't fake it).
-- **No single user is a point of failure** — any online member can bootstrap a new joiner;
-  the coordinator is out of the hot path.
+- **No single user is a point of failure** — established peers refresh each other's attestations;
+  the coordinator is out of the data path and the established mesh's freshness path. First-time
+  enrollment and discovery of unknown peers still require it.
 - Multiple, possibly overlapping, isolated networks per guild.
 - Direct peer-to-peer encrypted data plane (WireGuard). Coordinator carries **no traffic
   and no private keys** (Tailscale-style: control plane only).
@@ -48,8 +49,8 @@ their own devices (name, primary, remove) from the client app / CLI (§8).
   [§12](#12-alternatives-considered).)
 - Web dashboard. The client is a **native desktop app** (iced) + a background engine.
 
-  *(A data-plane relay for symmetric-NAT/CGNAT pairs was the original v1 non-goal — v1 shipped
-  best-effort diagnostics first; a ciphertext-only peer relay is now **planned**, §7.2.)*
+  *(A data-plane relay for symmetric-NAT/CGNAT pairs was the original v1 non-goal. That decision was
+  later reversed; a ciphertext-only peer relay now ships, §7.2.)*
 
 **Platforms**: Windows, Linux, macOS — **and mobile (iOS/Android) as the end-state**, all served
 by a single **userspace** WireGuard data plane, the only backend that exists on macOS/iOS/Android
@@ -71,19 +72,14 @@ Responsibilities:
 - Let guild admins **register networks** (`/unitylan network add|remove|list`, Manage-Guild gated).
 - Authenticate a client to a Discord identity (OAuth).
 - Read the user's **roles** and **nick** via the bot token (guild members).
-- **Allocate** each member a stable IP within each role's subnet (§6).
+- **Allocate** each device one stable IP in the deployment mesh range, reused across roles (§6).
 - **Sign attestations** (§4) for the roles the user holds; **re-sign** periodically (TTL).
-- **Attest a per-member identity key** (Ed25519) that members use to sign their own endpoint
-  records + ICE candidates (§4.2) — WG's X25519 key can't sign.
-- Keep a **soft endpoint cache** (`pubkey → ip:port`, self-reported on refresh) to build
-  bootstrap **seed lists**, never the real-time source of truth — established-tunnel endpoint churn
-  goes **peer-to-peer** (§4.2). It also brokers **ICE candidate exchange over the long-poll** (the
-  signal channel — no separate signal server) and pairs a **relay** peer with a stuck client (§7.2)
-  — always as a broker, **never on the traffic path**, and only for a pair with **no** working path
-  yet; peers that already share a tunnel re-negotiate through it or a third peer, not the coordinator.
-  *(Today it observes the reflexive from a co-member's view; end-state, the client's own userspace
-  ICE agent gathers candidates via STUN, §7.2/§7.3.)*
-- Optionally publish signed **revocation tombstones** for immediate kicks.
+- Keep a **soft endpoint cache** (`pubkey → ip:port`, self-reported on refresh) to build bootstrap
+  **seed lists**. It also brokers unsigned ICE candidates and relay selection/credentials over the
+  long-poll signal channel — always as a broker, **never on the traffic path** (§7.2).
+- Future hardening may attest a per-member Ed25519 identity key for signed endpoint records and ICE
+  candidates; WireGuard's X25519 key cannot sign (§4.2).
+- Signed **revocation tombstones** for immediate kicks remain planned, not built.
 
 ### 3.2 Client = engine + GUI ✅
 The client is **two processes**, the Tailscale/WireGuard-GUI split (the data plane needs
@@ -97,7 +93,8 @@ mesh state and the coordinator session. One device = one engine:
 - Configure WireGuard: **one interface**, one peer per online co-device (§6).
 - **NAT**: open a reachable port (UPnP); run a userspace **ICE** agent (STUN candidates +
   hole-punch) for NAT'd peers, with a **ciphertext-only relay** fallback when punch can't (§7.2).
-  *Today:* UPnP + coordinator-mediated cone punch; ICE + relay are the next increments.
+  *Today:* all three paths ship. The engine prefers a direct endpoint, uses side-socket ICE for
+  stuck userspace peers, and falls back to a co-member's opt-in TURN relay where available.
 - Local DNS resolver for `*.unity.internal`.
 - Exposes a local control socket (UDS / Windows named pipe).
 
@@ -157,14 +154,12 @@ Attestation  (Ed25519-signed by the guild coordinator)
   a member's live endpoint.
 
 ### 4.2 Live endpoint (self-reported)
-An **endpoint record** `{wg_pubkey, ip:port, seq}` is **signed by the member's coordinator-attested
-identity key** (§3.1); newest verified `seq` wins, and a peer rejects a record whose signature or
-identity-key attestation doesn't verify. Correctness never needed the signature — WireGuard
-authenticates by pubkey (from the signed attestation), so a forged endpoint fails the handshake and
-self-corrects — but signing closes the **targeted-DoS / seq-suppression** surface: a third party can
-no longer publish bogus high-`seq` records for *another* member's pubkey to burn its peers'
-handshakes or shadow its real endpoint. The **same identity key signs ICE candidates** (§7.2).
-Endpoints refresh as members roam.
+Today an endpoint is an unsigned `Option<SocketAddr>` in the register request and peer seed; ICE
+candidates are likewise unsigned pair-specific reports brokered by the coordinator. WireGuard still
+authenticates by the public key from the signed attestation, so a forged endpoint cannot decrypt or
+impersonate a peer, but it can cause targeted handshake churn or denial. Device bearer auth prevents
+another caller from rewriting a token-proven device's reports at the coordinator; a malicious
+coordinator remains inside this metadata trust boundary. Endpoints refresh as members roam.
 **Distribution splits on whether a tunnel already exists** — keep the coordinator on the cold path
 only:
 - **Cold pair (no tunnel yet)** — the coordinator's soft endpoint cache seeds it (self-reported on
@@ -176,9 +171,9 @@ only:
   announcement covers a two-sided move. *(In-mesh propagation is planned; today all endpoints ride
   the coordinator refresh — see §5.)*
 
-✅ **Endpoint/candidate integrity (planned):** records **and** ICE candidates are signed by a
-coordinator-attested per-member Ed25519 identity key (§3.1), so spoofing another pubkey's endpoint
-is rejected on verification; rate-limiting stays as a cheap belt-and-braces layer against volume.
+**Planned hardening:** sign sequenced endpoint records and ICE candidates with a
+coordinator-attested per-member identity key, allowing recipients to reject candidate injection even
+from a compromised coordinator. This is not built yet.
 
 ### 4.3 Enforcement = control of the WG peer-set ✅
 "Enforce role membership" concretely means: **only current role-holders' pubkeys appear in
@@ -403,28 +398,25 @@ can attach to the data path:
 - **Symmetric / CGNAT / UDP-blocked pairs**: a **relay** peer forwards WG **ciphertext** between
   the pair (e2e intact — the relay holds no keys). Any online member with a public endpoint is a
   candidate relay; the coordinator pairs relay↔client the same way it pairs a punch, staying off
-  the traffic path. This is the last rung every magicsock/DERP-class system has. The coordinator
-  brokers this only at **true cold start** (zero reachable peers); a client with **any** live tunnel
-  selects and reaches a public-endpoint relay **through that existing peer** — no coordinator
-  round-trip.
+  the traffic path. This is the last rung every magicsock/DERP-class system has. Relay selection,
+  credentials, and relayed-address exchange currently travel through coordinator long-poll.
 
 **Relay trust & candidate integrity.** A relay sees only **ciphertext** (e2e intact — no keys) but
 does learn **traffic metadata** — which two members talk, volume, timing — and can **selectively
 drop/delay** (targeted DoS). So relaying exposes a communication-pattern graph to an arbitrary
 co-member: relay eligibility is **opt-in** (prefer a trusted subset), and being relayed is surfaced
-in status (§8). **ICE candidates** exchanged over the long-poll are **signed by the sender's
-identity key** (§4.2), so a malicious coordinator/MITM can't inject candidates to steer a handshake
-onto a relay it controls — injection fails verification; the worst case is denial, not redirection.
+  in status (§8). ICE candidates exchanged over long-poll are currently unsigned; TLS and enrolled
+  device bearer auth protect them in transit and at the API boundary, while WireGuard rejects a
+  candidate that does not lead to the attested peer key. Sender-signed candidates remain planned
+  hardening against candidate injection by a compromised coordinator (§4.2).
 
-**Intermediate states** (roadmap M5):
-- *Shipped:* UPnP + endpoint autodiscovery; **peer-observed reflexive** (no STUN server — today
-  boringtun owns the WG socket via `defguard_wireguard_rs`, so we read the reflexive from a
-  co-member's view instead); coordinator-mediated **cone punch**; reachability diagnostics
-  (`Direct` / `Punching` / `Unreachable`).
-- *Next (M5.4):* the **ciphertext relay** — backend-agnostic (works on today's kernel+userspace
-  split), closes the symmetric/CGNAT tail; current `Unreachable` peers become `Relayed`.
-- *Then (M5.5):* replace the ad-hoc peer-observed punch with a real userspace **ICE agent**
-  (STUN + ICE + TURN via mature crates), keeping the long-poll as the signal channel.
+**Shipped traversal paths** (roadmap M5):
+- UPnP + endpoint autodiscovery, peer-observed reflexive endpoints, coordinator-mediated cone
+  punch, and reachability diagnostics (`Direct` / `Punching` / `Unreachable`).
+- A backend-agnostic ciphertext relay: a dialable, opted-in co-member runs an embedded TURN server;
+  stuck peers point WireGuard at a local proxy shim and surface as `Relayed`.
+- A userspace side-socket ICE agent using STUN candidates and TURN. The coordinator brokers offers
+  through the existing long-poll signal channel and remains off the traffic path.
 
 **Residual (Post-GA):** side-socket ICE still leaves restricted-cone pairs on a proxy/relay hop
 rather than a truly-direct path, and UDP-blocked networks need a **:443** relay. Both close with
@@ -469,7 +461,7 @@ engine via its control socket (no privilege in the front-ends):
   attestations).
 - The coordinator carries **no traffic and no private keys** — compromise leaks membership
   metadata + lets an attacker forge memberships for that guild, but not decrypt traffic.
-- Trust anchor = the coordinator's Ed25519 pubkey, **pinned on first login**. **Rotation
+- Trust anchor = one Ed25519 pubkey per guild, **pinned independently on first contact**. **Rotation
   (settled):** each rotation emits a `RotationCert` (`prev → new`) signed by the outgoing key; the
   coordinator serves the ordered chain in every `RegisterResp`. A client whose pin is superseded
   walks the chain, verifying each hop under the key it already trusts, and re-pins to the current
@@ -493,15 +485,19 @@ engine via its control socket (no privilege in the front-ends):
 - **Client secrets at rest.** The WG private key (never leaves the device), the OAuth
   session/refresh token, and the pinned anchor are stored under OS-appropriate protection — a
   keystore where available, else `0600` operator-owned files.
-- **Coordinator abuse controls.** Beyond the legitimate herd (§5), the register/enroll/refresh API
-  is **auth-gated and per-identity rate-limited** to bound registration floods, enrollment
-  brute-force, `/10` IP-space exhaustion, and long-poll slot exhaustion.
+- **Coordinator abuse controls.** First enrollment requires Discord OAuth or a short-lived,
+  single-use enrollment key. Enrolled devices receive a bearer token and send it on every
+  register/refresh; after its first valid presentation, a per-device migration ratchet rejects
+  missing or invalid tokens. Pre-device-auth clients remain temporarily pubkey-only until that
+  ratchet closes. Independent per-source-IP and deployment-global request caps bound floods and
+  long-poll slot exhaustion; the limiter is not per identity.
 - **Data minimization.** A compromise or subpoena yields only what the coordinator retains — the
   membership graph + allocations, a **short-TTL** soft endpoint cache, and the presence table. **No
   traffic, no private keys.** Retention windows are kept tight so the leak-on-compromise set stays
   small.
-- **Trust-root hardening (future, optional):** the single pinned anchor is one forge point — a
-  compromised coordinator could sign an attestation for any pubkey and inject a rogue peer. A
+- **Trust-root hardening (future, optional):** each pinned guild anchor is a forge point within that
+  guild — a compromised guild key could sign an attestation for any pubkey and inject a rogue peer
+  there. A
   **tailnet-lock-style co-signature** (a *new* device's attestation additionally signed by a
   trusted admin/peer key) would fail-closed against coordinator compromise. Deferred (post-GA);
   see `docs/prior-art.md` §7.
@@ -580,10 +576,10 @@ flowchart TB
 
 ## Open Questions
 
-- ~~**Endpoint-record spoofing** (§4.2): rate-limit only, or add a coordinator-attested
-  Ed25519 identity key per member to sign endpoint updates.~~ **Resolved (planned):** a
-  coordinator-attested per-member Ed25519 identity key signs endpoint records **and** ICE
-  candidates; rate-limiting stays as a cheap extra layer (§4.2, §7.2).
+- **Endpoint/candidate authenticity** (§4.2): endpoint and ICE metadata is unsigned today. TLS,
+  enrolled-device bearer auth, rate limiting, and the WireGuard handshake bound the current risk;
+  a coordinator-attested per-member signing key remains planned hardening against a malicious
+  coordinator or metadata injection.
 - ~~**Coordinator key rotation** (§9): rotate the Ed25519 anchor without hand re-pinning on
   every client.~~ **Resolved:** signed `prev → new` rotation-cert chain, walked client-side; the
   `rotate-key` subcommand mints hops (§9).
@@ -592,9 +588,8 @@ flowchart TB
   the old pubkey immediately; a presence reaper (`PRESENCE_TTL_SECS`) backstops any unclean drop
   (§9).
 - ~~**Symmetric-NAT both-ends** (§7.2): accept best-effort, or commit to a relay-through-peer
-  data path?~~ **Resolved (updated):** v1 shipped best-effort + diagnostics; a ciphertext
-  relay-through-peer is now **planned (roadmap M5.4)** as the next NAT increment — no longer
-  post-GA (§7.2).
+  data path?~~ **Resolved:** the M5.4 ciphertext relay and M5.5 ICE paths ship. Networks blocking
+  the available UDP transports still need the planned TCP/443 relay (§7.2).
 - **Coordinator endpoint discovery**: instead of the client hardcoding/human-configuring the
   coordinator URL, the coordinator could **advertise its endpoint via Discord** so the client
   auto-discovers it from the guild. Candidate spots a bot can publish to at runtime: its
@@ -613,6 +608,7 @@ wakeups**, herd jitter, and **peer-direct attestation refresh** (gossip — fres
 peer-to-peer, coordinator-independent revocation; `docs/gossip-refresh.md`); only **lazy-peering**
 remains as the >~1k-per-network escape hatch (§5). **Per-guild signing keys** with a client-side
 `guild_id`-match **MUST** (§3.1, §4.1); coordinator-snapshot omission + client-enforced TTL expiry
-for revocation (tombstones unbuilt, §4.4); endpoint records + ICE candidates **signed by a per-member identity key** (§4.2); anchor
+for revocation (tombstones unbuilt, §4.4); endpoint records + ICE candidates remain unsigned while
+per-member signatures are planned (§4.2); anchor
 **fingerprint surfaced** for OOB verify, key-**compromise** recovery is OOB re-pin (§9); signing
 key **`0600` now, encrypted-at-rest end-state** (§9).

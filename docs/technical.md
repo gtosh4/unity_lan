@@ -33,7 +33,11 @@ unitylan/
 │   ├── coordinator/      # the multi-tenant bot (binary), serves 1..N guilds — control plane
 │   │   ├── main.rs
 │   │   ├── config.rs      # TOML: bind, db path, [fake] source / live discord+oauth, [release], cidr
-│   │   ├── api.rs         # axum HTTP API + long-poll (build_snapshot, delta, wait_park, Wakers)
+│   │   ├── api/           # axum HTTP API: snapshot/long-poll, admin, rate limits, targeted wakes
+│   │   │   ├── mod.rs     # register/manage/OAuth handlers, auth, snapshot construction + delta
+│   │   │   ├── admin.rs   # token-gated dashboard, graph, stats, Prometheus metrics
+│   │   │   ├── ratelimit.rs # trusted-proxy client IP + per-IP/global request limits
+│   │   │   └── wake.rs    # per-device targeted wakes and herd jitter
 │   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
 │   │   ├── discord.rs     # twilight: bot-token role/nick reads + per-guild role-name TTL cache
 │   │   ├── commands.rs    # /unitylan network add|remove|list slash handler + gateway-event eviction
@@ -46,7 +50,10 @@ unitylan/
 │   ├── engine/           # PRIVILEGED daemon (binary) — the data plane / mesh
 │   │   ├── main.rs · service.rs · shutdown.rs   # systemd/Windows-Service/launchd lifecycle
 │   │   ├── daemon.rs      # long-running mesh state machine
-│   │   ├── control.rs     # local-socket server (interprocess: UDS / named pipe)
+│   │   ├── control/       # local-socket protocol implementation
+│   │   │   ├── server.rs  # secured listener + privileged request handlers
+│   │   │   ├── client.rs  # CLI/client request transport
+│   │   │   └── status.rs  # shared status context and reporting helpers
 │   │   ├── coord.rs       # coordinator client: register/refresh long-poll, verify + pin anchors
 │   │   ├── oauth.rs · keys.rs   # OAuth loopback PKCE; WG + token/anchor key storage
 │   │   ├── wg/{mod,userspace,windows}.rs   # WgBackend: boringtun userspace · Windows wg-nt kernel
@@ -247,7 +254,7 @@ engine owns the OAuth loopback itself (§5.1), and revocation is presence-driven
 endpoint built yet). Enrollment rides inside `/register` via `RegisterReq.enrollment_key`.
 
 **Request/response** (`common::api`): `RegisterReq` carries `wg_pubkey`, `device_name`,
-`enrollment_key?`, `endpoint?`, `since?` (long-poll ETag), `disabled_networks`, `observed`,
+`enrollment_key?`, `device_token?`, `endpoint?`, `since?` (long-poll ETag), `disabled_networks`, `observed`,
 `supersede?`, `paused`, relay-capability fields, `need_relay`, `relay_allocated`, `ice`, `proto`,
 `proto_min`, `caps`, `client_version`. `RegisterResp` returns `anchors` (one `GuildAnchor` per
 referenced guild), `grant?` (own attestation(s) + names), `device_token?`, `seeds`, `version`,
@@ -509,7 +516,13 @@ semantics. Local `disabled_networks` / block-peer let the client narrow this fur
   is **opt-in** and being-relayed is surfaced. ICE-candidate signing (design §4.2/§7.2) is the
   planned hardening against candidate injection — **not built yet**.
 - Client secrets (WG privkey, OAuth token, pinned anchors) stored under OS protection / `0600`.
-- Register/enroll/refresh is auth-gated; enrollment keys are ≥128-bit, short-expiry, single-use.
+- First enrollment is authenticated by Discord OAuth or a ≥128-bit, short-expiry, single-use
+  enrollment key. The coordinator then issues a random device bearer token; the engine stores it
+  with the WireGuard private key and sends it on every register/refresh. Once a device has presented
+  the token successfully, the coordinator ratchets that device into enforced mode and rejects a
+  missing or wrong token. Devices enrolled by clients predating device auth retain a temporary
+  pubkey-only migration grace until their real client first presents its token; a public WireGuard
+  key is an identifier, never treated as a secret for newly proven devices.
 
 ## 8. Open Technical Questions / Gaps vs design.md
 

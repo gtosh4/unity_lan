@@ -25,10 +25,10 @@ bob@nas       ~ $
 
 ## What it actually is
 
-- **A WireGuard mesh.** Every online member forms a **direct, peer-to-peer** [WireGuard](https://www.wireguard.com/)
-  tunnel to every other member they share a network with. Traffic is end-to-end encrypted and goes
-  straight between machines — there's no exit server and nothing routes through us; this connects
-  *your* machines to each other.
+- **A WireGuard mesh.** Every online member forms a [WireGuard](https://www.wireguard.com/)
+  tunnel to every other member they share a network with. Traffic goes directly between peers when
+  the network path allows it; difficult NAT pairs can use an opted-in member as a ciphertext-only
+  relay. There is no exit server, and the coordinator never carries your traffic.
 - **Membership = Discord roles.** An admin registers a Discord role as a *network* with a slash
   command (`/unitylan network add`). Holding the role gets you in; a role change in Discord takes
   effect on the mesh within seconds.
@@ -63,8 +63,9 @@ Being upfront so you can decide before installing:
   such.
 - **NAT traversal is still maturing.** A userspace ICE agent (STUN + UDP hole-punching) forms
   direct tunnels for common NATs, and a ciphertext-only relay fallback carries the hardest
-  CGNAT/symmetric-NAT pairs a punch can't connect — so no pair is left stranded, but the paths are
-  young and haven't been hardened across every network shape. Most home connections are fine.
+  CGNAT/symmetric-NAT pairs a punch can't connect. A pair can still remain unreachable when no
+  suitable relay is online or its network blocks the available UDP transports; the paths are young
+  and haven't been hardened across every network shape. Most home connections are fine.
 - **macOS/mobile aren't ready.** Linux and Windows are the current first-class targets. The data
   plane is portable userspace WireGuard by design, so macOS and mobile are planned — just not here
   yet.
@@ -72,24 +73,26 @@ Being upfront so you can decide before installing:
 ## How it works (the 60-second version)
 
 1. **A coordinator watches your Discord server** — invite the hosted bot, or self-host your own. It
-   holds one Ed25519 signing key: the trust anchor for your whole mesh.
+   holds an independent Ed25519 signing key for each Discord server it serves, so every server has
+   its own trust anchor and compromise of one cannot forge membership in another.
 2. **A member installs the client** (a privileged background *engine* + an unprivileged desktop
    *GUI*, à la Tailscale) and logs in with Discord.
 3. The coordinator checks their roles and issues a **short-lived, signed attestation** — a token
    that cryptographically binds *this user + this device + this IP + this WireGuard key* to your
    Discord server. Roles aren't baked into the token; the coordinator gates who it hands one to and
    who it shows you. It can't be forged, and it expires, so it must be continually re-earned.
-4. **Peers verify each other's attestations** against the pinned coordinator key and form direct
-   WireGuard tunnels. From here the data plane is pure peer-to-peer.
+4. **Peers verify each other's attestations** against the pinned key for the Discord server named
+   by the attestation and form direct WireGuard tunnels. From here the data plane is pure
+   peer-to-peer.
 5. Members discover each other by **long-polling the coordinator** (no gossip flood, no always-on
-   connection to babysit). A role change in Discord bumps a version and every client re-syncs at
-   once.
+   connection to babysit). A role change in Discord bumps that server's version and every affected
+   client re-syncs at once; clients in unrelated servers stay parked.
 
 The design goal throughout is **decentralization**: the coordinator is a lightweight control plane,
 not a relay. Once tunnels are up, the mesh keeps running with the coordinator barely involved — peers
 even keep each other's short-lived attestations fresh **directly over their tunnels** (the
 coordinator's job is minting, not fanning out), so an established mesh survives a coordinator outage,
-and any online member can help a new person bootstrap in.
+while first-time enrollment and discovery of previously unknown peers still require the coordinator.
 
 Want the real depth — trust model, NAT strategy, why not fully serverless? See
 [`docs/design.md`](docs/design.md) and [`docs/technical.md`](docs/technical.md).

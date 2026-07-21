@@ -41,8 +41,10 @@ Especially of interest:
   *discovery*; it cannot read tunnel traffic (WireGuard authenticates peers by public key).
 - A **compromised guild signing key** can forge membership **within that one guild** — this is the
   documented blast-radius boundary (per-guild keys, `docs/design.md` §3.1), not a cross-tenant break.
-- Reachability limits behind hostile NAT (symmetric / UDP-blocked) are a known functional gap, not
-  a security issue.
+- Reachability limits when no suitable peer relay is online, or when a network blocks the available
+  UDP traversal and relay transports, are functional limitations rather than security issues. ICE
+  and the opt-in ciphertext relay cover common symmetric-NAT/CGNAT cases; a TCP/443 relay does not
+  ship yet.
 
 ## Supported versions
 

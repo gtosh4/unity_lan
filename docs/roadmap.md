@@ -121,10 +121,12 @@ Reshapes M1/M3 addressing to the settled **Model B** (design §6). Build order:
    optional expiry, bound to a pubkey on use); `resolve_user` = known device by pubkey, else
    consume a key; minted via `/unitylan enroll` (any member, ephemeral) or config seed for tests.
    Replaced `dev_auth`/`?dev_user=`. Verified: `mesh-test.sh` enrolls + meshes; store tests cover
-   one-time/expiry/rejection. OAuth session (interactive) still TODO — reuses the same binding.
+   one-time/expiry/rejection. Interactive Discord OAuth + PKCE is also shipped and reuses the same
+   pubkey→user binding; the coordinator verifies token audience and `identify` scope before binding.
 3. **Community slug** ✅ — `communities` table (guild → slug); admin config via `[[community]]`
    seed, default = guild name; threaded into `Grant.community_name`. Runtime setter command
-   deferred to the management chunk. Verified: `mesh-test.sh` shows `<device>.<user>.lan.internal`.
+   deferred to the management chunk. Verified: `mesh-test.sh` shows
+   `<device>.<user>.unity.internal`.
 4. **Primary device** ✅ — `primary_device` table (one per user; simpler than per-community —
    the alias resolves the same everywhere). First enrollment auto-assigns; owner reassigns via
    `/unitylan primary set <device>` (`list` shows them). `is_primary` computed at register and
@@ -232,9 +234,8 @@ protocol itself is the same one `mesh-test.sh` exercises via the `ctl` CLI.
 dialable), *cone-NAT'd* (hole punch), *symmetric-both* (relay fallback — M5.4, §7.2).
 Punch architecture (settled): **coordinator-mediated + peer-observed reflexive** — reuses the
 long-poll/presence/endpoint cache already built; the simultaneous long-poll wake *is* the punch
-sync signal; reflexive endpoint is read from a reachable peer's view of us (no STUN server — the
-WG socket is owned by boringtun, so a side-socket STUN is impossible). Note the refresh source is
-useless for punch: refresh is HTTP/TCP, a different NAT mapping than the WG UDP port.
+sync signal. M5.5 later added side-socket ICE and a coordinator-hosted STUN responder for candidate
+gathering; the HTTP/TCP refresh source itself remains useless for the WG UDP mapping.
 
 ### M5.1 — UPnP + endpoint autodiscovery ✅
 - [x] `nat.rs`: UPnP-IGD (`igd-next`) maps the WG UDP port, learns external `ip:port`, renews the
@@ -289,9 +290,8 @@ useless for punch: refresh is HTTP/TCP, a different NAT mapping than the WG UDP 
 **Goal:** reach pairs where punch structurally can't (both symmetric, CGNAT, or outbound-UDP
 blocked). A relay forwards WG **ciphertext** between the pair; e2e stays intact (relay holds no
 keys). **Transport = TURN** (`webrtc-rs turn`), chosen over a bespoke forward so the M5.5 ICE agent
-reuses the same server + shim (no throwaway relay protocol). Highest-value next NAT increment
-(`docs/prior-art.md` §6.3). Supersedes the old "no relay in v1" stance (design §7.2) as the planned
-follow-on, not a GA blocker.
+reuses the same server + shim (no throwaway relay protocol). This completed increment superseded the
+old "no relay in v1" stance (`docs/prior-art.md` §6.3, design §7.2).
 
 > **TURN implies a local proxy shim** (revises the old "no data-plane rewrite" note): a TURN relay
 > only forwards TURN-encapsulated traffic, and boringtun emits raw UDP to a fixed endpoint. So each
@@ -449,8 +449,8 @@ falls back to a responder on the coordinator host when none is online.
 
 **Verify:** ✅ 2 `resolver/linux.rs` unit tests (resolvectl arg construction) + 2 `resolver/windows.rs`
 tests (NRPT script construction); `scripts/resolver-hook-test.sh` (live, root) — on this host's real
-systemd-resolved, scoped to a throwaway link: the daemon's actual `ResolvectlHook` routes `.internal`
-and `resolvectl query host-a.alice.lan.internal → 100.64.0.9`, then reverts. `mesh-test.sh` still
+systemd-resolved, scoped to a throwaway link: the daemon's actual `ResolvectlHook` routes
+`.unity.internal` and `resolvectl query host-a.alice.unity.internal → 100.64.0.9`, then reverts. `mesh-test.sh` still
 green (in-netns the hook warns best-effort — no resolved there). Windows NRPT: builds + unit tests
 pass on Windows; the `resolver-install`/`resolver-revert` dev subcommands drive the real `NrptHook`,
 and the port-53 guard errors cleanly. Live NRPT rule install + `.internal` resolution needs an
@@ -593,9 +593,10 @@ elevated box. macOS `/etc/resolver` still deferred.
       (crashed/dropped client) that would otherwise linger until coordinator restart. Verified:
       `should_supersede` + `reap_evicts_only_stale_entries` +
       `record_refreshes_last_seen_without_reporting_change` unit tests; `mesh-test.sh` still green.
-- [x] Symmetric-NAT policy ✅ — v1 ships best-effort + `[unreachable: symmetric NAT?]` diagnostic;
-      ciphertext relay is the planned follow-on (M5.4, design.md §7.2), not a GA blocker. System
-      already degrades cleanly; no code change for the v1 diagnostic.
+- [x] Symmetric-NAT policy ✅ — v1 ships the `[unreachable: symmetric NAT?]` diagnostic plus the
+      completed M5.4 ciphertext-relay and M5.5 ICE paths. A pair can still remain unreachable when
+      no suitable relay is online or its network blocks the available UDP transports; a TCP/443
+      relay remains post-GA work.
 
 ## GA release checklist
 From a 2026-07-18 readiness review (docs · roadmap · code quality · security · packaging). Code and

@@ -202,8 +202,9 @@ and *UDP-blocked-network packaging* — the case for magicsock later, not now.
 
 ## 7. Other borrowable ideas (not data-plane)
 
-- **Tailnet-lock co-signature (Tailscale).** Our model pins *one* coordinator Ed25519 anchor = a
-  single forge point (compromise it → sign any attestation → inject a rogue peer). Tailnet lock
+- **Tailnet-lock co-signature (Tailscale).** Our model pins one coordinator Ed25519 anchor per guild;
+  each is a forge point within that guild (compromise it → sign any guild attestation → inject a
+  rogue peer there). Tailnet lock
   requires node keys be **co-signed by trusted nodes**, so a hacked control server alone can't add
   a machine. Borrow: optional admin/peer co-signature on a *new* device's attestation for
   high-trust meshes. Fail-closed on coordinator compromise. Aligns with secure-by-default.
