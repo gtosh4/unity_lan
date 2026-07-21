@@ -241,12 +241,12 @@ mod tests {
         assert!(s.contains("-Action Allow -Protocol UDP -LocalPort 34197 -InterfaceAlias 'unl0'"));
         // Unscoped exposes reach any peer — no remote-address restriction.
         assert!(!s.contains("-RemoteAddress"));
-        // One `-ErrorAction SilentlyContinue` per rule: ICMP echo, the wg listen port, the two ports
-        // (beacon disabled here, so no beacon rule).
+        // One `-ErrorAction SilentlyContinue` per rule: ICMP echo, the p2p attestation port, the wg
+        // listen port, and the two exposed ports (beacon disabled here, so no beacon rule).
         assert_eq!(
             s.matches("-ErrorAction SilentlyContinue | Out-Null")
                 .count(),
-            4
+            5
         );
     }
 
