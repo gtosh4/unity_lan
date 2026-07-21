@@ -467,6 +467,16 @@ stateDiagram-v2
     Degraded --> Unauth: attestations expired (TTL passed) / Logout
 ```
 
+**Status snapshot vs liveness log — the flash/flap diagnostic.** A "peer reachability changed" log
+line comes **only** from the main liveness loop, and only when the WG-stats-derived `up`/`reach`
+actually flips (`prev_reach`). The status snapshot the GUI/`Watch` sees is a *separate* surface:
+`control::update` (inside `apply_state`) rebuilds it from seeds and `send_replace`s it **before**
+`set_live` re-overlays the live WG stats. So a peer can **flash** in the GUI/`Watch` stream — a
+momentary all-null row (`up:false, hs:null, rx:0`) at an `apply_state` timestamp — with **no** log
+line, because the tunnel never dropped. GUI-flaps-but-log-silent ⇒ suspect a snapshot rebuild, not
+the data plane; subscribing (`Watch`) is what makes that transient visible, polling `Status` usually
+misses it.
+
 ### 5.8 GUI (`gui/`, iced) — unprivileged front-end
 All-Rust Elm architecture; talks **only** to the engine. `ctl.rs` = control-socket client + a
 `Subscription` streaming `ControlResponse`/`StatusReport` events into `Message`s. `tray/` = tray-icon

@@ -20,8 +20,7 @@ Deeper design: `docs/design.md` (concepts, trust model, NAT), `docs/technical.md
 ## Commands
 
 ```sh
-cargo build                                        # whole workspace (debug)
-cargo build -p unitylan-engine                     # one crate
+cargo build                                        # whole workspace (debug); -p unitylan-engine for one crate
 
 # The three gates CI enforces (a pre-commit hook in .githooks runs these):
 cargo fmt --all --check
@@ -32,8 +31,7 @@ cargo test --workspace
 # runs it too, but only when a commit changes Cargo.lock (and only if cargo-audit is installed):
 cargo audit
 
-cargo test -p unitylan-coordinator                 # one crate's tests
-cargo test -p unitylan-coordinator rename_and       # single test by name substring
+cargo test -p unitylan-coordinator                 # one crate's tests (append a name substring to filter)
 ```
 
 Unit tests need no privilege or network. `cargo test` platform-aware: Windows runs
@@ -100,15 +98,9 @@ printf '"Watch"\n' | socat -t 86400 UNIX-CONNECT:$sock - \
 ```
 
 Pair `Watch` with a `Monitor` over dedup'd output to wake on a specific edge (a down, an endpoint
-landing) instead of re-polling. **`Watch` and `engine.log` are complementary, and the gap between
-them is itself a diagnostic.** "peer reachability changed" log line comes **only** from main liveness
-loop, and only when WG-stats-derived `up`/`reach` actually flips (`daemon.rs`, `prev_reach`). Status
-snapshot GUI/`Watch` sees is a *separate* surface: `control::update` (inside `apply_state`) rebuilds
-it from seeds and `send_replace`s it **before** `set_live` re-overlays live WG stats. So a peer can
-**flash** in GUI/`Watch` stream — a momentary all-null row (`up:false, hs:null, rx:0`) at an
-`apply_state` timestamp — with **no** log line, because tunnel never dropped. GUI-flaps-but-log-silent
-⇒ suspect snapshot rebuild, not data plane; subscribing makes that transient visible (polling
-`Status` usually misses it).
+landing) instead of re-polling. (Flash/flap diagnostic — an all-null peer row at an `apply_state`
+timestamp with no matching log line = snapshot rebuild, not a real tunnel drop — in
+`docs/technical.md` §5.7.)
 
 ## Architecture
 
@@ -122,8 +114,7 @@ Four crates (`crates/*`), two planes:
 | `gui` | `unitylan-gui` | unprivileged iced desktop app, drives engine over its control socket |
 
 **GUI screenshots are docs.** When a GUI change alters what app looks like, regenerate README images
-— `assets/demo.gif`, `assets/exposed.png` (plus `peers.png`/`networks.png`, generated but not
-currently referenced) — with `scripts/readme-demo.sh` (fake-engine canned fixtures + scripted tour +
+— `assets/demo.gif`, `assets/exposed.png` — with `scripts/readme-demo.sh` (fake-engine canned fixtures + scripted tour +
 screencast). Keep fixtures in `crates/gui/examples/fake-engine.rs` representative of the feature
 shown, else regenerated stills won't demonstrate it.
 
