@@ -178,21 +178,6 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Presence reaper: evict devices that stopped refreshing (crashed/dropped client, or the old
-    // pubkey a re-keyed device abandoned). Bumps the scopes it actually reaped from, so co-members
-    // prune the dead peer while unaffected guilds stay parked.
-    {
-        let presence = presence.clone();
-        let versions = versions.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                tick.tick().await;
-                versions.bump_all(presence.reap(common::now_unix(), common::PRESENCE_TTL_SECS));
-            }
-        });
-    }
-
     // Interactive-login provider: live Discord OAuth if configured, else a fake one in dev mode.
     let oauth: Option<Arc<dyn crate::oauth::OauthProvider>> = match (cfg.oauth, fake_mode) {
         (Some(o), _) => {
@@ -279,6 +264,25 @@ async fn main() -> anyhow::Result<()> {
         release,
         admin_token: cfg.admin.as_ref().map(|a| a.token.clone()),
     };
+
+    // Presence reaper: evict devices that stopped refreshing (crashed/dropped client, or the old
+    // pubkey a re-keyed device abandoned). Bumps the scopes it actually reaped from, so co-members
+    // prune the dead peer while unaffected guilds stay parked, then drops that device's now-orphaned
+    // NAT side-table entries (reflexive / source-IP / relay / ICE) so those maps don't grow forever.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tick.tick().await;
+                st.versions.bump_all(
+                    st.presence
+                        .reap(common::now_unix(), common::PRESENCE_TTL_SECS),
+                );
+                api::prune_nat_tables(&st, &st.presence.present_pubkeys());
+            }
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await

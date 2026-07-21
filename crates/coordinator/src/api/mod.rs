@@ -123,6 +123,34 @@ pub struct RelayReg {
     pub secret: String,
 }
 
+/// Drop per-device NAT side-table entries for devices no longer present, so these maps track live
+/// membership instead of growing with every pubkey ever seen (they are otherwise only overwritten or
+/// cleared on restart). Pair-keyed tables (`ice`, `relay_allocs`) drop an entry if *either* endpoint
+/// is gone. Called from the presence reaper; a still-connected device repopulates its own entries on
+/// its next refresh, so a rare over-prune is self-healing.
+pub fn prune_nat_tables(st: &AppState, present: &std::collections::HashSet<[u8; 32]>) {
+    st.source_ip
+        .lock()
+        .unwrap()
+        .retain(|pk, _| present.contains(pk));
+    st.reflexive
+        .lock()
+        .unwrap()
+        .retain(|pk, _| present.contains(pk));
+    st.relays
+        .lock()
+        .unwrap()
+        .retain(|pk, _| present.contains(pk));
+    st.relay_allocs
+        .lock()
+        .unwrap()
+        .retain(|(owner, peer), _| present.contains(owner) && present.contains(peer));
+    st.ice
+        .lock()
+        .unwrap()
+        .retain(|(owner, peer), _| present.contains(owner) && present.contains(peer));
+}
+
 pub fn router(state: AppState) -> Router {
     let limiter = RateLimitState {
         limiter: Arc::new(Mutex::new(RateLimiter::new(Instant::now()))),

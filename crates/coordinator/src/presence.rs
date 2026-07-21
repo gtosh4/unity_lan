@@ -74,6 +74,17 @@ impl Presence {
         changed
     }
 
+    /// Every device pubkey currently present — in any network (`map`) or as an own-device peer
+    /// (`self_map`). Used by the presence reaper to prune per-device NAT side-tables (reflexive /
+    /// source-IP / relay / ICE) of entries whose device has gone offline, so those maps track live
+    /// membership instead of accumulating every pubkey ever seen.
+    pub fn present_pubkeys(&self) -> std::collections::HashSet<[u8; 32]> {
+        let mut set = std::collections::HashSet::new();
+        set.extend(self.map.lock().unwrap().keys().map(|(_, _, pk)| *pk));
+        set.extend(self.self_map.lock().unwrap().keys().map(|(_, pk)| *pk));
+        set
+    }
+
     /// Record a device in the per-user online set (own-device peering). Semantics mirror [`record`]:
     /// returns `true` if it changed the map (new device / altered fields) so the caller bumps the
     /// version; an identical re-record refreshes `last_seen` only.
@@ -345,6 +356,20 @@ mod tests {
         // both of 42's devices gone; the other user's stays.
         assert_eq!(p.others_in(1, 2, &[0; 32]).len(), 1);
         assert!(!p.evict_user(1, 2, 42));
+    }
+
+    #[test]
+    fn present_pubkeys_unions_network_and_own_device_entries() {
+        let p = Presence::default();
+        p.record(1, 2, mp([1; 32], 42), "".into(), 0); // network presence
+        p.record_self(42, mp([2; 32], 42), "".into(), 0); // own-device-only presence
+        let present = p.present_pubkeys();
+        assert_eq!(present.len(), 2);
+        assert!(present.contains(&[1; 32]));
+        assert!(present.contains(&[2; 32]));
+        // A device that was reaped no longer counts as present.
+        p.reap(u64::MAX, 0);
+        assert!(p.present_pubkeys().is_empty());
     }
 
     #[test]
