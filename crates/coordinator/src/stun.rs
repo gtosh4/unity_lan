@@ -9,11 +9,12 @@
 //! that carries no traffic and reveals nothing beyond the caller's own source address); it stays off
 //! the data path, consistent with the coordinator's control-plane-only role.
 
-use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+
+use crate::limiter::{Caps, WindowCounter};
 use stun::fingerprint::FINGERPRINT;
 use stun::message::{Message, Setter, BINDING_REQUEST, BINDING_SUCCESS};
 use stun::xoraddr::XorMappedAddress;
@@ -30,44 +31,14 @@ const MAX_PER_IP: u32 = 20;
 const MAX_TOTAL: u32 = 2_000;
 const MAX_TRACKED_IPS: usize = 4_096;
 
-/// A per-source + global windowed counter. Single-task (the `serve` loop owns it), so no locking.
-struct RateLimiter {
-    window_start: Instant,
-    total: u32,
-    per_ip: HashMap<IpAddr, u32>,
-}
-
-impl RateLimiter {
-    fn new(now: Instant) -> Self {
-        Self {
-            window_start: now,
-            total: 0,
-            per_ip: HashMap::new(),
-        }
-    }
-
-    /// Whether to answer a request from `ip` at `now`, accounting it against the window if so.
-    fn allow(&mut self, ip: IpAddr, now: Instant) -> bool {
-        if now.duration_since(self.window_start) >= WINDOW {
-            self.window_start = now;
-            self.total = 0;
-            self.per_ip.clear();
-        }
-        if self.total >= MAX_TOTAL {
-            return false;
-        }
-        match self.per_ip.get_mut(&ip) {
-            Some(count) if *count >= MAX_PER_IP => return false,
-            Some(count) => *count += 1,
-            None => {
-                if self.per_ip.len() >= MAX_TRACKED_IPS {
-                    return false; // table full this window — drop unknown sources
-                }
-                self.per_ip.insert(ip, 1);
-            }
-        }
-        self.total += 1;
-        true
+/// Caps for this responder's shared [`WindowCounter`]. The single-task `serve` loop owns the counter
+/// directly, so it needs no locking.
+fn rate_limit_caps() -> Caps {
+    Caps {
+        window: WINDOW,
+        max_per_ip: MAX_PER_IP,
+        max_total: MAX_TOTAL,
+        max_tracked_ips: MAX_TRACKED_IPS,
     }
 }
 
@@ -77,7 +48,7 @@ pub async fn serve(bind: SocketAddr) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding STUN socket {bind}"))?;
     tracing::info!(%bind, "STUN: responder up");
-    let mut limiter = RateLimiter::new(Instant::now());
+    let mut limiter = WindowCounter::new(rate_limit_caps(), Instant::now());
     let mut buf = vec![0u8; 1500]; // a Binding request is tiny; this is generous
     loop {
         let (n, src) = match sock.recv_from(&mut buf).await {
@@ -157,39 +128,5 @@ mod tests {
     fn ignores_non_binding_packets() {
         let src: SocketAddr = "198.51.100.7:9".parse().unwrap();
         assert!(binding_response(b"not a stun packet", src).is_none());
-    }
-
-    #[test]
-    fn rate_limiter_caps_per_ip_and_resets_each_window() {
-        let t0 = Instant::now();
-        let mut rl = RateLimiter::new(t0);
-        let ip: IpAddr = "203.0.113.5".parse().unwrap();
-        // Up to MAX_PER_IP in a window are allowed; the next is refused.
-        for _ in 0..MAX_PER_IP {
-            assert!(rl.allow(ip, t0));
-        }
-        assert!(!rl.allow(ip, t0));
-        // A different source is unaffected by the first's exhaustion.
-        let other: IpAddr = "198.51.100.9".parse().unwrap();
-        assert!(rl.allow(other, t0));
-        // A new window clears the counters.
-        let t1 = t0 + WINDOW;
-        assert!(rl.allow(ip, t1));
-    }
-
-    #[test]
-    fn rate_limiter_caps_total_across_sources() {
-        let t0 = Instant::now();
-        let mut rl = RateLimiter::new(t0);
-        // Spread across many sources (few each) so the per-IP cap never trips — only the global
-        // MAX_TOTAL does. Confirms a spoofed-source flood can't exceed the overall reply budget.
-        let mut allowed = 0u32;
-        for i in 0..(MAX_TOTAL + 500) {
-            let ip = IpAddr::from([10, 0, (i >> 8) as u8, (i & 0xff) as u8]);
-            if rl.allow(ip, t0) {
-                allowed += 1;
-            }
-        }
-        assert_eq!(allowed, MAX_TOTAL);
     }
 }

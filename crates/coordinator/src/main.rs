@@ -6,6 +6,7 @@ mod api;
 mod commands;
 mod config;
 mod discord;
+mod limiter;
 mod oauth;
 mod presence;
 mod roles;

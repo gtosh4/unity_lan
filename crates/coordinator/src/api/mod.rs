@@ -25,7 +25,7 @@ mod ratelimit;
 mod wake;
 
 use admin::{admin_dashboard, admin_graph, admin_metrics, admin_stats};
-use ratelimit::{rate_limit, RateLimitState, RateLimiter};
+use ratelimit::{rate_limit, RateLimitState};
 pub use wake::Wakers;
 use wake::{wait_park, wake_jitter, Woke};
 
@@ -153,7 +153,7 @@ pub fn prune_nat_tables(st: &AppState, present: &std::collections::HashSet<[u8; 
 
 pub fn router(state: AppState) -> Router {
     let limiter = RateLimitState {
-        limiter: Arc::new(Mutex::new(RateLimiter::new(Instant::now()))),
+        limiter: Arc::new(Mutex::new(ratelimit::new_limiter(Instant::now()))),
         trusted_proxies: state.trusted_proxies.clone(),
     };
     Router::new()
