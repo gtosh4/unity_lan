@@ -275,3 +275,19 @@ Still open:
   (they're pair-specific; likely leave them until a concrete need — M3b's "marginal" caveat applies
   to endpoint-only gossip).
 - Backoff schedule for coordinator `/refresh` (stage 3, §10).
+- **Stagger the per-peer pull within the refresh window** (scaling nicety, not yet built). The
+  coordinator stamps every attestation in one snapshot with the same `expires_at = now + TTL`
+  (`signer.rs`), so all of a client's held peers enter the refresh window in the *same* daemon loop
+  pass and get pulled at once. Fix client-side (no wire/coordinator change, keeps work off the
+  coordinator): give each peer a deterministic phase offset inside the existing ~TTL/2 margin, keyed
+  off its pubkey — pull when `now >= expires_at - margin + hash(pubkey) % (margin - safety)` — so
+  pulls spread across the window instead of firing together. Prefer this over jittering `expires_at`
+  coordinator-side, which touches the security TTL and the signer's cache epoch.
+  - *When it's relevant:* only at **large held-peer counts** (dozens+ co-members in one client's
+    snapshot). At a handful of peers the synchronized burst is a few cheap UDP pulls + Ed25519
+    verifies in one instant — trivial.
+  - *How much it helps:* smooths that window-open micro-burst of `N` simultaneous pulls/verifies into
+    a spread; it does **not** reduce steady-state pull volume (still one pull per peer per window) and
+    does **not** help a peer that never answers — a never-responding peer retries the whole window
+    regardless (that's the intentional retry-before-coordinator-fallback, §4). So this is purely burst
+    smoothing for scale, orthogonal to the firewall/reachability reasons a pull fails.
