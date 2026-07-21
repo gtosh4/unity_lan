@@ -181,6 +181,16 @@ impl SentReport {
     }
 }
 
+/// The attestations carried by a coordinator response's grant (empty if it carried none) — what the
+/// p2p service (`gossip`) hands co-members over the tunnel. Refreshed on every register/refresh, so
+/// a delta response that renews only the grant still updates what we serve.
+fn grant_attestations(resp: &common::api::RegisterResp) -> Vec<common::api::GuildAttestation> {
+    resp.grant
+        .as_ref()
+        .map(|g| g.attestations.clone())
+        .unwrap_or_default()
+}
+
 /// Reflect the coordinator's advertised version, and verify + stage a release manifest from `resp`
 /// for the control socket's `ApplyUpdate`.
 ///
@@ -287,113 +297,46 @@ async fn teardown(
     }
 }
 
-pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> {
-    // Reconcile any pending-update breadcrumb: if a prior update restarted us onto the new version,
-    // log success and clear it; if we came back up on the old version, warn that the update didn't
-    // take. A no-op on an ordinary startup (no marker).
-    crate::selfupdate::reconcile_update_marker(&cfg.state_dir);
-
-    // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
-    // the coordinator on every register/refresh; also enforced locally so it works while the
-    // coordinator is unreachable.
-    let localnet = Arc::new(LocalNet::load(
-        &cfg.state_dir,
-        cfg.disable_new_networks,
-        cfg.peer_own_devices,
-    ));
-
-    let token = Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
-    // This device's WG public key, shared with the control socket so interactive login binds the
-    // *current* key. A logout re-keys the device; the enrollment loop below refreshes this each
-    // iteration.
-    let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
-    // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
-    let logout = Arc::new(tokio::sync::Notify::new());
-    // Signalled by `ApplyUpdate` once a file-swap update has swapped the binary: the mesh loop tears
-    // down fully, then re-execs the plan left in `exec_slot` (Unix) or returns `RestartService` so the
-    // SCM relaunches the service (Windows). The legacy Windows MSI path exits via msiexec instead.
-    let restart_for_update = Arc::new(tokio::sync::Notify::new());
-    #[cfg(unix)]
-    let exec_slot = crate::selfupdate::exec_slot();
-    // Signalled once interactive login binds the device — wakes the enrollment loop out of its
-    // `refresh_secs` backoff so the mesh comes up at once instead of on the next poll.
-    let login_done = Arc::new(tokio::sync::Notify::new());
-
-    // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
-    // The server itself is bound per-enrollment inside `'lifecycle` — it listens on this device's own
-    // mesh IP, which is only known after register and changes on re-key. The zone outlives enrollments.
-    let zone = dns::empty_zone();
-
-    // Host firewall, built *before* we register so the control socket can serve `expose` from the
-    // start and the rules are in place the instant the interface appears (nft matches by iface
-    // name, which loads fine before the iface exists). §M7.
-    let fw = if cfg.firewall {
-        let seeds: Vec<Exposed> = cfg
-            .expose
-            .iter()
-            .map(|e| {
-                Ok(Exposed {
-                    proto: match e.proto.to_ascii_lowercase().as_str() {
-                        "udp" => common::control::Proto::Udp,
-                        _ => common::control::Proto::Tcp,
-                    },
-                    port: e.port,
-                    scope: e.scope()?,
-                })
-            })
-            .collect::<anyhow::Result<_>>()
-            .context("reading the `expose` list")?;
-        let f = Arc::new(Firewall::load(
-            fw::default_backend(cfg.listen_port, cfg.beacon.then_some(cfg.beacon_port)),
-            cfg.iface.clone(),
-            seeds,
-            &cfg.state_dir,
-            cfg.tailscale_compat,
-        ));
-        f.init()
-            .context("installing firewall (default-deny); set `firewall = false` to disable")?;
-        tracing::info!(iface = %cfg.iface, "firewall: default-deny inbound + established/icmp/exposed");
-        Some(f)
-    } else {
-        None
-    };
-
-    // Control socket up first — so a frontend (GUI) can drive interactive login before we're
-    // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
-    let status = control::shared();
-    // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
-    control::set_connected(&status, !localnet.is_paused());
-    // Verified auto-update staged on register + each refresh; consumed by control's ApplyUpdate.
-    let pending_update = crate::selfupdate::pending_slot();
-    {
-        let name = cfg.control_name();
-        let control_group = cfg.control_group.clone();
-        let ctx = control::Ctx {
-            status: status.clone(),
-            coordinator: cfg.coordinator.clone(),
-            token: token.clone(),
-            fw: fw.clone(),
-            localnet: localnet.clone(),
-            pubkey: pubkey.clone(),
-            oauth_redirect: cfg.oauth_redirect.clone(),
-            logout: logout.clone(),
-            login_done: login_done.clone(),
-            state_dir: cfg.state_dir.clone(),
-            pending_update: pending_update.clone(),
-            restart_for_update: restart_for_update.clone(),
-            #[cfg(unix)]
-            exec_slot: exec_slot.clone(),
-        };
-        tokio::spawn(async move {
-            if let Err(e) = control::serve(&name, control_group, ctx).await {
-                tracing::error!("control socket ended: {e:#}");
-            }
-        });
+/// Build the host firewall from `cfg.expose` (default-deny + established/icmp/exposed), *before* we
+/// register so the control socket can serve `expose` from the start and the rules are in place the
+/// instant the interface appears (nft matches by iface name, which loads before the iface exists).
+/// `None` when `firewall` is off. Runs once per process — it outlives every enrollment. §M7.
+fn build_firewall(cfg: &Config) -> anyhow::Result<Option<Arc<Firewall>>> {
+    if !cfg.firewall {
+        return Ok(None);
     }
+    let seeds: Vec<Exposed> = cfg
+        .expose
+        .iter()
+        .map(|e| {
+            Ok(Exposed {
+                proto: match e.proto.to_ascii_lowercase().as_str() {
+                    "udp" => common::control::Proto::Udp,
+                    _ => common::control::Proto::Tcp,
+                },
+                port: e.port,
+                scope: e.scope()?,
+            })
+        })
+        .collect::<anyhow::Result<_>>()
+        .context("reading the `expose` list")?;
+    let f = Arc::new(Firewall::load(
+        fw::default_backend(cfg.listen_port, cfg.beacon.then_some(cfg.beacon_port)),
+        cfg.iface.clone(),
+        seeds,
+        &cfg.state_dir,
+        cfg.tailscale_compat,
+    ));
+    f.init()
+        .context("installing firewall (default-deny); set `firewall = false` to disable")?;
+    tracing::info!(iface = %cfg.iface, "firewall: default-deny inbound + established/icmp/exposed");
+    Ok(Some(f))
+}
 
-    // Endpoint we advertise to peers: an explicit config value wins (manual forward / known
-    // public addr); otherwise try UPnP-IGD to map our port; otherwise none (rely on being dialed).
-    let endpoint = match cfg.endpoint {
+/// The endpoint we advertise to peers: an explicit config value wins (manual forward / known public
+/// addr); otherwise try UPnP-IGD to map our port; otherwise none (rely on being dialed).
+async fn resolve_endpoint(cfg: &Config, shutdown: &Shutdown) -> Option<SocketAddr> {
+    match cfg.endpoint {
         Some(e) => Some(e),
         None if cfg.upnp => match crate::nat::map_port(cfg.listen_port, shutdown.clone()).await {
             Ok(ep) => {
@@ -406,14 +349,20 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             }
         },
         None => None,
-    };
+    }
+}
 
-    // Ciphertext relay (§7.2, M5.4): if opted in *and* directly dialable, run an embedded TURN
-    // server and advertise it so co-members whose hole punch fails can relay WG ciphertext through
-    // us. A NAT'd device (no endpoint) can't serve as a relay, so it's skipped. The server + secret
-    // outlive an enrollment cycle (a logout/login doesn't tear them down); a spawned task stops it
-    // on shutdown (its internal tasks keep it running without us holding the handle).
-    let relay_report = match (cfg.relay, endpoint) {
+/// Ciphertext relay (§7.2, M5.4): if opted in *and* directly dialable, start an embedded TURN server
+/// and advertise it so co-members whose hole punch fails can relay WG ciphertext through us. A NAT'd
+/// device (no endpoint) can't serve as a relay, so it's skipped. The server + secret outlive an
+/// enrollment cycle (a logout/login doesn't tear them down); a spawned task stops it on shutdown (its
+/// internal tasks keep it running without us holding the handle).
+async fn start_relay(
+    cfg: &Config,
+    endpoint: Option<SocketAddr>,
+    shutdown: &Shutdown,
+) -> anyhow::Result<coord::RelayReport> {
+    let report = match (cfg.relay, endpoint) {
         (true, Some(ep)) => {
             let secret = keys::load_or_create_relay_secret(&cfg.state_dir)?;
             let relay_addr = SocketAddr::new(ep.ip(), cfg.relay_port);
@@ -455,6 +404,87 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         }
         (false, _) => coord::RelayReport::default(),
     };
+    Ok(report)
+}
+
+pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> {
+    // Reconcile any pending-update breadcrumb: if a prior update restarted us onto the new version,
+    // log success and clear it; if we came back up on the old version, warn that the update didn't
+    // take. A no-op on an ordinary startup (no marker).
+    crate::selfupdate::reconcile_update_marker(&cfg.state_dir);
+
+    // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
+    // the coordinator on every register/refresh; also enforced locally so it works while the
+    // coordinator is unreachable.
+    let localnet = Arc::new(LocalNet::load(
+        &cfg.state_dir,
+        cfg.disable_new_networks,
+        cfg.peer_own_devices,
+    ));
+
+    let token = Arc::new(tokio::sync::RwLock::new(keys::load_token(&cfg.state_dir)));
+    // This device's WG public key, shared with the control socket so interactive login binds the
+    // *current* key. A logout re-keys the device; the enrollment loop below refreshes this each
+    // iteration.
+    let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
+    // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
+    let logout = Arc::new(tokio::sync::Notify::new());
+    // Signalled by `ApplyUpdate` once a file-swap update has swapped the binary: the mesh loop tears
+    // down fully, then re-execs the plan left in `exec_slot` (Unix) or returns `RestartService` so the
+    // SCM relaunches the service (Windows). The legacy Windows MSI path exits via msiexec instead.
+    let restart_for_update = Arc::new(tokio::sync::Notify::new());
+    #[cfg(unix)]
+    let exec_slot = crate::selfupdate::exec_slot();
+    // Signalled once interactive login binds the device — wakes the enrollment loop out of its
+    // `refresh_secs` backoff so the mesh comes up at once instead of on the next poll.
+    let login_done = Arc::new(tokio::sync::Notify::new());
+
+    // Optional `.unity.internal` resolver: serves our device + peers by name (empty until we mesh).
+    // The server itself is bound per-enrollment inside `'lifecycle` — it listens on this device's own
+    // mesh IP, which is only known after register and changes on re-key. The zone outlives enrollments.
+    let zone = dns::empty_zone();
+
+    // Host firewall (default-deny), installed before we register — see `build_firewall`.
+    let fw = build_firewall(&cfg)?;
+
+    // Control socket up first — so a frontend (GUI) can drive interactive login before we're
+    // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
+    let status = control::shared();
+    // Reflect the persisted connect/disconnect intent from the start (before the first mesh).
+    control::set_connected(&status, !localnet.is_paused());
+    // Verified auto-update staged on register + each refresh; consumed by control's ApplyUpdate.
+    let pending_update = crate::selfupdate::pending_slot();
+    {
+        let name = cfg.control_name();
+        let control_group = cfg.control_group.clone();
+        let ctx = control::Ctx {
+            status: status.clone(),
+            coordinator: cfg.coordinator.clone(),
+            token: token.clone(),
+            fw: fw.clone(),
+            localnet: localnet.clone(),
+            pubkey: pubkey.clone(),
+            oauth_redirect: cfg.oauth_redirect.clone(),
+            logout: logout.clone(),
+            login_done: login_done.clone(),
+            state_dir: cfg.state_dir.clone(),
+            pending_update: pending_update.clone(),
+            restart_for_update: restart_for_update.clone(),
+            #[cfg(unix)]
+            exec_slot: exec_slot.clone(),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = control::serve(&name, control_group, ctx).await {
+                tracing::error!("control socket ended: {e:#}");
+            }
+        });
+    }
+
+    // The endpoint we advertise to peers (config / UPnP / none) — see `resolve_endpoint`.
+    let endpoint = resolve_endpoint(&cfg, &shutdown).await;
+
+    // Embedded ciphertext relay (TURN), advertised only when dialable — see `start_relay`.
+    let relay_report = start_relay(&cfg, endpoint, &shutdown).await?;
 
     // Enrollment lifecycle. Runs once normally; a `Logout` tears the mesh down and loops back here
     // to re-key and wait for the next login. Setup above (dns, firewall, control socket, endpoint)
@@ -575,12 +605,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         // it. `own_atts` is refreshed from the grant on every register below.
         let own_atts = crate::p2p::OwnAttestations::default();
         let p2p_task = cfg.gossip.then(|| {
-            own_atts.set(
-                resp.grant
-                    .as_ref()
-                    .map(|g| g.attestations.clone())
-                    .unwrap_or_default(),
-            );
+            own_atts.set(grant_attestations(&resp));
             let bind = SocketAddr::new(device.wg_ip.into(), common::p2p::P2P_PORT);
             let own = own_atts.clone();
             tokio::spawn(async move {
@@ -1106,12 +1131,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     if cfg.gossip {
                         // Keep the p2p service handing out our freshest attestations (delta responses
                         // may carry a refreshed grant even when nothing else changed).
-                        own_atts.set(
-                            resp.grant
-                                .as_ref()
-                                .map(|g| g.attestations.clone())
-                                .unwrap_or_default(),
-                        );
+                        own_atts.set(grant_attestations(&resp));
                     }
                     match coord::merge_seeds(&last_seeds, &resp, &cfg.state_dir) {
                         Ok(seeds) => {
