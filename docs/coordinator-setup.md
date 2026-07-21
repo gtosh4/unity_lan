@@ -40,8 +40,9 @@ A coordinator can serve **multiple guilds**. Networks are not automatic — a gu
 /unitylan network remove role:@minecraft
 /unitylan network list
 ```
-The network's `<network>` DNS label is the role's own Discord name, and stays in sync when the
-role is renamed.
+A network's display name is the role's own Discord name and stays in sync when the role is renamed,
+but under Model B it is presentation-only — networks are pure ACL groups and never appear in any
+hostname (a device is always `<device>.<user>.unity.internal`, independent of its networks).
 
 ## E. Create test roles + collect IDs
 1. Enable **Developer Mode**: User Settings → **Advanced** → Developer Mode **ON**.
@@ -249,8 +250,10 @@ scrape_configs:
 ```
 
 Exposed gauges: `unitylan_guilds`, `unitylan_networks`, `unitylan_devices_enrolled`,
-`unitylan_devices_online`, `unitylan_users_online`, `unitylan_longpoll_waiters`, and
-`unitylan_peers_online{guild_id,role_id}` (online devices per network).
+`unitylan_devices_online`, `unitylan_users_online`, `unitylan_devices_off_network`,
+`unitylan_longpoll_waiters`, `unitylan_membership_version`,
+`unitylan_peers_online{guild_id,role_id}` (online devices per network), and
+`unitylan_devices_online_by_version{version}` (online devices per reported client version).
 
 > **Ids only, no names.** `unitylan_peers_online` labels with `guild_id`/`role_id` and **not**
 > guild or network names. A scrape stream leaves the coordinator for whatever Prometheus/Grafana

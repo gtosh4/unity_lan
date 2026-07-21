@@ -10,11 +10,6 @@ use std::net::Ipv4Addr;
 use ipnet::Ipv4Net;
 use siphasher::sip::SipHasher13;
 
-/// Reserved range: 100.64.0.0/10 (RFC 6598 / CGNAT), avoids home-LAN collisions. A deployment's
-/// mesh CIDR defaults to a `/16` inside this (see [`default_cidr`]); an admin may override it.
-pub const CGNAT_BASE: Ipv4Addr = Ipv4Addr::new(100, 64, 0, 0);
-/// Prefix length of the reserved CGNAT range.
-pub const CGNAT_PREFIX: u8 = 10;
 /// Default mesh CIDR prefix: a `/16` (65 534 usable devices) carved out of the CGNAT range by
 /// [`default_cidr`]. Small enough that up to 64 deployments get disjoint blocks by hashing.
 pub const DEFAULT_PREFIX: u8 = 16;

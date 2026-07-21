@@ -36,7 +36,7 @@ unitylan/
 │   │   ├── api.rs         # axum HTTP API + long-poll (build_snapshot, delta, wait_park, Wakers)
 │   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
 │   │   ├── discord.rs     # twilight: bot-token role/nick reads + per-guild role-name TTL cache
-│   │   ├── commands.rs    # /unitylan network add|remove|list|revoke slash handler + gateway events
+│   │   ├── commands.rs    # /unitylan network add|remove|list slash handler + gateway-event eviction
 │   │   ├── oauth.rs       # Discord OAuth2 PKCE config + token verify (binds pubkey→user)
 │   │   ├── presence.rs    # in-memory presence table + reaper (PRESENCE_TTL_SECS)
 │   │   ├── signer.rs      # per-guild Ed25519 attestation signing, configurable TTL, SignCache
@@ -295,8 +295,8 @@ coordinator's own window), `caps`, `server_version`, `release?`. All version/rel
 - `RoleSource` trait: `TwilightRoleSource` (live bot token, GUILD_MEMBERS intent) vs
   `FakeRoleSource` (config-seeded, offline). Per-guild role-name TTL cache in `discord.rs` dedups
   the `GET guild roles` bucket across the herd.
-- Slash commands `/unitylan network add|remove|list|revoke` (Manage-Guild gated); gateway events
-  drive role-loss eviction. `@everyone` is rejected as a network.
+- Slash commands `/unitylan network add|remove|list` (Manage-Guild gated); role-loss eviction is an
+  internal gateway-event handler (`revoke`), not a subcommand. `@everyone` is rejected as a network.
 
 ### 4.4 Signing & keys (`signer.rs`, `store.rs`)
 - **One independent Ed25519 key per guild** (`load_or_create_seed(guild_id)`), generated lazily on
@@ -444,7 +444,7 @@ Most-direct-first (design §7.2):
   (`relay_capable`); the coordinator mints short-lived HMAC TURN creds (`common::relay`,
   `RELAY_CRED_TTL_SECS`) and pairs relay↔client — staying off the traffic path. `need_relay` /
   `Seed.relay` (`RelayInfo`) carry the reservation.
-- **`ping.rs`** — reachability probing → `PeerReach` (`Direct`/`Punching`/`Relayed`/`Unreachable`)
+- **`ping.rs`** — reachability probing → `PeerReach` (`Direct`/`Punching`/`Relayed`/`Ice`/`Unreachable`)
   surfaced in status.
 
 ### 5.6 DNS (`dns.rs`, `resolver/`)
@@ -472,8 +472,9 @@ All-Rust Elm architecture; talks **only** to the engine. `ctl.rs` = control-sock
 `Subscription` streaming `ControlResponse`/`StatusReport` events into `Message`s. `tray/` = tray-icon
 (up/down, quick toggles, open/quit); the engine keeps the mesh up when the window closes. Every
 privileged action is a `ControlRequest` RPC — the GUI needs no elevation. `ControlRequest` covers
-`Status`, `Manage`, `Expose`, `SetNetwork`, `Login`, `SetConnected`, `SetNewNetworkDefault`,
-`Logout`, `BlockPeer`/`UnblockPeer` (local, user-keyed), `ApplyUpdate`.
+`Status`, `Watch` (push-channel subscription), `Manage`, `Expose`, `SetNetwork`,
+`SetOwnDevicePeering`, `Login`, `SetConnected`, `SetNewNetworkDefault`, `Logout`,
+`BlockPeer`/`UnblockPeer` (local, user-keyed), `ApplyUpdate`.
 
 ## 6. Peering = ACL (Model B)
 

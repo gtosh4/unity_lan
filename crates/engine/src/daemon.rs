@@ -1,6 +1,6 @@
 //! Mesh daemon: register → bring up the WG interface with our `/32`s → peer the seeds →
-//! refresh periodically, adding newly-seen co-members. Seed-based meshing (design.md §5);
-//! P2P gossip layers on top later.
+//! refresh periodically, adding newly-seen co-members. Seed-based meshing (design.md §5), with the
+//! P2P peer-direct gossip refresh layered on top (on by default).
 
 use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};

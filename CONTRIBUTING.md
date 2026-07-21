@@ -135,8 +135,9 @@ Get the runtime from <https://download.wireguard.com/wireguard-nt/> (verify it's
 "WireGuard LLC"). A `--release` build needs its own copy in `target\release\`. wireguard-nt is
 self-contained — the DLL installs its kernel driver on first elevated use; nothing else to install.
 
-**b. Config.** Copy `engine.example.toml` to `engine.toml` and set `coordinator` (and, for
-fake-mode, `dev_user`). `engine.toml` and `engine-state/` are git-ignored.
+**b. Config.** Copy `engine.example.toml` to `engine.toml` and set `coordinator`. `engine.toml` and
+`engine-state/` are git-ignored. In fake mode the engine still enrolls the normal way — via the
+fake OAuth login or an `enrollment_key`; there is no config shortcut.
 
 Then start the engine + GUI with the PowerShell analogue of `dev-run.sh`:
 

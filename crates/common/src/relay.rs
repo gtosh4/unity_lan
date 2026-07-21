@@ -57,12 +57,6 @@ pub fn issue_relay_creds(
     }
 }
 
-/// The expiry embedded in a REST-style TURN `username` (`"<unix_expiry>:<id>"`), if parseable.
-/// The relay's server uses it to reject stale credentials.
-pub fn username_expiry(username: &str) -> Option<u64> {
-    username.split(':').next()?.parse().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +81,8 @@ mod tests {
         assert_eq!(info.realm, RELAY_REALM);
         // The credential matches an independent derivation over the minted username.
         assert_eq!(info.credential, relay_credential("s3cret", &info.username));
-        assert_eq!(username_expiry(&info.username), Some(4_600));
+        // Username embeds the absolute expiry (issued_at + ttl) as its first `:`-field.
+        let expiry: u64 = info.username.split(':').next().unwrap().parse().unwrap();
+        assert_eq!(expiry, 4_600);
     }
 }

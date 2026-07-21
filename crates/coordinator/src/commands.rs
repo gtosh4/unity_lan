@@ -353,9 +353,9 @@ async fn handle_network(
             if role.get() == guild_id {
                 return "`@everyone` cannot be a network.".to_string();
             }
-            // The network name is always the role's own Discord name (kept in sync by the
-            // RoleUpdate handler); fall back to `role-{id}` only if the API lookup fails
-            // (e.g. the role was just deleted).
+            // The network name is always the role's own Discord name, resolved live from the API on
+            // each build_snapshot; fall back to `role-{id}` only if that lookup fails (e.g. the role
+            // was just deleted).
             let name = role_name(http, guild_id, role.get())
                 .await
                 .unwrap_or_else(|| format!("role-{role}"));

@@ -231,14 +231,6 @@ impl ExposeScope {
             } => format!("{name} @ {g}"),
         }
     }
-
-    /// The `(guild_id, role_id)` this scope names, if it is a resolved network.
-    pub fn net_id(&self) -> Option<(u64, u64)> {
-        match self {
-            ExposeScope::Net { guild_id, role_id } => Some((*guild_id, *role_id)),
-            _ => None,
-        }
-    }
 }
 
 impl Serialize for ExposeScope {

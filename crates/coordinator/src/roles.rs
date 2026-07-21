@@ -1,8 +1,8 @@
 //! Role source: the authority for guild identity + "who holds which role", across the
 //! (possibly multiple) guilds a coordinator serves.
 //!
-//! M1 ships a [`FakeRoleSource`] from config. The live twilight bot-token source lands later
-//! behind the same trait.
+//! Two impls behind the trait: [`FakeRoleSource`] (config-seeded, offline dev/tests) and the live
+//! twilight bot-token source ([`TwilightRoleSource`] in `discord.rs`).
 
 use std::collections::HashMap;
 
