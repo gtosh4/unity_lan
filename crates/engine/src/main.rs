@@ -432,15 +432,21 @@ async fn register_once(config: Option<String>, token: Option<String>) -> anyhow:
     let (_resp, device) = coord::register(
         &cfg.coordinator,
         &cfg.state_dir,
-        wg_pubkey,
-        cfg.device_name(),
-        cfg.endpoint,
-        cfg.enrollment_key.clone(),
-        Vec::new(),
-        keys::load_token(&cfg.state_dir),
-        false,
-        true, // own-device peering: default on for the one-shot CLI paths
-        coord::RelayReport::default(),
+        coord::CoordReq {
+            wg_pubkey,
+            device_name: cfg.device_name(),
+            endpoint: cfg.endpoint,
+            enrollment_key: cfg.enrollment_key.clone(),
+            since: None,
+            disabled_networks: Vec::new(),
+            observed: Vec::new(),
+            supersede: keys::load_token(&cfg.state_dir),
+            paused: false,
+            peer_own_devices: true, // own-device peering: default on for the one-shot CLI paths
+            relay: coord::RelayReport::default(),
+            ice: Vec::new(),
+            held: Vec::new(),
+        },
     )
     .await?;
     // `register` pins/verifies the anchor internally (trust-on-first-use, then rotation-chain).
@@ -613,15 +619,21 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
     let (_, device) = coord::register(
         &cfg.coordinator,
         &cfg.state_dir,
-        wg_pub,
-        cfg.device_name(),
-        cfg.endpoint,
-        None,
-        Vec::new(),
-        None, // login binds a fresh identity; nothing to supersede
-        false,
-        true, // own-device peering: default on for the one-shot CLI paths
-        coord::RelayReport::default(),
+        coord::CoordReq {
+            wg_pubkey: wg_pub,
+            device_name: cfg.device_name(),
+            endpoint: cfg.endpoint,
+            enrollment_key: None,
+            since: None,
+            disabled_networks: Vec::new(),
+            observed: Vec::new(),
+            supersede: None, // login binds a fresh identity; nothing to supersede
+            paused: false,
+            peer_own_devices: true, // own-device peering: default on for the one-shot CLI paths
+            relay: coord::RelayReport::default(),
+            ice: Vec::new(),
+            held: Vec::new(),
+        },
     )
     .await?;
     match device {

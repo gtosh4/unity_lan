@@ -240,18 +240,21 @@ async fn teardown(
     let withdraw = coord::refresh(
         &cfg.coordinator,
         &cfg.state_dir,
-        wg_pub,
-        cfg.device_name(),
-        endpoint,
-        cfg.enrollment_key.clone(),
-        None, // no long-poll hold: return as soon as the eviction is applied
-        Vec::new(),
-        Vec::new(),
-        true, // paused → evict from all networks
-        localnet.peer_own_devices(),
-        coord::RelayReport::default(),
-        Vec::new(),
-        Vec::new(), // withdrawing → no held set to diff against
+        coord::CoordReq {
+            wg_pubkey: wg_pub,
+            device_name: cfg.device_name(),
+            endpoint,
+            enrollment_key: cfg.enrollment_key.clone(),
+            since: None, // no long-poll hold: return as soon as the eviction is applied
+            disabled_networks: Vec::new(),
+            observed: Vec::new(),
+            supersede: None,
+            paused: true, // paused → evict from all networks
+            peer_own_devices: localnet.peer_own_devices(),
+            relay: coord::RelayReport::default(),
+            ice: Vec::new(),
+            held: Vec::new(), // withdrawing → no held set to diff against
+        },
     );
     match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
         Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
@@ -961,18 +964,21 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                 pending_refresh = Some(Box::pin(coord::refresh(
                     &cfg.coordinator,
                     &cfg.state_dir,
-                    wg_pub,
-                    cfg.device_name(),
-                    endpoint,
-                    cfg.enrollment_key.clone(),
-                    poll_since,
-                    localnet.as_refs(),
-                    observed.clone(),
-                    localnet.is_paused(),
-                    localnet.peer_own_devices(),
-                    relay_iter,
-                    ice_offers.clone(),
-                    held,
+                    coord::CoordReq {
+                        wg_pubkey: wg_pub,
+                        device_name: cfg.device_name(),
+                        endpoint,
+                        enrollment_key: cfg.enrollment_key.clone(),
+                        since: poll_since,
+                        disabled_networks: localnet.as_refs(),
+                        observed: observed.clone(),
+                        supersede: None,
+                        paused: localnet.is_paused(),
+                        peer_own_devices: localnet.peer_own_devices(),
+                        relay: relay_iter,
+                        ice: ice_offers.clone(),
+                        held,
+                    },
                 )));
             }
             // Set by arms that invalidate the held request; applied after the select, since the arms
@@ -1422,15 +1428,21 @@ async fn register_until_ready(
             r = coord::register(
                 &cfg.coordinator,
                 &cfg.state_dir,
-                wg_pub,
-                cfg.device_name(),
-                endpoint,
-                cfg.enrollment_key.clone(),
-                localnet.as_refs(),
-                supersede.clone(),
-                localnet.is_paused(),
-                localnet.peer_own_devices(),
-                relay.clone(),
+                coord::CoordReq {
+                    wg_pubkey: wg_pub,
+                    device_name: cfg.device_name(),
+                    endpoint,
+                    enrollment_key: cfg.enrollment_key.clone(),
+                    since: None,
+                    disabled_networks: localnet.as_refs(),
+                    observed: Vec::new(),
+                    supersede: supersede.clone(),
+                    paused: localnet.is_paused(),
+                    peer_own_devices: localnet.peer_own_devices(),
+                    relay: relay.clone(),
+                    ice: Vec::new(),
+                    held: Vec::new(),
+                },
             ) => r,
         };
         match attempt {

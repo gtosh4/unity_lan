@@ -114,102 +114,75 @@ pub struct SeedPeer {
     pub expires_at: u64,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The engine-side inputs to a coordinator `register`/`refresh` POST. `post` maps these onto the
+/// wire [`RegisterReq`], filling the fixed fields (proto/caps/version) and expanding `relay`. Bundled
+/// into one struct so the call sites read as named fields instead of a dozen-plus positional args.
+pub struct CoordReq {
+    pub wg_pubkey: WgPublicKey,
+    pub device_name: String,
+    pub endpoint: Option<SocketAddr>,
+    pub enrollment_key: Option<String>,
+    /// Last-seen version echoed as `since`. `Some` on a renewal (the coordinator holds the request
+    /// until membership changes or ~TTL/2 elapses); `None` returns immediately (no long-poll hold).
+    pub since: Option<u64>,
+    pub disabled_networks: Vec<NetworkRef>,
+    pub observed: Vec<common::api::ObservedEndpoint>,
+    /// Our stored device token, so the coordinator retires a prior pubkey we just re-keyed away from
+    /// (no-op unless the token names a different key). Only sent on the initial register.
+    pub supersede: Option<String>,
+    pub paused: bool,
+    pub peer_own_devices: bool,
+    pub relay: RelayReport,
+    pub ice: Vec<common::api::IceEndpoint>,
+    pub held: Vec<common::api::HeldPeer>,
+}
+
+/// First contact: returns immediately (no hold) and carries no peer state yet.
 pub async fn register(
     base_url: &str,
     state_dir: &Path,
-    wg_pubkey: WgPublicKey,
-    device_name: String,
-    endpoint: Option<SocketAddr>,
-    enrollment_key: Option<String>,
-    disabled_networks: Vec<NetworkRef>,
-    supersede: Option<String>,
-    paused: bool,
-    peer_own_devices: bool,
-    relay: RelayReport,
+    req: CoordReq,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
-    // First contact: `since = None` returns immediately (no long-poll hold). No peers yet → no
-    // observed endpoints to report. `supersede` carries our stored device token so the coordinator
-    // retires a prior pubkey we just re-keyed away from (no-op unless the token names a different key).
     post(
         base_url,
         state_dir,
         "register",
-        wg_pubkey,
-        device_name,
-        endpoint,
-        enrollment_key,
-        None,
-        disabled_networks,
-        Vec::new(),
-        supersede,
-        paused,
-        peer_own_devices,
-        relay,
-        Vec::new(), // no ICE offers at initial register (no peers yet)
-        Vec::new(), // no held peers yet → full snapshot
+        CoordReq {
+            since: None, // no long-poll hold on first contact
+            observed: Vec::new(),
+            ice: Vec::new(),  // no peers yet → nothing to report
+            held: Vec::new(), // no held peers yet → full snapshot
+            ..req
+        },
     )
     .await
 }
 
-/// Long-poll `/refresh`: pass the last-seen `version` as `since`; the coordinator holds the
-/// request until membership changes or ~TTL/2 elapses (renewal). Returns the new version.
-#[allow(clippy::too_many_arguments)]
+/// Long-poll `/refresh`: `req.since` is the last-seen `version`; the coordinator holds the request
+/// until membership changes or ~TTL/2 elapses (renewal). Returns the new version.
 pub async fn refresh(
     base_url: &str,
     state_dir: &Path,
-    wg_pubkey: WgPublicKey,
-    device_name: String,
-    endpoint: Option<SocketAddr>,
-    enrollment_key: Option<String>,
-    since: Option<u64>,
-    disabled_networks: Vec<NetworkRef>,
-    observed: Vec<common::api::ObservedEndpoint>,
-    paused: bool,
-    peer_own_devices: bool,
-    relay: RelayReport,
-    ice: Vec<common::api::IceEndpoint>,
-    held: Vec<common::api::HeldPeer>,
+    req: CoordReq,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
+    // refresh never supersedes: a re-key retires the old key on the initial register.
     post(
         base_url,
         state_dir,
         "refresh",
-        wg_pubkey,
-        device_name,
-        endpoint,
-        enrollment_key,
-        since,
-        disabled_networks,
-        observed,
-        None, // refresh never supersedes: a re-key retires the old key on the initial register
-        paused,
-        peer_own_devices,
-        relay,
-        ice,
-        held,
+        CoordReq {
+            supersede: None,
+            ..req
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn post(
     base_url: &str,
     state_dir: &Path,
     path: &str,
-    wg_pubkey: WgPublicKey,
-    device_name: String,
-    endpoint: Option<SocketAddr>,
-    enrollment_key: Option<String>,
-    since: Option<u64>,
-    disabled_networks: Vec<NetworkRef>,
-    observed: Vec<common::api::ObservedEndpoint>,
-    supersede: Option<String>,
-    paused: bool,
-    peer_own_devices: bool,
-    relay: RelayReport,
-    ice: Vec<common::api::IceEndpoint>,
-    held: Vec<common::api::HeldPeer>,
+    req: CoordReq,
 ) -> anyhow::Result<(RegisterResp, Option<SelfDevice>)> {
     // Total timeout must exceed the coordinator's long-poll hold, else we'd cancel a legit held
     // request. The connect timeout is short, though: an unreachable coordinator should fail fast so
@@ -227,27 +200,27 @@ async fn post(
     let resp = client
         .post(&url)
         .json(&RegisterReq {
-            wg_pubkey,
-            device_name,
-            enrollment_key,
-            endpoint,
-            since,
-            disabled_networks,
-            observed,
-            supersede,
-            paused,
-            peer_own_devices,
-            relay_capable: relay.capable,
-            relay_addr: relay.addr,
-            relay_secret: relay.secret,
-            need_relay: relay.need_relay,
-            relay_allocated: relay.allocated,
-            ice,
+            wg_pubkey: req.wg_pubkey,
+            device_name: req.device_name,
+            enrollment_key: req.enrollment_key,
+            endpoint: req.endpoint,
+            since: req.since,
+            disabled_networks: req.disabled_networks,
+            observed: req.observed,
+            supersede: req.supersede,
+            paused: req.paused,
+            peer_own_devices: req.peer_own_devices,
+            relay_capable: req.relay.capable,
+            relay_addr: req.relay.addr,
+            relay_secret: req.relay.secret,
+            need_relay: req.relay.need_relay,
+            relay_allocated: req.relay.allocated,
+            ice: req.ice,
             proto: common::PROTOCOL_VERSION,
             proto_min: common::MIN_PROTOCOL_VERSION,
             caps: common::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             client_version: common::VERSION.to_string(),
-            held,
+            held: req.held,
         })
         .send()
         .await
