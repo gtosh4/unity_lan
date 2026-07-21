@@ -7,241 +7,215 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
-- **Two devices on the same network now connect directly instead of flapping.** When two of your
-  peers sit behind the same router, their tunnel used to run through the router's public address (a
-  "hairpin") — which many home routers do unreliably, so the connection kept dropping and coming
-  back. Each engine now quietly announces itself on the local network so same-network peers find each
-  other's direct address and use it, giving a faster, stable link. Nothing private about your network
-  is sent anywhere — the announcement carries only this device's WireGuard key and port, stays on the
-  local segment, and if the direct path doesn't actually work the engine falls back to the old route.
-  On by default; turn it off with `beacon = false` in `engine.toml` (or change its port with
-  `beacon_port`).
+- **Two devices on the same network now connect directly instead of flapping.** Peers behind the
+  same router used to tunnel through the router's public address (a "hairpin"), which many home
+  routers do unreliably — so the link kept dropping. Each engine now announces itself on the local
+  segment (this device's WireGuard key and port only, nothing else, and it never leaves the segment)
+  so same-network peers use each other's direct address, falling back to the old route if the direct
+  path doesn't work. On by default; `beacon = false` in `engine.toml` to disable, `beacon_port` to
+  change the port.
 - **A peer changing reachability is now logged.** When a peer goes down or comes back — or shifts
   between direct, ICE, relayed, and unreachable — the engine logs the transition with the peer and
-  how long since its last handshake, so a peer that intermittently drops leaves a timestamped trail
-  instead of only showing up as a fluctuating `ctl status`.
-- **The engine can also write its logs to a file.** Logs still print to the console as before;
-  now they can additionally be appended (plain text, no colour codes) to a file, so a foreground
-  `unitylan-engine run` whose output would otherwise scroll away is kept for later. Set it in
-  `engine.toml` with `log_file = "engine.log"` — a relative path lands in the state directory
-  alongside the keys — or per-invocation with `--log-file <path>`, which overrides the config.
-- **Ports can be exposed to just your own devices.** A new scope sits alongside "all peers" and the
-  per-network ones, and it goes by identity rather than membership: only your other devices reach
-  the port, no matter what networks you and everyone else share. Useful for the things you run for
-  yourself — a syncthing instance, an SSH port on a home server — that until now had to be opened to
-  every co-member of a network to be reachable at all. In the GUI it's a checkbox in the new scope
-  picker; from the command line it's `unitylan-engine ctl expose <port> --own-devices`
-  (and `ctl unexpose … --own-devices` to close it again). Startup exposures in `engine.toml` can
-  name a scope too — `net = "<name>"` or `own_devices = true` on an `[[expose]]` entry — where
-  before they could only ever open a port to every peer.
+  time since its last handshake, so an intermittently-dropping peer leaves a timestamped trail
+  instead of only a fluctuating `ctl status`.
+- **The engine can also write its logs to a file.** Logs still print to the console; now they can
+  additionally be appended (plain text, no colour codes) to a file, so a foreground
+  `unitylan-engine run` isn't lost when its output scrolls away. Set `log_file = "engine.log"` in
+  `engine.toml` (a relative path lands in the state directory) or `--log-file <path>` per-invocation,
+  which overrides the config.
+- **Ports can be exposed to just your own devices.** A new scope alongside "all peers" and the
+  per-network ones, keyed by identity rather than membership: only your other devices reach the port,
+  no matter what networks you share. Useful for things you run for yourself — a syncthing instance,
+  an SSH port on a home server — that until now had to be opened to every co-member to be reachable
+  at all. In the GUI it's a checkbox in the new scope picker; from the CLI it's
+  `unitylan-engine ctl expose <port> --own-devices` (and `ctl unexpose … --own-devices`). Startup
+  `[[expose]]` entries in `engine.toml` can name a scope too — `net = "<name>"` or
+  `own_devices = true`.
 - **One port can be exposed to several networks at once.** Tick as many as apply and each becomes
   its own exposure, so you can close one later without disturbing the rest.
-- **The admin dashboard now counts devices that are online but on no network.** A device whose
-  networks are all toggled off is still live — it long-polls the coordinator and stays reachable to
-  its owner's other devices via own-device peering — but it used to be missing from the "devices
-  online" total and the per-version fleet breakdown, so the numbers didn't add up and a client on no
-  network was invisible when checking whether the fleet had finished updating. Such devices are now
-  included in the totals, with a new **off-network devices** card (and a `devices_off_network` field
-  / `unitylan_devices_off_network` metric) breaking out how many so the per-network table plus that
-  figure reconciles to the total.
+- **The admin dashboard now counts devices that are online but on no network.** A device with all
+  its networks toggled off is still live — it long-polls the coordinator and stays reachable to its
+  owner's other devices — but it used to be missing from the "devices online" total and the
+  per-version fleet breakdown, so a client on no network was invisible when checking whether the
+  fleet had finished updating. Such devices now count, with a new **off-network devices** card
+  (`devices_off_network` field / `unitylan_devices_off_network` metric).
 
 ### Changed
 
 - **An auto-update now switches to the new version on its own, without help from a service manager.**
-  On Linux, applying an update used to swap the engine on disk and then just exit, relying on
-  systemd's `Restart=always` to bring the new version back up. An engine started any other way — in
-  the foreground, from a container entrypoint, under a supervisor that doesn't restart on a clean
-  exit — would swap the binary and then simply stop. The engine now tears down its tunnel, firewall,
-  and DNS cleanly and relaunches itself in place onto the new version, so the update completes no
-  matter how the engine was started (and systemd still sees one continuously-running process, with no
-  restart gap).
+  On Linux, applying an update used to swap the engine on disk and then exit, relying on systemd's
+  `Restart=always` to bring the new version back up. An engine started any other way — foreground,
+  a container entrypoint, a supervisor that doesn't restart on a clean exit — would swap the binary
+  and simply stop. The engine now tears down tunnel, firewall, and DNS cleanly and relaunches itself
+  in place, so the update completes however it was started (and systemd still sees one continuously-
+  running process, no restart gap).
 
 - **Windows auto-updates are now a lightweight file swap instead of a full installer upgrade.**
-  Applying an update on Windows used to run the whole MSI installer over the top of itself — stopping
-  and re-registering the service, re-laying every file — which was the fragile part of the update and
-  could roll back and leave a machine wedged. The engine now downloads a small bundle, swaps its own
-  program file in place (staging the new app so an open window updates too), cleanly tears down its
-  tunnel, firewall, and DNS, and lets Windows restart the service on the new version — the same
-  swap-in-place approach Linux already uses. If anything published still points at the old `.msi`, it
-  keeps working exactly as before, now with an install log at `%ProgramData%\UnityLAN\update-msi.log`
-  for when something goes wrong. And if an update ever fails to take, the engine says so in its log on
-  the next start instead of silently staying on the old version.
+  Applying an update used to re-run the whole MSI installer over itself — stopping and re-registering
+  the service, re-laying every file — the fragile part that could roll back and wedge a machine. The
+  engine now downloads a small bundle, swaps its program file in place (staging the new app so an open
+  window updates too), tears down tunnel/firewall/DNS cleanly, and lets Windows restart the service —
+  the same swap-in-place Linux already uses. A still-published `.msi` keeps working exactly as before,
+  now with an install log at `%ProgramData%\UnityLAN\update-msi.log`. A failed update is reported in
+  the log on the next start instead of silently staying on the old version.
 
 - **The mesh now leans on peer-to-peer attestation refresh far longer before falling back to the
-  coordinator.** With peer-direct refresh (gossip) on, a peer's credential is renewed straight from
-  that peer over the tunnel; only when peer-direct can't refresh it and it's within two minutes of
-  expiring does the client concede and pull a full renewal from the coordinator. Before, that
-  concession window was a full long-poll hold (~15 min) and overlapped the entire peer-direct
-  window, so the coordinator was made to re-sign and re-send every attestation on most renewals even
-  when the peers could have carried it themselves. The coordinator now does that work only for
-  credentials the mesh genuinely couldn't refresh — less load on a busy coordinator, no change to
-  how quickly an offline or revoked peer drops (still on attestation expiry).
+  coordinator.** With peer-direct refresh (gossip) on, a credential is renewed straight from that
+  peer over the tunnel; only when peer-direct can't refresh it and it's within two minutes of
+  expiring does the client pull a full renewal from the coordinator. Before, that concession window
+  was a full long-poll hold (~15 min) overlapping the entire peer-direct window, so the coordinator
+  re-signed and re-sent every attestation on most renewals even when the peers could have carried it.
+  The coordinator now does that work only for credentials the mesh genuinely couldn't refresh — no
+  change to how quickly an offline or revoked peer drops (still on attestation expiry).
 
 - **The config file moved out of the middle of every command.** It used to be a positional argument
-  wedged between the verb and what you were acting on — `ctl expose /etc/unitylan/engine.toml 25565
-  minecraft` — and it was mandatory on some subcommands but optional on others, with no way to tell
-  which from `--help`. It's now a single `-c/--config` option that defaults to `engine.toml` in the
-  working directory, so the common case is just `unitylan-engine ctl status` and the argument you
-  care about comes first: `unitylan-engine ctl expose 25565 minecraft`. When `-c` is absent the
-  config is looked up in the working directory first and then where the package installed it
-  (`/etc/unitylan/engine.toml`; beside the exe or under `%ProgramData%\UnityLAN` on Windows), so on
-  an installed system the flag is usually unnecessary — `sudo unitylan-engine ctl status` works from
-  any directory. A path given with `-c` is never second-guessed: a typo fails loudly instead of
-  silently resolving to a different deployment, and when the search finds nothing the error lists
-  every location it tried. **This breaks existing
+  wedged between the verb and its target — `ctl expose /etc/unitylan/engine.toml 25565 minecraft` —
+  mandatory on some subcommands but optional on others, with no way to tell which from `--help`. It's
+  now a single `-c/--config` option defaulting to `engine.toml` in the working directory, so the
+  common case is just `unitylan-engine ctl status` and the argument you care about comes first:
+  `ctl expose 25565 minecraft`. Without `-c` the config is looked up in the working directory first,
+  then where the package installed it (`/etc/unitylan/engine.toml`; beside the exe or under
+  `%ProgramData%\UnityLAN` on Windows), so on an installed system the flag is usually unnecessary. A
+  path given with `-c` is never second-guessed: a typo fails loudly instead of silently resolving to
+  a different deployment, and a failed search lists every location it tried. **This breaks existing
   scripts and unit files**, which need the path moved ahead of the subcommand as `-c <path>`; the
   packaged systemd unit is updated for you. Alongside it, `--help` now documents every `ctl`
-  subcommand and its arguments (most had no description at all), `ctl net` and `ctl own-devices`
-  list their valid actions instead of failing at runtime, and the WireGuard/DNS/resolver commands
-  meant only for the test scripts no longer clutter the top-level command list.
-- **The peer list stops reshuffling on every latency update.** Peers are still ordered by ping,
-  but the ordering now follows a smoothed (rolling-average) latency instead of the raw reading, so
-  normal probe-to-probe jitter no longer swaps near-equal peers back and forth each poll. The number
-  shown on each row is still the latest measured round-trip — only the list order is damped.
-- **Name lookups stayed broken on hosts running Tailscale even once traffic flowed.** Clearing
-  Tailscale's block let peers reach each other, but `.unity.internal` names still failed: a lookup
-  goes to this machine's *own* mesh address, and the kernel loops that back on the loopback
-  interface, where an exemption written for the mesh interface never applies. Both paths are now
-  exempt — the loopback one scoped to just this host's own address.
+  subcommand (most had no description at all), `ctl net` and `ctl own-devices` list their valid
+  actions instead of failing at runtime, and the test-only WireGuard/DNS/resolver commands no longer
+  clutter the top-level command list.
+- **The peer list stops reshuffling on every latency update.** Peers are still ordered by ping, but
+  now by a smoothed (rolling-average) latency instead of the raw reading, so normal probe-to-probe
+  jitter no longer swaps near-equal peers back and forth each poll. The number on each row is still
+  the latest measured round-trip — only the list order is damped.
 - **Tailscale's mesh-range block is now cleared automatically.** Tailscale installs a firewall rule
-  that drops UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, which
-  blackholes the entire mesh while peers still look perfectly reachable. The engine already spotted
-  this and told you the command to run; it now inserts the exemption itself, re-checks it whenever
-  the firewall reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it
-  on shutdown. Set `tailscale_compat = false` to go back to being told rather than fixed. Linux only.
+  dropping UnityLAN's `100.64.0.0/10` addresses on any interface that isn't its own, blackholing the
+  entire mesh while peers still look perfectly reachable. The engine already spotted this and told
+  you the command to run; it now inserts the exemption itself, re-checks it whenever the firewall
+  reconciles (Tailscale rebuilds its rules on restart, discarding it), and removes it on shutdown.
+  Name lookups needed a second exemption: a `.unity.internal` lookup goes to this machine's *own*
+  mesh address, which the kernel loops back on the loopback interface, where a rule scoped to the
+  mesh interface never applies — so the loopback path is now exempt too, scoped to just this host's
+  own address. Set `tailscale_compat = false` to be told rather than fixed. Linux only.
 - **The exposed-ports list now shows who can actually reach each port.** Every port is one row with
-  a labelled chip per scope that can reach it, instead of one look-alike row per scope; a chip whose
-  peers are all offline is marked, since the port is open but nothing can currently connect. Each
-  chip closes just that scope, and the row closes all of them.
+  a labelled chip per scope, instead of one look-alike row per scope; a chip whose peers are all
+  offline is marked. Each chip closes just that scope, and the row closes all of them.
 - **Exposing a port no longer means typing the network name.** The scope is a picker built from the
-  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and the port
-  field reports a bad value as you type instead of after you submit.
+  networks you're actually in, TCP/UDP is a toggle rather than a `udp/34197` prefix, and a bad port
+  is reported as you type instead of after you submit.
 
 ### Fixed
 
 - **Windows devices now refresh their credentials directly from peers, not only through the
-  coordinator.** The peer-direct refresh (where co-members renew each other's short-lived
-  attestations straight over the tunnel, sparing the coordinator) never worked toward a Windows
-  peer: the Windows firewall backend opened the WireGuard and beacon ports but not the peer-direct
-  port, so every such request to a Windows device was silently dropped. Those peers fell back to the
-  coordinator for every renewal (and logged repeated peer-direct failures). The port is now opened
-  on the mesh interface, matching the Linux backend.
+  coordinator.** Peer-direct refresh (co-members renewing each other's short-lived attestations over
+  the tunnel, sparing the coordinator) never worked toward a Windows peer: the Windows firewall
+  backend opened the WireGuard and beacon ports but not the peer-direct port, so every such request
+  was silently dropped and those peers fell back to the coordinator for every renewal (logging
+  repeated failures). The port is now opened on the mesh interface, matching the Linux backend.
 
-- **Peers no longer flash offline in the GUI when another member comes online.** Every mesh refresh
+- **Peers no longer flash offline in the GUI when another member comes online.** Every refresh
   rebuilt the status snapshot with all peers momentarily marked down, restoring their real state a
   beat later — invisible normally, but a member coming online triggers a burst of refreshes, so the
-  whole peer list would blink offline and back several times. The engine now carries each peer's
-  last-known liveness across the rebuild, so a steady peer stays steady. This was always cosmetic —
-  the tunnels themselves never dropped.
+  whole peer list would blink. The engine now carries each peer's last-known liveness across the
+  rebuild. Always cosmetic — the tunnels never dropped.
 
-- **A member coming online no longer floods the log with firewall churn.** When a device joined the
-  mesh, every other member would re-log an `apply_state` line and rewrite its firewall rules several
-  times a second for a few seconds — the coordinator sends each refresh's peers in a different order,
-  and the engine treated the reordering as a real membership change. It now sorts members before
-  comparing, so an unchanged membership does no work and logs nothing. This was always cosmetic —
-  the reshuffling never touched any tunnel, so existing connections were never interrupted by it.
+- **A member coming online no longer floods the log with firewall churn.** When a device joined,
+  every other member re-logged an `apply_state` line and rewrote its firewall rules several times a
+  second for a few seconds — the coordinator sends each refresh's peers in a different order, and the
+  engine treated the reordering as a real membership change. It now sorts members before comparing,
+  so unchanged membership does no work. Always cosmetic — no tunnel was touched.
 
 - **Upgrading UnityLAN on Windows wiped your config and failed the install.** Every in-place upgrade
-  (and the automatic update) deleted `engine.toml` mid-install and never put it back, so the engine
-  service couldn't be registered and the whole installer rolled back — leaving the previous version's
-  files on disk but no running service, and your coordinator/enrollment settings gone. The config now
-  lives at `%ProgramData%\UnityLAN\engine.toml`, created and owned by the engine rather than the
-  installer — so an upgrade (or uninstall) never touches it and your edits simply persist. A config
-  from an older install (which kept it next to the program files) is migrated to the new location
-  automatically. The installer also no longer fails when the config is briefly absent: it writes a
-  working default so a fresh install or a recovery always comes up with a running service. Upgrading
-  *from* a version before this fix (0.3.1 or earlier) still resets the config to the default that one
-  time — the old installer deletes its own copy on the way out, before the new engine can rescue it —
-  but the upgrade now completes and the service starts (re-enter coordinator/enrollment once via the
-  GUI); every upgrade after that keeps your edits.
+  (and the auto-update) deleted `engine.toml` mid-install and never restored it, so the service
+  couldn't be registered and the installer rolled back — leaving the old files on disk but no running
+  service, and your coordinator/enrollment settings gone. The config now lives at
+  `%ProgramData%\UnityLAN\engine.toml`, created and owned by the engine rather than the installer, so
+  an upgrade or uninstall never touches it. A config from an older install (kept next to the program
+  files) is migrated automatically, and the installer writes a working default when the config is
+  briefly absent, so a fresh install or recovery always comes up running. Upgrading *from* a pre-fix
+  version (0.3.1 or earlier) still resets the config that one time — the old installer deletes its own
+  copy before the new engine can rescue it — but the upgrade now completes and the service starts
+  (re-enter coordinator/enrollment once via the GUI); every upgrade after that keeps your edits.
 - **A Windows upgrade no longer risks wedging on the service itself.** The installer used to delete
   and recreate the engine service on every upgrade; if anything held the old service open (an open
   Services console was enough), the deletion lingered and blocked the recreate, failing the upgrade
-  and leaving no service behind. Upgrades now stop the old service and reconfigure it in place instead
-  of deleting it — so there is nothing to linger, and a failed upgrade leaves the service intact
-  rather than gone.
-- **Upgrading the Linux package now restarts the engine onto the new version.** `apt`/`dnf` upgrading
-  the `unitylan` package replaced the binary on disk but left the old one running until you restarted
-  the service or rebooted — so a fix or feature didn't take effect on its own. The upgrade now restarts
-  a running engine automatically (a first-time install, where the service isn't enabled yet, is left
-  untouched), matching the in-app auto-update. Expect a brief reconnect as the tunnel re-establishes.
-- **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On
-  Windows the engine drives the WireGuard driver directly and — unlike the reference WireGuard app —
-  never opened its own UDP listen port on the host firewall. Windows Defender then dropped every
-  inbound handshake before it reached the tunnel, so peers could see the device but never connect to
-  it, and `ctl status` reported it as `unreachable: symmetric NAT?` even when the real cause was the
-  firewall. The engine now opens the listen port automatically (while the host firewall is enabled),
-  matching what it already relies on the distro firewall to allow on Linux. If you run your own
-  firewall on a Linux host, note that it still must permit the WireGuard `listen_port` — the engine
-  only manages the Windows side. The misleading status hint now names all three possible causes
-  (NAT, a blocked UDP port, or no relay) instead of guessing at symmetric NAT.
+  with no service left behind. Upgrades now stop and reconfigure the service in place — nothing to
+  linger, and a failed upgrade leaves the service intact rather than gone.
+- **Upgrading the Linux package now restarts the engine onto the new version.** `apt`/`dnf` replaced
+  the binary on disk but left the old one running until you restarted the service or rebooted — so a
+  fix didn't take effect on its own. The upgrade now restarts a running engine automatically (a
+  first-time install, service not yet enabled, is left untouched), matching the in-app auto-update.
+  Expect a brief reconnect.
+- **A Windows device could be unreachable to the whole mesh, blamed on "symmetric NAT".** On Windows
+  the engine drives the WireGuard driver directly and — unlike the reference WireGuard app — never
+  opened its own UDP listen port on the host firewall, so Windows Defender dropped every inbound
+  handshake before it reached the tunnel: peers could see the device but never connect, and
+  `ctl status` reported `unreachable: symmetric NAT?` when the real cause was the firewall. The engine
+  now opens the listen port automatically (while the host firewall is enabled), matching what it
+  relies on the distro firewall to allow on Linux. A self-managed Linux firewall must still permit
+  the WireGuard `listen_port` — the engine only manages the Windows side. The status hint now names
+  all three possible causes (NAT, a blocked UDP port, or no relay) instead of guessing symmetric NAT.
 - **Two UnityLAN devices behind one router would fight over the same port, and one lost silently.**
-  Every device asks its router to forward port 51820 by default, but a router can forward that port
-  to only one device — so the second device's request was refused and it fell back to advertising no
-  endpoint, going unreachable to the mesh with only a single log line to show for it. When the
-  preferred port is already taken the engine now asks for the next one up (and reports the swap), so
-  a second (or third) device behind the same NAT becomes reachable without any manual port juggling.
+  Every device asks its router to forward port 51820 by default, but a router can forward it to only
+  one device — so the second's request was refused and it fell back to advertising no endpoint, going
+  unreachable with only a single log line. When the preferred port is taken the engine now asks for
+  the next one up (and reports the swap), so a second or third device behind the same NAT becomes
+  reachable without manual port juggling.
 - **One interrupted shutdown could leave the engine unable to start ever again.** If tearing down the
-  interface wedged, systemd eventually killed the engine outright, and the killed process left its
-  WireGuard control socket behind — after which every start failed with `Address already in use` and
-  the service simply restart-looped until someone deleted the file by hand. A socket with nothing
-  behind it is now recognised as the leftover it is and cleared automatically; one that is still
-  answering is left strictly alone, since that means another engine is running. Shutdown also now
-  reverts the firewall and DNS settings *before* the interface, so the changes that outlive the
-  process are undone even when that last step is what hangs, and it gives up after fifteen seconds
-  instead of holding a stop — or a reboot — for a minute and a half.
+  interface wedged, systemd eventually killed the engine, and the killed process left its WireGuard
+  control socket behind — after which every start failed with `Address already in use` and the service
+  restart-looped until someone deleted the file by hand. A socket with nothing behind it is now
+  recognised as leftover and cleared; one still answering is left strictly alone (another engine is
+  running). Shutdown also now reverts firewall and DNS settings *before* the interface, so changes
+  that outlive the process are undone even when that last step hangs, and it gives up after fifteen
+  seconds instead of holding a stop — or a reboot — for a minute and a half.
 - **Running the engine once by hand could break the service afterwards.** Doing so leaves the
-  WireGuard runtime directory owned by your user, and the service, which deliberately runs with
-  almost no privileges, then can't write there. The failure surfaced as a bare `Permission denied`
-  that made no sense for a daemon running as root; it now says which directory is wrong, who owns
-  it, and how to fix it.
+  WireGuard runtime directory owned by your user, and the near-unprivileged service then can't write
+  there. The failure surfaced as a bare `Permission denied` that made no sense for a root daemon; it
+  now says which directory is wrong, who owns it, and how to fix it.
 - **Two devices on the same network could never reach each other if the router wouldn't hairpin.**
   Both got handed the router's public address, dialed it, and the handshake quietly never landed —
-  yet status kept reporting them as `Direct`, so nothing ever escalated to ICE and there was nothing
-  in the log to explain it. A peer that never completes a handshake is now treated as stuck no
-  matter how it was reached, which both tells the truth in `ctl status` and lets ICE take over,
-  where the local addresses the two devices already share can be used directly.
+  yet status kept reporting them as `Direct`, so nothing escalated to ICE and nothing in the log
+  explained it. A peer that never completes a handshake is now treated as stuck however it was
+  reached, which both tells the truth in `ctl status` and lets ICE take over, using the local
+  addresses the two devices already share.
 - **A stalled ICE attempt hung forever instead of retrying.** Waiting on a peer that never answered,
   or a negotiation that failed outright, parked the agent silently for the life of the process — the
-  only trace was an `ice: agent started` line with nothing after it. A failed negotiation now ends
-  as soon as it fails, the agent is replaced (with a growing delay, so a peer that has actually gone
-  away isn't retried at full tilt), and the reason it gave up is logged.
-- **A connected ICE path sat unused for up to a full refresh cycle.** Once ICE found a working route
-  to a peer, nothing told the tunnel to start using it — the new path was only picked up the next
-  time the engine heard from the coordinator, which for an otherwise-idle mesh could be many minutes
-  of a peer staying unreachable after it had become reachable. The engine now notices within seconds.
+  only trace an `ice: agent started` line with nothing after it. A failed negotiation now ends as
+  soon as it fails, the agent is replaced (with a growing delay, so a peer that has actually gone away
+  isn't retried at full tilt), and the reason it gave up is logged.
+- **A connected ICE path sat unused for up to a full refresh cycle.** Once ICE found a working route,
+  nothing told the tunnel to use it — the new path was only picked up next time the engine heard from
+  the coordinator, which on an idle mesh could be many minutes. The engine now notices within seconds.
 - **A port scoped to one community's network could be reached from another community's.** Networks
   were matched by role name alone, so if two of your Discord servers each had a role with the same
   name — an `Engineering` in both — a port you opened to one was reachable by the *other* server's
-  members too. Scopes now carry the community as well as the role, and are listed and labelled as
-  `role @ community` so you can tell them apart. If you had exposed a port to a role name that
-  exists in two of your communities, that exposure now admits **nobody** until you re-open it
-  against the community you meant: the old setting cannot say which one it was, and guessing is how
-  the wrong people got in. Exposures naming a role unique to one community keep working untouched,
-  and `ctl expose <port> <role>` still takes a bare name — it resolves on its own unless the name is
-  ambiguous, in which case it now refuses and asks for `--guild`.
+  members too. Scopes now carry the community as well as the role, listed and labelled as
+  `role @ community`. If you had exposed a port to a role name that exists in two communities, that
+  exposure now admits **nobody** until you re-open it against the community you meant: the old setting
+  cannot say which one it was, and guessing is how the wrong people got in. Exposures naming a role
+  unique to one community keep working, and `ctl expose <port> <role>` still takes a bare name,
+  resolving on its own unless ambiguous, in which case it refuses and asks for `--guild`.
 
-  Networks are now identified internally by their Discord guild and role ids rather than by their
-  names, so renaming a role or a community no longer changes what a port is exposed to, and two
-  identically-named roles can never be confused. **This needs a coordinator running this release or
-  newer**: an older one doesn't send those ids, and rather than guess, the client treats such a
-  network as un-exposable — a port scoped to one stays closed until the coordinator is updated.
-  Upgrade the coordinator before, or together with, the clients.
+  Networks are now identified internally by their Discord guild and role ids rather than names, so
+  renaming a role or community no longer changes what a port is exposed to, and two identically-named
+  roles can never be confused. **This needs a coordinator running this release or newer**: an older
+  one doesn't send those ids, and the client treats such a network as un-exposable — a port scoped to
+  it stays closed until the coordinator is updated. Upgrade the coordinator before, or with, the
+  clients.
 - **A one-time enrollment key could enrol more than one device.** The coordinator checked whether a
-  key was still unused and then bound it in two separate steps, so two registrations that raced —
-  the same leaked key presented with two different device keys at once — could both slip past the
-  check and both enrol, each as a device of the key's owner. The claim is now a single atomic step,
-  so exactly one of any racing pair wins and a "one-time" key really does admit only one device.
+  key was unused and then bound it in two separate steps, so two registrations racing the same leaked
+  key with two different device keys could both slip past the check and both enrol. The claim is now a
+  single atomic step, so exactly one of any racing pair wins and a "one-time" key really does admit
+  only one device.
 - **The engine's control socket was briefly world-reachable as it started.** On Linux the socket was
-  created at the process's default permissions and only tightened to owner/group a moment later,
-  leaving a window in which any local user could connect and drive the daemon. It is now created
-  locked down from the outset, and if the tightening that opens it to the intended group ever fails
-  the socket stays private rather than falling open.
+  created at default permissions and only tightened to owner/group a moment later, leaving a window in
+  which any local user could connect and drive the daemon. It is now created locked down from the
+  outset, and if the tightening that opens it to the intended group ever fails the socket stays
+  private rather than falling open.
 - **A downgrade couldn't be forced by replaying an old update.** The engine already refused to
-  "update" to a version at or below the one it runs, but a stale, still-validly-signed release
-  offer for a version between the two could have been replayed to walk a client back onto a release
-  with a known flaw. Once the engine has seen a given release it now refuses any older one, signed
-  or not.
+  "update" to a version at or below the one it runs, but a stale, still-validly-signed offer for a
+  version between the two could be replayed to walk a client back onto a release with a known flaw.
+  Once the engine has seen a given release it now refuses any older one, signed or not.
 
 ## v0.3.1
 
