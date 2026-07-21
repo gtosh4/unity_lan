@@ -13,6 +13,10 @@
 //! - `uninstall` — stop and remove it (needs an elevated shell).
 //! - `run [config.toml]` — the SCM-invoked entry point; not for interactive use. The config path is
 //!   baked into the service's command line at install time, so users never pass it themselves.
+//! - `restart-after` — internal, not for interactive use: the post-update restart helper. After a
+//!   file-swap auto-update swaps the engine binary in place, `run_service` spawns this (detached,
+//!   running the *new* binary); it waits for the service to stop, then starts it again — the Windows
+//!   restart, leaning on the SCM as supervisor since a service can't re-exec itself the Unix way.
 //!
 //! Runtime prerequisite (as for any Windows engine run): the wireguard-nt DLL sits at
 //! `resources-windows\binaries\wireguard-amd64.dll` under the engine's install dir (defguard loads
@@ -83,6 +87,7 @@ pub fn main() -> Result<()> {
         "stop" => stop(),
         "uninstall" => uninstall(),
         "run" => run_dispatch(),
+        "restart-after" => restart_after(),
         other => anyhow::bail!(
             "unknown `service` subcommand '{other}' (use: install [config.toml], start, stop, uninstall, run)"
         ),
@@ -293,6 +298,82 @@ fn start() -> Result<()> {
     Ok(())
 }
 
+/// Post-update restart helper — spawned (detached, running the freshly-swapped binary) by
+/// [`run_service`] after a file-swap auto-update. It waits for the service to reach `Stopped` (the
+/// outgoing process is on its way out, which frees the exe and reports the terminal state), then
+/// starts it again so the SCM relaunches the service onto the new binary. Windows can't re-exec a
+/// service in place the way the Unix path does; leaning on the SCM as supervisor is the intended
+/// Windows restart. Internal — not for interactive use.
+fn restart_after() -> Result<()> {
+    // Wait for the predecessor to fully exit before starting the service. Our stdin is a pipe whose
+    // write end the old process holds open and leaks (see `spawn_restart_helper`); the OS closes it
+    // only when that process terminates, so a read to EOF is precisely "the old engine is gone". This
+    // matters: the old engine's control pipe stays bound until it exits, and its control server does
+    // not retry a failed bind — start the new engine too early and it races that pipe, leaving the
+    // GUI unable to connect until the next restart.
+    let mut sink = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager for the post-update restart")?;
+    let service = manager
+        .open_service(
+            SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::START,
+        )
+        .context("opening the service to restart it after the update")?;
+
+    // Belt-and-suspenders: also confirm the SCM sees it Stopped (the terminal state may lag the
+    // process exit by a moment) before starting it again.
+    let deadline = Instant::now() + STOP_WAIT;
+    while Instant::now() < deadline {
+        if service.query_status()?.current_state == ServiceState::Stopped {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    match service.query_status()?.current_state {
+        ServiceState::Stopped => {
+            service
+                .start::<OsString>(&[])
+                .context("starting the service onto the updated binary")?;
+            println!("Restarted service '{SERVICE_NAME}' onto the updated binary.");
+            Ok(())
+        }
+        // Don't force it: the service is registered auto-start, so it comes up on the new binary at
+        // the next boot regardless. Failing loudly here just leaves a confusing error in the log.
+        other => anyhow::bail!(
+            "service '{SERVICE_NAME}' did not stop within {}s (state {other:?}); \
+             not restarting — it will start on the new binary at the next boot",
+            STOP_WAIT.as_secs()
+        ),
+    }
+}
+
+/// Launch [`restart_after`] as a detached child running the just-swapped engine binary, so it
+/// outlives this process and starts the service back up once we've stopped. `current_exe()` resolves
+/// the install path, which the file swap has already overwritten with the new binary — so the helper,
+/// and the service it starts, are both the new version.
+fn spawn_restart_helper() -> Result<()> {
+    let exe =
+        std::env::current_exe().context("locating the engine executable for the update restart")?;
+    // Give the helper a stdin pipe and hand it the write end, which we then leak: the OS keeps it open
+    // until *this* process exits and closes it then, so the helper reads EOF exactly when we're gone —
+    // its cue that it's safe to start the service (see `restart_after`). We never write to it.
+    let mut child = std::process::Command::new(exe)
+        .args(["service", "restart-after"])
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .context("spawning the post-update restart helper")?;
+    if let Some(stdin) = child.stdin.take() {
+        std::mem::forget(stdin);
+    }
+    tracing::info!(
+        "spawned the post-update restart helper; the service will restart onto the new binary"
+    );
+    Ok(())
+}
+
 /// Stop the service but leave it registered — the upgrade counterpart to [`uninstall`]'s stop+delete.
 ///
 /// The MSI runs this while removing the *old* build during a major upgrade: stopping frees the
@@ -438,8 +519,16 @@ fn run_service() -> Result<()> {
     // Abandon such stragglers after a short grace.
     rt.shutdown_timeout(Duration::from_secs(2));
     stopped?;
-    // The service never re-execs (Windows updates via msiexec + exit), so any clean outcome is a stop.
-    result.map(|_| ())
+
+    match result? {
+        // A file-swap auto-update tore down fully and swapped the binary in place. Hand the restart to
+        // the SCM via a detached helper that waits for us to finish stopping, then starts the service
+        // onto the new binary — spawned last, right before we return and the process exits, so the exe
+        // is on its way to being free.
+        daemon::RunOutcome::RestartService => spawn_restart_helper(),
+        // A plain stop (signal, or a clean daemon exit) — nothing more to do.
+        daemon::RunOutcome::Stopped => Ok(()),
+    }
 }
 
 /// The engine service has no console, so append logs to a file next to the executable.

@@ -201,7 +201,8 @@ fn note_update(
     *pending_update.lock().unwrap() = staged;
 }
 
-/// How [`run`] ended, so `main`/`service` know whether to just exit or to re-exec.
+/// How [`run`] ended, so `main`/`service` know whether to just exit, re-exec, or hand the restart to
+/// the SCM.
 pub enum RunOutcome {
     /// Clean shutdown (signal or logout-then-interrupted) — the caller exits.
     Stopped,
@@ -209,6 +210,11 @@ pub enum RunOutcome {
     /// this plan (same PID) so the update takes effect regardless of the supervisor.
     #[cfg(unix)]
     ReExec(crate::selfupdate::ExecPlan),
+    /// A Windows file-swap update swapped the binary and the daemon tore down fully; the caller lets
+    /// the SCM restart the service onto the new binary (Windows can't re-exec a service in place, and
+    /// leaning on the SCM as supervisor is the intended Windows restart — see `service::run_service`).
+    #[cfg(windows)]
+    RestartService,
 }
 
 /// Reverse every host mutation this enrollment made — in the order that survives a SIGKILL
@@ -279,6 +285,11 @@ async fn teardown(
 }
 
 pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> {
+    // Reconcile any pending-update breadcrumb: if a prior update restarted us onto the new version,
+    // log success and clear it; if we came back up on the old version, warn that the update didn't
+    // take. A no-op on an ordinary startup (no marker).
+    crate::selfupdate::reconcile_update_marker(&cfg.state_dir);
+
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
@@ -295,9 +306,9 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = Arc::new(tokio::sync::Notify::new());
-    // Signalled by `ApplyUpdate` once a Unix update has swapped the binary: the mesh loop tears down
-    // fully and re-execs the plan left in `exec_slot`. (Windows applies via msiexec and exits.)
-    #[cfg(unix)]
+    // Signalled by `ApplyUpdate` once a file-swap update has swapped the binary: the mesh loop tears
+    // down fully, then re-execs the plan left in `exec_slot` (Unix) or returns `RestartService` so the
+    // SCM relaunches the service (Windows). The legacy Windows MSI path exits via msiexec instead.
     let restart_for_update = Arc::new(tokio::sync::Notify::new());
     #[cfg(unix)]
     let exec_slot = crate::selfupdate::exec_slot();
@@ -366,7 +377,6 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             login_done: login_done.clone(),
             state_dir: cfg.state_dir.clone(),
             pending_update: pending_update.clone(),
-            #[cfg(unix)]
             restart_for_update: restart_for_update.clone(),
             #[cfg(unix)]
             exec_slot: exec_slot.clone(),
@@ -968,13 +978,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             // Set by arms that invalidate the held request; applied after the select, since the arms
             // can't assign to `pending_refresh` while the refresh arm holds it borrowed.
             let mut drop_pending = false;
-            // The auto-update re-exec wake-up. `select!` won't take a `#[cfg]` on a branch, so the
-            // branch is unconditional and we vary its future instead: a real notify on Unix, a future
-            // that never resolves elsewhere (Windows updates via msiexec and exits, never this path).
-            #[cfg(unix)]
+            // The auto-update restart wake-up — signalled once a file-swap update has swapped the
+            // binary (Unix and Windows both; only the legacy Windows MSI path bypasses this by exiting
+            // via msiexec).
             let restart_signal = restart_for_update.notified();
-            #[cfg(not(unix))]
-            let restart_signal = std::future::pending::<()>();
             tokio::pin!(restart_signal);
             let refreshed = tokio::select! {
                 // Clean shutdown: reverse every host mutation so a stop leaves no trace — destroy the
@@ -988,18 +995,20 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     tracing::info!("shutting down");
                     return Ok(RunOutcome::Stopped);
                 }
-                // Auto-update: same full teardown as a clean shutdown, then re-exec (same PID) onto the
-                // new binary the `ApplyUpdate` task already swapped in — so the update takes effect
-                // regardless of how the engine was launched. Falls back to a clean stop if, impossibly,
-                // no plan was staged.
+                // Auto-update: same full teardown as a clean shutdown (so an update leaves no stranded
+                // interface, firewall, or resolver state — the whole reason the file-swap path replaced
+                // the old Windows hard-exit), then restart onto the binary the `ApplyUpdate` task
+                // already swapped in. Unix re-execs the staged plan (same PID); Windows hands the
+                // restart to the SCM. On Unix, falls back to a clean stop if, impossibly, no plan was
+                // staged.
                 _ = &mut restart_signal => {
+                    tracing::info!("auto-update: tearing down before restarting onto the new engine");
+                    teardown(
+                        &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
+                        backend.as_ref(), &dns_task, &p2p_task,
+                    ).await;
                     #[cfg(unix)]
                     {
-                        tracing::info!("auto-update: tearing down before re-execing onto the new engine");
-                        teardown(
-                            &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
-                            backend.as_ref(), &dns_task, &p2p_task,
-                        ).await;
                         return match exec_slot.lock().unwrap().take() {
                             Some(plan) => Ok(RunOutcome::ReExec(plan)),
                             None => {
@@ -1008,9 +1017,15 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                             }
                         };
                     }
-                    // Non-unix: `restart_signal` never resolves, so this is unreachable.
-                    #[cfg(not(unix))]
-                    unreachable!("auto-update re-exec is Unix-only");
+                    #[cfg(windows)]
+                    {
+                        return Ok(RunOutcome::RestartService);
+                    }
+                    // No auto-update artifact exists off unix/windows (`current_platform` is `None`),
+                    // so `restart_for_update` is never signalled — but keep the arm diverging like the
+                    // others so the `select!` type-checks everywhere.
+                    #[cfg(not(any(unix, windows)))]
+                    unreachable!("auto-update restart is unix/windows only");
                 }
                 // Logout: break out to the teardown path below, which un-enrolls, drops the mesh, and
                 // loops back to `'lifecycle` to re-key and await the next login.

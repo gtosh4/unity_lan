@@ -127,6 +127,49 @@ fn within_floor(state_dir: &Path, version: &str) -> bool {
     true
 }
 
+/// Breadcrumb recording the version we're restarting onto, written just before the daemon tears down
+/// to apply an update and reconciled on the next startup. The Windows file-swap path has no installer
+/// log and no e2e test, so this is its post-mortem: a swap-and-restart that silently didn't take
+/// leaves a trace instead of the mesh just quietly staying on the old version.
+fn update_marker_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("update_pending")
+}
+
+/// Record that we're about to restart onto `version`. Best-effort — a write failure only costs us the
+/// post-mortem, never the update.
+pub fn mark_update_pending(state_dir: &Path, version: &str) {
+    if let Err(e) = std::fs::write(update_marker_path(state_dir), version) {
+        tracing::warn!("could not record the pending-update marker: {e}");
+    }
+}
+
+/// Reconcile the update breadcrumb at startup. If we came up on (at least) the version it names, the
+/// update took — log it and clear the marker. If we're *still older*, the swap-and-restart didn't take
+/// effect (a failed file swap, a restart that relaunched the old binary, an MSI rollback); log a
+/// warning and leave the marker so a later successful update clears it. A no-op when absent — the
+/// normal case, every ordinary startup.
+pub fn reconcile_update_marker(state_dir: &Path) {
+    let path = update_marker_path(state_dir);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let target = contents.trim();
+    if target.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    if is_newer(target, common::VERSION) {
+        tracing::warn!(
+            target,
+            running = common::VERSION,
+            "a staged auto-update did not take effect — still on the older engine (see the update log)"
+        );
+    } else {
+        tracing::info!(target, running = common::VERSION, "auto-update completed");
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
 /// Verify the coordinator's release manifest and stage an update if one applies to us: signature
 /// valid against the **pinned** anchor, version strictly newer than ours, and an artifact for this
 /// platform. `None` in every other case (no manifest, bad signature, not newer, wrong platform) — a
@@ -189,8 +232,10 @@ pub async fn apply(artifact: &ReleaseArtifact, state_dir: &Path) -> anyhow::Resu
     apply_bytes(&bytes, state_dir)
 }
 
-/// Download the artifact, re-verify size + SHA-256 against the (signed) manifest, then launch the
-/// MSI and exit. Returns only on error; on success it never continues (see `apply_bytes`).
+/// Download the artifact, re-verify size + SHA-256 against the (signed) manifest, then apply it. For a
+/// file-swap bundle this returns `Ok(())` once the binary is swapped, and the caller signals the
+/// daemon to tear down and let the SCM restart the service onto the new binary. For a legacy MSI it
+/// launches msiexec and never returns on success (see [`apply_bytes`]).
 #[cfg(windows)]
 pub async fn apply(artifact: &ReleaseArtifact, state_dir: &Path) -> anyhow::Result<()> {
     let bytes = download_verified(artifact).await?;
@@ -240,9 +285,10 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
 ///
 /// Both, because the GUI drives the engine over a control protocol that carries no version of its
 /// own: replacing only the engine (as this used to) left an older GUI talking to a newer daemon, and
-/// a field it didn't know was a dropped connection, not a clean error. Windows solves the same skew
-/// through its MSI (which ships the new GUI, applied via `swap_in_staged_gui` when the exe is in
-/// use) — so this restores the same on-disk lockstep on Linux.
+/// a field it didn't know was a dropped connection, not a clean error. Windows's file-swap path
+/// carries the same two-binary bundle and stages the GUI the same way (`apply_bundle_swap` →
+/// `stage_gui`, promoted by the GUI's `swap_in_staged_gui` when the exe is in use) — so both platforms
+/// keep the engine and GUI in on-disk lockstep across an update.
 ///
 /// A bare (non-gzip) artifact is still accepted as the engine binary alone, so a manifest published
 /// before this change keeps applying.
@@ -279,8 +325,19 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<ExecPlan> {
     Ok(exec_plan(current_exe, argv))
 }
 
-/// The staged files extracted from an update bundle.
+/// The two binary names the update bundle carries, per platform — Windows entries keep the `.exe`
+/// suffix so the extracted files are directly runnable. Used to match archive entries by exact file
+/// name (never by an archive-supplied path — see [`unpack_bundle`]).
+#[cfg(windows)]
+const BUNDLE_ENGINE: &str = "unitylan-engine.exe";
+#[cfg(windows)]
+const BUNDLE_GUI: &str = "unitylan-gui.exe";
 #[cfg(unix)]
+const BUNDLE_ENGINE: &str = "unitylan-engine";
+#[cfg(unix)]
+const BUNDLE_GUI: &str = "unitylan-gui";
+
+/// The staged files extracted from an update bundle.
 struct Bundle {
     engine: Option<std::path::PathBuf>,
     gui: Option<std::path::PathBuf>,
@@ -289,7 +346,6 @@ struct Bundle {
 /// Extract the two known binaries from the `.tar.gz` into `state_dir`. Entries are matched by file
 /// name and everything else is ignored — so a path-traversal entry (`../../etc/passwd`) can never
 /// escape, because we never join an archive-supplied path onto the destination.
-#[cfg(unix)]
 fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
     let mut bundle = Bundle {
         engine: None,
@@ -300,8 +356,8 @@ fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
         let mut entry = entry.context("reading update archive entry")?;
         let path = entry.path().context("update archive entry path")?;
         let slot = match path.file_name().and_then(|n| n.to_str()) {
-            Some("unitylan-engine") => &mut bundle.engine,
-            Some("unitylan-gui") => &mut bundle.gui,
+            Some(n) if n == BUNDLE_ENGINE => &mut bundle.engine,
+            Some(n) if n == BUNDLE_GUI => &mut bundle.gui,
             _ => continue,
         };
         let out = state_dir.join(format!(
@@ -315,6 +371,7 @@ fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
         std::io::copy(&mut entry, &mut f)
             .with_context(|| format!("extracting {}", out.display()))?;
         drop(f);
+        #[cfg(unix)]
         make_executable(&out)?;
         *slot = Some(out);
     }
@@ -357,31 +414,103 @@ fn make_executable(path: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("chmod +x on {}", path.display()))
 }
 
-/// Windows: the artifact is the signed MSI. Write it out and launch `msiexec`; the MSI's
-/// `MajorUpgrade` tears down the old service, replaces the files (engine + DLL), re-registers
-/// the service, and starts it again (the `StartService` custom action, gated on `NOT Installed`,
-/// true for the new product on an upgrade). We run `/quiet`, so the MSI's install wizard — including
-/// the ExitDialog that would otherwise launch the GUI — is suppressed: an auto-update just swaps
-/// files and restarts the daemon, it does not pop the GUI. We `exit(0)` first so the running engine
-/// releases the service and its files before the upgrade removes them. `msiexec` is a detached
-/// child, so it survives our exit and completes the swap + relaunch on its own.
-///
-/// The GUI is the exception: if it's open, its `unitylan-gui.exe` is locked and the upgrade
-/// reboot-defers it. The MSI sidesteps that by also laying down an always-writable
-/// `unitylan-gui.new.exe`; the running GUI renames that into place and relaunches itself in-session
-/// once the user clicks "restart" (see the GUI's `swap_in_staged_gui`), so no reboot is needed.
+/// Windows apply, mirroring the Linux gzip-magic sniff: a `.tar.gz` **file-swap bundle** (the
+/// preferred, primary path) is swapped in place; anything else is treated as a legacy **MSI** and
+/// applied the old installer-driven way. Keeping the MSI fallback lets a manifest still pointing at an
+/// `.msi` keep working while the rollout to the bundle is phased (coordinator and clients upgrade on
+/// independent schedules).
 #[cfg(windows)]
 fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        apply_bundle_swap(bytes, state_dir)
+    } else {
+        apply_msi(bytes, state_dir) // never returns on success
+    }
+}
+
+/// The file-swap update, matching the Linux path: swap the engine binary in place and stage the new
+/// GUI beside it, then return so the daemon can tear down cleanly and let the SCM restart the service
+/// onto the new binary. No MSI, no `MajorUpgrade`, none of the service-reregistration machinery that
+/// made the installer-driven upgrade fragile — a routine version bump is now just a file swap.
+///
+/// Windows forbids overwriting a *running* image but permits renaming it aside, which is exactly what
+/// `self_replace` does (the same crate the Unix path uses): the old image is moved out of the way and
+/// the new bytes land at our install path, so the SCM's next start launches the new version.
+#[cfg(windows)]
+fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
+    let bundle = unpack_bundle(bytes, state_dir)?;
+    // Stage the GUI as `unitylan-gui.new.exe` beside the installed one. A running GUI's exe is locked,
+    // so we never overwrite it directly — the GUI renames this into place itself on relaunch (see the
+    // GUI's `swap_in_staged_gui`). Best-effort: a host with no GUI beside the engine still updates it.
+    if let Some(gui) = &bundle.gui {
+        match stage_gui(gui) {
+            Ok(Some(at)) => {
+                tracing::info!(path = %at.display(), "staged the new GUI for in-session swap")
+            }
+            Ok(None) => {
+                tracing::info!("no installed GUI beside the engine; updating the engine only")
+            }
+            Err(e) => tracing::warn!("could not stage the new GUI: {e:#}"),
+        }
+    }
+    let engine = bundle
+        .engine
+        .context("update bundle has no unitylan-engine.exe")?;
+    self_replace::self_replace(&engine).context("replacing the running engine binary")?;
+    let _ = std::fs::remove_file(&engine);
+    tracing::info!(
+        "engine binary swapped; the service will restart onto the new version after teardown"
+    );
+    Ok(())
+}
+
+/// Copy `staged` to `unitylan-gui.new.exe` beside the installed GUI (the same directory as the engine
+/// on Windows), returning where it landed — or `None` if no GUI is installed there, since an update
+/// must not *add* a component the operator chose not to install. The running GUI promotes the
+/// `.new.exe` to the real name itself on its next relaunch.
+#[cfg(windows)]
+fn stage_gui(staged: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    else {
+        return Ok(None);
+    };
+    if !dir.join("unitylan-gui.exe").exists() {
+        return Ok(None);
+    }
+    let target = dir.join("unitylan-gui.new.exe");
+    std::fs::copy(staged, &target)
+        .with_context(|| format!("staging the GUI to {}", target.display()))?;
+    let _ = std::fs::remove_file(staged);
+    Ok(Some(target))
+}
+
+/// Legacy MSI path: write the signed MSI and launch it, then `exit(0)` so the running engine releases
+/// the service and its files before the `MajorUpgrade` removes them. The MSI stops+reregisters+starts
+/// the service on its own; `msiexec` is a detached child that survives our exit. We run `/quiet`, so
+/// no install wizard (and no GUI-launching ExitDialog) shows — an auto-update just swaps files.
+///
+/// Unlike the file-swap path, this does **not** run the daemon's teardown (it hard-exits), which is
+/// one reason the bundle path is preferred. It stays only as the compatibility fallback. New here:
+/// `/l*v` writes a verbose install log next to the state dir — the MSI upgrade has no e2e coverage, so
+/// a silent rollback previously left nothing to diagnose.
+#[cfg(windows)]
+fn apply_msi(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     let msi = state_dir.join("unitylan-update.msi");
     std::fs::write(&msi, bytes).with_context(|| format!("writing {}", msi.display()))?;
+    let log = state_dir.join("update-msi.log");
     let msi_arg = msi
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF-8 MSI path"))?;
+    let log_arg = log
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF-8 log path"))?;
     std::process::Command::new("msiexec")
-        .args(["/i", msi_arg, "/quiet", "/norestart"])
+        .args(["/i", msi_arg, "/quiet", "/norestart", "/l*v", log_arg])
         .spawn()
         .context("launching msiexec for the update")?;
-    tracing::info!("launched msiexec; the service will restart via the MSI upgrade");
+    tracing::info!(log = %log.display(), "launched msiexec; the service will restart via the MSI upgrade");
     std::process::exit(0);
 }
 
@@ -394,7 +523,6 @@ mod tests {
     /// Names are written straight into the header rather than through `append_data`, because the
     /// `tar` builder refuses to *emit* a `..` path — and a hostile archive is exactly what we need to
     /// hand the reader here.
-    #[cfg(unix)]
     fn targz(entries: &[(&str, &[u8])]) -> Vec<u8> {
         let mut tarball = Vec::new();
         {
@@ -427,6 +555,43 @@ mod tests {
         // Both must land — replacing only the engine is the skew this bundle exists to prevent.
         assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
         assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+    }
+
+    /// Windows: the bundle carries the `.exe`-suffixed names, and `unpack_bundle` must match those
+    /// (via `BUNDLE_ENGINE`/`BUNDLE_GUI`) and stage both — the file-swap update's engine source and
+    /// GUI stage-source. A name mismatch here would silently make every Windows update a no-op.
+    #[cfg(windows)]
+    #[test]
+    fn bundle_extracts_both_windows_binaries() {
+        let dir = crate::testutil::TempDir::new("su-bundle-win");
+        let bytes = targz(&[
+            ("unitylan-engine.exe", b"ENGINE" as &[u8]),
+            ("unitylan-gui.exe", b"GUI"),
+        ]);
+        let b = unpack_bundle(&bytes, &dir).unwrap();
+        assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
+        assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+    }
+
+    /// Windows traversal guard, mirroring the Unix one: a `..` entry whose *file name* is one we accept
+    /// must land inside the destination as the staged engine, never at the archive's chosen path.
+    #[cfg(windows)]
+    #[test]
+    fn bundle_ignores_traversal_windows() {
+        let dir = crate::testutil::TempDir::new("su-traversal-win");
+        let bytes = targz(&[
+            (
+                "../../../../../../Windows/Temp/unitylan-engine.exe",
+                b"EVIL" as &[u8],
+            ),
+            ("unitylan-engine.exe", b"ENGINE"),
+        ]);
+        let b = unpack_bundle(&bytes, &dir).unwrap();
+        assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
+        assert!(
+            !std::path::Path::new(r"C:\Windows\Temp\unitylan-engine.exe").exists(),
+            "a traversal entry escaped the destination"
+        );
     }
 
     /// An archive entry naming a path outside the destination must not be able to write there. We

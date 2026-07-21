@@ -337,9 +337,14 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                 None => ControlResponse::Error("no verified update is staged".into()),
                 Some(pu) => {
                     let state_dir = ctx.state_dir.clone();
-                    // Unix: download + verify + swap the binary, then hand the daemon a re-exec plan
-                    // and signal it to tear down and relaunch onto the new version (server.rs never
-                    // exits the process itself). Windows: `apply` launches msiexec and exits.
+                    // Recorded once the swap succeeds, so the restarted engine can confirm the update
+                    // took (or warn that it didn't) — see `selfupdate::reconcile_update_marker`.
+                    let version = pu.version.clone();
+                    // Both platforms: download + verify + swap the binary, then signal the daemon to
+                    // tear down fully and restart onto the new version (server.rs never exits the
+                    // process itself). Unix re-execs the staged plan (same PID); Windows returns
+                    // `RestartService` and the SCM relaunches the service. The one exception is the
+                    // legacy Windows MSI fallback, which exits inside `apply` and never returns here.
                     #[cfg(unix)]
                     {
                         let exec_slot = ctx.exec_slot.clone();
@@ -347,6 +352,7 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                         tokio::spawn(async move {
                             match crate::selfupdate::apply(&pu.artifact, &state_dir).await {
                                 Ok(plan) => {
+                                    crate::selfupdate::mark_update_pending(&state_dir, &version);
                                     *exec_slot.lock().unwrap() = Some(plan);
                                     restart.notify_one();
                                 }
@@ -357,10 +363,17 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
                     }
                     #[cfg(windows)]
                     {
+                        let restart = ctx.restart_for_update.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = crate::selfupdate::apply(&pu.artifact, &state_dir).await
-                            {
-                                tracing::error!("auto-update failed: {e:#}");
+                            match crate::selfupdate::apply(&pu.artifact, &state_dir).await {
+                                // File-swap bundle: binary swapped in place; signal the daemon to tear
+                                // down and let the SCM restart the service onto it. (An MSI artifact
+                                // exits inside `apply` and never reaches this arm.)
+                                Ok(()) => {
+                                    crate::selfupdate::mark_update_pending(&state_dir, &version);
+                                    restart.notify_one();
+                                }
+                                Err(e) => tracing::error!("auto-update failed: {e:#}"),
                             }
                         });
                     }

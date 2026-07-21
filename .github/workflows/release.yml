@@ -60,7 +60,8 @@ jobs:
         with:
           files: packaging/dist/*
 
-  # Windows installer (.msi, x64) built with WiX. Bundles the engine service + GUI + wireguard-nt.
+  # Windows installer (.msi, x64) built with WiX — bundles the engine service + GUI + wireguard-nt —
+  # plus the .tar.gz auto-update bundle (engine + GUI) the file-swap update path consumes.
   windows:
     needs: [release]
     runs-on: windows-latest
@@ -121,7 +122,7 @@ jobs:
       - name: Checksums
         shell: pwsh
         run: |
-          Get-ChildItem packaging/dist/*.msi | ForEach-Object {
+          Get-ChildItem packaging/dist/*.msi, packaging/dist/*.tar.gz | ForEach-Object {
             "$((Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower())  $($_.Name)"
           } | Set-Content packaging/dist/SHA256SUMS-windows.txt
       - name: Attach to release
@@ -129,6 +130,7 @@ jobs:
         with:
           files: |
             packaging/dist/*.msi
+            packaging/dist/unitylan-windows-x64.tar.gz
             packaging/dist/SHA256SUMS-windows.txt
 
   # coordinator Docker image -> ghcr.io/<owner>/unitylan-coordinator

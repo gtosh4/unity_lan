@@ -120,3 +120,17 @@ wix build (Join-Path $Here 'unitylan.wxs') `
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
 
 Write-Host ">> built $Output" -ForegroundColor Green
+
+# --- auto-update bundle (.tar.gz) ---
+# The signed auto-update's file-swap path (design phase 3), mirroring the Linux tarball: the engine
+# unpacks this, swaps its own binary in place, stages the new GUI beside it, and lets the SCM restart
+# the service - no MSI MajorUpgrade. The MSI above stays for first install and manual/DLL-bump
+# upgrades; routine version bumps ship as this lightweight bundle instead. The entry names must be
+# exactly unitylan-engine.exe / unitylan-gui.exe (the engine matches archive entries on those). `tar`
+# is bsdtar, shipped with Windows 10+. Note: this carries no wireguard-nt DLL, so a release that bumps
+# the DLL must be delivered via the MSI, not a file-swap.
+$bundle = Join-Path $Root 'packaging\dist\unitylan-windows-x64.tar.gz'
+Write-Host ">> bundling auto-update tarball -> $bundle" -ForegroundColor Cyan
+tar -czf $bundle -C $bin 'unitylan-engine.exe' 'unitylan-gui.exe'
+if ($LASTEXITCODE -ne 0) { throw "tar failed to build the update bundle" }
+Write-Host ">> built $bundle" -ForegroundColor Green

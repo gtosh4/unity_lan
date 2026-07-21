@@ -39,11 +39,13 @@ pub struct Ctx {
     pub state_dir: std::path::PathBuf,
     /// The verified auto-update the daemon has staged (if any), consumed by `ApplyUpdate`.
     pub pending_update: crate::selfupdate::PendingSlot,
-    /// Signalled once a Unix update has swapped the binary — wakes the daemon's mesh loop into its
-    /// teardown + re-exec path. (Windows applies via msiexec and exits directly, so it's unused there.)
-    #[cfg(unix)]
+    /// Signalled once a file-swap update has swapped the binary — wakes the daemon's mesh loop into
+    /// its teardown + restart path. On Unix the loop re-execs the plan from `exec_slot` (same PID); on
+    /// Windows it returns `RestartService` so the SCM relaunches the service onto the new binary. (The
+    /// legacy Windows MSI path exits via msiexec instead and never signals this.)
     pub restart_for_update: Arc<Notify>,
-    /// Where the `ApplyUpdate` task stashes the re-exec plan for the daemon loop to pick up.
+    /// Where the `ApplyUpdate` task stashes the re-exec plan for the daemon loop to pick up (Unix
+    /// re-exec only; Windows restarts via the SCM and needs no plan).
     #[cfg(unix)]
     pub exec_slot: crate::selfupdate::ExecSlot,
 }

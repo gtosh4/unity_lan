@@ -54,7 +54,18 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   exit — would swap the binary and then simply stop. The engine now tears down its tunnel, firewall,
   and DNS cleanly and relaunches itself in place onto the new version, so the update completes no
   matter how the engine was started (and systemd still sees one continuously-running process, with no
-  restart gap). Windows, which updates through its MSI installer, is unchanged.
+  restart gap).
+
+- **Windows auto-updates are now a lightweight file swap instead of a full installer upgrade.**
+  Applying an update on Windows used to run the whole MSI installer over the top of itself — stopping
+  and re-registering the service, re-laying every file — which was the fragile part of the update and
+  could roll back and leave a machine wedged. The engine now downloads a small bundle, swaps its own
+  program file in place (staging the new app so an open window updates too), cleanly tears down its
+  tunnel, firewall, and DNS, and lets Windows restart the service on the new version — the same
+  swap-in-place approach Linux already uses. If anything published still points at the old `.msi`, it
+  keeps working exactly as before, now with an install log at `%ProgramData%\UnityLAN\update-msi.log`
+  for when something goes wrong. And if an update ever fails to take, the engine says so in its log on
+  the next start instead of silently staying on the old version.
 
 - **The mesh now leans on peer-to-peer attestation refresh far longer before falling back to the
   coordinator.** With peer-direct refresh (gossip) on, a peer's credential is renewed straight from

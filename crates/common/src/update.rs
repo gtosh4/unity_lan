@@ -37,8 +37,9 @@ pub fn current_platform() -> Option<Platform> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReleaseArtifact {
     pub platform: Platform,
-    /// HTTPS URL to the artifact: a raw `unitylan-engine`(+`gui`) tarball on Linux, an `.msi` on
-    /// Windows. Admin-controlled (it comes from the signed manifest), so not an SSRF vector.
+    /// HTTPS URL to the artifact: a `.tar.gz` bundle of `unitylan-engine`(+`gui`) on both Linux and
+    /// Windows (the file-swap update), or on Windows a legacy `.msi` still accepted as a fallback.
+    /// Admin-controlled (it comes from the signed manifest), so not an SSRF vector.
     pub url: String,
     /// SHA-256 of the artifact bytes, bound into the signed manifest and re-checked after download.
     pub sha256: [u8; 32],

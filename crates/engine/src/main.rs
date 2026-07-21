@@ -365,6 +365,19 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                     tracing::error!("re-exec into the updated engine failed: {err}; exiting");
                     std::process::exit(0);
                 }
+                // Windows interactive `run` (not the service): the binary was swapped in place, so
+                // relaunch it as a fresh process to land the update. (The service path hands the
+                // restart to the SCM instead — see `service::run_service`.)
+                #[cfg(windows)]
+                daemon::RunOutcome::RestartService => {
+                    let exe = std::env::current_exe()?;
+                    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+                    std::process::Command::new(exe)
+                        .args(args)
+                        .spawn()
+                        .context("relaunching the updated engine")?;
+                    Ok(())
+                }
             }
         }
         Some(Cmd::Ctl { sub }) => ctl(sub, config).await,

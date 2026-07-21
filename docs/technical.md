@@ -60,7 +60,7 @@ unitylan/
 │   │   ├── relay.rs      # embedded TURN server (ciphertext relay) + client
 │   │   ├── ping.rs      # peer reachability probing (surge-ping)
 │   │   ├── netcfg.rs · util.rs
-│   │   └── selfupdate.rs # apply signed ReleaseManifest (self-replace / MSI)
+│   │   └── selfupdate.rs # apply signed ReleaseManifest (self-replace + restart; Windows MSI fallback)
 │   └── gui/              # UNPRIVILEGED desktop app (binary) — iced
 │       ├── main.rs       # iced app (Elm) + tray; connects to engine control socket
 │       ├── ctl.rs        # control-socket client + event Subscription

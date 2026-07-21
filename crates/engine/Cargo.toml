@@ -43,16 +43,17 @@ futures = "0.3"
 semver = "1"
 ipnet = "2"
 if-addrs = "0.13"
+# In-place swap of the running engine binary on a file-swap auto-update — same crate, both platforms
+# (Windows can also fall back to an MSI artifact, applied via msiexec).
+self-replace = "1"
+# Unpack the auto-update bundle: a .tar.gz carrying the engine + GUI together so both are replaced in
+# lockstep (the engine and GUI speak an unversioned control protocol). Both Linux and Windows use it.
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.
 libc = "0.2"
-# In-place swap of the running engine binary on auto-update (the Windows path uses msiexec instead).
-self-replace = "1"
-# Unpack the auto-update bundle: the Linux artifact is a .tar.gz carrying the engine + GUI together,
-# so both are replaced in lockstep. Windows gets the same effect from the MSI's MajorUpgrade.
-tar = "0.4"
-flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

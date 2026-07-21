@@ -629,8 +629,9 @@ release plumbing, distribution docs, and a deliberate version decision — not b
 
 ### Should-fix (not blocking)
 - [ ] **Windows is compile-verified only, never run on real hardware** (wg-nt backend, NRPT resolver,
-      firewall, service, tray, MSI self-update apply). If GA claims Windows support → needs live
-      sign-off; otherwise ship **Linux-first, Windows beta**. **(needs a Windows box)**
+      firewall, service, tray, file-swap self-update apply + SCM restart, and the legacy MSI-upgrade
+      fallback). If GA claims Windows support → needs live sign-off; otherwise ship **Linux-first,
+      Windows beta**. **(needs a Windows box)**
 - [x] **Defense-in-depth: validate seed `wg_ip` against the signed `wg_net`** — `verified_seeds` now
       skips any peer whose signed `wg_ip` falls outside its signed `wg_net` (+regression test).
 - [x] **Narrow systemd `ReadWritePaths`** — engine installs to `/usr/lib/unitylan/unitylan-engine`

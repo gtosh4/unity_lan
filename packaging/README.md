@@ -142,8 +142,9 @@ matrix leg that builds via [`cross`](https://github.com/cross-rs/cross).
 
 Alongside the packages, the Linux job attaches **both** `unitylan-engine-linux-amd64` (the raw
 binary) and `unitylan-linux-amd64.tar.gz` (engine + GUI), plus a `SHA256SUMS`; the Windows job
-attaches `SHA256SUMS-windows.txt`. These feed the auto-update below — see the phased rollout there
-for which of the two to publish.
+attaches the `.msi`, the `unitylan-windows-x64.tar.gz` auto-update bundle (engine + GUI), and
+`SHA256SUMS-windows.txt`. These feed the auto-update below — see the phased rollout there for which
+artifact to publish per platform.
 
 ## Signed auto-update
 
@@ -169,6 +170,13 @@ artifact, re-checks the SHA-256 against the signed manifest, then:
 > publish the raw `unitylan-engine-linux-amd64`; engines from 0.3 on handle either. Switch the
 > `[release]` block to the bundle once every client is ≥ 0.3, which is also when the GUI starts
 > being updated in lockstep.
+>
+> **Which Windows artifact to publish (phased).** Engines *before* the file-swap path only understand
+> the `.msi`; engines from it on accept **either** (they sniff gzip magic — bundle → file-swap, else
+> → MSI). So keep publishing the `.msi` while older Windows clients remain, and switch the Windows
+> `[release]` artifact to `unitylan-windows-x64.tar.gz` once every client understands it, for the
+> lighter, more robust upgrade. One caveat: the bundle carries **no wireguard-nt DLL**, so a release
+> that bumps the DLL must be shipped as the `.msi` (which re-lays it), not the bundle.
 
 - **Linux** — unpacks the `.tar.gz`, self-replaces the engine binary
   (`/usr/lib/unitylan/unitylan-engine`, symlinked onto PATH) in place, replaces the GUI at
@@ -184,8 +192,17 @@ artifact, re-checks the SHA-256 against the signed manifest, then:
   and a bare (non-gzip) artifact is still accepted as the engine binary so manifests published
   before this change keep working. A GUI process already running when the swap happens shows a
   "relaunch to finish" notice, since replacing the file can't update a live process.
-- **Windows** — runs the signed `.msi`; its `MajorUpgrade` stops the service, replaces engine + GUI +
-  DLL, and restarts.
+- **Windows** — unpacks the `unitylan-windows-x64.tar.gz` and, mirroring Linux, self-replaces the
+  running `unitylan-engine.exe` in place and stages the new GUI beside it as `unitylan-gui.new.exe`,
+  then tears its tunnel/firewall/DNS down cleanly and lets the **SCM restart the service** onto the
+  new binary (a detached `service restart-after` helper waits for the stop, then starts it — Windows
+  can't re-exec a service in place, but the SCM is a reliable supervisor). This deliberately avoids
+  the MSI `MajorUpgrade` — no service re-registration, no DLL re-lay, none of the machinery that made
+  installer-driven upgrades fragile. A running GUI shows a "relaunch to finish" notice and promotes
+  its staged `.new.exe` itself (`swap_in_staged_gui`). For backward compatibility a **non-gzip
+  artifact is treated as a legacy `.msi`** and applied the old way (launch `msiexec /quiet`, whose
+  `MajorUpgrade` stops the service, replaces engine + GUI + DLL, and restarts) — now with an install
+  log at `%ProgramData%\UnityLAN\update-msi.log`.
 
 The coordinator only advertises a signed string (never the bytes), so this adds no data-plane load
 and keeps it off the hot path — and the artifact download itself fans out to the URL host (GitHub
@@ -290,8 +307,9 @@ and both end with the new engine binary running as the service.
 
 The **in-app auto-update** (opt-in, user-triggered from the GUI) is documented above under
 [Signed auto-update](#signed-auto-update): the engine verifies a signed manifest, the GUI shows an
-**Update** button, and applying it swaps the binary (Linux) or runs the new MSI (Windows) and
-restarts. This section is the other path — an admin upgrading the **OS package** directly.
+**Update** button, and applying it swaps the engine binary in place on **both** platforms — Linux
+re-execs it (same PID), Windows lets the SCM restart the service — with a legacy `.msi` still accepted
+on Windows. This section is the other path — an admin upgrading the **OS package** (or MSI) directly.
 
 ### Linux (`.deb` / `.rpm`)
 
@@ -321,8 +339,10 @@ msiexec /i unitylan-<newver>-x64.msi          # a MajorUpgrade over the installe
 - **Config is preserved.** `engine.toml` lives at `%ProgramData%\UnityLAN\engine.toml`, owned by the
   engine and kept out of the installer's file list, so an upgrade (or uninstall) never touches it.
 - **State is preserved** under `%ProgramData%\UnityLAN`.
-- Engine, GUI, and the wireguard-nt DLL are replaced and the daemon restarts — no reboot. A `/quiet`
-  auto-update does the same with no wizard UI.
+- Engine, GUI, and the wireguard-nt DLL are replaced and the daemon restarts — no reboot. The
+  primary in-app auto-update no longer uses this MSI path — it file-swaps the engine and restarts via
+  the SCM (see [Signed auto-update](#signed-auto-update)) — but a legacy `.msi` auto-update artifact
+  still runs this same `MajorUpgrade` silently (`/quiet`, no wizard UI).
 
 **Version skew.** Both paths update the engine *and* GUI together: the GUI↔engine control protocol
 carries no version of its own, so a newer daemon must never be left talking to an older GUI.
