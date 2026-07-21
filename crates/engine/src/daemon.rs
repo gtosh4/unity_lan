@@ -682,19 +682,25 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         // loop iteration from this device's ping-reachability of each peer. Empty until a beacon is
         // received *and* the LAN path verifies; tops endpoint precedence in `apply_seeds`.
         let mut lan_eps: HashMap<[u8; 32], SocketAddr> = HashMap::new();
+        // The host-side handles that stay fixed for this enrollment; every apply_state below reuses it.
+        let ctx = MeshCtx {
+            backend: backend.as_ref(),
+            fw: &fw,
+            zone: &zone,
+            status: &status,
+            localnet: &localnet,
+        };
         apply_state(
-            backend.as_ref(),
-            &fw,
-            &zone,
-            &status,
-            &localnet,
+            &ctx,
             &last_device,
             &last_seeds,
             &mut peers,
             coord_online,
-            &relay_eps,
-            &ice_eps,
-            &lan_eps,
+            Endpoints {
+                relay: &relay_eps,
+                ice: &ice_eps,
+                lan: &lan_eps,
+            },
         )
         .await?;
 
@@ -769,18 +775,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         "dropped peers with lapsed attestations (revocation via expiry)"
                     );
                     apply_state(
-                        backend.as_ref(),
-                        &fw,
-                        &zone,
-                        &status,
-                        &localnet,
+                        &ctx,
                         &last_device,
                         &last_seeds,
                         &mut peers,
                         coord_online,
-                        &relay_eps,
-                        &ice_eps,
-                        &lan_eps,
+                        Endpoints {
+                            relay: &relay_eps,
+                            ice: &ice_eps,
+                            lan: &lan_eps,
+                        },
                     )
                     .await?;
                 }
@@ -1071,7 +1075,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         relay_eps = sync_relays(&mut relays, &last_seeds).await;
                     }
                     apply_state(
-                        backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps, &lan_eps,
+                        &ctx, &last_device, &last_seeds, &mut peers, coord_online,
+                        Endpoints { relay: &relay_eps, ice: &ice_eps, lan: &lan_eps },
                     ).await?;
                     // The held request carries the *old* opt-out/paused state — re-issue it.
                     drop_pending = true;
@@ -1098,7 +1103,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     }
                     if ice_changed || lan_changed {
                         apply_state(
-                            backend.as_ref(), &fw, &zone, &status, &localnet, &last_device, &last_seeds, &mut peers, coord_online, &relay_eps, &ice_eps, &lan_eps,
+                            &ctx, &last_device, &last_seeds, &mut peers, coord_online,
+                            Endpoints { relay: &relay_eps, ice: &ice_eps, lan: &lan_eps },
                         ).await?;
                     }
                     None
@@ -1154,18 +1160,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                                 relay_eps = sync_relays(&mut relays, &last_seeds).await;
                             }
                             apply_state(
-                                backend.as_ref(),
-                                &fw,
-                                &zone,
-                                &status,
-                                &localnet,
+                                &ctx,
                                 &last_device,
                                 &last_seeds,
                                 &mut peers,
                                 coord_online,
-                                &relay_eps,
-                                &ice_eps,
-                                &lan_eps,
+                                Endpoints {
+                                    relay: &relay_eps,
+                                    ice: &ice_eps,
+                                    lan: &lan_eps,
+                                },
                             )
                             .await?;
                         }
@@ -1236,25 +1240,38 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     }
 }
 
+/// Host-side handles fixed for a whole enrollment — the mesh loop threads these into every
+/// `apply_state`, so its five call sites pass one context instead of five separate refs.
+struct MeshCtx<'a> {
+    backend: &'a dyn WgBackend,
+    fw: &'a Option<Arc<Firewall>>,
+    zone: &'a dns::Zone,
+    status: &'a control::Shared,
+    localnet: &'a LocalNet,
+}
+
+/// The three per-peer endpoint overlays resolved each loop iteration — relay shim, ICE shim, LAN
+/// beacon — passed together as the endpoint-precedence source for `apply_seeds`. A borrowed view:
+/// each map is still produced independently by its own subsystem (`sync_relays` / `sync_ice` /
+/// beacon); this only groups them for the consumer that always reads all three together.
+#[derive(Clone, Copy)]
+struct Endpoints<'a> {
+    relay: &'a HashMap<[u8; 32], SocketAddr>,
+    ice: &'a HashMap<[u8; 32], SocketAddr>,
+    lan: &'a HashMap<[u8; 32], SocketAddr>,
+}
+
 /// Filter the snapshot through the local opt-out set, then push it to DNS, the control socket, the
 /// firewall, and the WG backend. A peer is kept if it shares at least one *enabled* network with
 /// us; peers whose every shared network is locally disabled are dropped (both here and — once the
 /// opt-out reaches the coordinator — from its seed list too).
-// Cohesive per-refresh state application; splitting the args adds no clarity.
-#[allow(clippy::too_many_arguments)]
 async fn apply_state(
-    backend: &dyn WgBackend,
-    fw: &Option<Arc<Firewall>>,
-    zone: &dns::Zone,
-    status: &control::Shared,
-    localnet: &LocalNet,
+    ctx: &MeshCtx<'_>,
     device: &Option<SelfDevice>,
     seeds: &[SeedPeer],
     peers: &mut HashMap<[u8; 32], PeerConfig>,
     coord_online: bool,
-    relay_eps: &HashMap<[u8; 32], SocketAddr>,
-    ice_eps: &HashMap<[u8; 32], SocketAddr>,
-    lan_eps: &HashMap<[u8; 32], SocketAddr>,
+    eps: Endpoints<'_>,
 ) -> anyhow::Result<()> {
     // Fold any newly-discovered networks into the opt-out set per the local policy (secure default:
     // disable on discovery) before snapshotting, so a brand-new network doesn't peer this cycle. The
@@ -1265,18 +1282,18 @@ async fn apply_state(
             .iter()
             .map(|n| (n.guild_id, n.role_id))
             .collect();
-        if let Err(e) = localnet.reconcile_new(&present) {
+        if let Err(e) = ctx.localnet.reconcile_new(&present) {
             tracing::warn!("reconciling new networks: {e:#}");
         }
     }
-    let disabled = localnet.snapshot();
-    let blocked = localnet.blocked_snapshot();
-    let paused = localnet.is_paused();
+    let disabled = ctx.localnet.snapshot();
+    let blocked = ctx.localnet.blocked_snapshot();
+    let paused = ctx.localnet.is_paused();
     // Disconnected: bring the interface administratively down (no traffic, /32 route inactive) *and*
     // drop every peer — no mesh. Reconnect brings the link back up. The device, its uapi socket and
     // the resolver config all persist across the toggle, so this is idempotent and needs no teardown.
     // The coordinator withdraws our presence (via the `paused` flag on refresh), so co-members prune us.
-    backend.set_link_up(!paused)?;
+    ctx.backend.set_link_up(!paused)?;
     let active: Vec<SeedPeer> = match device {
         Some(dev) if !paused => filter_active(seeds, &disabled, &blocked, &dev.networks_status),
         _ => Vec::new(),
@@ -1287,23 +1304,23 @@ async fn apply_state(
     // carries `coord_online`, which can flip with no membership change.
     let mut changed = false;
     if let Some(dev) = device {
-        changed |= dns::update(zone, dev, &active).await;
+        changed |= dns::update(ctx.zone, dev, &active).await;
         control::update(
-            status,
+            ctx.status,
             dev,
             &active,
             &disabled,
             &blocked,
             !paused,
-            localnet.disable_new(),
-            localnet.peer_own_devices(),
+            ctx.localnet.disable_new(),
+            ctx.localnet.peer_own_devices(),
             coord_online,
         );
     }
-    if let Some(fw) = fw {
+    if let Some(fw) = ctx.fw {
         changed |= fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;
     }
-    changed |= apply_seeds(backend, active, peers, relay_eps, ice_eps, lan_eps)?;
+    changed |= apply_seeds(ctx.backend, active, peers, eps)?;
     if changed {
         if let Some(dev) = device {
             tracing::debug!(
@@ -1579,9 +1596,7 @@ fn apply_seeds(
     backend: &dyn WgBackend,
     seeds: Vec<SeedPeer>,
     peers: &mut HashMap<[u8; 32], PeerConfig>,
-    relay_eps: &HashMap<[u8; 32], SocketAddr>,
-    ice_eps: &HashMap<[u8; 32], SocketAddr>,
-    lan_eps: &HashMap<[u8; 32], SocketAddr>,
+    eps: Endpoints<'_>,
 ) -> anyhow::Result<bool> {
     // Aggregate this round's seeds by pubkey (a co-member may share several networks → several /32s).
     // pubkey -> (allowed /32s, endpoint); a named alias for one local adds noise.
@@ -1594,9 +1609,9 @@ fn apply_seeds(
         // else our ICE shim (userspace path, the negotiated best path — direct srflx or relay); else
         // the M5.4 relay shim (kernel path); else the punch target (reflexive) so WG handshakes toward
         // it. The shims are loopback — the daemon's ICE / TURN pump forwards through them.
-        let lan_ep = lan_eps.get(&s.pubkey).copied();
-        let ice_ep = ice_eps.get(&s.pubkey).copied();
-        let relay_ep = relay_eps.get(&s.pubkey).copied();
+        let lan_ep = eps.lan.get(&s.pubkey).copied();
+        let ice_ep = eps.ice.get(&s.pubkey).copied();
+        let relay_ep = eps.relay.get(&s.pubkey).copied();
         if s.endpoint.is_none() && ice_ep.is_none() && relay_ep.is_none() && lan_ep.is_none() {
             if let Some(p) = s.punch {
                 tracing::info!(peer = %hex8(&s.pubkey), punch = %p, "hole-punch: dialing peer reflexive");
@@ -1654,13 +1669,13 @@ fn apply_seeds(
             // ~2s recheck, and logging it every pass floods the log (the coordinator's own directly
             // dialable endpoint is the unremarkable default, so it stays unlogged).
             match peer.endpoint {
-                Some(ep) if lan_eps.get(&pubkey) == Some(&ep) => {
+                Some(ep) if eps.lan.get(&pubkey) == Some(&ep) => {
                     tracing::debug!(peer = %hex8(&pubkey), lan = %ep, "beacon: routing peer via direct LAN endpoint");
                 }
-                Some(ep) if ice_eps.get(&pubkey) == Some(&ep) => {
+                Some(ep) if eps.ice.get(&pubkey) == Some(&ep) => {
                     tracing::debug!(peer = %hex8(&pubkey), shim = %ep, "ice: routing peer via ICE shim");
                 }
-                Some(ep) if relay_eps.get(&pubkey) == Some(&ep) => {
+                Some(ep) if eps.relay.get(&pubkey) == Some(&ep) => {
                     tracing::debug!(peer = %hex8(&pubkey), shim = %ep, "relay: routing peer via TURN shim");
                 }
                 _ => {}
