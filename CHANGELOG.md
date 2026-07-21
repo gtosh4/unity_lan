@@ -3,19 +3,7 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
-
-### Security
-
-- **The coordinator now authenticates each device by its bearer token, not just its WireGuard key.**
-  A device's public key is shared with every co-member (it rides in each peer's seed), so it was
-  never a secret — yet after enrollment the coordinator would serve anyone who presented a known key
-  the full snapshot for that device (its networks, peers, trust anchors, and relay/ICE credentials)
-  and accept presence, endpoint, and relay changes in its name. Register and refresh now require the
-  device token the coordinator issued at enrollment. The client already stores that token, so nothing
-  changes for you; the switch is per-device and automatic, so a mesh keeps working through the upgrade
-  even before every client has updated — a device is only held to the token once it has presented the
-  correct one at least once. Update the coordinator to close the exposure.
+## v0.4.0
 
 ### Added
 
@@ -231,6 +219,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- **The coordinator now authenticates each device by its bearer token, not just its WireGuard key.**
+  A device's public key is shared with every co-member (it rides in each peer's seed), so it was
+  never a secret — yet after enrollment the coordinator would serve anyone who presented a known key
+  the full snapshot for that device (its networks, peers, trust anchors, and relay/ICE credentials)
+  and accept presence, endpoint, and relay changes in its name. Register and refresh now require the
+  device token the coordinator issued at enrollment. The client already stores that token, so nothing
+  changes for you; the switch is per-device and automatic, so a mesh keeps working through the upgrade
+  even before every client has updated — a device is only held to the token once it has presented the
+  correct one at least once. Update the coordinator to close the exposure.
 - **A member could no longer pull another member's device-management token.** Because a device's
   WireGuard *public* key travels in every co-member's peer list, anyone you share a network with
   already knows it — and the coordinator used to hand back a device's control token to any request
