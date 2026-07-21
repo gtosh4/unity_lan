@@ -1,11 +1,54 @@
 //! Targeted-wake registry and long-poll parking for the register/refresh long-poll.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Mutex;
 
 use crate::versions::Scope;
 
 use super::AppState;
+
+/// Admission control for held register requests. Request-rate limits do not bound concurrency: a
+/// caller can otherwise open valid long-polls faster than they expire and consume every socket.
+pub struct ParkSlots {
+    global: std::sync::Arc<tokio::sync::Semaphore>,
+    devices: std::sync::Arc<Mutex<HashSet<[u8; 32]>>>,
+}
+
+pub struct ParkPermit {
+    _global: tokio::sync::OwnedSemaphorePermit,
+    devices: std::sync::Arc<Mutex<HashSet<[u8; 32]>>>,
+    pubkey: [u8; 32],
+}
+
+impl Drop for ParkPermit {
+    fn drop(&mut self) {
+        self.devices.lock().unwrap().remove(&self.pubkey);
+    }
+}
+
+impl ParkSlots {
+    pub fn new(max: usize) -> Self {
+        Self {
+            global: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
+            devices: Default::default(),
+        }
+    }
+
+    /// At most one parked request per enrolled device, and a deployment-wide hard ceiling.
+    pub fn try_acquire(&self, pubkey: [u8; 32]) -> Option<ParkPermit> {
+        let global = self.global.clone().try_acquire_owned().ok()?;
+        let mut devices = self.devices.lock().unwrap();
+        if !devices.insert(pubkey) {
+            return None;
+        }
+        drop(devices);
+        Some(ParkPermit {
+            _global: global,
+            devices: self.devices.clone(),
+            pubkey,
+        })
+    }
+}
 
 /// Per-client targeted-wake registry (see [`AppState::wakers`]). A parked `/register` subscribes to
 /// its own pubkey; a pair-specific report *about* that pubkey bumps only its channel, waking that one
@@ -175,6 +218,20 @@ mod tests {
         // Dropping the receiver lets the next subscribe sweep the sender-only entry (no leak).
         drop(rx);
         let _rx2 = w.subscribe([1u8; 32]);
+    }
+
+    #[test]
+    fn park_slots_limit_each_device_and_global_concurrency() {
+        let slots = super::ParkSlots::new(2);
+        let a = slots.try_acquire([1; 32]).expect("first device admitted");
+        assert!(slots.try_acquire([1; 32]).is_none(), "duplicate refused");
+        let b = slots.try_acquire([2; 32]).expect("second device admitted");
+        assert!(slots.try_acquire([3; 32]).is_none(), "global cap enforced");
+        drop(a);
+        let _a2 = slots
+            .try_acquire([1; 32])
+            .expect("drop releases device slot");
+        drop(b);
     }
 
     #[test]

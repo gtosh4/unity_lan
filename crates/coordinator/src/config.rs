@@ -34,6 +34,12 @@ pub struct Config {
     /// `trusted_proxies = ["127.0.0.1/32", "::1/128"]`.
     #[serde(default)]
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Maximum number of simultaneously parked client register/refresh long-polls. This is a global
+    /// coordinator limit (independent of source IP, so reverse proxies do not collapse or bypass it),
+    /// with a separate one-active-long-poll-per-device rule. Size it below the coordinator *and*
+    /// reverse proxy's fd/memory ceilings. Default: 4096.
+    #[serde(default = "default_max_longpolls")]
+    pub max_longpolls: usize,
     /// Offline role source. Mutually exclusive with a live Discord source.
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).
@@ -79,6 +85,10 @@ pub struct Config {
 
 fn default_attestation_ttl() -> u64 {
     common::ATTESTATION_TTL_SECS
+}
+
+fn default_max_longpolls() -> usize {
+    4096
 }
 
 /// The `[admin]` block: an operator-set bearer token gating `/admin` and `/metrics`.
@@ -202,7 +212,18 @@ impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        Ok(toml::from_str(&text)?)
+        let cfg: Self = toml::from_str(&text)?;
+        if cfg.max_longpolls == 0 {
+            anyhow::bail!("max_longpolls must be at least 1");
+        }
+        if cfg.max_longpolls > tokio::sync::Semaphore::MAX_PERMITS {
+            anyhow::bail!(
+                "max_longpolls {} exceeds the implementation maximum {}",
+                cfg.max_longpolls,
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
+        Ok(cfg)
     }
 }
 
@@ -236,5 +257,21 @@ mod tests {
         assert!(parse_sha256("deadbeef").is_err()); // too short
         assert!(parse_sha256(&"zz".repeat(32)).is_err()); // non-hex
         assert!(parse_sha256(&"ab".repeat(32)).is_ok()); // exactly 64 hex chars
+    }
+
+    #[test]
+    fn max_longpolls_defaults_and_zero_is_rejected() {
+        let base = "bind = '127.0.0.1:8080'\ndatabase = 'test.db'\n";
+        let cfg: Config = toml::from_str(base).unwrap();
+        assert_eq!(cfg.max_longpolls, 4096);
+
+        let path = std::env::temp_dir().join(format!(
+            "unitylan-zero-longpolls-{}.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, format!("{base}max_longpolls = 0\n")).unwrap();
+        let err = Config::load(&path).unwrap_err();
+        let _ = std::fs::remove_file(path);
+        assert!(err.to_string().contains("max_longpolls must be at least 1"));
     }
 }

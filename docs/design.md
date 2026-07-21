@@ -487,10 +487,10 @@ engine via its control socket (no privilege in the front-ends):
   keystore where available, else `0600` operator-owned files.
 - **Coordinator abuse controls.** First enrollment requires Discord OAuth or a short-lived,
   single-use enrollment key. Enrolled devices receive a bearer token and send it on every
-  register/refresh; after its first valid presentation, a per-device migration ratchet rejects
-  missing or invalid tokens. Pre-device-auth clients remain temporarily pubkey-only until that
-  ratchet closes. Independent per-source-IP and deployment-global request caps bound floods and
-  long-poll slot exhaustion; the limiter is not per identity.
+  register/refresh; missing or invalid tokens are rejected for every enrolled device. Legacy rows
+  without a token must re-enroll rather than falling back to their public WireGuard key. Independent
+  request-rate caps plus a global held-request ceiling and one active long-poll per device bound
+  floods and long-poll slot exhaustion.
 - **Data minimization.** A compromise or subpoena yields only what the coordinator retains — the
   membership graph + allocations, a **short-TTL** soft endpoint cache, and the presence table. **No
   traffic, no private keys.** Retention windows are kept tight so the leak-on-compromise set stays

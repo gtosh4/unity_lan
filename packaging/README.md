@@ -121,7 +121,10 @@ volumes:
 
 **4. TLS / reverse proxy.** The coordinator speaks plain HTTP; front it with a reverse proxy
 (Caddy / nginx / Traefik) terminating TLS on 443 and proxying to `:8080`. Engines pin the anchor,
-but clients still reach the control API over the network — run it behind HTTPS in production.
+but clients still reach the control API over the network — run it behind HTTPS in production. Set
+`trusted_proxies` to the proxy's actual source CIDR so per-IP rate limits use the real client, keep
+the proxy read timeout above the long-poll hold, and size both services' fd limits above
+`max_longpolls` (default 4096); see `docs/coordinator-setup.md`.
 
 **5. Publish an auto-update release** (optional): fill the `[release]` block (see
 [Signed auto-update](#signed-auto-update)) and hot-reload without downtime —

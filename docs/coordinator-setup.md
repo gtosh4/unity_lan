@@ -118,8 +118,8 @@ For the optional monitoring surface (`[admin]` block → dashboard + Prometheus 
 
 ## Behind a reverse proxy (TLS termination)
 
-The coordinator speaks plain HTTP, so a real deployment fronts it with Caddy/nginx for TLS. Two
-things need attention — both are silent failures, not startup errors.
+The coordinator speaks plain HTTP, so a real deployment fronts it with Caddy/nginx for TLS. Three
+things need attention.
 
 **1. Tell the coordinator about the proxy.** The rate limiter buckets by source IP. A same-host proxy
 makes every request arrive from loopback, so *all* your clients share one bucket and the 30 req/s
@@ -170,7 +170,20 @@ keep headroom.
 
 **3. The proxy has its own fd and memory limits.** It holds a connection per device just as the
 coordinator does, so its `LimitNOFILE` matters equally (Caddy's packaged systemd unit already sets a
-high one). Budget its memory alongside the coordinator's ~48 KB/device when sizing the instance.
+high one). Budget its memory alongside the coordinator's ~50 KB/device measured by
+`scripts/coordinator-scale-test.sh`. Set the coordinator's explicit admission ceiling to fit both
+processes:
+
+```toml
+max_longpolls = 4096 # default; must be at least 1
+```
+
+This limit is deployment-global and keyed additionally by authenticated device (one parked request
+per device), not by transport source IP. A reverse proxy therefore neither collapses all clients into
+one concurrency slot nor lets forged forwarding headers bypass the ceiling. `trusted_proxies` affects
+only the per-IP request-rate bucket and coordinator-observed source address. Keep the coordinator and
+proxy open-file limits above `max_longpolls`, with headroom for ordinary requests, SQLite, Discord,
+metrics, and listening sockets. If the ceiling is full, a new park receives `429` and retries normally.
 
 ---
 

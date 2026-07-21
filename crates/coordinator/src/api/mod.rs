@@ -26,8 +26,8 @@ mod wake;
 
 use admin::{admin_dashboard, admin_graph, admin_metrics, admin_stats};
 use ratelimit::{rate_limit, RateLimitState};
-pub use wake::Wakers;
 use wake::{wait_park, wake_jitter, Woke};
+pub use wake::{ParkSlots, Wakers};
 
 use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
@@ -51,6 +51,8 @@ pub struct AppState {
     /// config). A client refreshes its own attestation when its poll returns, so this bounds how stale
     /// a served attestation can get — it must stay below the attestation TTL.
     pub longpoll_hold_secs: u64,
+    /// Hard concurrency ceiling plus one-active-poll-per-device admission.
+    pub park_slots: Arc<ParkSlots>,
     pub roles: Arc<dyn RoleSource>,
     pub store: Arc<Store>,
     pub presence: Arc<Presence>,
@@ -206,6 +208,12 @@ async fn register(
     // loop — exactly as the old global bump made it — but now without waking the herd; the affected
     // peer is woken by a targeted wake instead.
     if !built.caller_changed && req.since == Some(built.resp.version) {
+        let _park_permit = st.park_slots.try_acquire(req.wg_pubkey).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "a long-poll is already active for this device, or the server is at capacity",
+            )
+        })?;
         // Free the snapshot *before* parking. We hold this request for minutes and rebuild on wake
         // anyway, so keeping its `seeds` alive would pin one full peer list per parked client —
         // O(clients × peers) bytes across the deployment, for data we already decided not to send.
@@ -436,6 +444,48 @@ fn record_peer_reports(
     }
 }
 
+const MAX_PEER_REPORTS: usize = 256;
+const MAX_ICE_REPORTS: usize = 128;
+const MAX_ICE_CANDIDATES: usize = 16;
+const MAX_ICE_CREDENTIAL_BYTES: usize = 256;
+const MAX_ICE_CANDIDATE_BYTES: usize = 512;
+const MAX_RELAY_SECRET_BYTES: usize = 256;
+
+/// Bound all attacker-controlled collections and strings before cloning them into persistent NAT
+/// tables. The HTTP body cap alone is insufficient because reports accumulate across requests.
+fn validate_peer_reports(req: &RegisterReq) -> Result<(), ApiError> {
+    let bad = |m| ApiError::new(StatusCode::BAD_REQUEST, m);
+    if req.observed.len() > MAX_PEER_REPORTS
+        || req.need_relay.len() > MAX_PEER_REPORTS
+        || req.relay_allocated.len() > MAX_PEER_REPORTS
+    {
+        return Err(bad("too many peer reports"));
+    }
+    if req.ice.len() > MAX_ICE_REPORTS {
+        return Err(bad("too many ICE reports"));
+    }
+    if req
+        .relay_secret
+        .as_ref()
+        .is_some_and(|s| s.len() > MAX_RELAY_SECRET_BYTES)
+    {
+        return Err(bad("relay secret is too long"));
+    }
+    for e in &req.ice {
+        if e.params.ufrag.len() > MAX_ICE_CREDENTIAL_BYTES
+            || e.params.pwd.len() > MAX_ICE_CREDENTIAL_BYTES
+            || e.params.candidates.len() > MAX_ICE_CANDIDATES
+            || e.params
+                .candidates
+                .iter()
+                .any(|c| c.len() > MAX_ICE_CANDIDATE_BYTES)
+        {
+            return Err(bad("ICE parameters exceed the allowed limits"));
+        }
+    }
+    Ok(())
+}
+
 /// One trust anchor per guild the caller participates in (covers every peer's guild too, since shared
 /// guilds are a subset). The client pins each independently and re-pins via its chain.
 async fn build_anchors(
@@ -481,6 +531,7 @@ async fn build_snapshot(
     req: &RegisterReq,
     caller_ip: std::net::IpAddr,
 ) -> Result<Built, ApiError> {
+    validate_peer_reports(req)?;
     let (user_id, already_enrolled) = resolve_user(st, req).await?;
     // Record where this device connects from (as the coordinator sees it), so a peer's reflexive
     // report about it can be validated against its real source address (see `accepted_reflexives`).
@@ -1091,42 +1142,29 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), A
     Ok((uid, false))
 }
 
-/// The device-auth decision for an already-enrolled register/refresh, factored out of I/O so it can
-/// be tested exhaustively. `stored` is the device's bearer token (if the row has one), `proven` is
-/// whether the device has ever presented that token before, and `presented` is what this request
-/// carried.
-///
-/// A correct token always admits the request and — the first time — ratchets the device into
-/// enforced mode. A wrong or missing token is rejected *only* once the device is proven; before
-/// that (a client built before device auth, or a row from before the token column) it is admitted
-/// pubkey-only, the migration grace. Because only a *valid* token ratchets, an attacker who merely
-/// learned the pubkey can neither pass nor flip the ratchet against the victim; the grace window for
-/// a given device closes the first time its real client refreshes.
-fn decide_device_auth(stored: Option<&str>, proven: bool, presented: Option<&str>) -> AuthOutcome {
+/// Device-auth decision for an already-enrolled register/refresh. Only the bearer token admits the
+/// request; a public WireGuard key and legacy tokenless rows fail closed.
+fn decide_device_auth(stored: Option<&str>, presented: Option<&str>) -> AuthOutcome {
     let valid = matches!((stored, presented), (Some(s), Some(p)) if common::crypto::ct_eq(s.as_bytes(), p.as_bytes()));
     if valid {
-        AuthOutcome::Admit { ratchet: !proven }
-    } else if proven {
-        AuthOutcome::Reject
+        AuthOutcome::Admit
     } else {
-        AuthOutcome::Admit { ratchet: false }
+        AuthOutcome::Reject
     }
 }
 
 enum AuthOutcome {
-    /// Serve the request; `ratchet` = flip the device into enforced mode (first valid token).
-    Admit { ratchet: bool },
-    /// A proven device presented a wrong/absent token — an impostor or a downgrade attempt.
+    Admit,
     Reject,
 }
 
-/// Enforce device-bearer auth on an already-enrolled register/refresh (see [`decide_device_auth`]).
+/// Enforce device-bearer auth on every already-enrolled register/refresh.
 /// Without it, anyone who learned a victim's WG pubkey — which rides in every co-member's seed —
 /// could pull the victim's snapshot and forge its presence/endpoint/relay/ICE state.
 async fn authenticate_enrolled(st: &AppState, req: &RegisterReq) -> Result<(), ApiError> {
     // The row can vanish between `device_owner` and here (concurrent remove); treat that as
     // not-our-concern and let the rebuild handle it, rather than 401-ing a benign race.
-    let Some((stored, proven)) = st
+    let Some(stored) = st
         .store
         .device_auth(&req.wg_pubkey)
         .await
@@ -1134,16 +1172,8 @@ async fn authenticate_enrolled(st: &AppState, req: &RegisterReq) -> Result<(), A
     else {
         return Ok(());
     };
-    match decide_device_auth(stored.as_deref(), proven, req.device_token.as_deref()) {
-        AuthOutcome::Admit { ratchet } => {
-            if ratchet {
-                st.store
-                    .mark_token_proven(&req.wg_pubkey)
-                    .await
-                    .map_err(internal)?;
-            }
-            Ok(())
-        }
+    match decide_device_auth(stored.as_deref(), req.device_token.as_deref()) {
+        AuthOutcome::Admit => Ok(()),
         AuthOutcome::Reject => Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "device token missing or invalid",
@@ -1293,9 +1323,9 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::{
         accepted_reflexives, decide_device_auth, negotiate, punch_target, relay_target,
-        should_supersede, AuthOutcome, RelayReg, StatusCode,
+        should_supersede, validate_peer_reports, AuthOutcome, RelayReg, StatusCode,
     };
-    use common::api::{ObservedEndpoint, RegisterReq, SharedNetwork};
+    use common::api::{IceEndpoint, IceParams, ObservedEndpoint, RegisterReq, SharedNetwork};
 
     fn addr(s: &str) -> std::net::SocketAddr {
         s.parse().unwrap()
@@ -1359,42 +1389,41 @@ mod tests {
     }
 
     #[test]
-    fn device_auth_ratchets_then_enforces() {
-        let admit = |o| matches!(o, AuthOutcome::Admit { .. });
-        let ratchets = |o| matches!(o, AuthOutcome::Admit { ratchet: true });
+    fn device_auth_always_requires_the_bearer_token() {
+        let admit = |o| matches!(o, AuthOutcome::Admit);
         let rejects = |o| matches!(o, AuthOutcome::Reject);
 
-        // First correct token: admitted *and* ratchets the device into enforced mode.
-        assert!(ratchets(decide_device_auth(
-            Some("tok"),
-            false,
-            Some("tok")
-        )));
-        // Correct token again once proven: admitted, no further ratchet.
-        let o = decide_device_auth(Some("tok"), true, Some("tok"));
-        assert!(admit(o) && !ratchets(decide_device_auth(Some("tok"), true, Some("tok"))));
+        // A correct bearer token admits the enrolled device.
+        assert!(admit(decide_device_auth(Some("tok"), Some("tok"))));
 
-        // Proven device, wrong or missing token → rejected (impostor / downgrade).
-        assert!(rejects(decide_device_auth(
-            Some("tok"),
-            true,
-            Some("wrong")
-        )));
-        assert!(rejects(decide_device_auth(Some("tok"), true, None)));
+        // Wrong, absent, and legacy missing tokens all fail closed. A public WG key is never auth.
+        assert!(rejects(decide_device_auth(Some("tok"), Some("wrong"))));
+        assert!(rejects(decide_device_auth(Some("tok"), None)));
+        assert!(rejects(decide_device_auth(None, Some("anything"))));
+    }
 
-        // Migration grace: a device that has never proven a token is served pubkey-only, and a
-        // pubkey-only request must NOT ratchet — else an attacker could flip the device and lock
-        // the victim out. Only a valid token ratchets.
-        assert!(admit(decide_device_auth(Some("tok"), false, None)));
-        assert!(!ratchets(decide_device_auth(Some("tok"), false, None)));
-        assert!(!ratchets(decide_device_auth(
-            Some("tok"),
-            false,
-            Some("wrong")
-        )));
-        // Legacy row with no stored token: also grace, never ratchets on a bogus token.
-        assert!(admit(decide_device_auth(None, false, Some("anything"))));
-        assert!(!ratchets(decide_device_auth(None, false, Some("anything"))));
+    #[test]
+    fn peer_report_sizes_fail_closed() {
+        let mut req = req_speaking(r#""proto":5,"proto_min":4"#);
+        req.relay_secret = Some("x".repeat(super::MAX_RELAY_SECRET_BYTES + 1));
+        assert_eq!(
+            validate_peer_reports(&req).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
+
+        req.relay_secret = None;
+        req.ice.push(IceEndpoint {
+            peer: [1; 32],
+            params: IceParams {
+                ufrag: "u".into(),
+                pwd: "p".into(),
+                candidates: vec!["x".repeat(super::MAX_ICE_CANDIDATE_BYTES + 1)],
+            },
+        });
+        assert_eq!(
+            validate_peer_reports(&req).unwrap_err().status,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     fn reg(s: &str) -> RelayReg {

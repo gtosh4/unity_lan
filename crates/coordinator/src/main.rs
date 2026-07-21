@@ -112,6 +112,10 @@ async fn main() -> anyhow::Result<()> {
         };
     let cfg = Config::load(std::path::Path::new(&config_path))
         .with_context(|| format!("loading config {config_path}"))?;
+    tracing::info!(
+        max_longpolls = cfg.max_longpolls,
+        "client long-poll admission configured"
+    );
 
     raise_fd_limit();
 
@@ -250,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
         // Hold a renewal long-poll ≈ half the attestation TTL, so a client's own attestation is
         // refreshed (on poll return) well before it expires.
         longpoll_hold_secs: (cfg.attestation_ttl_secs / 2).max(1),
+        park_slots: Arc::new(api::ParkSlots::new(cfg.max_longpolls)),
         roles,
         store,
         presence,

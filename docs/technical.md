@@ -518,11 +518,9 @@ semantics. Local `disabled_networks` / block-peer let the client narrow this fur
 - Client secrets (WG privkey, OAuth token, pinned anchors) stored under OS protection / `0600`.
 - First enrollment is authenticated by Discord OAuth or a ≥128-bit, short-expiry, single-use
   enrollment key. The coordinator then issues a random device bearer token; the engine stores it
-  with the WireGuard private key and sends it on every register/refresh. Once a device has presented
-  the token successfully, the coordinator ratchets that device into enforced mode and rejects a
-  missing or wrong token. Devices enrolled by clients predating device auth retain a temporary
-  pubkey-only migration grace until their real client first presents its token; a public WireGuard
-  key is an identifier, never treated as a secret for newly proven devices.
+  with the WireGuard private key and sends it on every register/refresh. The coordinator rejects a
+  missing or wrong token for every enrolled device; legacy rows without tokens must re-enroll. A
+  public WireGuard key is an identifier and is never treated as an authentication secret.
 
 ## 8. Open Technical Questions / Gaps vs design.md
 

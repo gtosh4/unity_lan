@@ -163,9 +163,8 @@ impl Store {
         let _ = sqlx::query("ALTER TABLE devices ADD COLUMN token TEXT")
             .execute(&self.pool)
             .await;
-        // Per-device ratchet: set once the device has proven it holds its bearer token, after which
-        // register/refresh requires the token (device auth). Migrates each device independently — a
-        // client built before device auth is served pubkey-only until it first presents the token.
+        // Retain the historical ratchet column for schema compatibility. Current releases require a
+        // valid token for every enrolled row and deliberately ignore this former grace flag.
         let _ =
             sqlx::query("ALTER TABLE devices ADD COLUMN token_proven INTEGER NOT NULL DEFAULT 0")
                 .execute(&self.pool)
@@ -491,31 +490,16 @@ impl Store {
         Ok(Some(tok))
     }
 
-    /// A device's stored bearer token (if any) and whether it has proven it holds it — the inputs to
-    /// the post-enrollment device-auth check. `None` when no device row exists for the pubkey. Unlike
+    /// A device's stored bearer token. The outer `None` means no device row; the inner `None` is a
+    /// legacy row that must re-enroll. Unlike
     /// [`Store::device_token`] this never mints a token: verification must not create one.
-    pub async fn device_auth(
-        &self,
-        pubkey: &[u8; 32],
-    ) -> anyhow::Result<Option<(Option<String>, bool)>> {
-        let row = sqlx::query("SELECT token, token_proven FROM devices WHERE pubkey = ?")
+    pub async fn device_auth(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<Option<String>>> {
+        let row = sqlx::query("SELECT token FROM devices WHERE pubkey = ?")
             .bind(pubkey.as_slice())
             .fetch_optional(&self.pool)
             .await?;
         let Some(row) = row else { return Ok(None) };
-        let token: Option<String> = row.try_get("token")?;
-        let proven = row.try_get::<i64, _>("token_proven")? != 0;
-        Ok(Some((token, proven)))
-    }
-
-    /// Ratchet a device into enforced mode: it has presented the correct bearer token, so every later
-    /// register/refresh must too. Idempotent.
-    pub async fn mark_token_proven(&self, pubkey: &[u8; 32]) -> anyhow::Result<()> {
-        sqlx::query("UPDATE devices SET token_proven = 1 WHERE pubkey = ?")
-            .bind(pubkey.as_slice())
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        Ok(Some(row.try_get("token")?))
     }
 
     /// Resolve a bearer token to (user_id, device pubkey).
@@ -859,22 +843,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_auth_reports_token_and_ratchet() {
+    async fn device_auth_reports_token_and_rejectable_legacy_rows() {
         let st = Store::memory().await;
         let a = [7u8; 32];
         st.allocate_device(tnet(), &a, 5, "laptop").await.unwrap();
 
-        // A freshly enrolled device has a token (minted on first read) and is not yet proven.
+        // A freshly enrolled device has a token (minted on first read).
         let tok = st.device_token(&a).await.unwrap().unwrap();
-        let (stored, proven) = st.device_auth(&a).await.unwrap().unwrap();
+        let stored = st.device_auth(&a).await.unwrap().unwrap();
         assert_eq!(stored.as_deref(), Some(tok.as_str()));
-        assert!(!proven, "new device starts unproven (migration grace)");
-
-        // Ratcheting sets the flag; device_auth reflects it, token unchanged.
-        st.mark_token_proven(&a).await.unwrap();
-        let (stored, proven) = st.device_auth(&a).await.unwrap().unwrap();
-        assert_eq!(stored.as_deref(), Some(tok.as_str()));
-        assert!(proven);
 
         // No such device → None.
         assert!(st.device_auth(&[9u8; 32]).await.unwrap().is_none());
