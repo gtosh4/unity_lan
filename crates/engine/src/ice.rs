@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,6 +67,22 @@ pub struct IceManager {
     failures: HashMap<[u8; 32], (u32, std::time::Instant)>,
 }
 
+/// One ICE agent's lifecycle. Replaces the former `failed: AtomicBool` + `shim: Option<SocketAddr>`
+/// flag pair, which between them encoded exactly these three states. Reading the two in the wrong
+/// order (shim before failed) would treat a just-failed agent as connected, so `ensure` had to check
+/// `failed` first; folding them into one enum makes `Failed` win by construction instead — it is
+/// terminal and sticky (a connect can't overwrite it), so the transition order no longer matters.
+enum IceState {
+    /// Gathering / running checks — no validated candidate pair yet.
+    Negotiating,
+    /// A pair validated; `127.0.0.1:<port>` is boringtun's shim, set as the peer's WG endpoint.
+    Connected(SocketAddr),
+    /// Terminal: negotiation failed, timed out, or the peer never offered. The session is dead —
+    /// `ensure` drops it so the next refresh starts a fresh agent with fresh credentials, which is
+    /// what an ICE restart is.
+    Failed,
+}
+
 struct IceSession {
     /// Our ICE credentials (fixed for the agent's life) — reported to the coordinator as our offer.
     ufrag: String,
@@ -76,20 +91,16 @@ struct IceSession {
     local_candidates: Arc<Mutex<Vec<String>>>,
     /// Pushes the latest remote params to the connect + candidate-adder tasks.
     remote_tx: watch::Sender<Option<IceParams>>,
-    /// `127.0.0.1:<port>` boringtun sends to once connected (set as the peer's WG endpoint); `None`
-    /// until the ICE agent has selected a working candidate pair.
-    shim: Arc<Mutex<Option<SocketAddr>>>,
-    /// Set when this agent reached a terminal state (negotiation failed, timed out, or the peer never
-    /// offered). The session is then dead — `ensure` drops it so the next refresh starts a fresh
-    /// agent with fresh credentials, which is what an ICE restart is.
-    failed: Arc<AtomicBool>,
+    /// The agent's lifecycle, written by the state-change callback and the connect task, read by
+    /// `ensure`/`is_connected`.
+    state: Arc<Mutex<IceState>>,
     tasks: Vec<JoinHandle<()>>,
 }
 
 impl IceSession {
     /// Whether this agent hit a terminal state and should be replaced.
     fn is_failed(&self) -> bool {
-        self.failed.load(Ordering::Relaxed)
+        matches!(*self.state.lock().unwrap(), IceState::Failed)
     }
 }
 
@@ -157,7 +168,10 @@ impl IceManager {
         }
         let s = &self.sessions[&peer];
         let _ = s.remote_tx.send(cfg.remote); // ignore: a closed receiver means the task died
-        let shim = *s.shim.lock().unwrap();
+        let shim = match *s.state.lock().unwrap() {
+            IceState::Connected(addr) => Some(addr),
+            _ => None,
+        };
         if shim.is_some() {
             self.failures.remove(&peer); // connected: the next failure starts from the shortest wait
         }
@@ -183,7 +197,7 @@ impl IceManager {
     pub fn is_connected(&self, peer: &[u8; 32]) -> bool {
         self.sessions
             .get(peer)
-            .is_some_and(|s| s.shim.lock().unwrap().is_some())
+            .is_some_and(|s| matches!(*s.state.lock().unwrap(), IceState::Connected(_)))
     }
 
     /// Our ICE offers to report to the coordinator (the candidate-exchange half). Candidates grow as
@@ -255,7 +269,7 @@ impl IceSession {
             .context("creating ICE agent")?,
         );
 
-        let failed = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(IceState::Negotiating));
 
         // The cancel sender must outlive dial/accept: they select on `cancel_rx.recv()`, which
         // resolves (→ cancel) the instant its sender drops. Parked here so the state-change handler
@@ -269,13 +283,13 @@ impl IceSession {
         // dropping the cancel sender here is what actually unblocks the connect task.
         {
             let peer_hex = peer_hex.clone();
-            let failed = failed.clone();
+            let state = state.clone();
             let cancel_tx = cancel_tx.clone();
             agent.on_connection_state_change(Box::new(move |st| {
                 tracing::debug!(peer = %peer_hex, state = %st, "ice: connection state");
                 if st == ConnectionState::Failed {
                     tracing::warn!(peer = %peer_hex, "ice: negotiation failed — no usable candidate pair");
-                    failed.store(true, Ordering::Relaxed);
+                    *state.lock().unwrap() = IceState::Failed; // unconditional: Failed always wins
                     cancel_tx.lock().unwrap().take(); // dropped → dial/accept returns
                 }
                 Box::pin(async {})
@@ -301,7 +315,6 @@ impl IceSession {
             .context("gathering ICE candidates")?;
 
         let (remote_tx, remote_rx) = watch::channel(cfg.remote.clone());
-        let shim = Arc::new(Mutex::new(None));
 
         // Candidate-adder: feed the peer's candidates into the agent as they trickle in over refreshes.
         let adder = {
@@ -333,10 +346,9 @@ impl IceSession {
         // Connect + pump: wait for the peer's credentials, run checks, then bridge boringtun↔Conn.
         let connect = {
             let agent = agent.clone();
-            let shim_slot = shim.clone();
+            let state = state.clone();
             let mut rx = remote_rx;
             let controlling = cfg.controlling;
-            let failed = failed.clone();
             let peer_hex = peer_hex.clone();
             tokio::spawn(async move {
                 // Mark the session dead on every early return, so `ensure` restarts it rather than
@@ -357,7 +369,7 @@ impl IceSession {
                 let (rufrag, rpwd) = match creds {
                     Ok(Some(c)) => c,
                     Ok(None) => {
-                        failed.store(true, Ordering::Relaxed);
+                        *state.lock().unwrap() = IceState::Failed;
                         return; // session dropped
                     }
                     Err(_) => {
@@ -367,7 +379,7 @@ impl IceSession {
                              WireGuard backend, have ice disabled, or not consider us stuck",
                             OFFER_WAIT.as_secs()
                         );
-                        failed.store(true, Ordering::Relaxed);
+                        *state.lock().unwrap() = IceState::Failed;
                         return;
                     }
                 };
@@ -392,7 +404,7 @@ impl IceSession {
                     Ok(Ok(c)) => c,
                     Ok(Err(e)) => {
                         tracing::warn!(peer = %peer_hex, controlling, "ice: negotiation failed ({e})");
-                        failed.store(true, Ordering::Relaxed);
+                        *state.lock().unwrap() = IceState::Failed;
                         return;
                     }
                     Err(_) => {
@@ -401,7 +413,7 @@ impl IceSession {
                             "ice: no candidate pair validated within {}s — giving up on this agent",
                             NEGOTIATE_TIMEOUT.as_secs()
                         );
-                        failed.store(true, Ordering::Relaxed);
+                        *state.lock().unwrap() = IceState::Failed;
                         return;
                     }
                 };
@@ -410,15 +422,24 @@ impl IceSession {
                     Ok(s) => Arc::new(s),
                     Err(e) => {
                         tracing::warn!(peer = %peer_hex, "ice: shim bind failed ({e})");
-                        failed.store(true, Ordering::Relaxed);
+                        *state.lock().unwrap() = IceState::Failed;
                         return;
                     }
                 };
                 let Ok(shim_addr) = shim.local_addr() else {
-                    failed.store(true, Ordering::Relaxed);
+                    *state.lock().unwrap() = IceState::Failed;
                     return;
                 };
-                *shim_slot.lock().unwrap() = Some(shim_addr);
+                {
+                    // Publish the connected shim — but only if a concurrent `Failed` (the state-change
+                    // callback firing as the pair dies) hasn't already won: Failed is terminal, so we
+                    // don't resurrect it, and there's no point pumping a session `ensure` will drop.
+                    let mut st = state.lock().unwrap();
+                    if matches!(*st, IceState::Failed) {
+                        return;
+                    }
+                    *st = IceState::Connected(shim_addr);
+                }
                 tracing::info!(peer = %peer_hex, %shim_addr, "ice: connected — routing peer via ICE");
 
                 let mut bt: Option<SocketAddr> = None; // boringtun's source, learned on first packet
@@ -447,8 +468,7 @@ impl IceSession {
             pwd,
             local_candidates,
             remote_tx,
-            shim,
-            failed,
+            state,
             tasks: vec![adder, connect],
         })
     }
