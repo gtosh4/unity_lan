@@ -1066,6 +1066,7 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), A
         .await
         .map_err(internal)?
     {
+        authenticate_enrolled(st, req).await?;
         return Ok((uid, true));
     }
     if let Some(uid) = st
@@ -1088,6 +1089,66 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), A
         .await
         .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, e.to_string()))?;
     Ok((uid, false))
+}
+
+/// The device-auth decision for an already-enrolled register/refresh, factored out of I/O so it can
+/// be tested exhaustively. `stored` is the device's bearer token (if the row has one), `proven` is
+/// whether the device has ever presented that token before, and `presented` is what this request
+/// carried.
+///
+/// A correct token always admits the request and — the first time — ratchets the device into
+/// enforced mode. A wrong or missing token is rejected *only* once the device is proven; before
+/// that (a client built before device auth, or a row from before the token column) it is admitted
+/// pubkey-only, the migration grace. Because only a *valid* token ratchets, an attacker who merely
+/// learned the pubkey can neither pass nor flip the ratchet against the victim; the grace window for
+/// a given device closes the first time its real client refreshes.
+fn decide_device_auth(stored: Option<&str>, proven: bool, presented: Option<&str>) -> AuthOutcome {
+    let valid = matches!((stored, presented), (Some(s), Some(p)) if common::crypto::ct_eq(s.as_bytes(), p.as_bytes()));
+    if valid {
+        AuthOutcome::Admit { ratchet: !proven }
+    } else if proven {
+        AuthOutcome::Reject
+    } else {
+        AuthOutcome::Admit { ratchet: false }
+    }
+}
+
+enum AuthOutcome {
+    /// Serve the request; `ratchet` = flip the device into enforced mode (first valid token).
+    Admit { ratchet: bool },
+    /// A proven device presented a wrong/absent token — an impostor or a downgrade attempt.
+    Reject,
+}
+
+/// Enforce device-bearer auth on an already-enrolled register/refresh (see [`decide_device_auth`]).
+/// Without it, anyone who learned a victim's WG pubkey — which rides in every co-member's seed —
+/// could pull the victim's snapshot and forge its presence/endpoint/relay/ICE state.
+async fn authenticate_enrolled(st: &AppState, req: &RegisterReq) -> Result<(), ApiError> {
+    // The row can vanish between `device_owner` and here (concurrent remove); treat that as
+    // not-our-concern and let the rebuild handle it, rather than 401-ing a benign race.
+    let Some((stored, proven)) = st
+        .store
+        .device_auth(&req.wg_pubkey)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(());
+    };
+    match decide_device_auth(stored.as_deref(), proven, req.device_token.as_deref()) {
+        AuthOutcome::Admit { ratchet } => {
+            if ratchet {
+                st.store
+                    .mark_token_proven(&req.wg_pubkey)
+                    .await
+                    .map_err(internal)?;
+            }
+            Ok(())
+        }
+        AuthOutcome::Reject => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "device token missing or invalid",
+        )),
+    }
 }
 
 /// `GET /oauth/pkce-config`: the public bits the engine needs to run the PKCE flow itself.
@@ -1231,8 +1292,8 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepted_reflexives, negotiate, punch_target, relay_target, should_supersede, RelayReg,
-        StatusCode,
+        accepted_reflexives, decide_device_auth, negotiate, punch_target, relay_target,
+        should_supersede, AuthOutcome, RelayReg, StatusCode,
     };
     use common::api::{ObservedEndpoint, RegisterReq, SharedNetwork};
 
@@ -1295,6 +1356,45 @@ mod tests {
         // No `proto` at all — a client from before the field existed. Refusing it would impose a
         // flag day on clients that never had a say.
         assert!(negotiate(&req_speaking(r#""device_name":"old""#)).is_ok());
+    }
+
+    #[test]
+    fn device_auth_ratchets_then_enforces() {
+        let admit = |o| matches!(o, AuthOutcome::Admit { .. });
+        let ratchets = |o| matches!(o, AuthOutcome::Admit { ratchet: true });
+        let rejects = |o| matches!(o, AuthOutcome::Reject);
+
+        // First correct token: admitted *and* ratchets the device into enforced mode.
+        assert!(ratchets(decide_device_auth(
+            Some("tok"),
+            false,
+            Some("tok")
+        )));
+        // Correct token again once proven: admitted, no further ratchet.
+        let o = decide_device_auth(Some("tok"), true, Some("tok"));
+        assert!(admit(o) && !ratchets(decide_device_auth(Some("tok"), true, Some("tok"))));
+
+        // Proven device, wrong or missing token → rejected (impostor / downgrade).
+        assert!(rejects(decide_device_auth(
+            Some("tok"),
+            true,
+            Some("wrong")
+        )));
+        assert!(rejects(decide_device_auth(Some("tok"), true, None)));
+
+        // Migration grace: a device that has never proven a token is served pubkey-only, and a
+        // pubkey-only request must NOT ratchet — else an attacker could flip the device and lock
+        // the victim out. Only a valid token ratchets.
+        assert!(admit(decide_device_auth(Some("tok"), false, None)));
+        assert!(!ratchets(decide_device_auth(Some("tok"), false, None)));
+        assert!(!ratchets(decide_device_auth(
+            Some("tok"),
+            false,
+            Some("wrong")
+        )));
+        // Legacy row with no stored token: also grace, never ratchets on a bogus token.
+        assert!(admit(decide_device_auth(None, false, Some("anything"))));
+        assert!(!ratchets(decide_device_auth(None, false, Some("anything"))));
     }
 
     fn reg(s: &str) -> RelayReg {

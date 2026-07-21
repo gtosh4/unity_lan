@@ -109,6 +109,20 @@ pub fn gen_enrollment_key() -> String {
     s
 }
 
+/// Constant-time byte-slice equality: fold the XOR of every byte pair so a mismatch's timing
+/// doesn't leak how long a common prefix ran. Length is not itself a secret here (a differing
+/// length short-circuits), but the content comparison — used for bearer tokens — is.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// A PKCE `code_verifier`: 64 hex chars from 32 random bytes. Hex is within the allowed
 /// `[A-Za-z0-9-._~]` unreserved set and comfortably inside the 43–128 char length bound.
 pub fn gen_pkce_verifier() -> String {

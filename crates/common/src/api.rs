@@ -23,6 +23,13 @@ pub struct RegisterReq {
     /// once enrolled (the coordinator resolves the owner from the pubkey binding).
     #[serde(default)]
     pub enrollment_key: Option<String>,
+    /// This device's bearer token — the one the coordinator issued at enrollment — proving the
+    /// request comes from the device that owns `wg_pubkey`, not merely someone who learned the
+    /// pubkey (it rides in every co-member's seed, so it is an identifier, not a secret). Absent
+    /// from clients built before device auth, and from the first register that enrolls the device.
+    /// The coordinator enforces it once a device has proven it holds it (see `authenticate_enrolled`).
+    #[serde(default)]
+    pub device_token: Option<String>,
     /// The client's reachable `ip:port` for the WG listener (UPnP-mapped in production).
     #[serde(default)]
     pub endpoint: Option<SocketAddr>,

@@ -122,6 +122,10 @@ pub struct CoordReq {
     pub device_name: String,
     pub endpoint: Option<SocketAddr>,
     pub enrollment_key: Option<String>,
+    /// Our persisted device bearer token, sent on every register/refresh once enrolled so the
+    /// coordinator authenticates us as the owner of `wg_pubkey` rather than anyone who learned it.
+    /// `None` before first enrollment (no token yet).
+    pub device_token: Option<String>,
     /// Last-seen version echoed as `since`. `Some` on a renewal (the coordinator holds the request
     /// until membership changes or ~TTL/2 elapses); `None` returns immediately (no long-poll hold).
     pub since: Option<u64>,
@@ -203,6 +207,7 @@ async fn post(
             wg_pubkey: req.wg_pubkey,
             device_name: req.device_name,
             enrollment_key: req.enrollment_key,
+            device_token: req.device_token,
             endpoint: req.endpoint,
             since: req.since,
             disabled_networks: req.disabled_networks,

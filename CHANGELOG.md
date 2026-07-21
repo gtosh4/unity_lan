@@ -5,6 +5,18 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ## Unreleased
 
+### Security
+
+- **The coordinator now authenticates each device by its bearer token, not just its WireGuard key.**
+  A device's public key is shared with every co-member (it rides in each peer's seed), so it was
+  never a secret — yet after enrollment the coordinator would serve anyone who presented a known key
+  the full snapshot for that device (its networks, peers, trust anchors, and relay/ICE credentials)
+  and accept presence, endpoint, and relay changes in its name. Register and refresh now require the
+  device token the coordinator issued at enrollment. The client already stores that token, so nothing
+  changes for you; the switch is per-device and automatic, so a mesh keeps working through the upgrade
+  even before every client has updated — a device is only held to the token once it has presented the
+  correct one at least once. Update the coordinator to close the exposure.
+
 ### Added
 
 - **Two devices on the same network now connect directly instead of flapping.** Peers behind the

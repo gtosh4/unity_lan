@@ -255,6 +255,7 @@ async fn teardown(
             device_name: cfg.device_name(),
             endpoint,
             enrollment_key: cfg.enrollment_key.clone(),
+            device_token: keys::load_token(&cfg.state_dir),
             since: None, // no long-poll hold: return as soon as the eviction is applied
             disabled_networks: Vec::new(),
             observed: Vec::new(),
@@ -998,6 +999,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         device_name: cfg.device_name(),
                         endpoint,
                         enrollment_key: cfg.enrollment_key.clone(),
+                        device_token: token.read().await.clone(),
                         since: poll_since,
                         disabled_networks: localnet.as_refs(),
                         observed: observed.clone(),
@@ -1470,6 +1472,10 @@ async fn register_until_ready(
                     device_name: cfg.device_name(),
                     endpoint,
                     enrollment_key: cfg.enrollment_key.clone(),
+                    // Same persisted token: on a reconnect it names our current key and authenticates
+                    // us; on a re-key it names the old (now-unenrolled) key, so it authenticates
+                    // nothing here and only `supersede` acts.
+                    device_token: supersede.clone(),
                     since: None,
                     disabled_networks: localnet.as_refs(),
                     observed: Vec::new(),
