@@ -308,6 +308,170 @@ struct Built {
     scopes: BTreeSet<Scope>,
 }
 
+/// Re-key supersede (design.md §9): a device regenerating its WG key registers under a *new* pubkey,
+/// orphaning the old one — its presence would linger (never self-evicted, since its owner now
+/// refreshes under the new key) until the reaper ages it out. If the client still holds the old
+/// device token it proves ownership, so retire the old device *now*: drop its store row (freeing its
+/// IP and stale DNS name) and evict its presence everywhere, recording the affected scopes in
+/// `changed`.
+/// Possession of the old token authorizes this; we still require it resolve to the same owner so one
+/// member can't retire another's device even with a leaked token.
+async fn retire_superseded(
+    st: &AppState,
+    req: &RegisterReq,
+    user_id: u64,
+    changed: &mut BTreeSet<Scope>,
+) -> Result<(), ApiError> {
+    let Some(old_token) = &req.supersede else {
+        return Ok(());
+    };
+    let Some((owner, old_pubkey)) = st
+        .store
+        .device_by_token(old_token)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(());
+    };
+    if !should_supersede(owner, old_pubkey, user_id, req.wg_pubkey) {
+        return Ok(());
+    }
+    st.store
+        .remove_device(user_id, &old_pubkey)
+        .await
+        .map_err(internal)?;
+    for (g, r) in st.presence.networks_of(&old_pubkey) {
+        if st.presence.evict(g, r, &old_pubkey) {
+            changed.insert(Scope::Guild(g));
+        }
+    }
+    // …and from the per-user own-device set, so a re-keyed device's siblings prune the retired
+    // pubkey immediately rather than waiting for the reaper.
+    if st.presence.evict_self(owner, &old_pubkey) {
+        changed.insert(Scope::User(owner));
+    }
+    Ok(())
+}
+
+/// Record the peer-keyed reports this device sent — reflexive sightings (a co-member's NAT mapping
+/// seen from the outside, for hole punching), TURN relayed addresses, and ICE session offers — plus
+/// record/clear the device's own relay capability. Every peer-keyed entry is accepted **only** for a
+/// `comembers` pubkey: the caller may publish state only *about a peer it actually meshes with*, which
+/// is the trust boundary that keeps these tables bounded (an authenticated member otherwise could
+/// inject entries for arbitrary pubkeys and force wakes for them). A first sighting or a change wakes
+/// just that one target (`wake_targets`) rather than bumping a whole membership scope — a NAT-traversal
+/// exchange doesn't wake a guild for a change only the one target cares about.
+fn record_peer_reports(
+    st: &AppState,
+    req: &RegisterReq,
+    comembers: &std::collections::HashSet<[u8; 32]>,
+    wake_targets: &mut std::collections::HashSet<[u8; 32]>,
+) {
+    {
+        // Lock order: source_ip before reflexive (the only site holding both). A reflexive is
+        // accepted only when the reporter is a co-member *and* the reported address matches where the
+        // reported device actually connects from (see `accepted_reflexives`).
+        let src = st.source_ip.lock().unwrap();
+        let mut refl = st.reflexive.lock().unwrap();
+        for obs in accepted_reflexives(&req.observed, comembers, &src) {
+            if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
+                refl.insert(obs.pubkey, obs.endpoint);
+                wake_targets.insert(obs.pubkey);
+            }
+        }
+    }
+
+    // This device's own relay capability: an opted-in, directly-dialable co-member that runs an
+    // embedded TURN server for stuck pairs. Not a membership change, so it deliberately doesn't bump
+    // the version (a new relay must not wake the whole herd — a stuck peer re-polls on its own cadence
+    // and picks it up). Cleared when the device stops advertising.
+    {
+        let mut relays = st.relays.lock().unwrap();
+        match (req.relay_capable, req.relay_addr, req.relay_secret.as_ref()) {
+            (true, Some(addr), Some(secret)) => {
+                relays.insert(
+                    req.wg_pubkey,
+                    RelayReg {
+                        addr,
+                        secret: secret.clone(),
+                    },
+                );
+            }
+            _ => {
+                relays.remove(&req.wg_pubkey);
+            }
+        }
+    }
+
+    // TURN relayed addresses (relayed-candidate exchange). A new/changed relayed address wakes that
+    // one peer so it learns it as its `peer_relayed` — the second half of the ~2-round relay converge.
+    {
+        let mut allocs = st.relay_allocs.lock().unwrap();
+        for a in &req.relay_allocated {
+            if !comembers.contains(&a.peer) {
+                continue;
+            }
+            if allocs.get(&(req.wg_pubkey, a.peer)) != Some(&a.relayed) {
+                allocs.insert((req.wg_pubkey, a.peer), a.relayed);
+                wake_targets.insert(a.peer);
+            }
+        }
+    }
+
+    // ICE session offers (candidate exchange, M5.5). A new/changed offer (fresh candidates, or an ICE
+    // restart's new ufrag/pwd) wakes that one peer so it picks up the candidates as its `Seed::ice` and
+    // runs connectivity checks — a targeted ping-pong rather than a herd wake. The coordinator only
+    // relays; it never runs ICE.
+    {
+        let mut ice = st.ice.lock().unwrap();
+        for e in &req.ice {
+            if !comembers.contains(&e.peer) {
+                continue;
+            }
+            if ice.get(&(req.wg_pubkey, e.peer)) != Some(&e.params) {
+                ice.insert((req.wg_pubkey, e.peer), e.params.clone());
+                wake_targets.insert(e.peer);
+            }
+        }
+    }
+}
+
+/// One trust anchor per guild the caller participates in (covers every peer's guild too, since shared
+/// guilds are a subset). The client pins each independently and re-pins via its chain.
+async fn build_anchors(
+    st: &AppState,
+    grant_guilds: &BTreeSet<u64>,
+) -> Result<Vec<GuildAnchor>, ApiError> {
+    let mut anchors = Vec::with_capacity(grant_guilds.len());
+    for &g in grant_guilds {
+        let key = st.guild_keys.get(g).await.map_err(internal)?;
+        anchors.push(GuildAnchor {
+            guild_id: g,
+            pubkey: key.signer.anchor_bytes(),
+            rotation_chain: key.rotation_chain.clone(),
+        });
+    }
+    Ok(anchors)
+}
+
+/// Auto-update manifest, signed on demand with a guild key the caller holds (the smallest `guild_id`,
+/// deterministically) so the client verifies it against an anchor it has pinned (design.md §3.1 — no
+/// deployment-wide key). `None` when no manifest is configured or the caller holds no guild.
+async fn sign_release(
+    st: &AppState,
+    grant_guilds: &BTreeSet<u64>,
+) -> Result<Option<String>, ApiError> {
+    // Clone the manifest out before the await so the RwLock guard isn't held across it.
+    let manifest = st.release.read().unwrap().clone();
+    match (manifest, grant_guilds.iter().next()) {
+        (Some(m), Some(&g)) => {
+            let key = st.guild_keys.get(g).await.map_err(internal)?;
+            Ok(Some(key.signer.sign_to_base64(&m).map_err(internal)?))
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Compute the caller's grant + seeds and record their presence. Bumps the **scoped** membership
 /// versions for the guilds (and users) whose membership actually changed — waking only clients of
 /// those scopes — and fires **targeted** wakes for peers named in the caller's pair-specific reports
@@ -374,38 +538,8 @@ async fn build_snapshot(
     // a whole guild for a change only the one target cares about.
     let mut wake_targets: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
 
-    // Re-key supersede (design.md §9): a device regenerating its WG key registers under a *new*
-    // pubkey, orphaning the old one — its presence would linger (never self-evicted, since its
-    // owner now refreshes under the new key) until the reaper ages it out. If the client still
-    // holds the old device token it proves ownership and we retire the old device *now*: drop its
-    // store row (frees the IP + stale DNS name) and evict its presence everywhere. Possession of
-    // the old token is the authorization; we still require it resolve to the same owner so one
-    // member can't retire another's device even with a leaked token.
-    if let Some(old_token) = &req.supersede {
-        if let Some((owner, old_pubkey)) = st
-            .store
-            .device_by_token(old_token)
-            .await
-            .map_err(internal)?
-        {
-            if should_supersede(owner, old_pubkey, user_id, req.wg_pubkey) {
-                st.store
-                    .remove_device(user_id, &old_pubkey)
-                    .await
-                    .map_err(internal)?;
-                for (g, r) in st.presence.networks_of(&old_pubkey) {
-                    if st.presence.evict(g, r, &old_pubkey) {
-                        changed.insert(Scope::Guild(g));
-                    }
-                }
-                // …and from the per-user own-device set, so a re-keyed device's siblings prune the
-                // retired pubkey immediately rather than waiting for the reaper.
-                if st.presence.evict_self(owner, &old_pubkey) {
-                    changed.insert(Scope::User(owner));
-                }
-            }
-        }
-    }
+    retire_superseded(st, req, user_id, &mut changed).await?;
+
     let mut network_names: Vec<String> = Vec::new();
     let mut community_cache: HashMap<u64, String> = HashMap::new();
     let mut username = format!("user-{user_id}"); // fallback until a role source gives a handle
@@ -635,90 +769,11 @@ async fn build_snapshot(
                 .or_insert_with(|| (mp, Vec::new(), grant_guilds.clone()));
         }
     }
-    // Record peer-observed reflexive endpoints (for hole punching). Each entry says "I saw device
-    // X arriving from ip:port" — X's NAT mapping seen from the outside. Accepted *only* for a pubkey
-    // the caller actually meshes with (a co-member seed): you can only report a reflexive for a peer
-    // you share a network with — and thus have a tunnel to observe. This bounds a spoofed endpoint to
-    // the victim's own co-members (the network trust boundary), instead of letting any authenticated
-    // member redirect any device's punch target to an attacker-chosen address. A first sighting or a
-    // roam (address change) wakes that one observed peer (targeted) so it picks up the punch target.
     // The caller's co-members: every device it shares ≥1 network with. This is the trust boundary
-    // for all peer-keyed exchange tables below — the caller may only publish reflexive/relay/ICE
-    // state *about a peer it actually meshes with*. Without this gate an authenticated member could
-    // inject entries for arbitrary pubkeys, growing the tables unbounded and forcing wakes for
-    // arbitrary pubkeys.
+    // for the peer-keyed exchange tables — the caller may publish reflexive/relay/ICE state *only
+    // about a peer it actually meshes with* (see `record_peer_reports`).
     let comembers: std::collections::HashSet<[u8; 32]> = by_pubkey.keys().copied().collect();
-    {
-        // Lock order: source_ip before reflexive (the only site holding both).
-        let src = st.source_ip.lock().unwrap();
-        let mut refl = st.reflexive.lock().unwrap();
-        for obs in accepted_reflexives(&req.observed, &comembers, &src) {
-            if refl.get(&obs.pubkey) != Some(&obs.endpoint) {
-                refl.insert(obs.pubkey, obs.endpoint);
-                wake_targets.insert(obs.pubkey);
-            }
-        }
-    }
-
-    // Record / clear this device's relay capability: an opted-in, directly-dialable co-member that
-    // runs an embedded TURN server for stuck pairs. Not a membership change, so it deliberately
-    // doesn't bump the version (a new relay must not wake the whole herd — a stuck peer re-polls on
-    // its own cadence and picks it up). Cleared when the device stops advertising.
-    {
-        let mut relays = st.relays.lock().unwrap();
-        match (req.relay_capable, req.relay_addr, req.relay_secret.as_ref()) {
-            (true, Some(addr), Some(secret)) => {
-                relays.insert(
-                    req.wg_pubkey,
-                    RelayReg {
-                        addr,
-                        secret: secret.clone(),
-                    },
-                );
-            }
-            _ => {
-                relays.remove(&req.wg_pubkey);
-            }
-        }
-    }
-
-    // Record this device's TURN relayed addresses (relayed-candidate exchange). A new/changed
-    // relayed address wakes that one peer (targeted) so it learns it as its `peer_relayed` — the
-    // second half of the ~2-round relay converge.
-    {
-        let mut allocs = st.relay_allocs.lock().unwrap();
-        for a in &req.relay_allocated {
-            // Only accept a relayed address for a peer the caller actually meshes with (mirrors the
-            // reflexive gate) — otherwise the map grows unbounded.
-            if !comembers.contains(&a.peer) {
-                continue;
-            }
-            if allocs.get(&(req.wg_pubkey, a.peer)) != Some(&a.relayed) {
-                allocs.insert((req.wg_pubkey, a.peer), a.relayed);
-                wake_targets.insert(a.peer);
-            }
-        }
-    }
-
-    // Record this device's ICE session offers (candidate exchange, M5.5). A new/changed offer (fresh
-    // candidates, or an ICE restart's new ufrag/pwd) wakes that one peer (targeted) so it picks up
-    // the candidates as its `Seed::ice` and runs connectivity checks — turning ICE exchange into a
-    // targeted ping-pong rather than a herd wake. The coordinator only relays; it never runs ICE.
-    {
-        let mut ice = st.ice.lock().unwrap();
-        for e in &req.ice {
-            // Same co-member gate as reflexive/relay: an ICE offer is only accepted for a peer the
-            // caller shares a network with, so the map stays bounded and can't be used to force
-            // wakes for arbitrary pubkeys.
-            if !comembers.contains(&e.peer) {
-                continue;
-            }
-            if ice.get(&(req.wg_pubkey, e.peer)) != Some(&e.params) {
-                ice.insert((req.wg_pubkey, e.peer), e.params.clone());
-                wake_targets.insert(e.peer);
-            }
-        }
-    }
+    record_peer_reports(st, req, &comembers, &mut wake_targets);
 
     // Relay candidates for the caller: co-members that advertise a TURN relay, captured with their
     // shared-with-caller network names before the seed loop consumes `by_pubkey`. A relay is used
@@ -877,30 +932,8 @@ async fn build_snapshot(
         "snapshot built"
     );
 
-    // One trust anchor per guild the caller participates in (covers every peer's guild too, since
-    // shared guilds are a subset). The client pins each independently and re-pins via its chain.
-    let mut anchors = Vec::with_capacity(grant_guilds.len());
-    for &g in &grant_guilds {
-        let key = st.guild_keys.get(g).await.map_err(internal)?;
-        anchors.push(GuildAnchor {
-            guild_id: g,
-            pubkey: key.signer.anchor_bytes(),
-            rotation_chain: key.rotation_chain.clone(),
-        });
-    }
-
-    // Auto-update manifest: signed on demand with a guild key the caller holds (the smallest
-    // guild_id, deterministically) so the client verifies it against an anchor it has pinned
-    // (design.md §3.1 — no deployment-wide key). Clone the manifest out before the await so the
-    // RwLock guard isn't held across it.
-    let manifest = st.release.read().unwrap().clone();
-    let release = match (manifest, grant_guilds.iter().next()) {
-        (Some(m), Some(&g)) => {
-            let key = st.guild_keys.get(g).await.map_err(internal)?;
-            Some(key.signer.sign_to_base64(&m).map_err(internal)?)
-        }
-        _ => None,
-    };
+    let anchors = build_anchors(st, &grant_guilds).await?;
+    let release = sign_release(st, &grant_guilds).await?;
 
     Ok(Built {
         caller_changed: !changed.is_empty() || !wake_targets.is_empty(),
