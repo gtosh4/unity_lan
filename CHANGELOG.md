@@ -22,6 +22,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   unreasonable attestation lifetimes, and malformed, non-HTTPS, duplicate, or oversized update
   artifacts.
 
+### Changed
+
+- The coordinator now caches each guild's name briefly instead of asking Discord for it on every
+  client refresh. Under a membership-change herd — when many clients wake and rebuild their
+  snapshots at once — this collapses what was one Discord request per client into one per guild,
+  so a large mesh no longer risks tripping Discord's per-guild rate limit on that lookup.
+
 ## v0.4.0
 
 ### Added

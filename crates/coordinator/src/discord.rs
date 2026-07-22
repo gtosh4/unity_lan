@@ -26,10 +26,23 @@ const ROLE_NAME_TTL: Duration = Duration::from_secs(300);
 /// easing the per-guild Discord rate-limit bucket that a herd hammers.
 const MEMBER_TTL: Duration = Duration::from_secs(30);
 
+/// How long a guild's own name is trusted before a re-fetch. This is the community label shown when
+/// no admin slug is set (the default), resolved once per `build_snapshot` per client — so an uncached
+/// fetch turns a version-bump herd into one `GET /guilds/{id}` per client, all landing on the same
+/// per-guild Discord bucket. Guild renames are rare, so a long window is fine; it collapses the herd
+/// (and a single client's repeated renewals) to one call per guild per window.
+const GUILD_NAME_TTL: Duration = Duration::from_secs(300);
+
 /// A guild's roles fetched together, with the instant they were fetched (for TTL expiry).
 struct CachedRoles {
     fetched: Instant,
     names: HashMap<u64, String>,
+}
+
+/// A guild's name with the instant fetched (for TTL expiry).
+struct CachedName {
+    fetched: Instant,
+    name: String,
 }
 
 /// A member's roles/nick with the instant fetched (for TTL expiry).
@@ -46,6 +59,9 @@ pub struct TwilightRoleSource {
     /// Per-`(guild, user)` member cache. Dedups repeated lookups of the *same* user (see
     /// [`MEMBER_TTL`]); only positive results are stored.
     member_cache: Mutex<HashMap<(u64, u64), CachedMember>>,
+    /// Per-guild name cache. Collapses the `guild_name` fetch a herd of clients each runs in
+    /// `build_snapshot` into one call per guild per [`GUILD_NAME_TTL`]; only positive results stored.
+    name_cache: Mutex<HashMap<u64, CachedName>>,
 }
 
 impl TwilightRoleSource {
@@ -54,7 +70,18 @@ impl TwilightRoleSource {
             http: Client::new(bot_token),
             role_cache: Mutex::new(HashMap::new()),
             member_cache: Mutex::new(HashMap::new()),
+            name_cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The cached name for `guild_id` if still fresh, else `None` (fetch).
+    fn cached_name(&self, guild_id: u64) -> Option<String> {
+        let cache = self.name_cache.lock().unwrap();
+        let entry = cache.get(&guild_id)?;
+        if entry.fetched.elapsed() >= GUILD_NAME_TTL {
+            return None; // stale → force a re-fetch
+        }
+        Some(entry.name.clone())
     }
 
     /// The cached member roles for `(guild_id, user_id)` if still fresh, else `None` (fetch).
@@ -82,6 +109,9 @@ impl TwilightRoleSource {
 #[async_trait::async_trait]
 impl RoleSource for TwilightRoleSource {
     async fn guild_name(&self, guild_id: u64) -> Option<String> {
+        if let Some(hit) = self.cached_name(guild_id) {
+            return Some(hit);
+        }
         let guild = self
             .http
             .guild(Id::new(guild_id))
@@ -90,6 +120,15 @@ impl RoleSource for TwilightRoleSource {
             .model()
             .await
             .ok()?;
+        // Cache only this successful fetch; a miss/failure is never cached, so a transient error
+        // isn't pinned for the whole window.
+        self.name_cache.lock().unwrap().insert(
+            guild_id,
+            CachedName {
+                fetched: Instant::now(),
+                name: guild.name.clone(),
+            },
+        );
         Some(guild.name)
     }
 
