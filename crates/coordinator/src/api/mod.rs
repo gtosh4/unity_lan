@@ -106,6 +106,20 @@ pub struct AppState {
     /// disabled (return 404), so an instance exposes no admin surface until its operator opts in.
     /// Compared in constant time; never logged. Read-only counts only — no traffic path.
     pub admin_token: Option<String>,
+    /// The deployment's X25519 enrollment secret. Its public half (`GET /enroll/pubkey`) lets a client
+    /// build a DH proof it holds the WG private key behind the pubkey it enrolls, so a party who only
+    /// learned that pubkey can't bind it under their own account. Persisted (`load_or_create_enroll_seed`).
+    pub enroll_secret: [u8; 32],
+    /// Require a valid possession proof on every enrolling register (`[enrollment] require_proof`).
+    /// `false` = observe-only: admit a proof-less enrollment (logged + counted), still reject a
+    /// malformed one. See [`crate::config::EnrollmentConfig`].
+    pub require_enroll_proof: bool,
+    /// Enrollments that presented a valid possession proof, process lifetime
+    /// (`unitylan_enrollments_proven_total`).
+    pub enroll_proven: Arc<std::sync::atomic::AtomicU64>,
+    /// Enrollments admitted **without** a proof under observe-only mode, process lifetime
+    /// (`unitylan_enrollments_unproven_total`) — the signal for when it's safe to flip `require_proof`.
+    pub enroll_unproven: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// `(owner, peer)` → the relayed address `owner` allocated to reach `peer` (the relayed-candidate
@@ -168,6 +182,9 @@ pub fn router(state: AppState) -> Router {
         // complete verifies the engine's access token and binds pubkey → user.
         .route("/oauth/pkce-config", get(oauth_pkce_config))
         .route("/oauth/complete", post(oauth_complete))
+        // The public enrollment key: a client combines it with its WG private key to prove possession
+        // when it first binds that pubkey. Unauthenticated — the value is public by design.
+        .route("/enroll/pubkey", get(enroll_pubkey))
         // Operator admin surface. The `/admin` shell is unauthenticated (it holds no data); the
         // `/admin/stats` feed and `/metrics` are token-gated. All 404 when `[admin]` is unset.
         .route("/admin", get(admin_dashboard))
@@ -1126,6 +1143,7 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), A
         .await
         .map_err(internal)?
     {
+        verify_possession(st, req)?;
         return Ok((uid, false));
     }
     let Some(key) = req.enrollment_key.as_deref() else {
@@ -1134,6 +1152,7 @@ async fn resolve_user(st: &AppState, req: &RegisterReq) -> Result<(u64, bool), A
             "device not enrolled; log in (oauth) or provide an enrollment_key",
         ));
     };
+    verify_possession(st, req)?;
     let uid = st
         .store
         .consume_enrollment_key(key, &req.wg_pubkey, common::now_unix())
@@ -1181,6 +1200,69 @@ async fn authenticate_enrolled(st: &AppState, req: &RegisterReq) -> Result<(), A
     }
 }
 
+/// Gate an *enrolling* register (one about to mint a fresh device row) on a DH proof that the caller
+/// holds the WG private key behind `wg_pubkey` — so a party who only learned a not-yet-enrolled pubkey
+/// can't bind it under their own account. Called from [`resolve_user`]'s enrolling branches only;
+/// already-enrolled registers authenticate by `device_token` (see [`authenticate_enrolled`]) instead.
+///
+/// A **present** proof is always verified — a malformed one is a `401` in both modes (a wrong proof is
+/// never merely an old client). A **missing** proof depends on policy: rejected when `require_proof`,
+/// else admitted (observe-only) with a warning and a counter bump, so an operator can watch the
+/// unproven count fall to zero before flipping the gate closed.
+fn verify_possession(st: &AppState, req: &RegisterReq) -> Result<(), ApiError> {
+    use std::sync::atomic::Ordering;
+    let valid = req
+        .possession_proof
+        .map(|p| common::crypto::verify_enroll_proof(&st.enroll_secret, &req.wg_pubkey, &p));
+    match decide_possession(valid, st.require_enroll_proof) {
+        PossessionOutcome::Proven => {
+            st.enroll_proven.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        PossessionOutcome::Unproven => {
+            st.enroll_unproven.fetch_add(1, Ordering::Relaxed);
+            let pubkey: String = req.wg_pubkey.iter().map(|b| format!("{b:02x}")).collect();
+            tracing::warn!(
+                %pubkey,
+                "enrolling device without a possession proof (observe-only; set [enrollment] require_proof to reject)"
+            );
+            Ok(())
+        }
+        PossessionOutcome::RejectInvalid => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "enrollment possession proof invalid",
+        )),
+        PossessionOutcome::RejectMissing => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "enrollment requires a possession proof; update the client",
+        )),
+    }
+}
+
+enum PossessionOutcome {
+    /// A valid proof was presented.
+    Proven,
+    /// No proof, admitted under observe-only mode (counted + logged).
+    Unproven,
+    /// A proof was presented but did not verify — rejected in **both** modes (a wrong proof is never
+    /// merely an old client).
+    RejectInvalid,
+    /// No proof under `require_proof` — rejected.
+    RejectMissing,
+}
+
+/// The enrollment possession-proof policy, factored out for testing. `valid` is `None` when the
+/// client sent no proof, `Some(true|false)` when it sent one that did|didn't verify. A malformed
+/// proof always rejects; a missing proof rejects only when `require` is set.
+fn decide_possession(valid: Option<bool>, require: bool) -> PossessionOutcome {
+    match (valid, require) {
+        (Some(true), _) => PossessionOutcome::Proven,
+        (Some(false), _) => PossessionOutcome::RejectInvalid,
+        (None, true) => PossessionOutcome::RejectMissing,
+        (None, false) => PossessionOutcome::Unproven,
+    }
+}
+
 /// `GET /oauth/pkce-config`: the public bits the engine needs to run the PKCE flow itself.
 async fn oauth_pkce_config(State(st): State<AppState>) -> Result<Json<PkceConfigResp>, ApiError> {
     let oauth = st.oauth.as_ref().ok_or_else(|| {
@@ -1217,6 +1299,12 @@ async fn oauth_complete(
         .await
         .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /enroll/pubkey`: the deployment's X25519 enrollment public key. A client combines it with its
+/// WG private key to build the possession proof it sends on an enrolling register. Public by design.
+async fn enroll_pubkey(State(st): State<AppState>) -> Json<[u8; 32]> {
+    Json(common::crypto::enroll_public_from_secret(&st.enroll_secret))
 }
 
 fn internal(e: anyhow::Error) -> ApiError {
@@ -1322,8 +1410,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepted_reflexives, decide_device_auth, negotiate, punch_target, relay_target,
-        should_supersede, validate_peer_reports, AuthOutcome, RelayReg, StatusCode,
+        accepted_reflexives, decide_device_auth, decide_possession, negotiate, punch_target,
+        relay_target, should_supersede, validate_peer_reports, AuthOutcome, PossessionOutcome,
+        RelayReg, StatusCode,
     };
     use common::api::{IceEndpoint, IceParams, ObservedEndpoint, RegisterReq, SharedNetwork};
 
@@ -1386,6 +1475,26 @@ mod tests {
         // No `proto` at all — a client from before the field existed. Refusing it would impose a
         // flag day on clients that never had a say.
         assert!(negotiate(&req_speaking(r#""device_name":"old""#)).is_ok());
+    }
+
+    #[test]
+    fn possession_policy_rejects_bad_proof_in_both_modes_missing_only_when_required() {
+        use PossessionOutcome::*;
+        // A valid proof always enrolls.
+        assert!(matches!(decide_possession(Some(true), false), Proven));
+        assert!(matches!(decide_possession(Some(true), true), Proven));
+        // A malformed proof is rejected regardless of mode — never treated as "just an old client".
+        assert!(matches!(
+            decide_possession(Some(false), false),
+            RejectInvalid
+        ));
+        assert!(matches!(
+            decide_possession(Some(false), true),
+            RejectInvalid
+        ));
+        // A missing proof is admitted (observe-only) unless enforcement is on.
+        assert!(matches!(decide_possession(None, false), Unproven));
+        assert!(matches!(decide_possession(None, true), RejectMissing));
     }
 
     #[test]

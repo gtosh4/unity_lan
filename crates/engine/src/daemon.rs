@@ -256,7 +256,8 @@ async fn teardown(
             endpoint,
             enrollment_key: cfg.enrollment_key.clone(),
             device_token: keys::load_token(&cfg.state_dir),
-            since: None, // no long-poll hold: return as soon as the eviction is applied
+            possession_proof: None, // withdraw is post-enrollment; the token authenticates
+            since: None,            // no long-poll hold: return as soon as the eviction is applied
             disabled_networks: Vec::new(),
             observed: Vec::new(),
             supersede: None,
@@ -501,6 +502,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             &cfg,
             endpoint,
             wg_pub,
+            wg_priv,
             &localnet,
             &status,
             &fw,
@@ -1000,6 +1002,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         endpoint,
                         enrollment_key: cfg.enrollment_key.clone(),
                         device_token: token.read().await.clone(),
+                        possession_proof: None, // steady-state refresh is enrolled; token authenticates
                         since: poll_since,
                         disabled_networks: localnet.as_refs(),
                         observed: observed.clone(),
@@ -1444,6 +1447,7 @@ async fn register_until_ready(
     cfg: &Config,
     endpoint: Option<SocketAddr>,
     wg_pub: [u8; 32],
+    wg_priv: [u8; 32],
     localnet: &LocalNet,
     status: &control::Shared,
     fw: &Option<Arc<Firewall>>,
@@ -1455,6 +1459,19 @@ async fn register_until_ready(
     // it still names the old pubkey → the coordinator retires that stale identity on our first
     // register. No-op when it names our current key (the steady case) or once the old row is gone.
     let supersede = keys::load_token(&cfg.state_dir);
+    // Prove possession of our WG private key to the coordinator, so a party who only learned our
+    // (not-yet-enrolled) pubkey can't bind it under their account. Fetched + computed once: the
+    // enrollment pubkey is stable and our key doesn't change across the register loop. Sent on every
+    // attempt — the coordinator uses it only on a register that first binds our pubkey and ignores it
+    // once we're enrolled (the device token authenticates then). A coordinator too old to expose the
+    // route leaves this `None`; it then permits enrollment without a proof (observe-only mode).
+    let possession_proof = match coord::enroll_pubkey(&cfg.coordinator).await {
+        Ok(enroll_pub) => Some(common::crypto::enroll_proof(&wg_priv, &enroll_pub)),
+        Err(e) => {
+            tracing::debug!("no enrollment possession proof (coordinator enroll pubkey): {e:#}");
+            None
+        }
+    };
     loop {
         let attempt = tokio::select! {
             _ = shutdown.wait() => {
@@ -1476,6 +1493,7 @@ async fn register_until_ready(
                     // us; on a re-key it names the old (now-unenrolled) key, so it authenticates
                     // nothing here and only `supersede` acts.
                     device_token: supersede.clone(),
+                    possession_proof,
                     since: None,
                     disabled_networks: localnet.as_refs(),
                     observed: Vec::new(),

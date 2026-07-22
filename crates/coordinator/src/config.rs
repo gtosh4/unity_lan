@@ -86,6 +86,26 @@ pub struct Config {
     /// the client's renewal/gossip cadence. Lowered in tests to exercise expiry quickly.
     #[serde(default = "default_attestation_ttl")]
     pub attestation_ttl_secs: u64,
+    /// Enrollment-time device possession proof.
+    #[serde(default)]
+    pub enrollment: EnrollmentConfig,
+}
+
+/// The `[enrollment]` block: policy for the DH possession proof a device presents when it first
+/// binds its WireGuard pubkey (proving it holds the matching private key, so a party who only learned
+/// the pubkey can't squat it).
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct EnrollmentConfig {
+    /// Require a valid possession proof on every enrolling register. Default `false` (observe-only):
+    /// the coordinator rejects a *malformed* proof but still admits an enrollment that sends none,
+    /// logging a warning and counting it (`unitylan_enrollments_unproven_total`) so an operator can
+    /// see when the fleet is proof-clean. A *present* proof is always verified regardless.
+    ///
+    // TODO(phase2): flip this default to `true` once `MIN_PROTOCOL_VERSION` is past the first release
+    // that shipped the client-side proof — by then no enrolling client omits it, so fail-closed costs
+    // nothing. Until then a mixed fleet with older engines still needs to enroll new devices.
+    #[serde(default)]
+    pub require_proof: bool,
 }
 
 fn default_attestation_ttl() -> u64 {

@@ -7,6 +7,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- Enrolling a device now proves it holds the WireGuard private key it registers, so someone who
+  merely learned your (not-yet-enrolled) public key can no longer bind it to their own account and
+  block you from joining. This release ships the check in **observe-only** mode: the coordinator
+  verifies a proof when one is sent and logs any enrollment that omits one, but still lets it
+  through, so a coordinator can upgrade ahead of its clients without breaking new-device enrollment.
+  Watch `unitylan_enrollments_unproven_total` in `/metrics`; once it stops climbing your fleet is
+  proof-clean and you can set `require_proof = true` under `[enrollment]` to reject proof-less
+  enrollments outright. A future release will make that the default.
 - Engine keys and bearer credentials are now created owner-only and installed atomically, closing
   the write-before-chmod window and preventing a pre-existing symlink from redirecting a secret
   write. The coordinator likewise creates its signing-key database privately before SQLite opens it.

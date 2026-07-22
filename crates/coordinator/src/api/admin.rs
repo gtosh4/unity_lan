@@ -388,7 +388,23 @@ pub(super) async fn admin_metrics(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     admin_auth(&st, &headers)?;
-    let body = render_metrics(&gather_stats(&st).await?);
+    let mut body = render_metrics(&gather_stats(&st).await?);
+    // Enrollment possession-proof adoption (process-lifetime counters). `unproven` is the operator's
+    // go/no-go for flipping `[enrollment] require_proof` closed: once it stops rising, no enrolling
+    // client omits a proof and fail-closed costs nothing.
+    use std::sync::atomic::Ordering;
+    counter(
+        &mut body,
+        "unitylan_enrollments_proven_total",
+        "Enrollments that presented a valid possession proof.",
+        st.enroll_proven.load(Ordering::Relaxed),
+    );
+    counter(
+        &mut body,
+        "unitylan_enrollments_unproven_total",
+        "Enrollments admitted without a proof (observe-only mode).",
+        st.enroll_unproven.load(Ordering::Relaxed),
+    );
     Ok((
         [(
             axum::http::header::CONTENT_TYPE,
@@ -408,6 +424,13 @@ fn gauge(out: &mut String, name: &str, help: &str, val: impl std::fmt::Display) 
     use std::fmt::Write;
     let _ = writeln!(out, "# HELP {name} {help}");
     let _ = writeln!(out, "# TYPE {name} gauge");
+    let _ = writeln!(out, "{name} {val}");
+}
+
+fn counter(out: &mut String, name: &str, help: &str, val: impl std::fmt::Display) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "# HELP {name} {help}");
+    let _ = writeln!(out, "# TYPE {name} counter");
     let _ = writeln!(out, "{name} {val}");
 }
 

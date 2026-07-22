@@ -30,6 +30,14 @@ pub struct RegisterReq {
     /// The coordinator enforces it once a device has proven it holds it (see `authenticate_enrolled`).
     #[serde(default)]
     pub device_token: Option<String>,
+    /// DH key-confirmation proving this request holds the WireGuard private key behind `wg_pubkey`,
+    /// sent only on an *enrolling* register (one that binds the pubkey for the first time). Blocks a
+    /// party who merely learned a not-yet-enrolled pubkey from squatting it under their own account.
+    /// Built via `common::crypto::enroll_proof` from the coordinator's published enrollment pubkey
+    /// (`GET /enroll/pubkey`); `None` from clients built before enrollment proofs, and from every
+    /// already-enrolled register (which authenticates by `device_token` instead).
+    #[serde(default)]
+    pub possession_proof: Option<[u8; 32]>,
     /// The client's reachable `ip:port` for the WG listener (UPnP-mapped in production).
     #[serde(default)]
     pub endpoint: Option<SocketAddr>,

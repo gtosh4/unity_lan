@@ -126,6 +126,10 @@ pub struct CoordReq {
     /// coordinator authenticates us as the owner of `wg_pubkey` rather than anyone who learned it.
     /// `None` before first enrollment (no token yet).
     pub device_token: Option<String>,
+    /// DH possession proof for an enrolling register (see [`RegisterReq::possession_proof`]). Set
+    /// only on the initial register, where the coordinator may bind our pubkey for the first time;
+    /// `None` on every already-enrolled register/refresh (`device_token` authenticates those).
+    pub possession_proof: Option<[u8; 32]>,
     /// Last-seen version echoed as `since`. `Some` on a renewal (the coordinator holds the request
     /// until membership changes or ~TTL/2 elapses); `None` returns immediately (no long-poll hold).
     pub since: Option<u64>,
@@ -182,6 +186,28 @@ pub async fn refresh(
     .await
 }
 
+/// Fetch the coordinator's enrollment public key (`GET /enroll/pubkey`) — the X25519 point a client
+/// combines with its WG private key to build the enrolling [`RegisterReq::possession_proof`]. Its
+/// value is stable per coordinator; callers fetch it once per enrollment attempt. Absent on a
+/// coordinator too old to expose the route — the caller then enrolls without a proof (the coordinator
+/// permits that while it runs proof enforcement in observe-only mode).
+pub async fn enroll_pubkey(base_url: &str) -> anyhow::Result<[u8; 32]> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("building http client")?;
+    let resp = client
+        .get(format!("{base_url}/enroll/pubkey"))
+        .send()
+        .await
+        .context("sending /enroll/pubkey")?;
+    let resp = ensure_ok(resp, "enroll/pubkey").await?;
+    resp.json::<[u8; 32]>()
+        .await
+        .context("decoding enroll pubkey")
+}
+
 async fn post(
     base_url: &str,
     state_dir: &Path,
@@ -208,6 +234,7 @@ async fn post(
             device_name: req.device_name,
             enrollment_key: req.enrollment_key,
             device_token: req.device_token,
+            possession_proof: req.possession_proof,
             endpoint: req.endpoint,
             since: req.since,
             disabled_networks: req.disabled_networks,

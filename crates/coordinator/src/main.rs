@@ -130,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let deployment_seed = store.load_or_create_deployment_seed().await?;
+    let enroll_secret = store.load_or_create_enroll_seed().await?;
     let mesh_cidr = resolve_mesh_cidr(&cfg, &deployment_seed)?;
     tracing::info!(cidr = %mesh_cidr, "mesh address range");
     let guild_keys = Arc::new(GuildKeys::new(
@@ -269,7 +270,18 @@ async fn main() -> anyhow::Result<()> {
         stun_port,
         release,
         admin_token: cfg.admin.as_ref().map(|a| a.token.clone()),
+        enroll_secret,
+        require_enroll_proof: cfg.enrollment.require_proof,
+        enroll_proven: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        enroll_unproven: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
+    if cfg.enrollment.require_proof {
+        tracing::info!("enrollment possession proof: REQUIRED (proof-less enrollment rejected)");
+    } else {
+        tracing::info!(
+            "enrollment possession proof: observe-only (proof-less enrollment allowed, logged)"
+        );
+    }
 
     // Presence reaper: evict devices that stopped refreshing (crashed/dropped client, or the old
     // pubkey a re-keyed device abandoned). Bumps the scopes it actually reaped from, so co-members

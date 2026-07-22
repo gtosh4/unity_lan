@@ -142,6 +142,10 @@ impl Store {
                 id   INTEGER PRIMARY KEY CHECK (id = 1),  -- one row; not a signing key
                 seed BLOB    NOT NULL                     -- random, selects the default mesh /16
             );
+            CREATE TABLE IF NOT EXISTS enroll_key (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),  -- one row; the X25519 enrollment secret
+                seed BLOB    NOT NULL                     -- device possession-proof DH secret
+            );
             CREATE TABLE IF NOT EXISTS networks (
                 guild_id INTEGER NOT NULL,
                 role_id  INTEGER NOT NULL,
@@ -211,6 +215,29 @@ impl Store {
         }
         let seed = common::crypto::CoordinatorKey::generate().to_seed();
         sqlx::query("INSERT INTO deployment_seed (id, seed) VALUES (1, ?)")
+            .bind(seed.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(seed)
+    }
+
+    /// A deployment-stable X25519 secret for the device enrollment possession proof, generated +
+    /// persisted once. Its public half is published (`GET /enroll/pubkey`); a client combines that
+    /// with its WG private key to prove possession at enrollment (`common::crypto::enroll_proof`).
+    /// Stable across restarts so a proof a client built against a fetched pubkey stays verifiable.
+    pub async fn load_or_create_enroll_seed(&self) -> anyhow::Result<[u8; 32]> {
+        if let Some(row) = sqlx::query("SELECT seed FROM enroll_key WHERE id = 1")
+            .fetch_optional(&self.pool)
+            .await?
+        {
+            let seed: Vec<u8> = row.try_get("seed")?;
+            return seed
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored enroll seed is not 32 bytes"));
+        }
+        let (seed, _) = common::crypto::gen_wg_keypair();
+        sqlx::query("INSERT INTO enroll_key (id, seed) VALUES (1, ?)")
             .bind(seed.as_slice())
             .execute(&self.pool)
             .await?;

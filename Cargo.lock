@@ -6819,6 +6819,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1",
+ "sha2",
  "siphasher",
  "thiserror 2.0.18",
  "x25519-dalek",

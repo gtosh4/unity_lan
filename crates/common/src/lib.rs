@@ -59,6 +59,14 @@ pub mod caps {
     /// safe way to roll it out while both kinds are in the field. Retire the flag — and always emit
     /// V2 — once [`crate::MIN_PROTOCOL_VERSION`] is past the last release that lacked it.
     pub const ATTESTATION_V2: &str = "attestation-v2";
+
+    /// Client attaches a DH possession proof ([`crate::crypto::enroll_proof`]) on an enrolling
+    /// register. Advertised so the coordinator can *observe* which enrollments could have proven
+    /// possession but didn't — telemetry that tells an operator when the fleet is proof-clean and
+    /// safe to flip `[enrollment] require_proof` on. It does **not** gate enforcement: a security
+    /// check the caller can opt out of by withholding a flag is no check at all, so enforcement is
+    /// coordinator policy (config), never this capability.
+    pub const ENROLL_PROOF: &str = "enroll-proof";
 }
 
 /// Every capability this build implements — what we advertise on the wire.
@@ -66,7 +74,7 @@ pub mod caps {
 /// Deliberately short: a capability earns its place by gating real behavior. Things a peer can
 /// infer from `proto` (delta sync, ICE, relay, gossip pull) don't belong here — an advertised flag
 /// nobody reads is worse than no flag, because it reads as a guarantee.
-pub const CAPABILITIES: &[&str] = &[caps::ATTESTATION_V2];
+pub const CAPABILITIES: &[&str] = &[caps::ATTESTATION_V2, caps::ENROLL_PROOF];
 
 /// This build's release version (the shared workspace version, from Cargo). All crates ship from one
 /// monorepo tag, so this is simultaneously the coordinator's, engine's, and GUI's version — which is

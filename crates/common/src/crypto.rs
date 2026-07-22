@@ -99,6 +99,56 @@ pub fn anon_label(key: &[u8], domain: &str, id: u64) -> String {
     s
 }
 
+/// Domain tag for the enrollment possession proof, so the DH-derived MAC can never be mistaken for
+/// (or lifted into) any other use of a shared secret.
+const ENROLL_PROOF_DOMAIN: &[u8] = b"unitylan-enroll-proof-v1";
+
+/// Prove possession of the WireGuard private key behind `wg_pubkey` to the coordinator at enrollment,
+/// **without** repurposing the Curve25519 key as a signature key — this is a DH key-confirmation.
+///
+/// The client computes `X25519(wg_priv, enroll_pub)`; the coordinator, holding the enrollment static
+/// secret, computes `X25519(enroll_priv, wg_pubkey)` — the same shared secret — and recomputes this
+/// MAC (see [`verify_enroll_proof`]). Only a holder of `wg_priv` (or the coordinator's secret) can
+/// produce the shared secret, so a party that merely learned the *public* key cannot forge the proof.
+/// No nonce is needed: the property is "only a private-key holder yields this value", and a client
+/// replaying a proof for its own key is a no-op.
+pub fn enroll_proof(wg_private: &WgPrivateKey, enroll_pub: &[u8; 32]) -> [u8; 32] {
+    let shared = StaticSecret::from(*wg_private).diffie_hellman(&PublicKey::from(*enroll_pub));
+    proof_mac(shared.as_bytes(), wg_public_from_private(wg_private))
+}
+
+/// Coordinator side: verify a client's [`enroll_proof`] using the enrollment static secret. Returns
+/// `false` for a mismatched proof and for a `wg_pubkey` that drives the DH to the all-zero shared
+/// secret (a low-order point — x25519-dalek does not reject these, and a zero secret is one any party
+/// could reproduce). A real WireGuard public key is never low-order.
+pub fn verify_enroll_proof(
+    enroll_private: &[u8; 32],
+    wg_pubkey: &WgPublicKey,
+    proof: &[u8; 32],
+) -> bool {
+    let shared = StaticSecret::from(*enroll_private).diffie_hellman(&PublicKey::from(*wg_pubkey));
+    if shared.as_bytes() == &[0u8; 32] {
+        return false;
+    }
+    let expected = proof_mac(shared.as_bytes(), *wg_pubkey);
+    ct_eq(&expected, proof)
+}
+
+/// HMAC-SHA256 over the domain tag and the bound public key, keyed by the DH shared secret.
+fn proof_mac(shared: &[u8], wg_pubkey: WgPublicKey) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(shared).expect("HMAC accepts a key of any length");
+    mac.update(ENROLL_PROOF_DOMAIN);
+    mac.update(&wg_pubkey);
+    mac.finalize().into_bytes().into()
+}
+
+/// The public half of the coordinator's enrollment static secret — what clients fetch to build a proof.
+pub fn enroll_public_from_secret(enroll_private: &[u8; 32]) -> [u8; 32] {
+    PublicKey::from(&StaticSecret::from(*enroll_private)).to_bytes()
+}
+
 /// Mint a one-time enrollment key: `unl_` + 32 hex chars (128 bits from the OS CSPRNG).
 pub fn gen_enrollment_key() -> String {
     let mut bytes = [0u8; 16];
@@ -187,6 +237,42 @@ mod tests {
         let l = anon_label(&key, "user", 42);
         assert_eq!(l.len(), 8);
         assert!(l.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn enroll_proof_roundtrips_and_binds_the_key() {
+        let (enroll_priv, enroll_pub) = gen_wg_keypair();
+        let (wg_priv, wg_pub) = gen_wg_keypair();
+
+        // A holder of wg_priv produces a proof the coordinator (holding enroll_priv) accepts.
+        let proof = enroll_proof(&wg_priv, &enroll_pub);
+        assert!(verify_enroll_proof(&enroll_priv, &wg_pub, &proof));
+
+        // A proof for one key does not verify against another key.
+        let (_, other_pub) = gen_wg_keypair();
+        assert!(!verify_enroll_proof(&enroll_priv, &other_pub, &proof));
+
+        // A different WG private key can't forge a proof for wg_pub.
+        let (forger_priv, _) = gen_wg_keypair();
+        let forged = enroll_proof(&forger_priv, &enroll_pub);
+        assert!(!verify_enroll_proof(&enroll_priv, &wg_pub, &forged));
+
+        // A wrong enrollment secret rejects a genuine proof.
+        let (other_enroll_priv, _) = gen_wg_keypair();
+        assert!(!verify_enroll_proof(&other_enroll_priv, &wg_pub, &proof));
+
+        // The published enroll pubkey matches the secret used to verify.
+        assert_eq!(enroll_public_from_secret(&enroll_priv), enroll_pub);
+    }
+
+    #[test]
+    fn enroll_proof_rejects_low_order_pubkey() {
+        // The all-zero point is low-order: DH yields the all-zero shared secret, which any party can
+        // reproduce. Such a "pubkey" must never verify regardless of the proof bytes offered.
+        let (enroll_priv, _) = gen_wg_keypair();
+        let low_order = [0u8; 32];
+        let proof = enroll_proof(&[1u8; 32], &enroll_public_from_secret(&enroll_priv));
+        assert!(!verify_enroll_proof(&enroll_priv, &low_order, &proof));
     }
 
     #[test]

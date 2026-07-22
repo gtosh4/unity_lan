@@ -427,7 +427,11 @@ async fn wait_for_shutdown_signal() {
 async fn register_once(config: Option<String>, token: Option<String>) -> anyhow::Result<()> {
     let cfg = load_config(config, token)?;
 
-    let (_wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
+    let (wg_priv, wg_pubkey) = keys::load_or_generate_keypair(&cfg.state_dir)?;
+    let possession_proof = coord::enroll_pubkey(&cfg.coordinator)
+        .await
+        .ok()
+        .map(|ep| common::crypto::enroll_proof(&wg_priv, &ep));
 
     let (_resp, device) = coord::register(
         &cfg.coordinator,
@@ -438,6 +442,7 @@ async fn register_once(config: Option<String>, token: Option<String>) -> anyhow:
             endpoint: cfg.endpoint,
             enrollment_key: cfg.enrollment_key.clone(),
             device_token: keys::load_token(&cfg.state_dir),
+            possession_proof,
             since: None,
             disabled_networks: Vec::new(),
             observed: Vec::new(),
@@ -600,7 +605,7 @@ fn load_config(arg: Option<String>, token_override: Option<String>) -> anyhow::R
 /// `login <config.toml>` — interactive Discord login. Prints the authorize URL to open, then
 /// polls register until the coordinator has bound this device to the authenticated user.
 async fn login(cfg: Config) -> anyhow::Result<()> {
-    let (_wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
+    let (wg_priv, wg_pub) = keys::load_or_generate_keypair(&cfg.state_dir)?;
     let login = oauth::begin(&cfg.coordinator, &cfg.oauth_redirect, wg_pub).await?;
     println!(
         "Open this URL in your browser to log in with Discord:\n\n  {}\n",
@@ -617,6 +622,10 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
         })??;
 
     // The binding is now in place, so a register succeeds and confirms the device.
+    let possession_proof = coord::enroll_pubkey(&cfg.coordinator)
+        .await
+        .ok()
+        .map(|ep| common::crypto::enroll_proof(&wg_priv, &ep));
     let (_, device) = coord::register(
         &cfg.coordinator,
         &cfg.state_dir,
@@ -626,6 +635,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
             endpoint: cfg.endpoint,
             enrollment_key: None,
             device_token: keys::load_token(&cfg.state_dir),
+            possession_proof,
             since: None,
             disabled_networks: Vec::new(),
             observed: Vec::new(),
