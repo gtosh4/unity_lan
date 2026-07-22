@@ -3,7 +3,7 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
+## v0.4.1
 
 ### Security
 
@@ -28,6 +28,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 - Engine keys and bearer credentials are now created owner-only and installed atomically, closing
   the write-before-chmod window and preventing a pre-existing symlink from redirecting a secret
   write. The coordinator likewise creates its signing-key database privately before SQLite opens it.
+- A coordinator now caps how many client long-polls it holds at once (`max_longpolls`, default 4096)
+  and allows only one parked request per device, so a single account can no longer tie up every
+  connection slot and starve everyone else's refreshes. A device turned away at the ceiling gets a
+  `429` and retries normally. Raise the limit only alongside the coordinator's and the reverse
+  proxy's open-file limits — see `docs/coordinator-setup.md`.
 - Coordinators now refuse unsafe security settings at startup, including weak admin tokens,
   unreasonable attestation lifetimes, and malformed, non-HTTPS, duplicate, or oversized update
   artifacts.
