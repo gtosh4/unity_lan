@@ -49,16 +49,9 @@ pub const MIN_PROTOCOL_VERSION: u32 = 4;
 /// from our set, never a decode failure. An empty set (an older client) means "infer from `proto`".
 /// Only declare a capability that actually gates behavior — an aspirational list is worse than none.
 pub mod caps {
-    /// Client can read the **V2** attestation layout
-    /// ([`crate::attestation::ATTESTATION_SCHEMA_V2`]), so the coordinator may sign its snapshot in
-    /// V2 rather than the original layout.
-    ///
-    /// This is what makes the layout change survivable: a v0.2.0 client handed a V2 blob decodes
-    /// neither its own grant nor any peer and silently meshes with nobody, and the blob is postcard
-    /// so it cannot detect that. Gating emission on the client saying "I can read this" is the only
-    /// safe way to roll it out while both kinds are in the field. Retire the flag — and always emit
-    /// V2 — once [`crate::MIN_PROTOCOL_VERSION`] is past the last release that lacked it.
-    pub const ATTESTATION_V2: &str = "attestation-v2";
+    // The attestation-v2 read capability was retired once the fleet was entirely ≥ v0.3.0 (the first
+    // release that reads V2): the coordinator now always signs V2, so there is no per-client layout
+    // choice left to gate. See `attestation::ATTESTATION_SCHEMA_V2`.
 
     /// Client attaches a DH possession proof ([`crate::crypto::enroll_proof`]) on an enrolling
     /// register. Advertised so the coordinator can *observe* which enrollments could have proven
@@ -74,7 +67,7 @@ pub mod caps {
 /// Deliberately short: a capability earns its place by gating real behavior. Things a peer can
 /// infer from `proto` (delta sync, ICE, relay, gossip pull) don't belong here — an advertised flag
 /// nobody reads is worse than no flag, because it reads as a guarantee.
-pub const CAPABILITIES: &[&str] = &[caps::ATTESTATION_V2, caps::ENROLL_PROOF];
+pub const CAPABILITIES: &[&str] = &[caps::ENROLL_PROOF];
 
 /// This build's release version (the shared workspace version, from Cargo). All crates ship from one
 /// monorepo tag, so this is simultaneously the coordinator's, engine's, and GUI's version — which is

@@ -19,25 +19,17 @@ use crate::DNS_SUFFIX;
 /// unambiguous (a small `guild_id`, as fake/test configs use, is indistinguishable from a leading
 /// schema tag).
 ///
-/// - `0` = **V1**, the original layout, no tag. What every released client reads.
+/// - `0` = **V1**, the original layout, no tag. Read-only now: still decodes an in-field blob, never
+///   signed. Retired as an emission target once the fleet was entirely ≥ v0.3.0 (see below).
 /// - `1` = **V2**, `schema`-first, so a future layout change is a clean rejection rather than a
-///   silent misparse.
+///   silent misparse. What the coordinator now always signs.
 ///
-/// **Rollout (phase 1 of 2).** Clients read both from this release; the coordinator still signs V1
-/// only, because a v0.2.0 client handed a V2 blob fails to decode it — its own grant *and* every
-/// peer — and peers with nobody. Emission flips to V2 in the release where
-/// [`crate::MIN_PROTOCOL_VERSION`] reaches 5, by which point every supported client can read it.
+/// **Rollout complete.** V2 read support shipped in v0.3.0; emission was gated on the client
+/// advertising `attestation-v2` so both layouts could coexist while the fleet upgraded. With every
+/// enrolled device ≥ v0.3.0, the coordinator now signs V2 unconditionally and the capability is
+/// retired. V1 *decode* stays for any stray blob still in flight; nothing emits it.
 pub const ATTESTATION_SCHEMA_V1: u32 = 0;
 pub const ATTESTATION_SCHEMA_V2: u32 = 1;
-
-/// The layout the coordinator signs for a client that has **not** claimed it can read anything
-/// newer — i.e. the floor, and what every released client gets. A client advertising
-/// [`crate::caps::ATTESTATION_V2`] is served V2 instead.
-///
-/// Moving this to V2 is the phase-2 step, valid only once the support floor excludes every release
-/// that lacked the capability; `coordinator_still_emits_the_layout_old_clients_read` and
-/// `a_v0_2_0_client_can_still_read_what_we_emit_by_default` both fail if it moves early.
-pub const ATTESTATION_SCHEMA_EMIT: u32 = ATTESTATION_SCHEMA_V1;
 
 /// V2 wire form: identical to [`Attestation`] with a leading schema tag. Private to this module —
 /// callers work with `Attestation` and pass a layout, so the tag never leaks into domain code.
@@ -309,53 +301,6 @@ mod tests {
             sign_attestation(&key, &sample(now), 99),
             Err(AttestationError::UnknownSchema { got: 99 })
         ));
-    }
-
-    /// The compatibility guarantee this release rests on: what the coordinator actually emits must
-    /// stay the layout every already-released client can read. Flipping `ATTESTATION_SCHEMA_EMIT`
-    /// before the support floor reaches 5 strands every v0.2.0 client — it decodes neither its own
-    /// grant nor any peer, and silently peers with nobody.
-    /// A v0.2.0 client's struct, byte-for-byte as that release shipped it. Frozen on purpose: it is
-    /// the oracle for "can a client already in the field still read what we emit?".
-    #[derive(Serialize, Deserialize)]
-    struct V0_2_0Attestation {
-        guild_id: u64,
-        user_id: u64,
-        username: String,
-        device_name: String,
-        is_primary: bool,
-        wg_ip: Ipv4Addr,
-        wg_net: Ipv4Net,
-        wg_pubkey: [u8; 32],
-        issued_at: u64,
-        expires_at: u64,
-    }
-
-    /// The regression test for the bug this design exists to prevent: a released client decoding a
-    /// blob signed by a *newer* coordinator. It reads the postcard bytes with its own field list and
-    /// ignores the envelope hint entirely, so the only thing keeping it working is that we still emit
-    /// the layout it knows. Signing V2 by default failed exactly here — `DeserializeUnexpectedEnd` —
-    /// and a real v0.2.0 client would have meshed with nobody while reporting no error.
-    #[test]
-    fn a_v0_2_0_client_can_still_read_what_we_emit_by_default() {
-        let key = CoordinatorKey::generate();
-        let now = 1_000;
-        let signed = sign_attestation(&key, &sample(now), ATTESTATION_SCHEMA_EMIT).unwrap();
-        let old: V0_2_0Attestation = signed
-            .verify(&key.anchor())
-            .expect("a released client must still decode the default emitted layout");
-        assert_eq!(old.username, "alice");
-        assert_eq!(old.guild_id, GUILD);
-        assert_eq!(old.wg_ip, Ipv4Addr::new(100, 64, 42, 7));
-    }
-
-    #[test]
-    fn coordinator_still_emits_the_layout_old_clients_read() {
-        assert_eq!(
-            ATTESTATION_SCHEMA_EMIT, ATTESTATION_SCHEMA_V1,
-            "only flip this once MIN_PROTOCOL_VERSION excludes every release without \
-             caps::ATTESTATION_V2 — until then a client that advertises nothing still needs V1"
-        );
     }
 
     #[test]

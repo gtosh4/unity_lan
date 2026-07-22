@@ -557,15 +557,9 @@ async fn build_snapshot(
         .unwrap()
         .insert(req.wg_pubkey, caller_ip);
     let now = common::now_unix();
-    // Which attestation layout this client gets. Gated on the client *saying* it can read V2: the
-    // blob is postcard, so a client handed a layout it doesn't know decodes neither its own grant
-    // nor any peer — and cannot tell that's what happened. Absent capability → the original layout,
-    // which every released client reads. See `common::caps::ATTESTATION_V2`.
-    let att_schema = if req.caps.iter().any(|c| c == common::caps::ATTESTATION_V2) {
-        common::attestation::ATTESTATION_SCHEMA_V2
-    } else {
-        common::attestation::ATTESTATION_SCHEMA_V1
-    };
+    // Always sign the V2 layout. V2 read support shipped in v0.3.0 and the whole fleet is past it, so
+    // the per-client capability gate that once kept V1 alive for older readers is retired.
+    let att_schema = common::attestation::ATTESTATION_SCHEMA_V2;
     let networks = st.store.all_networks().await.map_err(internal)?;
     // One IP + one name per device (keyed by pubkey), reused across every network it holds. The
     // request name only seeds these on first enrollment; thereafter `allocate_device` returns the

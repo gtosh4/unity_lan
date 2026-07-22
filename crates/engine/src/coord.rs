@@ -593,7 +593,7 @@ mod tests {
     use super::*;
     use crate::testutil::TempDir;
     use common::api::{GuildAnchor, GuildAttestation, RegisterResp, Seed};
-    use common::attestation::{ATTESTATION_SCHEMA_EMIT, ATTESTATION_SCHEMA_V2};
+    use common::attestation::{ATTESTATION_SCHEMA_V1, ATTESTATION_SCHEMA_V2};
     use common::crypto::CoordinatorKey;
 
     const GUILD: u64 = 42;
@@ -638,7 +638,7 @@ mod tests {
     /// Like `seed_signed_by`, but with an explicit signed `wg_ip` / `wg_net` (to exercise the
     /// off-mesh-`/32` guard).
     fn seed_with_ip(key: &CoordinatorKey, guild_id: u64, wg_ip: Ipv4Addr, wg_net: &str) -> Seed {
-        seed_with_ip_schema(key, guild_id, wg_ip, wg_net, ATTESTATION_SCHEMA_EMIT)
+        seed_with_ip_schema(key, guild_id, wg_ip, wg_net, ATTESTATION_SCHEMA_V1)
     }
 
     /// Sign `att` in `schema` and wrap it in the envelope that declares that layout — the pairing the
@@ -752,7 +752,7 @@ mod tests {
                     GUILD,
                     Ipv4Addr::new(100, 64, 0, 9),
                     "100.64.0.0/10",
-                    ATTESTATION_SCHEMA_EMIT,
+                    ATTESTATION_SCHEMA_V1,
                 ),
                 seed_with_ip_schema(
                     &honest,
@@ -871,7 +871,7 @@ mod tests {
             pubkey,
             expires_at,
         );
-        signed_ga(key, &att, ATTESTATION_SCHEMA_EMIT)
+        signed_ga(key, &att, ATTESTATION_SCHEMA_V1)
     }
 
     /// Peer-direct pull verification: adopt only a pinned-anchor-valid attestation for the *expected*
