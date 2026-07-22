@@ -1,6 +1,7 @@
 //! Ed25519 (coordinator attestation signing) and Curve25519 (WireGuard key) helpers.
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+pub use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use rand_core::{OsRng, RngCore};
 use x25519_dalek::{PublicKey, StaticSecret};
 

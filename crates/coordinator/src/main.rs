@@ -83,6 +83,13 @@ async fn main() -> anyhow::Result<()> {
     // `rotate-key --guild <id> [config]` is an offline admin subcommand: rotate one guild's signing
     // key and exit (keys are per-guild, §3.1). The operator restarts to sign under the new key.
     let argv: Vec<String> = std::env::args().skip(1).collect();
+    // Offline release-key tooling — run with the release key in the pipeline, never on a live
+    // coordinator (which holds no release key). Both exit before any server/DB setup.
+    match argv.first().map(String::as_str) {
+        Some("gen-release-key") => return gen_release_key(argv.get(1).map(String::as_str)),
+        Some("sign-release") => return sign_release_cli(&argv[1..]),
+        _ => {}
+    }
     let (rotate_guild, config_path): (Option<u64>, String) =
         if argv.first().map(String::as_str) == Some("rotate-key") {
             let mut guild = None;
@@ -214,6 +221,10 @@ async fn main() -> anyhow::Result<()> {
     // Fails closed at startup: a malformed `[release]` aborts boot. Behind a RwLock so SIGHUP can
     // swap it without a restart (see below).
     let release = Arc::new(std::sync::RwLock::new(build_release(cfg.release.as_ref())?));
+    // The pre-signed blob, served verbatim (the coordinator never signs it). Validated at config load.
+    let release_signed = Arc::new(std::sync::RwLock::new(
+        cfg.release.as_ref().and_then(|r| r.signed_blob.clone()),
+    ));
 
     // Reload the release manifest on SIGHUP (unix): re-read the config, re-sign `[release]`, and swap
     // it in — so an admin publishes a new release with `kill -HUP`, no restart. Only the release
@@ -222,6 +233,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let release = release.clone();
+        let release_signed = release_signed.clone();
         let config_path = config_path.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{signal, SignalKind};
@@ -233,13 +245,20 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
             while hup.recv().await.is_some() {
-                match Config::load(std::path::Path::new(&config_path))
-                    .and_then(|cfg| build_release(cfg.release.as_ref()))
-                {
-                    Ok(new) => {
-                        *release.write().unwrap() = new;
-                        tracing::info!("reloaded [release] manifest on SIGHUP");
-                    }
+                match Config::load(std::path::Path::new(&config_path)) {
+                    Ok(cfg) => match build_release(cfg.release.as_ref()) {
+                        Ok(new) => {
+                            *release.write().unwrap() = new;
+                            *release_signed.write().unwrap() =
+                                cfg.release.as_ref().and_then(|r| r.signed_blob.clone());
+                            tracing::info!("reloaded [release] manifest on SIGHUP");
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "SIGHUP reload failed; keeping previous manifest: {e:#}"
+                            )
+                        }
+                    },
                     Err(e) => {
                         tracing::error!("SIGHUP reload failed; keeping previous manifest: {e:#}")
                     }
@@ -269,6 +288,7 @@ async fn main() -> anyhow::Result<()> {
         ice: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         stun_port,
         release,
+        release_signed,
         admin_token: cfg.admin.as_ref().map(|a| a.token.clone()),
         enroll_secret,
         require_enroll_proof: cfg.enrollment.require_proof,
@@ -371,6 +391,106 @@ fn errno() -> std::io::Error {
 /// limit, so there's nothing to raise.
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
+
+/// `gen-release-key [out-file]`: generate a dedicated release signing key. Writes the 32-byte seed as
+/// hex to `out-file` (default `release-key.seed`, owner-only), and prints the public key hex to bake
+/// into clients as `UNITYLAN_RELEASE_PUBKEY`. The seed is the update trust root — keep it **offline**,
+/// never on a coordinator.
+fn gen_release_key(out: Option<&str>) -> anyhow::Result<()> {
+    let key = common::crypto::CoordinatorKey::generate();
+    let seed_hex = to_hex(&key.to_seed());
+    let pub_hex = to_hex(&key.anchor_bytes());
+    let path = out.unwrap_or("release-key.seed");
+    write_seed_private(std::path::Path::new(path), seed_hex.as_bytes())
+        .with_context(|| format!("writing {path}"))?;
+    println!("release signing key generated.");
+    println!("  private seed -> {path}  (keep OFFLINE; never deploy to a coordinator)");
+    println!("  public key   -> bake into clients at build time as:");
+    println!("      UNITYLAN_RELEASE_PUBKEY={pub_hex}");
+    Ok(())
+}
+
+/// `sign-release <release.toml> --seed <seed-file>`: sign the manifest in a standalone `[release]`
+/// TOML with the offline release seed, printing the base64 blob to paste into the coordinator's
+/// `[release] signed_blob`. The coordinator serves that blob verbatim; it never sees this seed.
+fn sign_release_cli(args: &[String]) -> anyhow::Result<()> {
+    let mut config = None;
+    let mut seed = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--seed" => {
+                seed = Some(
+                    it.next()
+                        .context("sign-release: --seed needs a file")?
+                        .clone(),
+                )
+            }
+            other => config = Some(other.to_string()),
+        }
+    }
+    let config = config.context("sign-release requires a release TOML path")?;
+    let seed = seed.context("sign-release requires --seed <seed-file>")?;
+
+    #[derive(serde::Deserialize)]
+    struct ReleaseFile {
+        release: crate::config::ReleaseConfig,
+    }
+    let text = std::fs::read_to_string(&config).with_context(|| format!("reading {config}"))?;
+    let mut rf: ReleaseFile = toml::from_str(&text).context("parsing release TOML")?;
+    // Ignore any signed_blob already in the config — we're minting a fresh one, and a stale blob (from
+    // the previous release) would otherwise fail validate()'s version-consistency check.
+    rf.release.signed_blob = None;
+    rf.release.validate()?;
+    let manifest = rf.release.to_manifest()?;
+
+    let seed_hex = std::fs::read_to_string(&seed).with_context(|| format!("reading {seed}"))?;
+    let seed_bytes = from_hex32(seed_hex.trim()).context("seed file is not 64 hex chars")?;
+    let key = common::crypto::CoordinatorKey::from_seed(&seed_bytes);
+    let blob = common::wire::Signed::sign(&key, &manifest)
+        .context("signing manifest")?
+        .to_base64();
+    println!("{blob}");
+    Ok(())
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex32(hex: &str) -> anyhow::Result<[u8; 32]> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        anyhow::bail!("expected 64 hex chars, got {}", hex.len());
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).context("bad hex")?;
+    }
+    Ok(out)
+}
+
+/// Write a secret seed file owner-only (0600 on unix), truncating any existing file.
+fn write_seed_private(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(bytes)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::File::create(path)?;
+        f.write_all(bytes)?;
+    }
+    Ok(())
+}
 
 /// Build the signed auto-update manifest from the `[release]` config, or `None` if unconfigured.
 /// Signs with the coordinator anchor so clients verify it against their pinned key. Shared by the

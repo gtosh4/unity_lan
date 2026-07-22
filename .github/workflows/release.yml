@@ -7,6 +7,12 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Dedicated release-signing PUBLIC key, baked into every client build in this workflow (read via
+  # option_env! in `common::update::release_pubkey`) so auto-updates verify against it rather than any
+  # guild signing key. Set the repo variable UNITYLAN_RELEASE_PUBKEY to the hex public key printed by
+  # `unitylan-coordinator gen-release-key`; the private seed stays offline with the release operator.
+  # Empty → builds are UNARMED and clients fall back to the legacy guild-signed update path.
+  UNITYLAN_RELEASE_PUBKEY: ${{ vars.UNITYLAN_RELEASE_PUBKEY }}
 
 permissions:
   contents: write   # attach .deb/.rpm to the GitHub Release
@@ -49,6 +55,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        # Include the release pubkey in the cache key: it's baked in at compile time, so a stale cache
+        # from an unarmed (or differently-keyed) build must not be reused, or clients ship unarmed.
+        with:
+          key: relkey-${{ env.UNITYLAN_RELEASE_PUBKEY }}
+      - name: Release-signing arm status
+        run: |
+          if [ -n "$UNITYLAN_RELEASE_PUBKEY" ]; then
+            echo "release signing: ARMED (pubkey ${UNITYLAN_RELEASE_PUBKEY:0:16}…)"
+          else
+            echo "::warning::release signing UNARMED — clients fall back to the guild-signed update path"
+          fi
       - name: Install nfpm
         run: |
           echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
@@ -69,6 +86,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: relkey-${{ env.UNITYLAN_RELEASE_PUBKEY }}
+      - name: Release-signing arm status
+        shell: bash
+        run: |
+          if [ -n "$UNITYLAN_RELEASE_PUBKEY" ]; then
+            echo "release signing: ARMED (pubkey ${UNITYLAN_RELEASE_PUBKEY:0:16}…)"
+          else
+            echo "::warning::release signing UNARMED — clients fall back to the guild-signed update path"
+          fi
       - name: Install WiX
         # Pinned: WiX v6+ requires accepting the Open Source Maintenance Fee EULA (WIX7015), and
         # unitylan.wxs targets the v4/v5 schema.

@@ -7,6 +7,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- Binary auto-updates can now be signed by a **dedicated release key** whose private half is held
+  offline in the release pipeline, never on a coordinator — so a leaked *guild* signing key can forge
+  attestations but can no longer sign a malicious engine update and push root code to every member of
+  that guild. Clients built with the release public key baked in (`UNITYLAN_RELEASE_PUBKEY`) verify
+  updates against it alone and won't downgrade to the old guild-signed path once a coordinator offers
+  a release-key-signed manifest. Generate the key with `unitylan-coordinator gen-release-key`, sign a
+  release with `sign-release`, and paste the resulting blob into `[release] signed_blob`. Existing
+  guild-signed updates keep working during the transition, so coordinators and clients can upgrade on
+  their own schedules; the guild-signed path can be retired once the fleet has the release key baked
+  in.
 - Enrolling a device now proves it holds the WireGuard private key it registers, so someone who
   merely learned your (not-yet-enrolled) public key can no longer bind it to their own account and
   block you from joining. This release ships the check in **observe-only** mode: the coordinator

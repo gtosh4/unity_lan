@@ -102,6 +102,13 @@ pub struct AppState {
     /// `RwLock` because reads are per-request but writes are rare; the read clones and never holds
     /// across an await.
     pub release: Arc<std::sync::RwLock<Option<ReleaseManifest>>>,
+    /// The **pre-signed** release manifest blob (`[release] signed_blob`) — a base64
+    /// [`common::wire::Signed`] the release pipeline produced offline with the dedicated release key.
+    /// Served **verbatim** in `RegisterResp.release_signed` to every caller (no guild needed, and the
+    /// coordinator never holds the release key — it can't and doesn't sign this). A client with a baked
+    /// release pubkey verifies it against that key and ignores the guild-signed [`release`](Self::release).
+    /// `None` disables the strong path (clients fall back to `release`). `RwLock` so SIGHUP can swap it.
+    pub release_signed: Arc<std::sync::RwLock<Option<String>>>,
     /// Operator admin-surface bearer token (`[admin] token`). `None` → `/admin` and `/metrics` are
     /// disabled (return 404), so an instance exposes no admin surface until its operator opts in.
     /// Compared in constant time; never logged. Read-only counts only — no traffic path.
@@ -1016,6 +1023,9 @@ async fn build_snapshot(
             caps: common::CAPABILITIES.iter().map(|c| c.to_string()).collect(),
             server_version: common::VERSION.to_string(),
             release,
+            // Served verbatim to every caller — the coordinator holds no release key, just relays the
+            // blob the pipeline signed offline. Cloned out of the RwLock (never held across an await).
+            release_signed: st.release_signed.read().unwrap().clone(),
             partial,
             removed,
         },

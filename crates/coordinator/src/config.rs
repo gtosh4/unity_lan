@@ -131,6 +131,15 @@ pub struct ReleaseConfig {
     pub version: String,
     #[serde(default, rename = "artifact")]
     pub artifacts: Vec<ArtifactConfig>,
+    /// Optional pre-signed manifest blob: a base64 [`common::wire::Signed`] the release pipeline
+    /// produced offline with the dedicated release key (`unitylan-coordinator sign-release`). The
+    /// coordinator serves it **verbatim** in `RegisterResp.release_signed` — it never holds the
+    /// release key. Clients with a baked release pubkey verify it against that key and ignore the
+    /// guild-signed manifest, so a leaked guild key can't sign a binary update. Its inner version
+    /// must match [`version`](Self::version) (a consistency check, so a stale paste fails at startup).
+    /// `None` → only the legacy guild-anchor path is served.
+    #[serde(default)]
+    pub signed_blob: Option<String>,
 }
 
 /// One `[[release.artifact]]`: a per-platform download + its SHA-256 (pasted from CI's SHA256SUMS).
@@ -270,7 +279,7 @@ impl Config {
 }
 
 impl ReleaseConfig {
-    fn validate(&self) -> anyhow::Result<()> {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
         semver::Version::parse(&self.version).map_err(|e| {
             anyhow::anyhow!("release version {:?} is not semver: {e}", self.version)
         })?;
@@ -290,6 +299,21 @@ impl ReleaseConfig {
                 anyhow::bail!(
                     "release contains duplicate platform {:?}",
                     artifact.platform
+                );
+            }
+        }
+        // A pre-signed blob, if present, must be a well-formed `Signed` whose inner manifest names the
+        // same version — so an operator can't paste a stale or corrupt blob and unknowingly serve it.
+        // We decode (not verify: the coordinator holds no release key) purely for this sanity check.
+        if let Some(blob) = &self.signed_blob {
+            let manifest = common::update::peek_signed_manifest(blob).map_err(|e| {
+                anyhow::anyhow!("release signed_blob is not a valid signed ReleaseManifest: {e}")
+            })?;
+            if manifest.version != self.version {
+                anyhow::bail!(
+                    "release signed_blob version {:?} does not match [release] version {:?}",
+                    manifest.version,
+                    self.version
                 );
             }
         }
@@ -386,5 +410,31 @@ mod tests {
             "cd".repeat(32)
         );
         assert!(load_text(&duplicate).is_err());
+    }
+
+    #[test]
+    fn validates_signed_blob_at_load() {
+        let block = |version: &str, blob: &str| {
+            format!(
+                "[release]\nversion = '{version}'\nsigned_blob = '{blob}'\n[[release.artifact]]\nplatform = 'linux-amd64'\nurl = 'https://example.test/a'\nsha256 = '{}'\nsize = 1\n",
+                "ab".repeat(32)
+            )
+        };
+        let sign = |version: &str| {
+            let key = common::crypto::CoordinatorKey::generate();
+            let manifest = common::update::ReleaseManifest {
+                version: version.into(),
+                artifacts: vec![],
+            };
+            common::wire::Signed::sign(&key, &manifest)
+                .unwrap()
+                .to_base64()
+        };
+        // Blob's inner version matches [release].version → accepted.
+        assert!(load_text(&block("1.2.3", &sign("1.2.3"))).is_ok());
+        // Stale/mismatched blob version → fail closed at load.
+        assert!(load_text(&block("1.2.3", &sign("9.9.9"))).is_err());
+        // Garbage blob → fail closed.
+        assert!(load_text(&block("1.2.3", "not-a-blob")).is_err());
     }
 }

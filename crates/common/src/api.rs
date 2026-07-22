@@ -299,6 +299,15 @@ pub struct RegisterResp {
     /// artifact for the client's platform. `None` when the deployment has no `[release]` configured.
     #[serde(default)]
     pub release: Option<String>,
+    /// The same manifest signed by the **dedicated release key** (see [`crate::update::release_pubkey`])
+    /// rather than a guild anchor — a base64 [`crate::wire::Signed`]`<`[`crate::update::ReleaseManifest`]`>`
+    /// the coordinator serves **verbatim** from config (it never holds the release key). A client whose
+    /// build baked a release pubkey verifies this against that key alone and ignores [`release`](Self::release),
+    /// so a leaked guild key can't sign an update. `None` on a coordinator not yet configured with a
+    /// pre-signed blob; the client then falls back to [`release`](Self::release). Additive: an old client
+    /// ignores this field.
+    #[serde(default)]
+    pub release_signed: Option<String>,
     /// Delta sync: whether `seeds` is a **delta** to merge into the client's held set (add/replace
     /// the listed peers, drop [`removed`](Self::removed), keep the rest) rather than a **full**
     /// snapshot to replace it. `false` from a pre-delta coordinator, or when the client sent no

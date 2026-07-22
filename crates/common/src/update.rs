@@ -1,14 +1,51 @@
 //! Signed release manifest for the auto-update path (design phase 3).
 //!
-//! The coordinator signs a [`ReleaseManifest`] with its trust anchor — the same Ed25519 key that
-//! signs attestations, so there is **no new trust root** — and hands it to clients on the long-poll
-//! ([`crate::api::RegisterResp::release`]). A client verifies it against its pinned anchor, then
-//! offers the update only when the manifest names a strictly-newer version *and* carries an artifact
-//! for the client's own platform. The artifact's SHA-256 is bound into the signed manifest, so the
-//! (large) artifact itself can be fetched over plain HTTPS from any host and still be proven to be
-//! exactly what the anchor blessed — the coordinator never carries the bytes.
+//! A [`ReleaseManifest`] is signed by the **dedicated release key** ([`release_pubkey`]) — a trust
+//! root deliberately separate from the per-guild attestation keys, its private half held offline in
+//! the release pipeline and never on a coordinator, so a leaked guild key can't sign a binary update.
+//! The coordinator serves the pre-signed blob verbatim in [`crate::api::RegisterResp::release_signed`];
+//! a client with the release key baked in verifies against it alone. A client offers the update only
+//! when the manifest names a strictly-newer version *and* carries an artifact for its platform. The
+//! artifact's SHA-256 is bound into the signed manifest, so the (large) artifact is fetched over plain
+//! HTTPS from any host and still proven exactly what the key blessed — the coordinator never carries
+//! the bytes.
+//!
+//! For the migration, the coordinator also still signs the manifest per-request under a **guild** key
+//! the caller holds ([`crate::api::RegisterResp::release`]); a client with no release key baked in
+//! (dev/CI) verifies that against its pinned anchor. That legacy path is what the release key exists
+//! to replace and is retired once the fleet has the key baked in.
 
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
+
+/// The dedicated release-signing **public** key, baked into the binary at build time from the
+/// `UNITYLAN_RELEASE_PUBKEY` env var (a 64-char hex Ed25519 public key). Its private half is held
+/// **offline** by the release pipeline and never touches a coordinator — so a leaked *guild* signing
+/// key can no longer sign a binary update (the update trust root is this key alone, not any pinned
+/// guild anchor).
+///
+/// `None` in dev/CI builds where the var is unset: the auto-update path then falls back to the legacy
+/// guild-anchor-signed manifest, so nothing here is load-bearing until a real release sets the var.
+/// A malformed value yields `None` too — a build with a bad key just declines the strong path rather
+/// than shipping an unverifiable one.
+pub fn release_pubkey() -> Option<VerifyingKey> {
+    let hex = option_env!("UNITYLAN_RELEASE_PUBKEY")?;
+    let bytes = parse_hex32(hex)?;
+    VerifyingKey::from_bytes(&bytes).ok()
+}
+
+/// Parse exactly 64 hex chars into 32 bytes, or `None` on any malformed input.
+fn parse_hex32(hex: &str) -> Option<[u8; 32]> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, byte) in out.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(i * 2..i * 2 + 2)?, 16).ok()?;
+    }
+    Some(out)
+}
 
 /// A target platform for a release artifact — one per artifact CI publishes.
 ///
@@ -64,6 +101,15 @@ impl ReleaseManifest {
     }
 }
 
+/// Decode the inner manifest of a base64 [`crate::wire::Signed`] release blob **without verifying**
+/// its signature. Only for a coordinator to sanity-check a `signed_blob` it will serve verbatim — the
+/// coordinator holds no release key, so it can't verify; the *client* does, against its baked-in key.
+/// This is never a trust decision.
+pub fn peek_signed_manifest(blob: &str) -> Result<ReleaseManifest, crate::wire::WireError> {
+    let signed = crate::wire::Signed::from_base64(blob)?;
+    Ok(postcard::from_bytes(&signed.payload)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +153,21 @@ mod tests {
         // Verified against the pinned anchor (not the attacker's), it must fail.
         let out: Result<ReleaseManifest, _> = signed.verify(&key.anchor());
         assert!(out.is_err());
+    }
+
+    #[test]
+    fn parse_hex32_roundtrips_and_rejects_malformed() {
+        let key = CoordinatorKey::generate();
+        let hex: String = key
+            .anchor_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(parse_hex32(&hex), Some(key.anchor_bytes()));
+        assert_eq!(parse_hex32(""), None);
+        assert_eq!(parse_hex32("zz"), None);
+        assert_eq!(parse_hex32(&hex[..62]), None); // too short
+        assert_eq!(parse_hex32(&format!("{hex}00")), None); // too long
     }
 
     #[test]

@@ -1,15 +1,21 @@
-//! Signed auto-update (design phase 3): verify the coordinator's release manifest against the
-//! pinned anchor, then download → re-verify → apply on the user's confirmation.
+//! Signed auto-update (design phase 3): verify the coordinator's release manifest, then download →
+//! re-verify → apply on the user's confirmation.
 //!
-//! Trust chain: the manifest is signed by the coordinator's anchor (already TOFU-pinned client-side,
-//! same key that signs attestations — no new trust root), and it binds each artifact's SHA-256. So
-//! the (large) artifact is fetched over plain HTTPS from anywhere and still proven to be exactly what
-//! the anchor blessed — a MITM can neither forge the manifest nor swap the artifact. Apply is
-//! user-triggered from the GUI, never automatic.
+//! **Trust root.** The manifest is verified against the **dedicated release key** baked into this
+//! binary (`common::update::release_pubkey`) whose private half lives offline in the release pipeline,
+//! *never* on a coordinator. That deliberately keeps the update trust root separate from the per-guild
+//! attestation keys: a leaked guild signing key can forge attestations but **cannot** sign a binary
+//! update. The manifest binds each artifact's SHA-256, so the (large) artifact is fetched over plain
+//! HTTPS from anywhere and still proven to be exactly what the release key blessed — a MITM can neither
+//! forge the manifest nor swap the artifact. Apply is user-triggered from the GUI, never automatic.
 //!
-//! Critically, the manifest is verified against the **pinned** anchor on disk (`keys::load_anchor`),
-//! never `resp.coord_pubkey` — a substituted response could carry an attacker's anchor + a manifest
-//! signed by it, which would otherwise be an update-channel RCE. Same rule as `coord::verified_seeds`.
+//! **Legacy fallback (transition only).** A build with no release key baked in (dev/CI), or one talking
+//! to a coordinator that hasn't published a release-key-signed blob yet, falls back to the older path:
+//! the manifest signed by a **pinned guild anchor** (`keys::load_all_anchors`), never `resp.coord_pubkey`
+//! — a substituted response could carry an attacker's anchor + a matching manifest, which would be an
+//! update-channel RCE. Same rule as `coord::verified_seeds`. This fallback is what a leaked guild key
+//! *could* still abuse, so it exists only until the fleet has migrated to the release-key path; an armed
+//! build refuses to fall back once the coordinator does send a (here, tampered) release-signed blob.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -170,17 +176,54 @@ pub fn reconcile_update_marker(state_dir: &Path) {
     }
 }
 
-/// Verify the coordinator's release manifest and stage an update if one applies to us: signature
-/// valid against the **pinned** anchor, version strictly newer than ours, and an artifact for this
-/// platform. `None` in every other case (no manifest, bad signature, not newer, wrong platform) — a
-/// failure is logged and swallowed, never fatal to the mesh.
-///
-/// The anchors are the pinned per-guild keys on disk (`keys::load_all_anchors`), **not** the
-/// response's own anchors: trusting those would let a substituted response ship an attacker-signed
-/// update. The coordinator signs the manifest under one guild key the caller holds (design.md
-/// §3.1), so we accept it if it verifies against *any* pinned anchor. Same discipline as
-/// [`crate::coord::verified_seeds`].
+/// Verify the coordinator's release manifest and stage an update if one applies to us. Delegates to
+/// [`stage_with`] using the release key baked into this build ([`common::update::release_pubkey`]).
 pub fn stage(resp: &RegisterResp, state_dir: &Path) -> Option<PendingUpdate> {
+    stage_with(resp, state_dir, common::update::release_pubkey())
+}
+
+/// Core of [`stage`], with the release key injected so tests can arm/disarm the strong path.
+///
+/// Two verification paths, in order:
+/// 1. **Release-key path (strong).** If this build has a baked release key *and* the response carries
+///    a `release_signed` blob, verify that blob against the release key **alone**. A valid signature
+///    stages; a *present but invalid* one is refused outright (`None`) — an armed build never falls
+///    back to the weaker guild-anchor path once the coordinator has spoken the strong protocol, so a
+///    MITM can't strip the strong signature down to a forgeable one.
+/// 2. **Legacy guild-anchor path (transition).** Otherwise (no baked key, or the coordinator sent no
+///    strong blob) verify `release` against any **pinned** guild anchor on disk — never the response's
+///    own anchors, which a substituted response controls. This is the pre-release-key behavior and
+///    exists only until the fleet migrates.
+///
+/// `None` in every non-staging case (no manifest, bad signature, not newer, rollback, wrong platform)
+/// — a failure is logged and swallowed, never fatal to the mesh.
+pub(crate) fn stage_with(
+    resp: &RegisterResp,
+    state_dir: &Path,
+    release_pk: Option<common::crypto::VerifyingKey>,
+) -> Option<PendingUpdate> {
+    // Strong path: an armed build + a coordinator that published a release-key-signed blob.
+    if let Some(pk) = release_pk {
+        if let Some(b64) = resp.release_signed.as_ref() {
+            let signed = Signed::from_base64(b64)
+                .map_err(|e| tracing::warn!("release manifest (signed): bad base64: {e}"))
+                .ok()?;
+            let manifest: ReleaseManifest = signed
+                .verify(&pk)
+                .map_err(|_| {
+                    // Present but doesn't verify against the release key: treat as hostile and refuse
+                    // — do NOT fall through to the guild-anchor path (that would be a downgrade).
+                    tracing::warn!(
+                        "release-signed manifest failed release-key verification — refusing"
+                    )
+                })
+                .ok()?;
+            return stage_manifest(manifest, state_dir);
+        }
+        // Armed build, but the coordinator sent no strong blob (older coordinator mid-transition):
+        // fall through to the legacy path so we're not stranded, unable to update at all.
+    }
+    // Legacy guild-anchor path.
     let b64 = resp.release.as_ref()?;
     let signed = Signed::from_base64(b64)
         .map_err(|e| tracing::warn!("release manifest: bad base64: {e}"))
@@ -202,6 +245,12 @@ pub fn stage(resp: &RegisterResp, state_dir: &Path) -> Option<PendingUpdate> {
             tracing::warn!("release manifest verified against no pinned anchor");
             None
         })?;
+    stage_manifest(manifest, state_dir)
+}
+
+/// The applicability gate shared by both verification paths: refuse a rollback below the highest
+/// version we've verified, require strictly newer than what we run, and pick this platform's artifact.
+fn stage_manifest(manifest: ReleaseManifest, state_dir: &Path) -> Option<PendingUpdate> {
     if !within_floor(state_dir, &manifest.version) {
         tracing::warn!(
             version = %manifest.version,
@@ -748,6 +797,102 @@ mod tests {
         assert!(stage(&resp("9.9.8"), &dir).is_none());
         // Re-offering the version at the floor still stages (not a rollback).
         assert!(stage(&resp("9.9.9"), &dir).is_some());
+    }
+
+    // ---- Dedicated release-key path (strong) ----
+
+    use common::crypto::CoordinatorKey;
+    use common::update::{Platform, ReleaseArtifact, ReleaseManifest};
+
+    /// A version-9.9.9 manifest with an artifact for both CI platforms (so `current_platform()`
+    /// matches on either target and the semver gate never masks a signature check).
+    fn manifest_9() -> ReleaseManifest {
+        ReleaseManifest {
+            version: "9.9.9".into(),
+            artifacts: vec![
+                ReleaseArtifact {
+                    platform: Platform::LinuxAmd64,
+                    url: "https://example.test/x".into(),
+                    sha256: [0u8; 32],
+                    size: 1,
+                },
+                ReleaseArtifact {
+                    platform: Platform::WindowsAmd64,
+                    url: "https://example.test/x.msi".into(),
+                    sha256: [0u8; 32],
+                    size: 1,
+                },
+            ],
+        }
+    }
+
+    fn resp_with(release: Option<String>, release_signed: Option<String>) -> RegisterResp {
+        RegisterResp {
+            version: 1,
+            proto: common::PROTOCOL_VERSION,
+            server_version: "9.9.9".into(),
+            release,
+            release_signed,
+            ..Default::default()
+        }
+    }
+
+    // An armed build (has a release key) verifies `release_signed` against that key alone — no guild
+    // anchor pinned or needed. This is the whole point: the update trust root is the release key.
+    #[test]
+    fn strong_path_stages_manifest_signed_by_release_key() {
+        let dir = crate::testutil::TempDir::new("su-strong");
+        let release = CoordinatorKey::generate();
+        let resp = resp_with(
+            None,
+            Some(Signed::sign(&release, &manifest_9()).unwrap().to_base64()),
+        );
+        assert!(stage_with(&resp, &dir, Some(release.anchor())).is_some());
+    }
+
+    // The anti-downgrade invariant: once the coordinator sends a `release_signed` blob, an armed build
+    // verifies it against the release key and NEVER falls back to the guild-anchor path. A blob signed
+    // by a (leaked) guild key — even alongside a perfectly valid legacy `release` — must be refused, or
+    // stripping the strong signature down to a guild-signed one would re-open the RCE.
+    #[test]
+    fn strong_path_refuses_non_release_key_and_does_not_fall_back() {
+        let dir = crate::testutil::TempDir::new("su-strong-reject");
+        let release = CoordinatorKey::generate();
+        let guild = CoordinatorKey::generate();
+        crate::keys::pin_anchor(&dir, 42, &guild.anchor_bytes(), &[]).unwrap();
+        let by_guild = Signed::sign(&guild, &manifest_9()).unwrap().to_base64();
+        // Strong blob signed by the wrong (guild) key, plus a legit legacy manifest that WOULD stage.
+        let resp = resp_with(Some(by_guild.clone()), Some(by_guild));
+        assert!(stage_with(&resp, &dir, Some(release.anchor())).is_none());
+    }
+
+    // Transition case: an armed build talking to an older coordinator that sends only the legacy
+    // `release` (no strong blob) still updates via the guild-anchor path, so it isn't stranded.
+    #[test]
+    fn armed_build_falls_back_to_legacy_when_no_strong_blob() {
+        let dir = crate::testutil::TempDir::new("su-fallback");
+        let guild = CoordinatorKey::generate();
+        crate::keys::pin_anchor(&dir, 42, &guild.anchor_bytes(), &[]).unwrap();
+        let resp = resp_with(
+            Some(Signed::sign(&guild, &manifest_9()).unwrap().to_base64()),
+            None,
+        );
+        // Armed with an unrelated release key; falls back because the coordinator sent no strong blob.
+        assert!(stage_with(&resp, &dir, Some(CoordinatorKey::generate().anchor())).is_some());
+    }
+
+    // An unarmed build (no baked release key) ignores `release_signed` entirely and uses the legacy
+    // guild-anchor path — even if the strong blob is garbage.
+    #[test]
+    fn unarmed_build_ignores_strong_blob_and_uses_legacy() {
+        let dir = crate::testutil::TempDir::new("su-unarmed");
+        let guild = CoordinatorKey::generate();
+        crate::keys::pin_anchor(&dir, 42, &guild.anchor_bytes(), &[]).unwrap();
+        let resp = resp_with(
+            Some(Signed::sign(&guild, &manifest_9()).unwrap().to_base64()),
+            Some("not-a-valid-blob".into()),
+        );
+        assert!(stage_with(&resp, &dir, None).is_some());
     }
 
     // A tampered/oversized/short artifact must be rejected before apply. We drive `download_verified`
