@@ -15,8 +15,14 @@ pub struct NftBackend;
 const TABLE: &str = "inet unitylan";
 
 impl FirewallBackend for NftBackend {
-    fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
-        run_nft(&ruleset(iface, exposed, peers))
+    fn apply(
+        &self,
+        iface: &str,
+        mesh_addr: Option<std::net::Ipv4Addr>,
+        exposed: &[Exposed],
+        peers: &PeerSets,
+    ) -> anyhow::Result<()> {
+        run_nft(&ruleset(iface, mesh_addr, exposed, peers))
     }
 
     fn reset(&self) -> anyhow::Result<()> {
@@ -58,7 +64,12 @@ fn set_name(scope: &ExposeScope) -> String {
 
 /// Build the nft script. Only `iif <iface>` traffic is policed; everything else is accepted so
 /// the host's other interfaces are untouched.
-fn ruleset(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
+fn ruleset(
+    iface: &str,
+    mesh_addr: Option<std::net::Ipv4Addr>,
+    exposed: &[Exposed],
+    peers: &PeerSets,
+) -> String {
     let mut s = String::new();
     // Atomic replace: ensure the table exists, drop it, recreate empty.
     s.push_str(&format!("add table {TABLE}\n"));
@@ -88,6 +99,18 @@ fn ruleset(iface: &str, exposed: &[Exposed], peers: &PeerSets) -> String {
     s.push_str(&format!(
         "add chain {TABLE} input {{ type filter hook input priority 0 ; policy accept ; }}\n"
     ));
+    // Close the Linux weak-host bypass: our mesh address is a *local* address, so the kernel accepts
+    // a packet addressed to it no matter which interface it arrived on. Without this, an on-link
+    // attacker could reach the mesh-IP DNS + p2p listeners over a non-mesh NIC, sidestepping the
+    // WireGuard authentication the "iifname != iface accept" rule below would otherwise imply.
+    // Legitimate mesh traffic is decrypted onto `iface`; local resolver queries loop back via `lo`;
+    // both are excluded, everything else addressed to us on a foreign interface is dropped. Ordered
+    // ahead of the blanket accept so it wins.
+    if let Some(addr) = mesh_addr {
+        s.push_str(&format!(
+            "add rule {TABLE} input ip daddr {addr} iifname != {{ \"{iface}\", \"lo\" }} drop\n"
+        ));
+    }
     // Leave non-wg interfaces alone.
     s.push_str(&format!(
         "add rule {TABLE} input iifname != \"{iface}\" accept\n"
@@ -439,6 +462,7 @@ mod tests {
     fn ruleset_has_default_deny_and_unscoped_ports() {
         let rs = ruleset(
             "unl0",
+            None,
             &[
                 exp(Proto::Tcp, 25565, ExposeScope::AllPeers),
                 exp(Proto::Udp, 34197, ExposeScope::AllPeers),
@@ -460,7 +484,7 @@ mod tests {
             "mesh",
             vec![Ipv4Addr::new(100, 64, 0, 2), Ipv4Addr::new(100, 64, 0, 3)],
         );
-        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, MESH)], &peers);
+        let rs = ruleset("unl0", None, &[exp(Proto::Tcp, 9001, MESH)], &peers);
         // Named set populated with the network's peer IPs. The set name is built from the ids, so
         // it needs no sanitizing and cannot collide with another network's.
         assert!(rs.contains("add set inet unitylan net_900100_7001 { type ipv4_addr ; }"));
@@ -488,6 +512,7 @@ mod tests {
         // Our own ruleset drops with a bare verdict (no CGNAT match) → no false positive.
         let ours = ruleset(
             "unl0",
+            None,
             &[exp(Proto::Tcp, 25565, ExposeScope::AllPeers)],
             &PeerSets::default(),
         );
@@ -577,7 +602,12 @@ mod tests {
 
     #[test]
     fn scoped_expose_with_no_peers_still_defines_empty_set() {
-        let rs = ruleset("unl0", &[exp(Proto::Tcp, 9001, MESH)], &PeerSets::default());
+        let rs = ruleset(
+            "unl0",
+            None,
+            &[exp(Proto::Tcp, 9001, MESH)],
+            &PeerSets::default(),
+        );
         assert!(rs.contains("add set inet unitylan net_900100_7001 { type ipv4_addr ; }"));
         assert!(!rs.contains("add element")); // no IPs → no elements, port reachable by nobody
         assert!(rs.contains("ip saddr @net_900100_7001 tcp dport 9001 accept"));
@@ -600,6 +630,7 @@ mod tests {
         };
         let rs = ruleset(
             "unl0",
+            None,
             &[
                 exp(Proto::Tcp, 9001, ExposeScope::OwnDevices),
                 exp(Proto::Tcp, 9002, MESH),
@@ -610,5 +641,26 @@ mod tests {
         assert!(rs.contains("add element inet unitylan net_900100_7001 { 100.64.0.9 }"));
         assert!(rs.contains("ip saddr @own_devices tcp dport 9001 accept"));
         assert!(rs.contains("ip saddr @net_900100_7001 tcp dport 9002 accept"));
+    }
+
+    /// The mesh address is a local address, so the kernel would deliver a packet addressed to it that
+    /// arrives on any interface (Linux weak host model). The drop rule closes that off — scoped to
+    /// our address, excluding the mesh iface and `lo`, and ordered ahead of the blanket accept so an
+    /// on-link attacker can't reach the mesh-IP DNS/p2p listeners over a foreign NIC.
+    #[test]
+    fn weak_host_drop_precedes_the_blanket_accept() {
+        let addr: Ipv4Addr = "100.73.61.1".parse().unwrap();
+        let rs = ruleset("unl0", Some(addr), &[], &PeerSets::default());
+        let drop = "ip daddr 100.73.61.1 iifname != { \"unl0\", \"lo\" } drop";
+        assert!(rs.contains(drop), "missing weak-host drop rule:\n{rs}");
+        // Must come before the "leave other interfaces alone" accept, or it never matches.
+        let accept = "iifname != \"unl0\" accept";
+        assert!(
+            rs.find(drop).unwrap() < rs.find(accept).unwrap(),
+            "drop must precede the blanket accept"
+        );
+        // Without an assigned mesh address there's nothing to protect and no rule is emitted.
+        let none = ruleset("unl0", None, &[], &PeerSets::default());
+        assert!(!none.contains("ip daddr"));
     }
 }

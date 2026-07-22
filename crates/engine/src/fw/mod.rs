@@ -154,8 +154,16 @@ impl PeerSets {
 /// removes it.
 pub trait FirewallBackend: Send + Sync {
     /// Replace the ruleset: default-deny new inbound on `iface`, allow established/related + ICMP
-    /// echo, accept the exposed ports (scoped exposes matched against `peers`).
-    fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()>;
+    /// echo, accept the exposed ports (scoped exposes matched against `peers`). `mesh_addr` is this
+    /// host's mesh address once assigned, so the backend can drop packets addressed to it that
+    /// arrive on the wrong interface (the Linux weak-host bypass).
+    fn apply(
+        &self,
+        iface: &str,
+        mesh_addr: Option<std::net::Ipv4Addr>,
+        exposed: &[Exposed],
+        peers: &PeerSets,
+    ) -> anyhow::Result<()>;
     /// Remove all UnityLAN firewall rules.
     fn reset(&self) -> anyhow::Result<()>;
 }
@@ -365,9 +373,10 @@ impl Firewall {
             *self.mesh_addr.lock().unwrap(),
             self.tailscale_compat,
         );
+        let mesh_addr = *self.mesh_addr.lock().unwrap();
         let exposed = self.exposed.lock().unwrap().clone();
         let peers = self.peers.lock().unwrap().clone();
-        self.backend.apply(&self.iface, &exposed, &peers)
+        self.backend.apply(&self.iface, mesh_addr, &exposed, &peers)
     }
 }
 
@@ -379,7 +388,13 @@ mod tests {
     /// A backend that installs nothing, so the tests exercise `Firewall`'s own bookkeeping.
     struct NullBackend;
     impl FirewallBackend for NullBackend {
-        fn apply(&self, _: &str, _: &[Exposed], _: &PeerSets) -> anyhow::Result<()> {
+        fn apply(
+            &self,
+            _: &str,
+            _: Option<std::net::Ipv4Addr>,
+            _: &[Exposed],
+            _: &PeerSets,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
         fn reset(&self) -> anyhow::Result<()> {

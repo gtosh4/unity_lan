@@ -39,7 +39,16 @@ pub struct WindowsFwBackend {
 const GROUP: &str = "UnityLAN";
 
 impl FirewallBackend for WindowsFwBackend {
-    fn apply(&self, iface: &str, exposed: &[Exposed], peers: &PeerSets) -> anyhow::Result<()> {
+    // `mesh_addr` (the Linux weak-host guard) is unused here: Windows uses the strong host model and
+    // the firewall rules are already scoped to the mesh interface (`-InterfaceAlias`), so a packet to
+    // the mesh address on another NIC is never delivered locally.
+    fn apply(
+        &self,
+        iface: &str,
+        _mesh_addr: Option<std::net::Ipv4Addr>,
+        exposed: &[Exposed],
+        peers: &PeerSets,
+    ) -> anyhow::Result<()> {
         run_fw_ps(&script(
             iface,
             self.listen_port,

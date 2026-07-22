@@ -25,6 +25,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   Watch `unitylan_enrollments_unproven_total` in `/metrics`; once it stops climbing your fleet is
   proof-clean and you can set `require_proof = true` under `[enrollment]` to reject proof-less
   enrollments outright. A future release will make that the default.
+- On Linux, a device on the same physical network as yours can no longer reach your mesh-only DNS
+  resolver or peer services by addressing them directly on a non-mesh interface. Linux's default
+  "weak host" behavior accepts a packet aimed at a local address regardless of which interface it
+  arrived on, which let an on-link attacker query the `.internal` name resolver or pull your signed
+  device attestation (leaking guild/user/device identity) without any mesh credential, sidestepping
+  WireGuard entirely. The engine now drops traffic addressed to its mesh IP that arrives on any
+  interface other than the mesh tunnel (local loopback queries still work). Windows was never
+  affected.
 - A malicious device on your local network can no longer disrupt your mesh tunnels with forged LAN
   discovery beacons. Previously a host on the same segment could spoof a peer's beacon from a
   rotating source address and repeatedly yank that peer's endpoint onto the attacker, tearing down
