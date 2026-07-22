@@ -34,6 +34,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- Installing an auto-update is far less disruptive to the mesh. The engine used to announce its
+  departure before restarting onto the new binary, so every peer dropped you and then had to
+  rediscover you and punch a fresh path through NAT — often tens of seconds of dead tunnels for an
+  update that took one. It now stays registered across the restart and keeps its firewall and DNS
+  setup in place, so peers see nothing worse than a missed handshake and traffic resumes within
+  seconds. (Tunnels still briefly drop; the engine and the WireGuard data plane share a process
+  today, so nothing can survive the swap. A truly seamless upgrade needs them split apart.)
 - The coordinator now caches each guild's name briefly instead of asking Discord for it on every
   client refresh. Under a membership-change herd — when many clients wake and rebuild their
   snapshots at once — this collapses what was one Discord request per client into one per guild,

@@ -227,13 +227,34 @@ pub enum RunOutcome {
     RestartService,
 }
 
+/// Why the daemon is tearing down — a stop that ends the mesh, or a restart onto a new binary.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TeardownKind {
+    /// The engine is going away: reverse everything, including our presence at the coordinator.
+    Stop,
+    /// The engine is coming straight back on the updated binary (re-exec / SCM restart). Keep the
+    /// state whose removal would be *visible to other people* — see [`teardown`].
+    UpdateRestart,
+}
+
 /// Reverse every host mutation this enrollment made — in the order that survives a SIGKILL
 /// mid-teardown: withdraw presence at the coordinator, then host-global state (firewall, resolver)
 /// *before* the interface, then stop the background tasks. Shared by the clean-shutdown and
 /// re-exec-for-update paths: both end the daemon and must leave no live TUN fd, bound socket, or
 /// stranded host state behind.
+///
+/// [`TeardownKind::UpdateRestart`] keeps the presence, firewall and resolver state, because we are
+/// about to re-apply all three seconds later and dropping them is what makes an update *hurt*:
+/// withdrawing evicts us from every co-member's snapshot, so each peer prunes us and then has to
+/// re-punch NAT / re-run ICE from scratch on our return — far longer than the restart itself. Stay
+/// registered on the same `listen_port` and peers never notice more than a missed handshake. (The
+/// interface still goes down: boringtun lives *in* this process, so its TUN and sessions die with
+/// it either way — see the data-plane-process item in `docs/roadmap.md` for the real fix.) Both
+/// kept pieces are re-established idempotently on start, and if the new binary never comes up, the
+/// coordinator's presence reaper and the next start's stale-socket/firewall rebuild clean up.
 #[allow(clippy::too_many_arguments)]
 async fn teardown(
+    kind: TeardownKind,
     cfg: &Config,
     wg_pub: [u8; 32],
     endpoint: Option<SocketAddr>,
@@ -247,45 +268,49 @@ async fn teardown(
     // Best-effort: tell the coordinator we're leaving so co-members prune us within seconds instead
     // of waiting out the presence reaper (~31 min). Bounded to 3s so an unreachable coordinator
     // can't stall teardown; a crash/power-loss can't send this — the reaper is the backstop.
-    let withdraw = coord::refresh(
-        &cfg.coordinator,
-        &cfg.state_dir,
-        coord::CoordReq {
-            wg_pubkey: wg_pub,
-            device_name: cfg.device_name(),
-            endpoint,
-            enrollment_key: cfg.enrollment_key.clone(),
-            device_token: keys::load_token(&cfg.state_dir),
-            possession_proof: None, // withdraw is post-enrollment; the token authenticates
-            since: None,            // no long-poll hold: return as soon as the eviction is applied
-            disabled_networks: Vec::new(),
-            observed: Vec::new(),
-            supersede: None,
-            paused: true, // paused → evict from all networks
-            peer_own_devices: localnet.peer_own_devices(),
-            relay: coord::RelayReport::default(),
-            ice: Vec::new(),
-            held: Vec::new(), // withdrawing → no held set to diff against
-        },
-    );
-    match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
-        Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
-        Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
-        Err(_) => tracing::debug!("shutdown withdraw timed out"),
+    if kind == TeardownKind::Stop {
+        let withdraw = coord::refresh(
+            &cfg.coordinator,
+            &cfg.state_dir,
+            coord::CoordReq {
+                wg_pubkey: wg_pub,
+                device_name: cfg.device_name(),
+                endpoint,
+                enrollment_key: cfg.enrollment_key.clone(),
+                device_token: keys::load_token(&cfg.state_dir),
+                possession_proof: None, // withdraw is post-enrollment; the token authenticates
+                since: None, // no long-poll hold: return as soon as the eviction is applied
+                disabled_networks: Vec::new(),
+                observed: Vec::new(),
+                supersede: None,
+                paused: true, // paused → evict from all networks
+                peer_own_devices: localnet.peer_own_devices(),
+                relay: coord::RelayReport::default(),
+                ice: Vec::new(),
+                held: Vec::new(), // withdrawing → no held set to diff against
+            },
+        );
+        match tokio::time::timeout(Duration::from_secs(3), withdraw).await {
+            Ok(Ok(_)) => tracing::info!("withdrew presence on shutdown"),
+            Ok(Err(e)) => tracing::debug!("shutdown withdraw failed: {e:#}"),
+            Err(_) => tracing::debug!("shutdown withdraw timed out"),
+        }
     }
     // Revert host-global state *before* the interface. `backend.down()` can wedge inside boringtun's
     // uapi (seen in the field), and a SIGKILL runs nothing after it — stranding the firewall table,
     // the resolved routing domain, and the exemption we inserted into another product's nft chain.
     // Those outlive the process and nothing else cleans them; a leftover interface + uapi socket are
     // both recovered on the next start.
-    if let Some(fw) = fw {
-        if let Err(e) = fw.reset() {
-            tracing::warn!("firewall reset on shutdown: {e:#}");
+    if kind == TeardownKind::Stop {
+        if let Some(fw) = fw {
+            if let Err(e) = fw.reset() {
+                tracing::warn!("firewall reset on shutdown: {e:#}");
+            }
         }
-    }
-    if let Some(r) = resolver {
-        if let Err(e) = r.revert(&cfg.iface) {
-            tracing::warn!("resolver revert on shutdown: {e:#}");
+        if let Some(r) = resolver {
+            if let Err(e) = r.revert(&cfg.iface) {
+                tracing::warn!("resolver revert on shutdown: {e:#}");
+            }
         }
     }
     if let Err(e) = backend.down() {
@@ -1029,21 +1054,24 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                 // shutdown-aware task.)
                 _ = shutdown.wait() => {
                     teardown(
+                        TeardownKind::Stop,
                         &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
                         backend.as_ref(), &dns_task, &p2p_task,
                     ).await;
                     tracing::info!("shutting down");
                     return Ok(RunOutcome::Stopped);
                 }
-                // Auto-update: same full teardown as a clean shutdown (so an update leaves no stranded
-                // interface, firewall, or resolver state — the whole reason the file-swap path replaced
-                // the old Windows hard-exit), then restart onto the binary the `ApplyUpdate` task
-                // already swapped in. Unix re-execs the staged plan (same PID); Windows hands the
-                // restart to the SCM. On Unix, falls back to a clean stop if, impossibly, no plan was
-                // staged.
+                // Auto-update: tear the interface down (so an update leaves no stranded TUN or bound
+                // socket — the whole reason the file-swap path replaced the old Windows hard-exit),
+                // but keep our presence, firewall and resolver state, since we re-apply all three on
+                // the way back up and dropping them would cost every peer a re-punch (see `teardown`).
+                // Then restart onto the binary the `ApplyUpdate` task already swapped in: Unix
+                // re-execs the staged plan (same PID), Windows hands the restart to the SCM. On Unix,
+                // falls back to a clean stop if, impossibly, no plan was staged.
                 _ = &mut restart_signal => {
                     tracing::info!("auto-update: tearing down before restarting onto the new engine");
                     teardown(
+                        TeardownKind::UpdateRestart,
                         &cfg, wg_pub, endpoint, &localnet, &fw, &resolver,
                         backend.as_ref(), &dns_task, &p2p_task,
                     ).await;

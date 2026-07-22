@@ -669,6 +669,25 @@ release plumbing, distribution docs, and a deliberate version decision — not b
       (`defguard_wireguard_rs`'s userspace path is unix-only), replacing the wg-nt dependency.
       Prerequisite for magicsock-on-Windows and for collapsing to a single data plane
       (prior-art §6.1).
+- [ ] **Split data plane into its own process (hitless upgrade + privsep)** — today boringtun runs
+      *in* the engine (`defguard_boringtun::device::DeviceHandle` inside `WGApi<Userspace>`), so the
+      TUN fd, the UDP socket **and** every Noise session (ephemeral keys, counters, replay windows)
+      die with the process. Nothing survives a restart, and boringtun exposes no way to serialize
+      session state — so an in-place upgrade can never be truly hitless while the two share a
+      process. Splitting the data plane into a long-lived child that owns the TUN + socket lets the
+      control plane (coordinator polling, ICE brokering, control socket, GUI) restart — and
+      **auto-update** — with tunnels never dropping a packet, instead of the ~1s re-handshake gap the
+      current update path leaves (M-update mitigation below). Same split is the privilege separation
+      deferred as security audit backlog #9: the child keeps `CAP_NET_ADMIN` and the raw socket, the
+      parent drops to an unprivileged uid and never touches packets. Cost is a new versioned IPC
+      surface between the halves (config apply, peer set, stats read-back) plus supervision/restart
+      semantics — and the userspace-primary direction means it eventually covers **every** platform,
+      not just unix. Gate it on the upgrade gap actually mattering in practice; the cheap mitigation
+      (below) already removes the peer-visible churn.
+      - [x] **Cheap mitigation shipped** — the auto-update restart no longer withdraws presence at
+            the coordinator, resets the firewall, or reverts the resolver. Peers keep you in their
+            snapshot, the listen port is unchanged, so tunnels re-handshake in ~1s instead of the
+            peers pruning you and re-running NAT punch / ICE from scratch.
 - [ ] **macOS + mobile clients** — userspace + utun (macOS) / NetworkExtension (iOS) / VpnService
       (Android). Userspace is *mandatory* there — no kernel WG exists. Unlocked by the
       userspace-primary direction (prior-art §6.1, §8).
