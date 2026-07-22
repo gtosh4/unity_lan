@@ -25,6 +25,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   Watch `unitylan_enrollments_unproven_total` in `/metrics`; once it stops climbing your fleet is
   proof-clean and you can set `require_proof = true` under `[enrollment]` to reject proof-less
   enrollments outright. A future release will make that the default.
+- A malicious device on your local network can no longer disrupt your mesh tunnels with forged LAN
+  discovery beacons. Previously a host on the same segment could spoof a peer's beacon from a
+  rotating source address and repeatedly yank that peer's endpoint onto the attacker, tearing down
+  and rebuilding the WireGuard tunnel every couple of seconds and blackholing traffic to it. The
+  engine now only switches a peer to a LAN-discovered endpoint when its current path is already
+  failing (a working tunnel is never replaced), sticks with a candidate through its health check
+  instead of restarting on every address change, and suppresses a peer that failed verification
+  regardless of which address the next beacon claims — so a flood costs at most one brief probe per
+  five-minute cooldown. Beacons for pubkeys that aren't current mesh peers are also dropped on
+  receipt, so a flood of forged keys can't grow engine memory.
 - Engine keys and bearer credentials are now created owner-only and installed atomically, closing
   the write-before-chmod window and preventing a pre-existing symlink from redirecting a secret
   write. The coordinator likewise creates its signing-key database privately before SQLite opens it.

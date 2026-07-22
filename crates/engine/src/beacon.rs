@@ -15,14 +15,17 @@
 //! endpoint and (if it proves out) point WireGuard at it, replacing the hairpin.
 //!
 //! **No beacon crypto.** The WireGuard handshake is the authenticator: a beacon only says "try
-//! endpoint X for pubkey P", and P's pubkey is already public among mesh members. Adopting an
-//! endpoint is guarded by a health check ([`Beacon::select`]) — we switch, then require the peer to
-//! stay reachable (ping) across a short grace; if not we revert to the reflexive path and suppress
-//! that address for a cooldown. So a forged/spoofed beacon (from an on-LAN attacker who sniffed the
-//! cleartext pubkey) can cost at most one bounded ~grace-length blip before we fall back, never a
-//! key compromise.
+//! endpoint X for pubkey P", and P's pubkey is already public among mesh members. Adoption is
+//! doubly guarded ([`Beacon::select`]) so a forged/spoofed beacon (from an on-LAN attacker who
+//! sniffed the cleartext pubkey) can't churn a peer: we only *start* adopting a LAN candidate for a
+//! peer whose current path is unhealthy (a working endpoint is never replaced), and once we switch
+//! we require the peer to stay reachable (ping) across a short grace or we revert and suppress that
+//! *peer* — not just that address — for a cooldown. A rotating-source flood therefore costs at most
+//! one bounded ~grace-length blip per cooldown, never continuous WireGuard teardown, and never a key
+//! compromise. Candidates are only recorded for pubkeys already in the authenticated peer set, so a
+//! flood of forged pubkeys can't grow the candidate map past the mesh size.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,8 +55,9 @@ const VERIFY_GRACE: Duration = Duration::from_secs(8);
 /// Demote an established LAN endpoint back to reflexive after this long unreachable (peer left the
 /// LAN, or the direct path died).
 const STALE_GRACE: Duration = Duration::from_secs(20);
-/// After a LAN endpoint fails verification, suppress *that address* this long so a repeatedly-forged
-/// or dead endpoint can't thrash the peer. A different candidate address retries immediately.
+/// After a LAN endpoint fails verification, suppress the *peer* (any candidate address) this long so
+/// a repeatedly-forged or rotating-source endpoint can't thrash it — a fresh address does not retry
+/// early, which is what bounds a rotating-source flood to one blip per cooldown.
 const FAIL_COOLDOWN: Duration = Duration::from_secs(300);
 
 /// A LAN endpoint learned from a received beacon.
@@ -79,6 +83,9 @@ enum LanState {
 /// per-peer adoption state machine ([`select`](Beacon::select), driven by the mesh loop).
 pub struct Beacon {
     candidates: Arc<Mutex<HashMap<[u8; 32], Candidate>>>,
+    /// Authenticated peer pubkeys, refreshed each [`select`](Beacon::select). The recv task reads it
+    /// to drop beacons for pubkeys not in the mesh, bounding the candidate map to the mesh size.
+    members: Arc<Mutex<HashSet<[u8; 32]>>>,
     states: HashMap<[u8; 32], LanState>,
     /// Send + receive task handles, aborted on drop so re-enrollment frees the bound socket.
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -125,12 +132,16 @@ impl Beacon {
         beacon_port: u16,
     ) -> Beacon {
         let candidates: Arc<Mutex<HashMap<[u8; 32], Candidate>>> = Arc::default();
+        let members: Arc<Mutex<HashSet<[u8; 32]>>> = Arc::default();
         let sock = Arc::new(sock);
         let mut tasks = Vec::with_capacity(2);
-        // Receiver: record each known-shaped beacon as a candidate (src_ip : advertised_port).
+        // Receiver: record each known-shaped beacon from a current mesh peer as a candidate
+        // (src_ip : advertised_port). Beacons for pubkeys not in the authenticated peer set are
+        // dropped, so an on-LAN flood of forged random pubkeys can't grow the map past the mesh size.
         {
             let sock = sock.clone();
             let candidates = candidates.clone();
+            let members = members.clone();
             tasks.push(tokio::spawn(async move {
                 let mut buf = [0u8; 512];
                 loop {
@@ -146,6 +157,9 @@ impl Beacon {
                     };
                     if pk == my_pubkey {
                         continue; // our own broadcast, looped back
+                    }
+                    if !members.lock().unwrap().contains(&pk) {
+                        continue; // not a current mesh peer — never routes, so never stored
                     }
                     let addr = SocketAddr::new(from.ip(), port);
                     candidates.lock().unwrap().insert(
@@ -188,6 +202,7 @@ impl Beacon {
         }
         Beacon {
             candidates,
+            members,
             states: HashMap::new(),
             tasks,
         }
@@ -206,6 +221,13 @@ impl Beacon {
         now: Instant,
         reachable: &HashMap<[u8; 32], bool>,
     ) -> HashMap<[u8; 32], SocketAddr> {
+        // Publish the current authenticated peer set for the recv task's membership gate.
+        {
+            let mut m = self.members.lock().unwrap();
+            m.clear();
+            m.extend(reachable.keys().copied());
+        }
+
         // Snapshot live (non-expired) candidates, then drop stale ones so the map can't grow with
         // beacons from hosts that stopped broadcasting (or never were peers).
         let mut cands = self.candidates.lock().unwrap();
@@ -224,75 +246,97 @@ impl Beacon {
                 self.states.remove(&pk);
                 continue;
             };
-            let next = self.step(pk, addr, ok, now);
-            match &next {
-                LanState::Trying { addr, .. } | LanState::Active { addr, .. } => {
-                    out.insert(pk, *addr);
+            match self.step(pk, addr, ok, now) {
+                // Trying/Active → route to the LAN endpoint; Failed → hold the state (enforces the
+                // per-peer cooldown) but fall back to reflexive (not routed this iteration).
+                Some(next) => {
+                    if let LanState::Trying { addr, .. } | LanState::Active { addr, .. } = next {
+                        out.insert(pk, addr);
+                    }
+                    self.states.insert(pk, next);
                 }
-                LanState::Failed { .. } => {} // suppressed → fall back to reflexive
+                // Not adopting (healthy path, or cooldown elapsed while still healthy): hold no state
+                // and route via the coordinator/reflexive endpoint.
+                None => {
+                    self.states.remove(&pk);
+                }
             }
-            self.states.insert(pk, next);
         }
         out
     }
 
     /// Advance one peer's LAN-adoption state given its current live candidate `addr` and whether it
-    /// is `ok` (reachable) this iteration.
-    fn step(&self, pk: [u8; 32], addr: SocketAddr, ok: bool, now: Instant) -> LanState {
+    /// is `ok` (reachable) this iteration. `None` = not adopting (route via the reflexive endpoint).
+    ///
+    /// Two anti-churn guards defend against forged/flooded beacons:
+    /// - **Adopt only an unhealthy path.** We enter `Trying` for a peer only when its current path is
+    ///   *not* carrying traffic (`!ok`); a working endpoint is never yanked onto a LAN candidate. A
+    ///   forged beacon therefore can't disturb a healthy peer at all.
+    /// - **Throttle per peer, not per address.** Once we commit to a candidate we stick with it,
+    ///   ignoring a changed candidate address until the attempt resolves; a failure suppresses the
+    ///   peer for [`FAIL_COOLDOWN`] regardless of address. A rotating-source flood thus can't reset
+    ///   the attempt every iteration — it costs one bounded blip per cooldown.
+    fn step(&self, pk: [u8; 32], addr: SocketAddr, ok: bool, now: Instant) -> Option<LanState> {
         match self.states.get(&pk) {
-            // A different candidate address than whatever we were doing → (re)start verification.
-            Some(LanState::Trying { addr: a, .. })
-            | Some(LanState::Active { addr: a, .. })
-            | Some(LanState::Failed { addr: a, .. })
-                if *a != addr =>
-            {
-                LanState::Trying { addr, since: now }
-            }
-            None => LanState::Trying { addr, since: now },
-            Some(LanState::Trying { since, .. }) => {
+            // Not currently adopting: start only if the peer's existing path is unhealthy. Committing
+            // to whatever candidate is live now; a later address change is ignored until this resolves.
+            None => (!ok).then_some(LanState::Trying { addr, since: now }),
+            // Stick with the address we're verifying (`a`), ignoring any newer candidate `addr`.
+            Some(LanState::Trying { addr: a, since }) => {
+                let a = *a;
                 let waited = now.duration_since(*since);
-                if waited < SETTLE {
+                Some(if waited < SETTLE {
                     LanState::Trying {
-                        addr,
+                        addr: a,
                         since: *since,
                     } // let the path settle before judging
                 } else if ok {
-                    LanState::Active { addr, last_ok: now }
+                    LanState::Active {
+                        addr: a,
+                        last_ok: now,
+                    }
                 } else if waited >= VERIFY_GRACE {
                     LanState::Failed {
-                        addr,
+                        addr: a,
                         until: now + FAIL_COOLDOWN,
                     }
                 } else {
                     LanState::Trying {
-                        addr,
+                        addr: a,
                         since: *since,
                     }
-                }
+                })
             }
-            Some(LanState::Active { last_ok, .. }) => {
-                if ok {
-                    LanState::Active { addr, last_ok: now }
+            // Stay on the confirmed address until it goes stale; a different candidate is ignored.
+            Some(LanState::Active { addr: a, last_ok }) => {
+                let a = *a;
+                Some(if ok {
+                    LanState::Active {
+                        addr: a,
+                        last_ok: now,
+                    }
                 } else if now.duration_since(*last_ok) >= STALE_GRACE {
                     LanState::Failed {
-                        addr,
+                        addr: a,
                         until: now + FAIL_COOLDOWN,
                     }
                 } else {
                     LanState::Active {
-                        addr,
+                        addr: a,
                         last_ok: *last_ok,
                     }
-                }
+                })
             }
-            Some(LanState::Failed { until, .. }) => {
+            // Suppressed peer: hold the cooldown regardless of which address beacons now arrive. When
+            // it elapses, retry only if the path is still unhealthy.
+            Some(LanState::Failed { addr: a, until }) => {
                 if now < *until {
-                    LanState::Failed {
-                        addr,
+                    Some(LanState::Failed {
+                        addr: *a,
                         until: *until,
-                    } // same address still suppressed
+                    })
                 } else {
-                    LanState::Trying { addr, since: now } // cooldown elapsed → retry
+                    (!ok).then_some(LanState::Trying { addr, since: now })
                 }
             }
         }
@@ -332,25 +376,41 @@ mod tests {
             .insert(pk, Candidate { addr, seen });
         Beacon {
             candidates,
+            members: Arc::default(),
             states: HashMap::new(),
             tasks: Vec::new(),
         }
     }
 
     #[test]
-    fn adopts_reachable_lan_endpoint_after_settle() {
+    fn adopts_lan_endpoint_for_unhealthy_peer_then_confirms() {
         let pk = [1u8; 32];
         let addr = ep(118, 51820);
         let t0 = Instant::now();
         let mut b = with_candidate(pk, addr, t0);
-        let known = HashMap::from([(pk, true)]);
 
-        // First pass: within SETTLE, still Trying but already routed to the LAN endpoint.
-        assert_eq!(b.select(t0, &known).get(&pk), Some(&addr));
-        // After SETTLE, reachable → confirmed Active, still routed.
-        let out = b.select(t0 + SETTLE + Duration::from_millis(1), &known);
+        // Current path down (ok=false) → start adopting; within SETTLE, routed to the LAN endpoint.
+        let down = HashMap::from([(pk, false)]);
+        assert_eq!(b.select(t0, &down).get(&pk), Some(&addr));
+        // The LAN path now answers → after SETTLE, confirmed Active, still routed.
+        let up = HashMap::from([(pk, true)]);
+        let out = b.select(t0 + SETTLE + Duration::from_millis(1), &up);
         assert_eq!(out.get(&pk), Some(&addr));
         assert!(matches!(b.states.get(&pk), Some(LanState::Active { .. })));
+    }
+
+    #[test]
+    fn does_not_adopt_a_healthy_peer() {
+        // The core forged-beacon defense: a peer whose current path works is never yanked onto a LAN
+        // candidate, so a spoofed beacon can't disturb it.
+        let pk = [9u8; 32];
+        let addr = ep(200, 51820); // attacker-advertised endpoint
+        let t0 = Instant::now();
+        let mut b = with_candidate(pk, addr, t0);
+        let healthy = HashMap::from([(pk, true)]);
+        let out = b.select(t0, &healthy);
+        assert!(!out.contains_key(&pk));
+        assert!(!b.states.contains_key(&pk));
     }
 
     #[test]
@@ -378,15 +438,64 @@ mod tests {
     }
 
     #[test]
+    fn rotating_source_stays_suppressed_per_peer() {
+        // A forged-beacon flood that changes source address every iteration must not keep restarting
+        // adoption: once one attempt fails, the peer is suppressed regardless of address.
+        let pk = [5u8; 32];
+        let a1 = ep(200, 51820);
+        let t0 = Instant::now();
+        let mut b = with_candidate(pk, a1, t0);
+        let down = HashMap::from([(pk, false)]);
+
+        // a1 tried and fails past the grace → Failed (peer suppressed).
+        b.select(t0, &down);
+        let t1 = t0 + VERIFY_GRACE + Duration::from_millis(1);
+        assert!(!b.select(t1, &down).contains_key(&pk));
+        assert!(matches!(b.states.get(&pk), Some(LanState::Failed { .. })));
+
+        // Attacker rotates to a different address during the cooldown → still ignored, not routed,
+        // and no new Trying attempt starts.
+        let a2 = ep(201, 51820);
+        b.candidates
+            .lock()
+            .unwrap()
+            .insert(pk, Candidate { addr: a2, seen: t1 });
+        let out = b.select(t1 + Duration::from_secs(2), &down);
+        assert!(!out.contains_key(&pk));
+        assert!(matches!(b.states.get(&pk), Some(LanState::Failed { .. })));
+    }
+
+    #[test]
+    fn trying_sticks_to_its_address_ignoring_rotation() {
+        // While verifying one candidate, a changed candidate address (a rotating flood) must not
+        // hijack the in-flight attempt.
+        let pk = [6u8; 32];
+        let a1 = ep(118, 51820); // the real LAN endpoint we committed to
+        let t0 = Instant::now();
+        let mut b = with_candidate(pk, a1, t0);
+        let down = HashMap::from([(pk, false)]);
+        assert_eq!(b.select(t0, &down).get(&pk), Some(&a1));
+
+        // Attacker overwrites the candidate mid-verification, still within SETTLE.
+        let a2 = ep(202, 51820);
+        b.candidates
+            .lock()
+            .unwrap()
+            .insert(pk, Candidate { addr: a2, seen: t0 });
+        let out = b.select(t0 + Duration::from_secs(1), &down);
+        assert_eq!(out.get(&pk), Some(&a1)); // still a1, not the injected a2
+    }
+
+    #[test]
     fn expired_candidate_drops_adoption() {
         let pk = [3u8; 32];
         let addr = ep(118, 51820);
         let t0 = Instant::now();
         let mut b = with_candidate(pk, addr, t0);
-        let known = HashMap::from([(pk, true)]);
-        b.select(t0, &known);
-        // No fresh beacon: past the TTL the candidate is gone → no LAN route, state cleared.
-        let out = b.select(t0 + CAND_TTL + Duration::from_secs(1), &known);
+        let down = HashMap::from([(pk, false)]);
+        b.select(t0, &down); // unhealthy → adopts (Trying)
+                             // No fresh beacon: past the TTL the candidate is gone → no LAN route, state cleared.
+        let out = b.select(t0 + CAND_TTL + Duration::from_secs(1), &down);
         assert!(!out.contains_key(&pk));
         assert!(!b.states.contains_key(&pk));
     }
@@ -396,9 +505,23 @@ mod tests {
         let pk = [4u8; 32];
         let t0 = Instant::now();
         let mut b = with_candidate(pk, ep(118, 51820), t0);
-        b.select(t0, &HashMap::from([(pk, true)]));
+        b.select(t0, &HashMap::from([(pk, false)])); // unhealthy → adopts, holds state
+        assert!(b.states.contains_key(&pk));
         // Peer absent from `reachable` (left the mesh) → state forgotten.
         b.select(t0 + Duration::from_millis(1), &HashMap::new());
         assert!(!b.states.contains_key(&pk));
+    }
+
+    #[test]
+    fn select_publishes_member_set_for_ingestion_gate() {
+        // `select` must expose the authenticated peer set so the recv task can drop beacons for
+        // non-members (the candidate-map growth bound).
+        let pk = [7u8; 32];
+        let other = [8u8; 32];
+        let t0 = Instant::now();
+        let mut b = with_candidate(pk, ep(118, 51820), t0);
+        b.select(t0, &HashMap::from([(pk, false), (other, true)]));
+        let m = b.members.lock().unwrap();
+        assert!(m.contains(&pk) && m.contains(&other));
     }
 }
