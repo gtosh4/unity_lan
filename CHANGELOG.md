@@ -3,6 +3,39 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Security
+
+- On Linux, a device on the same physical network as yours can no longer reach your mesh-only DNS
+  resolver or peer services by addressing them directly on a non-mesh interface. Linux's default
+  "weak host" behavior accepts a packet aimed at a local address regardless of which interface it
+  arrived on, which let an on-link attacker query the `.internal` name resolver or pull your signed
+  device attestation (leaking guild/user/device identity) without any mesh credential, sidestepping
+  WireGuard entirely. The engine now drops traffic addressed to its mesh IP that arrives on any
+  interface other than the mesh tunnel (local loopback queries still work). Windows was never
+  affected.
+- A malicious device on your local network can no longer disrupt your mesh tunnels with forged LAN
+  discovery beacons. Previously a host on the same segment could spoof a peer's beacon from a
+  rotating source address and repeatedly yank that peer's endpoint onto the attacker, tearing down
+  and rebuilding the WireGuard tunnel every couple of seconds and blackholing traffic to it. The
+  engine now only switches a peer to a LAN-discovered endpoint when its current path is already
+  failing (a working tunnel is never replaced), sticks with a candidate through its health check
+  instead of restarting on every address change, and suppresses a peer that failed verification
+  regardless of which address the next beacon claims — so a flood costs at most one brief probe per
+  five-minute cooldown. Beacons for pubkeys that aren't current mesh peers are also dropped on
+  receipt, so a flood of forged keys can't grow engine memory.
+
+### Changed
+
+- Restarting a coordinator no longer stampedes it. A restart drops every client's held long-poll at
+  the same instant, and clients all retried on the same fixed interval — so a whole mesh arrived
+  together, at a coordinator whose per-guild caches were empty, and each arrival asked Discord for
+  the same guild and role names. Two changes: each device now spreads its reconnect wait by a stable
+  factor of its own (half to one and a half times `refresh_secs`), and the coordinator fetches every
+  registered guild's names once at startup before it accepts anyone. Redeploying a busy coordinator
+  no longer risks tripping Discord's per-guild rate limit.
+
 ## v0.4.1
 
 ### Security
@@ -25,24 +58,6 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   Watch `unitylan_enrollments_unproven_total` in `/metrics`; once it stops climbing your fleet is
   proof-clean and you can set `require_proof = true` under `[enrollment]` to reject proof-less
   enrollments outright. A future release will make that the default.
-- On Linux, a device on the same physical network as yours can no longer reach your mesh-only DNS
-  resolver or peer services by addressing them directly on a non-mesh interface. Linux's default
-  "weak host" behavior accepts a packet aimed at a local address regardless of which interface it
-  arrived on, which let an on-link attacker query the `.internal` name resolver or pull your signed
-  device attestation (leaking guild/user/device identity) without any mesh credential, sidestepping
-  WireGuard entirely. The engine now drops traffic addressed to its mesh IP that arrives on any
-  interface other than the mesh tunnel (local loopback queries still work). Windows was never
-  affected.
-- A malicious device on your local network can no longer disrupt your mesh tunnels with forged LAN
-  discovery beacons. Previously a host on the same segment could spoof a peer's beacon from a
-  rotating source address and repeatedly yank that peer's endpoint onto the attacker, tearing down
-  and rebuilding the WireGuard tunnel every couple of seconds and blackholing traffic to it. The
-  engine now only switches a peer to a LAN-discovered endpoint when its current path is already
-  failing (a working tunnel is never replaced), sticks with a candidate through its health check
-  instead of restarting on every address change, and suppresses a peer that failed verification
-  regardless of which address the next beacon claims — so a flood costs at most one brief probe per
-  five-minute cooldown. Beacons for pubkeys that aren't current mesh peers are also dropped on
-  receipt, so a flood of forged keys can't grow engine memory.
 - Engine keys and bearer credentials are now created owner-only and installed atomically, closing
   the write-before-chmod window and preventing a pre-existing symlink from redirecting a secret
   write. The coordinator likewise creates its signing-key database privately before SQLite opens it.

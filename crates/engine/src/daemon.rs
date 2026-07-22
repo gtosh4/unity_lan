@@ -181,6 +181,26 @@ impl SentReport {
     }
 }
 
+/// Spread of the reconnect interval, as a fraction of it: a device retries at `refresh_secs` scaled
+/// into `[1 - SPREAD, 1 + SPREAD]`.
+const RECONNECT_SPREAD: f64 = 0.5;
+
+/// The wait before retrying an unreachable coordinator: `base`, scaled by a stable per-device factor
+/// in `[0.5, 1.5]` derived from our (uniformly distributed) pubkey.
+///
+/// A coordinator restart cuts every held long-poll at the same instant, and every client then retries
+/// on the same flat interval — so the fleet arrives together, at a coordinator whose per-guild caches
+/// are cold. Spreading the interval de-synchronizes clients on the first retry and keeps them spread
+/// afterwards. Derived from the pubkey rather than an RNG for the same reason as the coordinator's
+/// `wake_jitter`: no dependency, and a device's slot is stable across restarts.
+fn reconnect_backoff(base: Duration, wg_pub: &[u8; 32]) -> Duration {
+    let n = u64::from_le_bytes(wg_pub[..8].try_into().unwrap());
+    // n / u64::MAX in [0, 1] → factor in [1 - SPREAD, 1 + SPREAD].
+    let frac = n as f64 / u64::MAX as f64;
+    let factor = 1.0 - RECONNECT_SPREAD + 2.0 * RECONNECT_SPREAD * frac;
+    base.mul_f64(factor)
+}
+
 /// The attestations carried by a coordinator response's grant (empty if it carried none) — what the
 /// p2p service (`gossip`) hands co-members over the tunnel. Refreshed on every register/refresh, so
 /// a delta response that renews only the grant still updates what we serve.
@@ -1224,7 +1244,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         PROTO_MISMATCH_BACKOFF
                     } else {
                         tracing::warn!("refresh failed: {e:#}");
-                        Duration::from_secs(cfg.refresh_secs.max(1))
+                        // Spread across the fleet: a coordinator restart drops every client at once.
+                        reconnect_backoff(Duration::from_secs(cfg.refresh_secs.max(1)), &wg_pub)
                     };
                     coord_online = false;
                     control::set_coord_online(&status, false);
@@ -1572,7 +1593,12 @@ async fn register_until_ready(
         // Back off before the next attempt, but wake early if interactive login just bound us —
         // collapses the post-"Login successful" gap from up to `refresh_secs` to near-zero.
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(cfg.refresh_secs.max(2))) => {}
+            // Spread across the fleet, as in the refresh loop: on a coordinator restart every client
+            // is retrying this same loop.
+            _ = tokio::time::sleep(reconnect_backoff(
+                Duration::from_secs(cfg.refresh_secs.max(2)),
+                &wg_pub,
+            )) => {}
             _ = login_done.notified() => {}
         }
     }
@@ -1753,6 +1779,25 @@ mod tests {
     use crate::coord::SeedPeer;
     use common::control::PeerReach;
     use std::time::Instant;
+
+    #[test]
+    fn reconnect_backoff_is_stable_per_device_and_spread_around_the_base() {
+        let base = Duration::from_secs(20);
+        let a = reconnect_backoff(base, &[7u8; 32]);
+        assert_eq!(
+            a,
+            reconnect_backoff(base, &[7u8; 32]),
+            "same key → same slot"
+        );
+        // Bounded: never hammers faster than half the interval, never idles past 1.5x.
+        for k in 0..=255u8 {
+            let d = reconnect_backoff(base, &[k; 32]);
+            assert!(d >= base.mul_f64(0.5) && d <= base.mul_f64(1.5), "{d:?}");
+        }
+        // Spread: distinct keys land in distinct slots (what de-synchronizes the fleet).
+        let b = reconnect_backoff(base, &[8u8; 32]);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn step_ages_attempt_then_flags_the_flip() {

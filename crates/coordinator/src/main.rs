@@ -322,6 +322,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Warm the per-guild Discord caches before accepting a single client. A restart cuts every held
+    // long-poll at once, so the fleet reconnects together onto a cold cache — and each snapshot then
+    // fetches the same guild name and role names from Discord, N clients deep into one per-guild rate
+    // bucket. Fetching them once here turns that into one call per guild, whatever the arrival shape.
+    // Best-effort: a failure just leaves the entry cold, to be fetched on demand as before.
+    warm_guild_caches(&state).await;
+
     let listener = tokio::net::TcpListener::bind(&cfg.bind)
         .await
         .with_context(|| format!("binding {}", cfg.bind))?;
@@ -391,6 +398,37 @@ fn errno() -> std::io::Error {
 /// limit, so there's nothing to raise.
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
+
+/// Fetch each registered network's guild name and role name once, populating the [`RoleSource`]'s
+/// per-guild caches before the listener accepts anyone (see the call site for why).
+///
+/// Deduped per guild, and per `(guild, role)` — the role fetch populates every role in the guild in
+/// one REST call, so this is one round of calls per guild regardless of how many networks it has.
+async fn warm_guild_caches(state: &api::AppState) {
+    let networks = match state.store.all_networks().await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("could not list networks to warm the guild caches: {e:#}");
+            return;
+        }
+    };
+    let mut guilds = std::collections::BTreeSet::new();
+    for n in &networks {
+        guilds.insert(n.guild_id);
+    }
+    for g in &guilds {
+        state.roles.guild_name(*g).await;
+    }
+    // One role fetch per guild fills that guild's whole role snapshot; the rest are cache hits.
+    for n in &networks {
+        state.roles.role_name(n.guild_id, n.role_id).await;
+    }
+    tracing::info!(
+        guilds = guilds.len(),
+        networks = networks.len(),
+        "warmed the per-guild Discord caches"
+    );
+}
 
 /// `gen-release-key [out-file]`: generate a dedicated release signing key. Writes the 32-byte seed as
 /// hex to `out-file` (default `release-key.seed`, owner-only), and prints the public key hex to bake
