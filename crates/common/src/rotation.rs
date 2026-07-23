@@ -30,13 +30,23 @@ pub struct RotationCert {
     pub issued_at: u64,
 }
 
+/// The longest rotation chain we'll walk. Each hop re-scans the whole chain (`advance` is O(len)),
+/// so the walk is O(len²) Ed25519 verifies — a semi-trusted or MITM'd coordinator could otherwise
+/// hand a client a giant chain purely to burn its CPU. A real deployment rotates its anchor rarely;
+/// dozens of hops is already implausible, so refusing past this bounds the work at ~64² verifies.
+const MAX_ROTATION_CHAIN: usize = 64;
+
 /// Can we extend trust from `pinned` to `target` through `chain`? Starting at the pinned anchor,
 /// repeatedly find a cert **signed by the current anchor** advancing it (`prev == current`), until
 /// we reach `target`. Each hop is verified cryptographically under the key we already trust, so an
 /// attacker without a legitimately-signed successor can't bridge the gap. `chain` is the coordinator's
 /// certs oldest→newest, but the walk doesn't rely on their order. Bounded by `chain.len()` hops so a
-/// cyclic/forged set can't loop forever. `true` ⇒ the caller may re-pin to `target`.
+/// cyclic/forged set can't loop forever, and refused outright past [`MAX_ROTATION_CHAIN`] certs so an
+/// oversized chain can't burn CPU. `true` ⇒ the caller may re-pin to `target`.
 pub fn walk_chain(pinned: [u8; 32], target: [u8; 32], chain: &[Signed]) -> bool {
+    if chain.len() > MAX_ROTATION_CHAIN {
+        return false;
+    }
     let mut current = pinned;
     // At most one legitimate hop per cert; the bound also caps any adversarial cycle.
     for _ in 0..=chain.len() {
@@ -144,5 +154,25 @@ mod tests {
         // Chain only advances A→B; walking B back to A must fail (no B→A cert).
         let chain = vec![cert(&a, &b)];
         assert!(!walk_chain(b.anchor_bytes(), a.anchor_bytes(), &chain));
+    }
+
+    #[test]
+    fn rejects_chain_past_the_length_cap() {
+        // A genuinely-signed path of MAX+1 hops is refused before any verification, so an oversized
+        // chain can't force the O(len²) walk. One hop under the cap still resolves.
+        let keys: Vec<_> = (0..=MAX_ROTATION_CHAIN + 1)
+            .map(|_| CoordinatorKey::generate())
+            .collect();
+        let chain: Vec<Signed> = keys.windows(2).map(|w| cert(&w[0], &w[1])).collect();
+        let start = keys.first().unwrap().anchor_bytes();
+        let end = keys.last().unwrap().anchor_bytes();
+        assert!(chain.len() > MAX_ROTATION_CHAIN);
+        assert!(!walk_chain(start, end, &chain));
+        // Trim to exactly the cap: the same-shaped path now walks.
+        assert!(walk_chain(
+            start,
+            keys[MAX_ROTATION_CHAIN].anchor_bytes(),
+            &chain[..MAX_ROTATION_CHAIN]
+        ));
     }
 }

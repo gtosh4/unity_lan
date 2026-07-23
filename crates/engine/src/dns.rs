@@ -85,10 +85,16 @@ async fn answer(bytes: &[u8], zone: &Zone) -> Option<Vec<u8>> {
             continue;
         }
         let name = norm(&q.name().to_ascii());
+        // Only ever speak for our own zone: a query outside `.unity.internal` gets no answer here (no
+        // record, no authoritative NXDOMAIN) even if a name somehow collided in the map — we are not
+        // its authority. In-zone names resolve from the map or NXDOMAIN as our own missing records.
+        if !name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
+            continue;
+        }
         if let Some(ip) = map.get(&name) {
             resp.add_answer(Record::from_rdata(q.name().clone(), 30, RData::A(A(*ip))));
             answered = true;
-        } else if name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
+        } else {
             ours_but_missing = true;
         }
     }
@@ -139,6 +145,23 @@ mod tests {
         let msg = Message::from_vec(&reply).unwrap();
         assert!(msg.answers.is_empty());
         assert_eq!(msg.metadata.response_code, ResponseCode::NXDomain);
+    }
+
+    #[tokio::test]
+    async fn does_not_speak_for_names_outside_the_zone() {
+        // Even a name planted in the map is not answered if it's outside our suffix: no A record and
+        // no authoritative NXDOMAIN, since we aren't its authority.
+        let zone = empty_zone();
+        zone.write()
+            .await
+            .insert("evil.example.com".into(), Ipv4Addr::new(10, 0, 0, 1));
+
+        let reply = answer(&query_bytes("evil.example.com."), &zone)
+            .await
+            .unwrap();
+        let msg = Message::from_vec(&reply).unwrap();
+        assert!(msg.answers.is_empty());
+        assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
     }
 
     #[tokio::test]

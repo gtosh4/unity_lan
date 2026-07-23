@@ -28,6 +28,12 @@ use common::update::{current_platform, ReleaseArtifact, ReleaseManifest};
 use common::wire::Signed;
 use sha2::{Digest, Sha256};
 
+/// Ceiling on an update artifact — both the declared download size and each binary extracted from a
+/// `.tar.gz` bundle. Two shipped binaries sit far under this; the bound stops a hostile manifest's
+/// oversized `size` from pre-allocating a huge buffer, and a decompression bomb from a tiny archive
+/// from filling the disk. 512 MiB leaves ample headroom over any real release.
+const MAX_UPDATE_BYTES: u64 = 512 * 1024 * 1024;
+
 /// A verified update the daemon has staged: a strictly-newer release with an artifact for this
 /// platform. Held so the control socket's `ApplyUpdate` can act on it.
 #[derive(Clone, Debug)]
@@ -312,6 +318,12 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
     if !artifact.url.starts_with("https://") {
         anyhow::bail!("refusing non-HTTPS update URL: {}", artifact.url);
     }
+    if artifact.size > MAX_UPDATE_BYTES {
+        anyhow::bail!(
+            "refusing update: declared size {} exceeds the {MAX_UPDATE_BYTES}-byte ceiling",
+            artifact.size
+        );
+    }
     let builder = reqwest::Client::builder().timeout(Duration::from_secs(300));
     // Test-only (feature off in every shipped build): trust a self-signed cert so the offline e2e
     // harness can serve the artifact over the mandatory HTTPS from a local host. See the crate
@@ -401,6 +413,7 @@ const BUNDLE_ENGINE: &str = "unitylan-engine";
 const BUNDLE_GUI: &str = "unitylan-gui";
 
 /// The staged files extracted from an update bundle.
+#[derive(Debug)]
 struct Bundle {
     engine: Option<std::path::PathBuf>,
     gui: Option<std::path::PathBuf>,
@@ -410,6 +423,12 @@ struct Bundle {
 /// name and everything else is ignored — so a path-traversal entry (`../../etc/passwd`) can never
 /// escape, because we never join an archive-supplied path onto the destination.
 fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
+    unpack_bundle_capped(bytes, state_dir, MAX_UPDATE_BYTES)
+}
+
+/// [`unpack_bundle`] with the per-entry extraction ceiling injected, so tests can exercise the
+/// decompression-bomb guard without materializing a half-gigabyte archive.
+fn unpack_bundle_capped(bytes: &[u8], state_dir: &Path, max_entry: u64) -> anyhow::Result<Bundle> {
     let mut bundle = Bundle {
         engine: None,
         gui: None,
@@ -431,8 +450,17 @@ fn unpack_bundle(bytes: &[u8], state_dir: &Path) -> anyhow::Result<Bundle> {
         ));
         let mut f =
             std::fs::File::create(&out).with_context(|| format!("writing {}", out.display()))?;
-        std::io::copy(&mut entry, &mut f)
+        // Bound the extracted size: a `.tar.gz` compresses well, so a tiny archive can inflate to
+        // gigabytes. Copy at most one byte past the ceiling, then reject if we hit it — a real binary
+        // is far under. `Take` guards the write regardless of the header's declared entry size.
+        let written = std::io::copy(&mut std::io::Read::take(&mut entry, max_entry + 1), &mut f)
             .with_context(|| format!("extracting {}", out.display()))?;
+        if written > max_entry {
+            let _ = std::fs::remove_file(&out);
+            anyhow::bail!(
+                "refusing update: archive entry {out:?} exceeds the {max_entry}-byte ceiling",
+            );
+        }
         drop(f);
         #[cfg(unix)]
         make_executable(&out)?;
@@ -696,6 +724,18 @@ mod tests {
         // Both must land — replacing only the engine is the skew this bundle exists to prevent.
         assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
         assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_rejects_an_oversized_entry() {
+        // A small archive whose entry inflates past the ceiling is refused, and the partial file it
+        // was writing is cleaned up — a decompression bomb can't fill the disk.
+        let dir = crate::testutil::TempDir::new("su-bomb");
+        let bytes = targz(&[("unitylan-engine", &vec![0u8; 4096])]);
+        let err = unpack_bundle_capped(&bytes, &dir, 1024).unwrap_err();
+        assert!(err.to_string().contains("exceeds"), "got: {err}");
+        assert!(!dir.join("unitylan-engine.update").exists());
     }
 
     /// Windows: the bundle carries the `.exe`-suffixed names, and `unpack_bundle` must match those
