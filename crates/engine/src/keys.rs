@@ -8,9 +8,25 @@ use common::crypto::{gen_wg_keypair, wg_public_from_private, WgPrivateKey, WgPub
 use common::rotation::walk_chain;
 use common::wire::Signed;
 
+/// Create `dir` (and any missing parents) and restrict it to the owner. On unix the directory is set
+/// to 0700, tightening it even if it already existed at a looser mode — the state dir holds the WG
+/// private key, device token, relay secret, and pinned anchors, none of which any other local user
+/// should be able to list or read. Windows inherits the service profile's ACLs. Best-effort on the
+/// permission step so a filesystem that can't represent the mode (rare) doesn't block startup.
+pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("restricting permissions on {}", dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Load the persisted WG keypair, or generate + persist one (0600).
 pub fn load_or_generate_keypair(state_dir: &Path) -> anyhow::Result<(WgPrivateKey, WgPublicKey)> {
-    std::fs::create_dir_all(state_dir)?;
+    create_private_dir(state_dir)?;
     let priv_path = state_dir.join("wg.key");
     let priv_bytes: [u8; 32] = if priv_path.exists() {
         std::fs::read(&priv_path)?
@@ -35,7 +51,7 @@ pub fn pin_anchor(
     rotation_chain: &[String],
 ) -> anyhow::Result<()> {
     let dir = state_dir.join("anchors");
-    std::fs::create_dir_all(&dir)?;
+    create_private_dir(&dir)?;
     let path = dir.join(format!("{guild_id}.pub"));
     let Ok(existing) = std::fs::read(&path) else {
         write_private_atomic(&path, anchor)?;
@@ -129,7 +145,7 @@ pub fn load_or_create_relay_secret(state_dir: &Path) -> anyhow::Result<String> {
             return Ok(s);
         }
     }
-    std::fs::create_dir_all(state_dir)?;
+    create_private_dir(state_dir)?;
     let secret = common::relay::generate_secret();
     write_secret(&path, secret.as_bytes())?;
     Ok(secret)

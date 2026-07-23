@@ -50,10 +50,22 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
         grant_socket_access(endpoint, group.as_deref());
     }
     tracing::info!(socket = %endpoint, "control socket listening");
+    // Bound concurrent connections. The socket is a privilege boundary reachable by an
+    // authorized-but-unprivileged local caller (unix group / Windows INTERACTIVE); a flood of
+    // connections would otherwise spawn an unbounded number of tasks against the root daemon. A
+    // long-lived `Watch` holds its permit for the subscription's lifetime, so the cap is generous —
+    // a real host runs one GUI and a handful of `ctl` invocations.
+    let conns = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONTROL_CONNS));
     loop {
+        let permit = conns
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("control connection semaphore is never closed");
         let stream = listener.accept().await?;
         let ctx = ctx.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_conn(stream, ctx).await {
                 tracing::warn!("control conn: {e:#}");
             }
@@ -153,13 +165,24 @@ fn group_gid(name: &str) -> Option<u32> {
 /// comfortably under this.
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
+/// Cap on concurrent control connections — see the semaphore in [`serve`].
+const MAX_CONTROL_CONNS: usize = 256;
+
+/// Deadline for a connection to deliver its one-line request. Without it a caller could connect and
+/// send nothing (or a partial line), parking a task and holding a connection permit indefinitely —
+/// a slowloris against the daemon. Only the request read is bounded; a `Watch` subscription streams
+/// for as long as the client stays connected.
+const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    let n = (&mut reader)
-        .take(MAX_REQUEST_BYTES)
-        .read_line(&mut line)
-        .await?;
+    let n = tokio::time::timeout(
+        REQUEST_READ_TIMEOUT,
+        (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line),
+    )
+    .await
+    .context("control request not received within the read timeout")??;
     if n == 0 {
         return Ok(());
     }

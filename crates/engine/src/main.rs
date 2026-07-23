@@ -57,8 +57,10 @@ struct Cli {
     #[arg(short, long, global = true, value_name = "PATH")]
     config: Option<String>,
     /// One-time enrollment key, overriding `enrollment_key` in the config. Lets a headless box
-    /// enroll without writing the bearer secret to disk (e.g. pass it once via a systemd unit
-    /// `ExecStart`, an env-substituted arg, or an interactive first run).
+    /// enroll without writing the bearer secret to disk. Prefer the `UNITYLAN_ENROLLMENT_KEY`
+    /// environment variable (used when this flag is absent): an argv value is exposed to every local
+    /// user through `/proc/<pid>/cmdline` and `ps`, whereas the environment is readable only by the
+    /// process owner.
     #[arg(long, value_name = "KEY")]
     token: Option<String>,
     /// Also append logs to this file (in addition to stdout), overriding the config's `log_file`.
@@ -298,6 +300,13 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         token,
         log_file: _,
     } = cli;
+    // Prefer the argv `--token`, but fall back to `UNITYLAN_ENROLLMENT_KEY` so a secret need never
+    // appear on the (world-readable) command line — see the `--token` doc.
+    let token = token.or_else(|| {
+        std::env::var("UNITYLAN_ENROLLMENT_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+    });
     match cmd {
         Some(Cmd::WgSmoke { ifname }) => wg_smoke(&ifname),
         Some(Cmd::WgKeygen) => {

@@ -7,6 +7,19 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- Hardened local access to the engine daemon and its secrets (defense in depth). The state
+  directory (WG private key, device token, relay secret, pinned anchors) is now created owner-only
+  (0700) and tightened on startup if an older version or a loose umask left it readable. The control
+  socket now drops a connection that doesn't send its request within a short timeout and caps
+  concurrent connections, so a local caller can't tie the daemon up with idle or flooded connections.
+  A headless enrollment key can now be supplied through the `UNITYLAN_ENROLLMENT_KEY` environment
+  variable instead of `--token`, keeping the one-time secret off the world-readable command line.
+- Hardened the engine against malformed control-plane and update inputs (defense in depth). A
+  coordinator's trust-anchor rotation chain is now refused past a sane length instead of walked, so a
+  misbehaving or man-in-the-middle'd coordinator can't hand a client an oversized chain to burn its
+  CPU. An update artifact whose declared size or decompressed contents are implausibly large is now
+  rejected before it can exhaust memory or fill the disk. The built-in resolver now answers strictly
+  for names inside its own `.unity.internal` zone and stays silent for anything else.
 - A tampered but validly-signed update manifest can no longer freeze a device's auto-updates. The
   engine records the highest release it has accepted as a rollback floor; previously it raised that
   floor the moment a manifest passed its signature check — before confirming the release was newer
