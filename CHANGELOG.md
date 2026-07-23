@@ -7,6 +7,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- A Discord account that authorized the app but holds no network role in any served guild can no
+  longer consume a mesh address or leave a permanent device record behind. The coordinator now checks
+  role membership before allocating an address, so an account with no access gets an empty snapshot
+  and no device row — closing a path by which such accounts could have filled the mesh's address
+  space (denying enrollment to real members) and grown the coordinator's database without bound.
+  Each account is additionally capped at 32 devices, so a member who *does* hold a role can't loop
+  enrollments with fresh keys to the same effect.
 - On Linux, a device on the same physical network as yours can no longer reach your mesh-only DNS
   resolver or peer services by addressing them directly on a non-mesh interface. Linux's default
   "weak host" behavior accepts a packet aimed at a local address regardless of which interface it
