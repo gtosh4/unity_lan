@@ -539,6 +539,43 @@ fn promote_gui(staged: &Path) -> anyhow::Result<Option<PathBuf>> {
     promote_gui_in(&dir, staged)
 }
 
+/// Startup hook: finish a GUI update that an *older* engine only staged, by promoting a leftover
+/// `unitylan-gui.new.exe` into place. A no-op when nothing is staged — every ordinary startup.
+///
+/// This is the counterpart to [`promote_gui`], and it is what makes the fix apply to the very update
+/// that ships it. An update is applied by the version you're coming *from*, so the apply-time
+/// promotion can't run during that transition; engines before this release instead staged the new GUI
+/// under `.new.exe` and expected the *unprivileged* GUI to rename it into place, which always failed
+/// in an admin-only install dir. Running the promotion here — in the freshly-started **new** engine,
+/// which does have the rights — means that by the time the user clicks "restart to finish", the
+/// canonical `unitylan-gui.exe` already holds the new bytes. Even the old GUI's relaunch then lands on
+/// them: Windows `current_exe()` reports the load-time path (the canonical name), not the aside-renamed
+/// one, and with `.new.exe` consumed its own failing self-swap is skipped entirely.
+///
+/// Promoting unconditionally when `.new.exe` exists is safe: it only ever exists as an update artifact,
+/// and every path that updates `gui.exe` now also removes it, so it can never be *older* than what's
+/// installed.
+#[cfg(windows)]
+pub fn promote_staged_gui() {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let staged = dir.join("unitylan-gui.new.exe");
+    if !staged.exists() {
+        return;
+    }
+    match promote_gui_in(&dir, &staged) {
+        Ok(Some(at)) => {
+            tracing::info!(path = %at.display(), "promoted a GUI staged by the previous engine")
+        }
+        Ok(None) => tracing::info!("a GUI was staged but none is installed beside the engine"),
+        Err(e) => tracing::warn!("could not promote the staged GUI: {e:#}"),
+    }
+}
+
 /// Testable core of [`promote_gui`] with the install dir injected (so a test needn't stand in for the
 /// engine's real install path).
 #[cfg(windows)]
@@ -563,6 +600,10 @@ fn promote_gui_in(dir: &Path, staged: &Path) -> anyhow::Result<Option<PathBuf>> 
     match moved {
         Ok(()) => {
             let _ = std::fs::remove_file(staged);
+            // Retire the legacy `unitylan-gui.new.exe` staging file. Older builds dropped one here for
+            // the GUI to promote itself; nothing consumes it now, so without this it would sit in the
+            // install dir forever — and the unprivileged GUI can't delete it either.
+            let _ = std::fs::remove_file(dir.join("unitylan-gui.new.exe"));
             Ok(Some(target))
         }
         Err(e) => {
@@ -673,6 +714,10 @@ mod tests {
         // The freshly-extracted new GUI, as `unpack_bundle` leaves it in the state dir.
         let staged = dir.join("unitylan-gui.exe.update");
         std::fs::write(&staged, b"NEW").unwrap();
+        // A legacy staging file an older build left behind. Nothing consumes it anymore, and the
+        // unprivileged GUI can't delete it, so promotion must be what retires it.
+        let legacy = dir.join("unitylan-gui.new.exe");
+        std::fs::write(&legacy, b"LEGACY").unwrap();
 
         let at = promote_gui_in(&dir, &staged)
             .unwrap()
@@ -689,6 +734,10 @@ mod tests {
             "the previous GUI was renamed aside, not destroyed"
         );
         assert!(!staged.exists(), "the staged copy was consumed");
+        assert!(
+            !legacy.exists(),
+            "the legacy .new.exe staging file was retired"
+        );
     }
 
     /// A leftover `.old.exe` from a prior update (successor never cleaned it) must not block a new
@@ -708,6 +757,86 @@ mod tests {
             std::fs::read(dir.join("unitylan-gui.old.exe")).unwrap(),
             b"OLD",
             "the stale aside-image was replaced by the just-superseded GUI"
+        );
+    }
+
+    /// The transition case that makes this fix self-applying: an *older* engine staged the new GUI as
+    /// `unitylan-gui.new.exe` and couldn't promote it. The new engine's startup hook must consume that
+    /// exact file and land it at the canonical name — otherwise the old GUI's relaunch (which spawns
+    /// the canonical path) would come back up on the old version.
+    #[cfg(windows)]
+    #[test]
+    fn promote_gui_consumes_a_legacy_staged_new_exe() {
+        let dir = crate::testutil::TempDir::new("su-promote-legacy");
+        std::fs::write(dir.join("unitylan-gui.exe"), b"OLD").unwrap();
+        let staged = dir.join("unitylan-gui.new.exe");
+        std::fs::write(&staged, b"NEW").unwrap();
+
+        promote_gui_in(&dir, &staged).unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(dir.join("unitylan-gui.exe")).unwrap(),
+            b"NEW",
+            "the canonical name the relaunching GUI spawns now holds the new bytes"
+        );
+        assert!(!staged.exists(), "the legacy staging file was consumed");
+        assert_eq!(
+            std::fs::read(dir.join("unitylan-gui.old.exe")).unwrap(),
+            b"OLD"
+        );
+    }
+
+    /// The load-bearing assumption the inert-file tests above cannot reach: Windows lets us rename an
+    /// executable image that is **currently running**. Everything here depends on it — it's why
+    /// promotion renames aside instead of overwriting — and if it ever stopped holding (a lock, an AV
+    /// hook, a future OS change) every other test would still pass while real updates silently failed.
+    /// That is precisely how the GUI-side swap shipped broken, so pin it against a live process.
+    ///
+    /// `ping.exe` stands in for the GUI: present on every Windows host, and we promote over *our own
+    /// copy* of it, never the system one. Skips rather than fails if it isn't there — the logic is
+    /// covered above either way.
+    #[cfg(windows)]
+    #[test]
+    fn promote_gui_replaces_an_image_that_is_currently_running() {
+        let system_exe = Path::new(r"C:\Windows\System32\ping.exe");
+        if !system_exe.exists() {
+            return;
+        }
+        let dir = crate::testutil::TempDir::new("su-promote-running");
+        let gui = dir.join("unitylan-gui.exe");
+        std::fs::copy(system_exe, &gui).unwrap();
+
+        // Launch it so the image is genuinely mapped, and outlives the promotion below.
+        let mut child = std::process::Command::new(&gui)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("launching the stand-in GUI");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let was_running = child.try_wait().unwrap().is_none();
+
+        let staged = dir.join("unitylan-gui.exe.update");
+        std::fs::write(&staged, b"NEW").unwrap();
+        let promoted = promote_gui_in(&dir, &staged);
+
+        // Reap before asserting, so a failure can't leak the process.
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            was_running,
+            "the stand-in must still be running for this test to mean anything"
+        );
+        promoted
+            .expect("promoting over a running image must succeed")
+            .expect("a GUI is installed here");
+        assert_eq!(
+            std::fs::read(&gui).unwrap(),
+            b"NEW",
+            "the canonical name holds the new bytes even though the old image was in use"
+        );
+        assert!(
+            dir.join("unitylan-gui.old.exe").exists(),
+            "the in-use image was renamed aside, not clobbered"
         );
     }
 

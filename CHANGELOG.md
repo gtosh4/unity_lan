@@ -67,9 +67,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   move the new program file into place itself, but it runs unprivileged and the install folder under
   `Program Files` is admin-only, so the swap silently failed and the app stayed on the old version
   with the notice stuck on screen. The privileged engine — which already has the rights — now puts the
-  new GUI in place as part of applying the update, and the button simply relaunches into it. If you
-  were left on an old GUI with a `unitylan-gui.new.exe` sitting in the install folder, this update
-  clears it up.
+  new GUI in place as part of applying the update, and the button simply relaunches into it. This
+  also repairs an install that the old bug already stranded: an update is applied by the version you
+  are coming *from*, so the engine additionally finishes any GUI a previous version left half-staged
+  when it starts up — including the leftover `unitylan-gui.new.exe` on machines that hit this. No
+  manual step, and nothing to clean up by hand.
 - **On Windows, an auto-update could leave the engine service stopped instead of restarting it.** The
   helper that brings the service back after swapping the binary gave up if its first start attempt
   raced the outgoing process's exit, leaving the mesh down until you started the service by hand or

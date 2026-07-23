@@ -147,6 +147,21 @@ a promise not a number. Two gotchas: `#[serde(default)]` does **nothing** inside
 and peer-supplied data that won't parse or verify must cost you *that peer*, not the whole batch.
 Rationale in `docs/technical.md` §3.6.
 
+**Upgrade steps go in the *new* binary's startup, not the apply path.** An update is applied by the
+version you're coming *from*: `selfupdate::apply*` and the GUI's relaunch are the **old** release's
+code during the very transition that ships them, so a fix placed there doesn't take effect until the
+release *after* — and on-disk state an older version left behind never gets repaired at all. Anything
+that must reconcile such state belongs in a startup hook, which always runs the new code:
+`daemon::run` (beside `selfupdate::reconcile_update_marker` — e.g. the Windows
+`selfupdate::promote_staged_gui`, which finishes a GUI a previous engine only half-staged) or
+`service::ensure_config` (config bootstrap + migration). Split of duties: **apply** puts the new bytes
+on disk; **startup** reconciles whatever the old version left. Two Windows facts the promotion path
+leans on, worth knowing before writing another: a *running* image can't be overwritten but **can** be
+renamed aside (how `self_replace` works), and `current_exe()` keeps reporting the **load-time** path
+after such a rename — so an old GUI relaunching the canonical path still lands on the new bytes.
+Install-dir writes must come from the **engine** (LocalSystem); the unprivileged GUI has read+execute
+only under `%ProgramFiles%`.
+
 **Platform split.** Engine OS-specific code = separate modules selected at runtime:
 `wg/{userspace,windows}.rs`, `fw/{nftables,windows}.rs`, `resolver/{linux,windows}.rs`. Userspace
 WireGuard (boringtun) backend is portable primary; kernel drivers (Linux netlink, Windows

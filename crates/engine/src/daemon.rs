@@ -460,6 +460,11 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     // take. A no-op on an ordinary startup (no marker).
     crate::selfupdate::reconcile_update_marker(&cfg.state_dir);
 
+    // Finish a GUI update that an older engine only staged. This runs in the *new* binary, which is
+    // what lets the fix apply to the very update that delivers it — see `promote_staged_gui`.
+    #[cfg(windows)]
+    crate::selfupdate::promote_staged_gui();
+
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
