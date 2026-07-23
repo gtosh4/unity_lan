@@ -33,7 +33,7 @@ use crate::oauth::OauthProvider;
 use crate::presence::{MemberPresence, Presence};
 use crate::roles::{MemberRoles, RoleSource};
 use crate::signer::{GuildKeys, SignCache};
-use crate::store::{match_device_by_name, DeviceMatch, Store};
+use crate::store::{match_device_by_name, DeviceMatch, Network, Store};
 use crate::versions::{Scope, Versions};
 
 #[derive(Clone)]
@@ -550,6 +550,32 @@ async fn sign_release(
 /// versions for the guilds (and users) whose membership actually changed — waking only clients of
 /// those scopes — and fires **targeted** wakes for peers named in the caller's pair-specific reports
 /// (reflexive/relay/ICE). Re-signs all attestations with the current time (so a rebuild renews them).
+/// Whether `user_id` holds a role in any registered network — the gate that decides whether a
+/// register may allocate a mesh address at all. Fills `cache` (keyed by guild) as it goes, so the
+/// caller's own membership pass reuses it and each guild is queried from the role source only once
+/// across both. Short-circuits on the first held role.
+async fn holds_any_network_role(
+    roles: &dyn RoleSource,
+    networks: &[Network],
+    user_id: u64,
+    cache: &mut HashMap<u64, Option<MemberRoles>>,
+) -> bool {
+    for net in networks {
+        let member = match cache.get(&net.guild_id) {
+            Some(m) => m.clone(),
+            None => {
+                let m = roles.member(net.guild_id, user_id).await;
+                cache.insert(net.guild_id, m.clone());
+                m
+            }
+        };
+        if member.is_some_and(|m| m.role_ids.contains(&net.role_id)) {
+            return true;
+        }
+    }
+    false
+}
+
 async fn build_snapshot(
     st: &AppState,
     req: &RegisterReq,
@@ -568,35 +594,57 @@ async fn build_snapshot(
     // the per-client capability gate that once kept V1 alive for older readers is retired.
     let att_schema = common::attestation::ATTESTATION_SCHEMA_V2;
     let networks = st.store.all_networks().await.map_err(internal)?;
-    // One IP + one name per device (keyed by pubkey), reused across every network it holds. The
-    // request name only seeds these on first enrollment; thereafter `allocate_device` returns the
-    // stored (possibly renamed / auto-suffixed) name, and we build the attestation/hostname from
-    // *that* so DNS tracks renames and never advertises a duplicate label.
-    let (ip, device_name) = st
-        .store
-        .allocate_device(
-            st.guild_keys.wg_net(),
-            &req.wg_pubkey,
-            user_id,
-            &sanitize_label(&req.device_name),
-        )
-        .await
-        .map_err(internal)?;
-
-    // Primary device: first-enrolled auto-becomes primary; reassigned via `/unitylan primary`.
-    st.store
-        .ensure_primary(user_id, &req.wg_pubkey)
-        .await
-        .map_err(internal)?;
-    let is_primary = st
-        .store
-        .primary_pubkey(user_id)
-        .await
-        .map_err(internal)?
-        .is_some_and(|p| p == req.wg_pubkey);
 
     // Cache per-guild member lookups so we hit the role source once per guild.
     let mut member_cache: HashMap<u64, Option<MemberRoles>> = HashMap::new();
+
+    // Does the caller hold *any* network role? Determined BEFORE allocating an address. A caller who
+    // holds none — e.g. a Discord user who authorized the app but was never granted a role — must not
+    // consume a mesh IP or leave a permanent device row behind, or an account with no access could
+    // exhaust the mesh `/16` and bloat the store (TM-2). This shares `member_cache` with the
+    // membership loop below, so between them each guild is queried from the role source only once.
+    let any_held =
+        holds_any_network_role(st.roles.as_ref(), &networks, user_id, &mut member_cache).await;
+
+    // One IP + one name per device (keyed by pubkey), reused across every network it holds — but
+    // allocated only once the caller is known to hold a role. The request name only seeds these on
+    // first enrollment; thereafter `allocate_device` returns the stored (possibly renamed /
+    // auto-suffixed) name, and we build the attestation/hostname from *that* so DNS tracks renames
+    // and never advertises a duplicate label.
+    let device = if any_held {
+        let (ip, device_name) = st
+            .store
+            .allocate_device(
+                st.guild_keys.wg_net(),
+                &req.wg_pubkey,
+                user_id,
+                &sanitize_label(&req.device_name),
+            )
+            .await
+            .map_err(internal)?;
+        // Primary device: first-enrolled auto-becomes primary; reassigned via `/unitylan primary`.
+        st.store
+            .ensure_primary(user_id, &req.wg_pubkey)
+            .await
+            .map_err(internal)?;
+        let is_primary = st
+            .store
+            .primary_pubkey(user_id)
+            .await
+            .map_err(internal)?
+            .is_some_and(|p| p == req.wg_pubkey);
+        Some((ip, device_name, is_primary))
+    } else {
+        None
+    };
+    // Unpacked for the sites below. When the caller holds no role these are unused: every reader
+    // (presence.record, the self-grant attestation, own-device seeding) is gated on holding ≥1 role
+    // — `has_identity`, which equals `any_held` — so the `None` branch is never observed by them.
+    let (ip, device_name, is_primary) = match device {
+        Some((ip, name, primary)) => (ip, name, primary),
+        None => (std::net::Ipv4Addr::UNSPECIFIED, String::new(), false),
+    };
+
     let mut held: Vec<(u64, u64)> = Vec::new(); // (guild, role) the caller holds
                                                 // Scopes whose membership this request changed → bumped at the end, waking the clients of those
                                                 // scopes only. A presence change in a guild is scoped to that guild; an own-device (`*_self`)
@@ -623,7 +671,7 @@ async fn build_snapshot(
         .collect();
     let mut networks_status: Vec<NetworkStatus> = Vec::new();
 
-    for net in networks {
+    for net in &networks {
         let member = match member_cache.get(&net.guild_id) {
             Some(m) => m.clone(),
             None => {
@@ -1414,9 +1462,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepted_reflexives, decide_device_auth, decide_possession, negotiate, punch_target,
-        relay_target, should_supersede, validate_peer_reports, AuthOutcome, PossessionOutcome,
-        RelayReg, StatusCode,
+        accepted_reflexives, decide_device_auth, decide_possession, holds_any_network_role,
+        negotiate, punch_target, relay_target, should_supersede, validate_peer_reports,
+        AuthOutcome, Network, PossessionOutcome, RelayReg, StatusCode,
     };
     use common::api::{IceEndpoint, IceParams, ObservedEndpoint, RegisterReq, SharedNetwork};
 
@@ -1429,6 +1477,49 @@ mod tests {
     fn req_speaking(range: &str) -> RegisterReq {
         let pk = "[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]";
         serde_json::from_str(&format!(r#"{{"wg_pubkey":{pk},{range}}}"#)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn allocation_gate_opens_only_for_a_role_holder() {
+        use crate::config::{FakeConfig, FakeGuild, FakeMember};
+        use crate::roles::FakeRoleSource;
+        use std::collections::HashMap;
+
+        // Guild 1 registers role 10 as a network. User 7 holds it; user 8 is a member but with a
+        // different role; user 9 is not a member at all.
+        let roles = FakeRoleSource::new(FakeConfig {
+            guilds: vec![FakeGuild {
+                id: 1,
+                name: "acme".into(),
+                members: vec![
+                    FakeMember {
+                        user_id: 7,
+                        nick: "holder".into(),
+                        role_ids: vec![10],
+                    },
+                    FakeMember {
+                        user_id: 8,
+                        nick: "other".into(),
+                        role_ids: vec![99],
+                    },
+                ],
+            }],
+        });
+        let networks = vec![Network {
+            guild_id: 1,
+            role_id: 10,
+            name: "net".into(),
+        }];
+
+        // Role holder → gate opens (a mesh address may be allocated).
+        let mut c = HashMap::new();
+        assert!(holds_any_network_role(&roles, &networks, 7, &mut c).await);
+        // Member without the network's role → gate stays closed (no allocation, TM-2).
+        let mut c = HashMap::new();
+        assert!(!holds_any_network_role(&roles, &networks, 8, &mut c).await);
+        // Non-member (e.g. a Discord user who only authorized the app) → gate stays closed.
+        let mut c = HashMap::new();
+        assert!(!holds_any_network_role(&roles, &networks, 9, &mut c).await);
     }
 
     #[test]

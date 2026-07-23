@@ -7,6 +7,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- A Discord account that authorized the app but holds no network role in any served guild can no
+  longer consume a mesh address or leave a permanent device record behind. The coordinator now checks
+  role membership before allocating an address, so an account with no access gets an empty snapshot
+  and no device row — closing a path by which such accounts could have filled the mesh's address
+  space (denying enrollment to real members) and grown the coordinator's database without bound.
+  Each account is additionally capped at 32 devices, so a member who *does* hold a role can't loop
+  enrollments with fresh keys to the same effect.
 - Binary auto-updates can now be signed by a **dedicated release key** whose private half is held
   offline in the release pipeline, never on a coordinator — so a leaked *guild* signing key can forge
   attestations but can no longer sign a malicious engine update and push root code to every member of

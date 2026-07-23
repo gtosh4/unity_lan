@@ -12,6 +12,12 @@ use ipnet::Ipv4Net;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
+/// Per-account device cap. A device row is a permanent mesh-IP allocation, so without a ceiling a
+/// single role-holding account could loop enrollments with fresh keys and exhaust the mesh `/16`
+/// (TM-2). Set well above any realistic fleet (laptops, phones, servers, VMs) so it never bites a
+/// legitimate user, only a runaway.
+const MAX_DEVICES_PER_USER: u64 = 32;
+
 /// A registered network = a role designated as a UnityLAN network.
 #[derive(Clone, Debug)]
 pub struct Network {
@@ -453,6 +459,17 @@ impl Store {
         {
             let ip = addr_from_index(&net, row.get::<i64, _>("idx") as u32);
             return Ok((ip, row.get::<String, _>("device_name")));
+        }
+
+        // A new row for this pubkey: enforce the per-account cap before consuming an address, so one
+        // account can't loop fresh-key enrollments to exhaust the mesh space.
+        let owned = sqlx::query("SELECT COUNT(*) AS n FROM devices WHERE user_id = ?")
+            .bind(user_id as i64)
+            .fetch_one(&self.pool)
+            .await?
+            .get::<i64, _>("n") as u64;
+        if owned >= MAX_DEVICES_PER_USER {
+            anyhow::bail!("device limit reached for this account (max {MAX_DEVICES_PER_USER})");
         }
 
         let taken: BTreeSet<u32> = sqlx::query("SELECT idx FROM devices")
@@ -956,6 +973,32 @@ mod tests {
         assert_eq!(a, a2, "same device pubkey → same IP");
         assert_ne!(a, b, "same user's two devices → distinct IPs");
         assert_eq!(st.device_owner(&[1u8; 32]).await.unwrap(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn device_cap_bounds_a_single_account() {
+        let st = Store::memory().await;
+        // Fill the account to the cap: each distinct pubkey is a new row + IP.
+        for i in 0..MAX_DEVICES_PER_USER {
+            let mut pk = [0u8; 32];
+            pk[..8].copy_from_slice(&i.to_le_bytes());
+            st.allocate_device(tnet(), &pk, 1, "dev").await.unwrap();
+        }
+        // One more distinct key for the same user is refused, so an account can't loop enrollments
+        // to exhaust the mesh space.
+        assert!(st
+            .allocate_device(tnet(), &[0xff; 32], 1, "dev")
+            .await
+            .is_err());
+        // An already-allocated pubkey still resolves (idempotent, no new row) even at the cap.
+        let mut first = [0u8; 32];
+        first[..8].copy_from_slice(&0u64.to_le_bytes());
+        assert!(st.allocate_device(tnet(), &first, 1, "dev").await.is_ok());
+        // A different account is a separate budget — unaffected by the first user's cap.
+        assert!(st
+            .allocate_device(tnet(), &[0xfe; 32], 2, "dev")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
