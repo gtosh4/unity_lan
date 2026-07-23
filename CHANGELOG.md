@@ -7,6 +7,12 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- An authenticated account can no longer bloat the coordinator's database with interactive-login
+  bindings. Each completed Discord login binds a device key to the account, and these rows were only
+  ever removed when the device was removed — so a single account could repeat the login exchange with
+  fresh keys to grow the table without limit. The coordinator now keeps only the most recent bindings
+  per account (64), dropping the oldest; a binding is used once at enrollment, so this never affects a
+  real device.
 - Hardened local access to the engine daemon and its secrets (defense in depth). The state
   directory (WG private key, device token, relay secret, pinned anchors) is now created owner-only
   (0700) and tightened on startup if an older version or a loose umask left it readable. The control

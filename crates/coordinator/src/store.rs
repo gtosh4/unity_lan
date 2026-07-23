@@ -18,6 +18,14 @@ use sqlx::{Row, SqlitePool};
 /// legitimate user, only a runaway.
 const MAX_DEVICES_PER_USER: u64 = 32;
 
+/// Per-account cap on interactive-login (OAuth) device bindings. `/oauth/complete` writes one row per
+/// (pubkey, user) pair, and a single authenticated user could otherwise loop it with fresh pubkeys —
+/// each requiring only a still-valid access token — to grow `oauth_authorized` without bound (TM-2).
+/// A binding is only consumed once, at enrollment (after which the device authenticates by token), so
+/// keeping just the most recent bindings per user costs nothing legitimate: set above the device cap
+/// so a real fleet's in-flight logins never fall off.
+const MAX_OAUTH_BINDINGS_PER_USER: u64 = 64;
+
 /// A registered network = a role designated as a UnityLAN network.
 #[derive(Clone, Debug)]
 pub struct Network {
@@ -180,8 +188,9 @@ impl Store {
                 pubkey  BLOB    NOT NULL
             );
             CREATE TABLE IF NOT EXISTS oauth_authorized (
-                pubkey  BLOB    PRIMARY KEY,  -- device pubkey bound to a user via interactive login
-                user_id INTEGER NOT NULL
+                pubkey   BLOB    PRIMARY KEY,  -- device pubkey bound to a user via interactive login
+                user_id  INTEGER NOT NULL,
+                bound_at INTEGER NOT NULL DEFAULT 0  -- unix secs; orders the per-user cap prune
             );
             CREATE TABLE IF NOT EXISTS guild_rotation_certs (
                 idx      INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
@@ -202,6 +211,12 @@ impl Store {
             sqlx::query("ALTER TABLE devices ADD COLUMN token_proven INTEGER NOT NULL DEFAULT 0")
                 .execute(&self.pool)
                 .await;
+        // Order/expire OAuth bindings so the per-user cap can drop the oldest (ignore if present).
+        let _ = sqlx::query(
+            "ALTER TABLE oauth_authorized ADD COLUMN bound_at INTEGER NOT NULL DEFAULT 0",
+        )
+        .execute(&self.pool)
+        .await;
         Ok(())
     }
 
@@ -394,13 +409,35 @@ impl Store {
 
     // ---- interactive login (OAuth) device binding ----
 
-    /// Bind a device pubkey to a user id (set by the OAuth callback). Idempotent.
+    /// Bind a device pubkey to a user id (set by the OAuth callback). Idempotent. Bounds the user's
+    /// bindings to [`MAX_OAUTH_BINDINGS_PER_USER`], dropping their oldest, so a flood of
+    /// `/oauth/complete` calls with fresh pubkeys can't grow the table without limit (TM-2).
     pub async fn bind_oauth(&self, pubkey: &[u8; 32], user_id: u64) -> anyhow::Result<()> {
-        sqlx::query("INSERT OR REPLACE INTO oauth_authorized (pubkey, user_id) VALUES (?, ?)")
-            .bind(pubkey.as_slice())
-            .bind(user_id as i64)
-            .execute(&self.pool)
-            .await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT OR REPLACE INTO oauth_authorized (pubkey, user_id, bound_at) VALUES (?, ?, ?)",
+        )
+        .bind(pubkey.as_slice())
+        .bind(user_id as i64)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        // Keep only this user's newest bindings. A binding is consumed once at enrollment, after
+        // which the device authenticates by token, so pruning older ones is harmless. `rowid` breaks
+        // ties when several rows share a `bound_at` second.
+        sqlx::query(
+            "DELETE FROM oauth_authorized WHERE user_id = ?1 AND pubkey NOT IN (
+                 SELECT pubkey FROM oauth_authorized WHERE user_id = ?1
+                 ORDER BY bound_at DESC, rowid DESC LIMIT ?2
+             )",
+        )
+        .bind(user_id as i64)
+        .bind(MAX_OAUTH_BINDINGS_PER_USER as i64)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -962,6 +999,34 @@ mod tests {
         // possession proof alone — it must re-enroll (fresh OAuth or an enrollment key).
         assert_eq!(st.device_owner(&a).await.unwrap(), None);
         assert_eq!(st.oauth_user(&a).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn oauth_bindings_are_capped_per_user() {
+        let st = Store::memory().await;
+        let pk = |i: u64| {
+            let mut b = [0u8; 32];
+            b[..8].copy_from_slice(&i.to_le_bytes());
+            b
+        };
+        // Bind more pubkeys for one user than the cap allows; the oldest must fall off.
+        let total = MAX_OAUTH_BINDINGS_PER_USER + 8;
+        for i in 0..total {
+            st.bind_oauth(&pk(i), 5).await.unwrap();
+        }
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM oauth_authorized WHERE user_id = ?")
+                .bind(5i64)
+                .fetch_one(&st.pool)
+                .await
+                .unwrap();
+        assert_eq!(count as u64, MAX_OAUTH_BINDINGS_PER_USER);
+        // Newest binding survives; the very first (oldest) is evicted.
+        assert_eq!(st.oauth_user(&pk(total - 1)).await.unwrap(), Some(5));
+        assert_eq!(st.oauth_user(&pk(0)).await.unwrap(), None);
+        // The cap is per user — another account is untouched.
+        st.bind_oauth(&[7u8; 32], 9).await.unwrap();
+        assert_eq!(st.oauth_user(&[7u8; 32]).await.unwrap(), Some(9));
     }
 
     #[tokio::test]
