@@ -52,6 +52,22 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   registered guild's names once at startup before it accepts anyone. Redeploying a busy coordinator
   no longer risks tripping Discord's per-guild rate limit.
 
+### Fixed
+
+- **On Windows, the "restart to finish" button did nothing after an auto-update.** The GUI tried to
+  move the new program file into place itself, but it runs unprivileged and the install folder under
+  `Program Files` is admin-only, so the swap silently failed and the app stayed on the old version
+  with the notice stuck on screen. The privileged engine — which already has the rights — now puts the
+  new GUI in place as part of applying the update, and the button simply relaunches into it. If you
+  were left on an old GUI with a `unitylan-gui.new.exe` sitting in the install folder, this update
+  clears it up.
+- **On Windows, an auto-update could leave the engine service stopped instead of restarting it.** The
+  helper that brings the service back after swapping the binary gave up if its first start attempt
+  raced the outgoing process's exit, leaving the mesh down until you started the service by hand or
+  rebooted — and it wrote nothing to the log, so there was no trace of what went wrong. It now retries
+  the start over a short window and records each step in the engine service log, so the restart is
+  both more reliable and diagnosable when it isn't.
+
 ## v0.4.1
 
 ### Security

@@ -256,11 +256,13 @@ fn install_private_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+// Unix-only: the sole test here exercises symlink/permission behavior that doesn't apply on Windows.
+// Gating the whole module (not just the test) keeps `use super::*` from reading as an unused import on
+// Windows, where `clippy -D warnings` would otherwise fail.
+#[cfg(all(test, unix))]
 mod security_tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn private_write_is_owner_only_and_replaces_symlink() {
         use std::os::unix::fs::{symlink, PermissionsExt};

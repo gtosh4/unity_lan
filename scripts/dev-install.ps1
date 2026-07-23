@@ -105,9 +105,11 @@ if ($SwapOnly) {
         Log ">> swapping binaries into $installDir"
         Install-Binary $engineSrc (Join-Path $installDir 'unitylan-engine.exe')
         Install-Binary $guiSrc    (Join-Path $installDir 'unitylan-gui.exe')
-        # A stale staged GUI would clobber the fresh one on the GUI's next launch
-        # (selfupdate `swap_in_staged_gui` promotes .new.exe over the real name).
+        # Clear any leftover update artifacts from a prior auto-update so they can't shadow this fresh
+        # dev build: `.new.exe` (retired staging name) and `.old.exe` (the engine's renamed-aside image
+        # from `promote_gui`), which the GUI's `clean_stale_gui` would otherwise be the one to remove.
         Remove-Item (Join-Path $installDir 'unitylan-gui.new.exe') -Force -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $installDir 'unitylan-gui.old.exe') -Force -ErrorAction SilentlyContinue
     }
     catch {
         Log "!! swap failed: $($_.Exception.Message)"

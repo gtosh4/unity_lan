@@ -196,16 +196,20 @@ artifact, re-checks the SHA-256 against the signed manifest, then:
   before this change keep working. A GUI process already running when the swap happens shows a
   "relaunch to finish" notice, since replacing the file can't update a live process.
 - **Windows** — unpacks the `unitylan-windows-x64.tar.gz` and, mirroring Linux, self-replaces the
-  running `unitylan-engine.exe` in place and stages the new GUI beside it as `unitylan-gui.new.exe`,
-  then tears its tunnel/firewall/DNS down cleanly and lets the **SCM restart the service** onto the
-  new binary (a detached `service restart-after` helper waits for the stop, then starts it — Windows
-  can't re-exec a service in place, but the SCM is a reliable supervisor). This deliberately avoids
-  the MSI `MajorUpgrade` — no service re-registration, no DLL re-lay, none of the machinery that made
-  installer-driven upgrades fragile. A running GUI shows a "relaunch to finish" notice and promotes
-  its staged `.new.exe` itself (`swap_in_staged_gui`). For backward compatibility a **non-gzip
-  artifact is treated as a legacy `.msi`** and applied the old way (launch `msiexec /quiet`, whose
-  `MajorUpgrade` stops the service, replaces engine + GUI + DLL, and restarts) — now with an install
-  log at `%ProgramData%\UnityLAN\update-msi.log`.
+  running `unitylan-engine.exe` in place and **promotes the new GUI in place** beside it: the engine
+  renames the current `unitylan-gui.exe` aside to `.old.exe` (Windows forbids overwriting a running
+  image but allows renaming one) and moves the new binary into the canonical name. This runs in the
+  **LocalSystem engine on purpose** — the install dir under `%ProgramFiles%` is admin-only, so the
+  unprivileged GUI could not do it itself (the earlier GUI-driven swap silently failed on real
+  installs). The engine then tears its tunnel/firewall/DNS down cleanly and lets the **SCM restart the
+  service** onto the new binary (a detached `service restart-after` helper waits for the stop, then
+  starts it with retry, logging to the service log — Windows can't re-exec a service in place, but the
+  SCM is a reliable supervisor). This deliberately avoids the MSI `MajorUpgrade` — no service
+  re-registration, no DLL re-lay, none of the machinery that made installer-driven upgrades fragile. A
+  running GUI shows a "relaunch to finish" notice; one click re-execs the (already-promoted) canonical
+  exe. For backward compatibility a **non-gzip artifact is treated as a legacy `.msi`** and applied the
+  old way (launch `msiexec /quiet`, whose `MajorUpgrade` stops the service, replaces engine + GUI +
+  DLL, and restarts) — now with an install log at `%ProgramData%\UnityLAN\update-msi.log`.
 
 The coordinator only advertises a signed string (never the bytes), so this adds no data-plane load
 and keeps it off the hot path — and the artifact download itself fans out to the URL host (GitHub

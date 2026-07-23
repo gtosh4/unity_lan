@@ -112,41 +112,25 @@ fn main() -> iced::Result {
 /// Launch a fresh GUI process onto the updated binary (the caller then exits, handing over). Passes
 /// the same socket argument this instance runs with, so the successor talks to the same engine.
 ///
-/// On Unix the update already swapped `unitylan-gui` in place at apply time, so this is a plain
-/// re-exec of our own path. On Windows the running exe can't be overwritten, so the update left the
-/// new bytes beside us as `unitylan-gui.new.exe`; [`swap_in_staged_gui`] moves them into place first.
+/// The privileged engine has already put the new bytes on disk by the time we're prompted to
+/// restart: on Unix it swapped `unitylan-gui` in place, and on Windows it renamed the running
+/// `unitylan-gui.exe` aside to `.old.exe` and moved the new binary into the canonical name (the GUI
+/// can't do this itself — the install dir is admin-only). So we relaunch the **canonical path**, not
+/// `current_exe()`: on Windows our own image may now be the renamed-aside `.old.exe`, and spawning
+/// that would just relaunch the old version.
 fn relaunch_successor(socket: &Path) -> std::io::Result<()> {
     let exe = std::env::current_exe()?;
     #[cfg(windows)]
-    swap_in_staged_gui(&exe)?;
+    let exe = exe
+        .parent()
+        .map(|d| d.join("unitylan-gui.exe"))
+        .unwrap_or(exe);
     std::process::Command::new(&exe).arg(socket).spawn()?;
     Ok(())
 }
 
-/// Finish a Windows auto-update by promoting the staged `unitylan-gui.new.exe` to the real name.
-/// Windows forbids overwriting a running image but *permits renaming it*, so we rename ourselves
-/// aside and move the staged copy in — leaving the path we're about to relaunch pointing at the new
-/// bytes. A no-op when nothing is staged (a normal launch, or an installer too old to ship the copy),
-/// so we simply relaunch the current binary.
-#[cfg(windows)]
-fn swap_in_staged_gui(exe: &Path) -> std::io::Result<()> {
-    let Some(dir) = exe.parent() else {
-        return Ok(());
-    };
-    let staged = dir.join("unitylan-gui.new.exe");
-    if !staged.exists() {
-        return Ok(());
-    }
-    // The prior update's renamed-aside image was in use then and couldn't be deleted; it's free now.
-    let old = dir.join("unitylan-gui.old.exe");
-    let _ = std::fs::remove_file(&old);
-    std::fs::rename(exe, &old)?;
-    std::fs::rename(&staged, exe)?;
-    Ok(())
-}
-
-/// Best-effort cleanup of the image a previous update renamed aside (see [`swap_in_staged_gui`]) —
-/// only deletable once we're no longer running from it, i.e. from the successor at startup.
+/// Best-effort cleanup of the image the engine renamed aside when it promoted our replacement — only
+/// deletable once we're no longer running from it, i.e. from the successor at startup.
 #[cfg(windows)]
 fn clean_stale_gui() {
     if let Ok(exe) = std::env::current_exe() {

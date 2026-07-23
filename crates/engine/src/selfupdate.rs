@@ -335,9 +335,10 @@ async fn download_verified(artifact: &ReleaseArtifact) -> anyhow::Result<Vec<u8>
 /// Both, because the GUI drives the engine over a control protocol that carries no version of its
 /// own: replacing only the engine (as this used to) left an older GUI talking to a newer daemon, and
 /// a field it didn't know was a dropped connection, not a clean error. Windows's file-swap path
-/// carries the same two-binary bundle and stages the GUI the same way (`apply_bundle_swap` →
-/// `stage_gui`, promoted by the GUI's `swap_in_staged_gui` when the exe is in use) — so both platforms
-/// keep the engine and GUI in on-disk lockstep across an update.
+/// carries the same two-binary bundle and promotes the GUI in place the same way (`apply_bundle_swap`
+/// → `promote_gui`, renaming an open GUI's exe aside since the engine — not the unprivileged GUI —
+/// can write the install dir) — so both platforms keep the engine and GUI in on-disk lockstep across
+/// an update.
 ///
 /// A bare (non-gzip) artifact is still accepted as the engine binary alone, so a manifest published
 /// before this change keeps applying.
@@ -477,10 +478,10 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     }
 }
 
-/// The file-swap update, matching the Linux path: swap the engine binary in place and stage the new
-/// GUI beside it, then return so the daemon can tear down cleanly and let the SCM restart the service
-/// onto the new binary. No MSI, no `MajorUpgrade`, none of the service-reregistration machinery that
-/// made the installer-driven upgrade fragile — a routine version bump is now just a file swap.
+/// The file-swap update, matching the Linux path: promote the new GUI in place, swap the engine
+/// binary, then return so the daemon can tear down cleanly and let the SCM restart the service onto
+/// the new binary. No MSI, no `MajorUpgrade`, none of the service-reregistration machinery that made
+/// the installer-driven upgrade fragile — a routine version bump is now just a file swap.
 ///
 /// Windows forbids overwriting a *running* image but permits renaming it aside, which is exactly what
 /// `self_replace` does (the same crate the Unix path uses): the old image is moved out of the way and
@@ -488,18 +489,20 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
 #[cfg(windows)]
 fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     let bundle = unpack_bundle(bytes, state_dir)?;
-    // Stage the GUI as `unitylan-gui.new.exe` beside the installed one. A running GUI's exe is locked,
-    // so we never overwrite it directly — the GUI renames this into place itself on relaunch (see the
-    // GUI's `swap_in_staged_gui`). Best-effort: a host with no GUI beside the engine still updates it.
+    // Promote the GUI in place beside the installed one. This must happen *here*, in the
+    // LocalSystem engine, and not in the GUI: the install dir is `%ProgramFiles%\UnityLAN`, where an
+    // unprivileged GUI has only read+execute and so cannot rename its own exe — the reason the old
+    // GUI-driven swap silently failed on a real install. Best-effort: a host with no GUI beside the
+    // engine still updates it.
     if let Some(gui) = &bundle.gui {
-        match stage_gui(gui) {
+        match promote_gui(gui) {
             Ok(Some(at)) => {
-                tracing::info!(path = %at.display(), "staged the new GUI for in-session swap")
+                tracing::info!(path = %at.display(), "promoted the new GUI in place")
             }
             Ok(None) => {
                 tracing::info!("no installed GUI beside the engine; updating the engine only")
             }
-            Err(e) => tracing::warn!("could not stage the new GUI: {e:#}"),
+            Err(e) => tracing::warn!("could not promote the new GUI: {e:#}"),
         }
     }
     let engine = bundle
@@ -513,26 +516,61 @@ fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Copy `staged` to `unitylan-gui.new.exe` beside the installed GUI (the same directory as the engine
-/// on Windows), returning where it landed — or `None` if no GUI is installed there, since an update
-/// must not *add* a component the operator chose not to install. The running GUI promotes the
-/// `.new.exe` to the real name itself on its next relaunch.
+/// Promote the freshly-extracted GUI (`staged`) to the installed `unitylan-gui.exe` beside the
+/// engine, returning where it landed — or `None` if no GUI is installed there, since an update must
+/// not *add* a component the operator chose not to install.
+///
+/// Runs in the LocalSystem engine on purpose: it has FullControl over `%ProgramFiles%\UnityLAN`,
+/// which the unprivileged GUI does not. Windows forbids overwriting a running image but permits
+/// *renaming* one (the loader opens it share-delete), so a GUI that is open right now is handled the
+/// same way `self_replace` handles the engine — rename the current `unitylan-gui.exe` aside to
+/// `.old.exe` (the open GUI keeps executing from that inode), then move the new binary into the
+/// canonical name. The open GUI picks it up when it re-execs the canonical path
+/// (`gui::relaunch_successor`); the stale `.old.exe` is deleted by the successor on its next start
+/// (`gui::clean_stale_gui`).
 #[cfg(windows)]
-fn stage_gui(staged: &Path) -> anyhow::Result<Option<PathBuf>> {
+fn promote_gui(staged: &Path) -> anyhow::Result<Option<PathBuf>> {
     let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
     else {
         return Ok(None);
     };
-    if !dir.join("unitylan-gui.exe").exists() {
+    promote_gui_in(&dir, staged)
+}
+
+/// Testable core of [`promote_gui`] with the install dir injected (so a test needn't stand in for the
+/// engine's real install path).
+#[cfg(windows)]
+fn promote_gui_in(dir: &Path, staged: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let target = dir.join("unitylan-gui.exe");
+    if !target.exists() {
         return Ok(None);
     }
-    let target = dir.join("unitylan-gui.new.exe");
-    std::fs::copy(staged, &target)
-        .with_context(|| format!("staging the GUI to {}", target.display()))?;
-    let _ = std::fs::remove_file(staged);
-    Ok(Some(target))
+    let old = dir.join("unitylan-gui.old.exe");
+    // Clear a leftover aside-image from a prior update. It may still be locked if a GUI is *still*
+    // running from it (the user never relaunched); then the rename below fails and we abort before
+    // touching the working `gui.exe`, rather than destroy it.
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(&target, &old)
+        .with_context(|| format!("renaming {} aside for the update", target.display()))?;
+    // Move the new GUI into the now-free canonical name. The state dir (`%ProgramData%`) and the
+    // install dir (`%ProgramFiles%`) can be on different volumes, so fall back to copy when rename
+    // can't cross. On any failure, roll the aside-image back so we never leave the install with no
+    // `gui.exe` at all.
+    let moved =
+        std::fs::rename(staged, &target).or_else(|_| std::fs::copy(staged, &target).map(|_| ()));
+    match moved {
+        Ok(()) => {
+            let _ = std::fs::remove_file(staged);
+            Ok(Some(target))
+        }
+        Err(e) => {
+            let _ = std::fs::rename(&old, &target);
+            Err(anyhow::Error::new(e)
+                .context(format!("promoting the new GUI to {}", target.display())))
+        }
+    }
 }
 
 /// Legacy MSI path: write the signed MSI and launch it, then `exit(0)` so the running engine releases
@@ -620,6 +658,68 @@ mod tests {
         let b = unpack_bundle(&bytes, &dir).unwrap();
         assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
         assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+    }
+
+    /// Windows GUI promotion runs in the (LocalSystem) engine because the unprivileged GUI can't write
+    /// the Program Files install dir. It must land the new bytes at the canonical `unitylan-gui.exe`
+    /// (what the relaunching GUI spawns) and keep the previous one aside as `.old.exe` rather than
+    /// destroy it — an open GUI is still executing from that inode.
+    #[cfg(windows)]
+    #[test]
+    fn promote_gui_replaces_in_place_keeping_old_aside() {
+        let dir = crate::testutil::TempDir::new("su-promote");
+        let gui = dir.join("unitylan-gui.exe");
+        std::fs::write(&gui, b"OLD").unwrap();
+        // The freshly-extracted new GUI, as `unpack_bundle` leaves it in the state dir.
+        let staged = dir.join("unitylan-gui.exe.update");
+        std::fs::write(&staged, b"NEW").unwrap();
+
+        let at = promote_gui_in(&dir, &staged)
+            .unwrap()
+            .expect("a GUI is installed here");
+        assert_eq!(at, gui);
+        assert_eq!(
+            std::fs::read(&gui).unwrap(),
+            b"NEW",
+            "the canonical name now holds the new bytes"
+        );
+        assert_eq!(
+            std::fs::read(dir.join("unitylan-gui.old.exe")).unwrap(),
+            b"OLD",
+            "the previous GUI was renamed aside, not destroyed"
+        );
+        assert!(!staged.exists(), "the staged copy was consumed");
+    }
+
+    /// A leftover `.old.exe` from a prior update (successor never cleaned it) must not block a new
+    /// promotion: it's cleared first, then the current GUI takes its place.
+    #[cfg(windows)]
+    #[test]
+    fn promote_gui_clears_a_stale_aside_image() {
+        let dir = crate::testutil::TempDir::new("su-promote-stale");
+        std::fs::write(dir.join("unitylan-gui.exe"), b"OLD").unwrap();
+        std::fs::write(dir.join("unitylan-gui.old.exe"), b"STALE").unwrap();
+        let staged = dir.join("unitylan-gui.exe.update");
+        std::fs::write(&staged, b"NEW").unwrap();
+
+        promote_gui_in(&dir, &staged).unwrap().unwrap();
+        assert_eq!(std::fs::read(dir.join("unitylan-gui.exe")).unwrap(), b"NEW");
+        assert_eq!(
+            std::fs::read(dir.join("unitylan-gui.old.exe")).unwrap(),
+            b"OLD",
+            "the stale aside-image was replaced by the just-superseded GUI"
+        );
+    }
+
+    /// A headless host has the engine but no GUI beside it: promotion must not *add* one.
+    #[cfg(windows)]
+    #[test]
+    fn promote_gui_noop_when_no_gui_installed() {
+        let dir = crate::testutil::TempDir::new("su-promote-headless");
+        let staged = dir.join("unitylan-gui.exe.update");
+        std::fs::write(&staged, b"NEW").unwrap();
+        assert!(promote_gui_in(&dir, &staged).unwrap().is_none());
+        assert!(!dir.join("unitylan-gui.exe").exists());
     }
 
     /// Windows traversal guard, mirroring the Unix one: a `..` entry whose *file name* is one we accept

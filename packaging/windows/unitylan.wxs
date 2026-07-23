@@ -53,14 +53,12 @@
                     Description="Mesh status and device management" Advertise="no" />
         </File>
       </Component>
-      <!-- A second, identical copy of the GUI under a name that is never in use. On a /quiet
-           MajorUpgrade the real unitylan-gui.exe is locked whenever the GUI is open, so the installer
-           reboot-defers it; this copy replaces cleanly (no lock), giving the running GUI the new bytes
-           it renames into place to finish the update in-session without a reboot (App::relaunch ->
-           swap_in_staged_gui). It's consumed (renamed) by that swap and re-laid by the next install. -->
-      <Component>
-        <File Id="GuiExeStaged" Name="unitylan-gui.new.exe" Source="$(GuiExe)" KeyPath="yes" />
-      </Component>
+      <!-- No `unitylan-gui.new.exe` staged copy here anymore. It existed so a running GUI could rename
+           the new bytes into place itself during a locked MajorUpgrade, but the unprivileged GUI can't
+           write this admin-only install dir, so that self-swap never actually worked. GUI promotion now
+           lives in the LocalSystem engine (selfupdate `promote_gui`), which has the rights to do it; a
+           bundle auto-update finishes in-session, and an MSI MajorUpgrade with the GUI open reboot-defers
+           the locked exe the standard way. -->
       <!-- No engine.toml here on purpose. Config lives at %ProgramData%\UnityLAN\engine.toml, written
            and owned by the engine (`service install` / the service's own startup — see
            `service::ensure_config`), not the installer. Keeping it out of the MSI's file list means an

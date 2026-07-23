@@ -305,6 +305,13 @@ fn start() -> Result<()> {
 /// service in place the way the Unix path does; leaning on the SCM as supervisor is the intended
 /// Windows restart. Internal — not for interactive use.
 fn restart_after() -> Result<()> {
+    // This helper is detached from the outgoing service and has no console, so log to the same file
+    // the service uses — otherwise a failed post-update restart is completely invisible (there is no
+    // installer log and no e2e test for this path), which is exactly how an update that silently left
+    // the engine down looked in the field.
+    init_service_logging();
+    tracing::info!("post-update restart: waiting for the outgoing engine to exit");
+
     // Wait for the predecessor to fully exit before starting the service. Our stdin is a pipe whose
     // write end the old process holds open and leaks (see `spawn_restart_helper`); the OS closes it
     // only when that process terminates, so a read to EOF is precisely "the old engine is gone". This
@@ -313,6 +320,7 @@ fn restart_after() -> Result<()> {
     // GUI unable to connect until the next restart.
     let mut sink = Vec::new();
     let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut sink);
+    tracing::info!("post-update restart: predecessor exited; restarting the service");
 
     let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
         .context("opening the service manager for the post-update restart")?;
@@ -323,30 +331,47 @@ fn restart_after() -> Result<()> {
         )
         .context("opening the service to restart it after the update")?;
 
-    // Belt-and-suspenders: also confirm the SCM sees it Stopped (the terminal state may lag the
-    // process exit by a moment) before starting it again.
+    // Confirm the SCM sees it Stopped (the terminal state can lag the process exit by a moment), then
+    // start it — retrying transient failures rather than giving up on the first one. The SCM can
+    // still consider the just-exited process present for a beat and reject `StartService` with
+    // ERROR_SERVICE_ALREADY_RUNNING; a single attempt (the old behavior) then left the engine down
+    // until the next boot or a manual start. Retry across the same window instead.
     let deadline = Instant::now() + STOP_WAIT;
-    while Instant::now() < deadline {
-        if service.query_status()?.current_state == ServiceState::Stopped {
-            break;
+    loop {
+        match service.query_status()?.current_state {
+            ServiceState::Stopped => match service.start::<OsString>(&[]) {
+                Ok(()) => {
+                    tracing::info!("post-update restart: started the service onto the updated binary");
+                    return Ok(());
+                }
+                Err(e) if Instant::now() < deadline => {
+                    tracing::warn!("post-update restart: start attempt failed, retrying: {e}");
+                    std::thread::sleep(POLL_INTERVAL);
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context(
+                        "starting the service onto the updated binary (it will start at the next boot)",
+                    ))
+                }
+            },
+            // Already back up — a retry landed, or the SCM's own auto-start beat us to it. Done.
+            ServiceState::Running | ServiceState::StartPending => {
+                tracing::info!("post-update restart: service is already running");
+                return Ok(());
+            }
+            // Still winding down (StopPending) or another transient state: wait for it to settle.
+            other if Instant::now() < deadline => {
+                tracing::debug!("post-update restart: waiting for a startable state, saw {other:?}");
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            // Don't force it past the window: the service is registered auto-start, so it comes up on
+            // the new binary at the next boot regardless.
+            other => anyhow::bail!(
+                "service '{SERVICE_NAME}' never reached a startable state within {}s (last {other:?}); \
+                 not restarting — it will start on the new binary at the next boot",
+                STOP_WAIT.as_secs()
+            ),
         }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-    match service.query_status()?.current_state {
-        ServiceState::Stopped => {
-            service
-                .start::<OsString>(&[])
-                .context("starting the service onto the updated binary")?;
-            println!("Restarted service '{SERVICE_NAME}' onto the updated binary.");
-            Ok(())
-        }
-        // Don't force it: the service is registered auto-start, so it comes up on the new binary at
-        // the next boot regardless. Failing loudly here just leaves a confusing error in the log.
-        other => anyhow::bail!(
-            "service '{SERVICE_NAME}' did not stop within {}s (state {other:?}); \
-             not restarting — it will start on the new binary at the next boot",
-            STOP_WAIT.as_secs()
-        ),
     }
 }
 
