@@ -17,6 +17,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- The update prompt no longer stays hidden when a new release is ready to install. The app decided
+  whether to offer an update from the *coordinator's own* version rather than the version of the
+  release it publishes — so after a coordinator rolled out a new release without upgrading its own
+  binary first, every client silently held a verified, ready-to-apply update with no button to apply
+  it. The prompt now follows the staged release.
 - The peer-direct attestation refresh no longer stops working after a peer goes offline. On Linux,
   sending to a peer that has no listener triggers an ICMP "port unreachable" that surfaces as an error
   on the next receive; the engine treated that as fatal and tore down its refresh responder, so it

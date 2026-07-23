@@ -225,10 +225,25 @@ fn note_update(
     state_dir: &std::path::Path,
     pending_update: &crate::selfupdate::PendingSlot,
 ) {
-    control::set_update_available(status, &resp.server_version);
     let staged = crate::selfupdate::stage(resp, state_dir);
+    // Prefer the staged release's version over the coordinator's own: they move independently, and a
+    // coordinator still on an older binary than the release it publishes would otherwise report "no
+    // update" and suppress the GUI's prompt even though a verified artifact is sitting staged.
+    control::set_update_available(
+        status,
+        latest_version(staged.as_ref(), &resp.server_version),
+    );
     control::set_update_ready(status, staged.is_some());
     *pending_update.lock().unwrap() = staged;
+}
+
+/// The version to report as available: the staged release when there is one, else whatever the
+/// coordinator says it runs.
+fn latest_version<'a>(
+    staged: Option<&'a crate::selfupdate::PendingUpdate>,
+    server_version: &'a str,
+) -> &'a str {
+    staged.map_or(server_version, |u| u.version.as_str())
 }
 
 /// How [`run`] ended, so `main`/`service` know whether to just exit, re-exec, or hand the restart to
@@ -1784,6 +1799,23 @@ mod tests {
     use crate::coord::SeedPeer;
     use common::control::PeerReach;
     use std::time::Instant;
+
+    #[test]
+    fn staged_release_outranks_the_coordinators_own_version() {
+        // A coordinator lagging the release it publishes must not suppress the prompt.
+        let staged = crate::selfupdate::PendingUpdate {
+            version: "0.4.2".into(),
+            artifact: common::update::ReleaseArtifact {
+                platform: common::update::Platform::LinuxAmd64,
+                url: "https://example.invalid/x".into(),
+                sha256: [0u8; 32],
+                size: 1,
+            },
+        };
+        assert_eq!(latest_version(Some(&staged), "0.4.1"), "0.4.2");
+        // Nothing staged: fall back to what the coordinator reports.
+        assert_eq!(latest_version(None, "0.4.1"), "0.4.1");
+    }
 
     #[test]
     fn reconnect_backoff_is_stable_per_device_and_spread_around_the_base() {
