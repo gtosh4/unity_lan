@@ -45,6 +45,22 @@ pub struct Config {
     /// reverse proxy's fd/memory ceilings. Default: 4096.
     #[serde(default = "default_max_longpolls")]
     pub max_longpolls: usize,
+    /// Slowloris guard: seconds a client is given to send its *complete* request headers before the
+    /// connection is dropped. `axum::serve` arms no such deadline, so without this a peer that opens a
+    /// socket and dribbles (or withholds) header bytes ties up a connection — and an fd — indefinitely,
+    /// before the rate limiter or long-poll admission ceiling can act (both run only once a request has
+    /// been fully received and dispatched). Applies to the header phase alone; a long-poll that has
+    /// already been dispatched is not cut. Default: 15.
+    #[serde(default = "default_header_read_timeout_secs")]
+    pub header_read_timeout_secs: u64,
+    /// Hard ceiling on simultaneously-open TCP connections, enforced at accept time. Every parked
+    /// long-poll holds one connection, so this must sit *above* `max_longpolls` with headroom for the
+    /// short-lived requests in flight — it bounds the connection flood a slowloris or stalled-handshake
+    /// attack can raise before it would exhaust the process fd table (which fails unrelated work — DB
+    /// queries, new accepts — process-wide). Keep it under the coordinator's (and any reverse proxy's)
+    /// fd ceiling. Default: 8192.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
     /// Offline role source. Mutually exclusive with a live Discord source.
     pub fake: Option<FakeConfig>,
     /// Live Discord role source (bot token).
@@ -114,6 +130,14 @@ fn default_attestation_ttl() -> u64 {
 
 fn default_max_longpolls() -> usize {
     4096
+}
+
+fn default_header_read_timeout_secs() -> u64 {
+    15
+}
+
+fn default_max_connections() -> usize {
+    8192
 }
 
 /// The `[admin]` block: an operator-set bearer token gating `/admin` and `/metrics`.
@@ -257,6 +281,24 @@ impl Config {
                 tokio::sync::Semaphore::MAX_PERMITS
             );
         }
+        if cfg.header_read_timeout_secs == 0 {
+            anyhow::bail!("header_read_timeout_secs must be at least 1");
+        }
+        if cfg.max_connections <= cfg.max_longpolls {
+            anyhow::bail!(
+                "max_connections ({}) must exceed max_longpolls ({}): each parked long-poll holds a \
+                 connection, so an equal or smaller cap would starve new requests",
+                cfg.max_connections,
+                cfg.max_longpolls
+            );
+        }
+        if cfg.max_connections > tokio::sync::Semaphore::MAX_PERMITS {
+            anyhow::bail!(
+                "max_connections {} exceeds the implementation maximum {}",
+                cfg.max_connections,
+                tokio::sync::Semaphore::MAX_PERMITS
+            );
+        }
         if !(MIN_ATTESTATION_TTL_SECS..=MAX_ATTESTATION_TTL_SECS)
             .contains(&cfg.attestation_ttl_secs)
         {
@@ -367,6 +409,33 @@ mod tests {
         let err = Config::load(&path).unwrap_err();
         let _ = std::fs::remove_file(path);
         assert!(err.to_string().contains("max_longpolls must be at least 1"));
+    }
+
+    #[test]
+    fn connection_guards_default_and_validate() {
+        let base = "bind = '127.0.0.1:8080'\ndatabase = 'test.db'\n";
+        let cfg: Config = toml::from_str(base).unwrap();
+        assert_eq!(cfg.header_read_timeout_secs, 15);
+        assert_eq!(cfg.max_connections, 8192);
+
+        // A connection cap at or below the long-poll cap would starve new requests: every parked
+        // long-poll holds a connection, so all slots could sit on held long-polls.
+        let err = load_text("max_longpolls = 4096\nmax_connections = 4096\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("max_connections") && err.contains("must exceed max_longpolls"),
+            "{err}"
+        );
+
+        // A zero header-read timeout disables the slowloris guard.
+        let err = load_text("header_read_timeout_secs = 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("header_read_timeout_secs must be at least 1"),
+            "{err}"
+        );
     }
 
     fn load_text(extra: &str) -> anyhow::Result<Config> {

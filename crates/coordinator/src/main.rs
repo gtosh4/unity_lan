@@ -333,13 +333,86 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("binding {}", cfg.bind))?;
     tracing::info!(addr = %cfg.bind, "coordinator listening");
-    // `into_make_service_with_connect_info` surfaces the peer address to the rate-limit middleware.
-    axum::serve(
-        listener,
-        api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
-    Ok(())
+
+    // Own accept loop instead of `axum::serve`, because axum arms the underlying hyper builder with
+    // no header-read deadline and no connection ceiling. A slowloris — open a socket, dribble (or
+    // never finish) the request headers — would otherwise pin connections and fds ahead of the rate
+    // limiter and long-poll admission gate, both of which run only after a request is dispatched.
+    // Here each accepted connection takes a semaphore permit held for its whole lifetime (the
+    // accept-time cap: `max_connections` must exceed `max_longpolls`, checked at config load, since
+    // every parked long-poll holds one) and is dropped if it hasn't produced a dispatched request
+    // within `header_read_timeout`. That deadline is disarmed the instant a request lands, so a
+    // long-poll that then parks for minutes is never cut short.
+    let app = api::router(state);
+    let header_timeout = std::time::Duration::from_secs(cfg.header_read_timeout_secs);
+    let conns = Arc::new(tokio::sync::Semaphore::new(cfg.max_connections));
+    loop {
+        let permit = conns
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("connection semaphore is never closed");
+        let (stream, peer) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!(error = %e, "accepting connection");
+                continue;
+            }
+        };
+        let app = app.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            // Set the first time the service is invoked — i.e. a complete request was parsed and
+            // dispatched. Until then the connection is in its header/handshake phase and subject to
+            // the deadline below. The deadline wraps the whole pre-dispatch future rather than using
+            // hyper's built-in `header_read_timeout`, because that only starts once header parsing
+            // begins — it leaves hyper-util's preceding, untimed HTTP/1-vs-2 protocol sniff (a read
+            // of up to 24 bytes) unguarded, which a client dribbling <24 bytes would stall forever.
+            let dispatched = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let service = {
+                let dispatched = dispatched.clone();
+                hyper_util::service::TowerToHyperService::new(tower::service_fn(
+                    move |req: hyper::Request<hyper::body::Incoming>| {
+                        dispatched.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Surface the peer address to the rate-limit middleware (via `ConnectInfo`)
+                        // and adapt hyper's incoming body to axum's — what `axum::serve` would do.
+                        let app = app.clone();
+                        async move {
+                            let mut req = req.map(axum::body::Body::new);
+                            req.extensions_mut()
+                                .insert(axum::extract::ConnectInfo(peer));
+                            tower::ServiceExt::oneshot(app, req).await
+                        }
+                    },
+                ))
+            };
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let conn = builder
+                .serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(stream), service);
+            let deadline = tokio::time::sleep(header_timeout);
+            tokio::pin!(conn, deadline);
+            let mut armed = true;
+            loop {
+                tokio::select! {
+                    result = conn.as_mut() => {
+                        if let Err(e) = result {
+                            tracing::debug!(error = %e, %peer, "serving connection");
+                        }
+                        break;
+                    }
+                    _ = deadline.as_mut(), if armed => {
+                        if dispatched.load(std::sync::atomic::Ordering::Relaxed) {
+                            armed = false; // a request landed; stop policing the header phase
+                        } else {
+                            tracing::debug!(%peer, "dropping connection: no request within header timeout");
+                            break; // drop `conn` -> close the socket on the stalled client
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Raise the open-file soft limit to the hard limit.
