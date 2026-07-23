@@ -34,6 +34,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   real release, after which the engine refused all genuine (lower-versioned) updates until its state
   was wiped. The floor is now raised only for a manifest the engine will actually install.
 
+### Changed
+
+- A busy coordinator asks Discord for far less on a cold cache. When a membership change wakes every
+  client of a guild at once, each one used to look up the same guild name, role names, and its own
+  membership before any of them had filled the coordinator's cache — so a single change turned into
+  one Discord request per client, all landing on that guild's shared rate-limit bucket. Those
+  simultaneous lookups are now funnelled into one request whose result the rest reuse. Restarts and
+  large role changes are correspondingly less likely to trip Discord's per-guild limit.
+
 ### Fixed
 
 - The update prompt no longer stays hidden when a new release is ready to install. The app decided
