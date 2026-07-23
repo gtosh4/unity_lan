@@ -14,6 +14,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   space (denying enrollment to real members) and grown the coordinator's database without bound.
   Each account is additionally capped at 32 devices, so a member who *does* hold a role can't loop
   enrollments with fresh keys to the same effect.
+- A coordinator can no longer be tied up by clients that open connections and then send their
+  request slowly or not at all (a "slowloris"). Each such connection previously held a socket open
+  indefinitely — the rate limiter and long-poll admission ceiling only engage once a full request
+  arrives — so enough of them could exhaust the coordinator's file descriptors and lock out real
+  clients, with no attacker credentials needed. The coordinator now drops a connection that hasn't
+  sent a complete request within a deadline (`header_read_timeout_secs`, default 15) and caps the
+  number of simultaneous connections (`max_connections`, default 8192); an established long-poll is
+  never cut short. Operators fronting the coordinator with a reverse proxy already had similar
+  protection from the proxy; this hardens the direct-exposure case too.
 - On Linux, a device on the same physical network as yours can no longer reach your mesh-only DNS
   resolver or peer services by addressing them directly on a non-mesh interface. Linux's default
   "weak host" behavior accepts a packet aimed at a local address regardless of which interface it

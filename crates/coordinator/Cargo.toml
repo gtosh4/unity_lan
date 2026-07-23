@@ -20,6 +20,11 @@ tokio.workspace = true
 toml.workspace = true
 
 axum = "0.8"
+# Own accept loop (main.rs) instead of `axum::serve`, so a slowloris header-read deadline and a
+# connection ceiling can be enforced; axum's serve exposes neither hook.
+hyper = "1"
+hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
+tower = { version = "0.5", features = ["util"] }
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
