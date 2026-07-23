@@ -37,7 +37,17 @@ impl OwnAttestations {
 pub async fn serve(sock: UdpSocket, own: OwnAttestations) -> anyhow::Result<()> {
     let mut buf = vec![0u8; P2P_MAX_DATAGRAM];
     loop {
-        let (n, from) = sock.recv_from(&mut buf).await.context("p2p recv")?;
+        // A `recv_from` error here is transient, not fatal: on Linux a prior `send_to` to a peer that
+        // has no listener elicits an ICMP port-unreachable, delivered as an error on the *next* socket
+        // op. Propagating it would tear down the whole serve loop, killing peer-direct refresh until
+        // the engine restarts — so log and keep serving, like the DNS responder (`dns.rs`).
+        let (n, from) = match sock.recv_from(&mut buf).await {
+            Ok(x) => x,
+            Err(e) => {
+                tracing::warn!("p2p recv: {e}");
+                continue;
+            }
+        };
         let body = match serde_json::from_slice::<P2pRequest>(&buf[..n]) {
             // A peer outside our support window gets a clean `Unsupported` (→ it falls back to the
             // coordinator) rather than a reply it may misread. `proto == 0` predates the envelope.

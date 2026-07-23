@@ -104,24 +104,34 @@ fn floor_path(state_dir: &Path) -> PathBuf {
     state_dir.join("update_floor")
 }
 
-/// Accept `version` against the persisted rollback floor, raising the floor to it when accepted.
-/// The manifest is signed by the coordinator's anchor, but the transport is deliberately untrusted,
-/// so a MITM can *replay* an older-but-genuinely-signed manifest to walk us back onto a release with
-/// a known vuln (`is_newer` only blocks going below what we currently *run*, not below what we've
-/// already been offered). Once we've verified some release, we refuse any strictly-older one. A
-/// *withheld* newer manifest — freezing us in place — can't be caught here; that needs a signed
+/// Whether `version` is allowed by the persisted rollback floor (the highest release we've accepted).
+/// Pure check — the floor is only tightened by [`raise_floor`], called after every other acceptance
+/// check passes. The manifest is signed by the coordinator's anchor, but the transport is deliberately
+/// untrusted, so a MITM can *replay* an older-but-genuinely-signed manifest to walk us back onto a
+/// release with a known vuln (`is_newer` only blocks going below what we currently *run*, not below
+/// what we've already been offered). Once we've accepted some release, we refuse any strictly-older
+/// one. A *withheld* newer manifest — freezing us in place — can't be caught here; that needs a signed
 /// freshness stamp inside the manifest itself.
-fn within_floor(state_dir: &Path, version: &str) -> bool {
+fn clears_floor(state_dir: &Path, version: &str) -> bool {
     let floor = std::fs::read_to_string(floor_path(state_dir))
         .ok()
         .and_then(|s| semver::Version::parse(s.trim()).ok());
-    if let Some(floor) = &floor {
-        if is_newer(&floor.to_string(), version) {
-            return false;
-        }
+    match floor {
+        Some(floor) => !is_newer(&floor.to_string(), version),
+        None => true,
     }
-    // Raise the floor when this is the newest we've seen. Best-effort: a write failure just means we
-    // don't tighten the floor this round, never that we wrongly reject.
+}
+
+/// Raise the rollback floor to `version` when it's the newest we've accepted. Kept separate from
+/// [`clears_floor`] and called only once a manifest has passed *every* acceptance check, so a signed
+/// manifest that cleared the gate but was then rejected (no artifact for our platform, not actually
+/// newer than what we run) can't tighten the floor — which would otherwise brick every future,
+/// lower-versioned real release. Best-effort: a write failure just means we don't tighten this round,
+/// never that we wrongly reject.
+fn raise_floor(state_dir: &Path, version: &str) {
+    let floor = std::fs::read_to_string(floor_path(state_dir))
+        .ok()
+        .and_then(|s| semver::Version::parse(s.trim()).ok());
     let raise = match (&floor, semver::Version::parse(version)) {
         (Some(f), Ok(v)) => v > *f,
         (None, Ok(_)) => true,
@@ -130,7 +140,6 @@ fn within_floor(state_dir: &Path, version: &str) -> bool {
     if raise {
         let _ = std::fs::write(floor_path(state_dir), version);
     }
-    true
 }
 
 /// Breadcrumb recording the version we're restarting onto, written just before the daemon tears down
@@ -251,7 +260,7 @@ pub(crate) fn stage_with(
 /// The applicability gate shared by both verification paths: refuse a rollback below the highest
 /// version we've verified, require strictly newer than what we run, and pick this platform's artifact.
 fn stage_manifest(manifest: ReleaseManifest, state_dir: &Path) -> Option<PendingUpdate> {
-    if !within_floor(state_dir, &manifest.version) {
+    if !clears_floor(state_dir, &manifest.version) {
         tracing::warn!(
             version = %manifest.version,
             "release manifest older than one already verified — refusing (possible rollback)"
@@ -263,6 +272,10 @@ fn stage_manifest(manifest: ReleaseManifest, state_dir: &Path) -> Option<Pending
     }
     let platform = current_platform()?;
     let artifact = manifest.artifact_for(platform)?.clone();
+    // Only now — a genuinely newer release with an artifact for our platform — tighten the floor.
+    // Raising it earlier would let a signed manifest we never stage (wrong platform, not newer) poison
+    // the floor and refuse every future lower-versioned real release.
+    raise_floor(state_dir, &manifest.version);
     Some(PendingUpdate {
         version: manifest.version,
         artifact,
@@ -1026,6 +1039,54 @@ mod tests {
         assert!(stage(&resp("9.9.8"), &dir).is_none());
         // Re-offering the version at the floor still stages (not a rollback).
         assert!(stage(&resp("9.9.9"), &dir).is_some());
+    }
+
+    // A signed manifest that clears the floor but is then rejected (no artifact for our platform) must
+    // not raise the floor, or it would brick every future lower-versioned real release.
+    #[test]
+    fn manifest_without_our_artifact_does_not_poison_the_floor() {
+        use common::crypto::CoordinatorKey;
+        use common::update::{Platform, ReleaseArtifact, ReleaseManifest};
+
+        let dir = crate::testutil::TempDir::new("su-floor-poison");
+        let honest = CoordinatorKey::generate();
+        const GUILD: u64 = 42;
+        crate::keys::pin_anchor(&dir, GUILD, &honest.anchor_bytes(), &[]).unwrap();
+
+        let both = || {
+            vec![
+                ReleaseArtifact {
+                    platform: Platform::LinuxAmd64,
+                    url: "https://example.test/x".into(),
+                    sha256: [0u8; 32],
+                    size: 1,
+                },
+                ReleaseArtifact {
+                    platform: Platform::WindowsAmd64,
+                    url: "https://example.test/x.msi".into(),
+                    sha256: [0u8; 32],
+                    size: 1,
+                },
+            ]
+        };
+        let resp = |version: &str, artifacts: Vec<ReleaseArtifact>| {
+            let manifest = ReleaseManifest {
+                version: version.into(),
+                artifacts,
+            };
+            RegisterResp {
+                version: 1,
+                proto: common::PROTOCOL_VERSION,
+                server_version: version.into(),
+                release: Some(Signed::sign(&honest, &manifest).unwrap().to_base64()),
+                ..Default::default()
+            }
+        };
+
+        // Very-new, correctly signed, but carries no artifact for us → refused, floor untouched.
+        assert!(stage(&resp("9.9.9", vec![]), &dir).is_none());
+        // A genuine newer release with our artifact still stages: 9.9.9 didn't poison the floor.
+        assert!(stage(&resp("9.9.0", both()), &dir).is_some());
     }
 
     // ---- Dedicated release-key path (strong) ----

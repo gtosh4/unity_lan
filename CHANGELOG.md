@@ -3,6 +3,25 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Security
+
+- A tampered but validly-signed update manifest can no longer freeze a device's auto-updates. The
+  engine records the highest release it has accepted as a rollback floor; previously it raised that
+  floor the moment a manifest passed its signature check — before confirming the release was newer
+  than the running one and actually had a build for this platform. A man-in-the-middle replaying a
+  signed manifest with a very high version but no artifact for your OS could push the floor past every
+  real release, after which the engine refused all genuine (lower-versioned) updates until its state
+  was wiped. The floor is now raised only for a manifest the engine will actually install.
+
+### Fixed
+
+- The peer-direct attestation refresh no longer stops working after a peer goes offline. On Linux,
+  sending to a peer that has no listener triggers an ICMP "port unreachable" that surfaces as an error
+  on the next receive; the engine treated that as fatal and tore down its refresh responder, so it
+  quietly stopped answering co-members until the next restart. It now logs and keeps serving.
+
 ## v0.4.2
 
 ### Security
