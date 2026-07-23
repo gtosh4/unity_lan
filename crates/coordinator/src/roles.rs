@@ -22,6 +22,11 @@ pub trait RoleSource: Send + Sync {
     async fn guild_name(&self, guild_id: u64) -> Option<String>;
     /// A member's roles + nick in a specific guild; `None` if not a member.
     async fn member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles>;
+    /// Drop any cached membership for `(guild, user)` so the next `member` call re-fetches. Called on
+    /// a role-change/leave event: without it a revoked member would keep being served from a stale
+    /// positive cache for its TTL, re-admitting on a register that lands inside the window. Default
+    /// no-op for sources that don't cache.
+    async fn forget(&self, _guild_id: u64, _user_id: u64) {}
     /// Current Discord display name of a role, so a network's name tracks role renames without any
     /// stored copy to propagate. `None` if unknown (caller falls back to the registered snapshot).
     async fn role_name(&self, guild_id: u64, role_id: u64) -> Option<String>;

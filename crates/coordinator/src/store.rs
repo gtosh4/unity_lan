@@ -606,6 +606,15 @@ impl Store {
             .bind(user_id as i64)
             .execute(&self.pool)
             .await?;
+        // Also drop the interactive-login binding for this key. Without this the row in
+        // `oauth_authorized` survives, and `resolve_user` treats a bound-but-unenrolled pubkey as
+        // pre-authorized: the removed (or stolen) key would re-register on possession proof alone —
+        // minting a fresh device row + token — silently undoing the removal. Deleting it forces a
+        // full re-enrollment (fresh OAuth or an enrollment key) to come back.
+        sqlx::query("DELETE FROM oauth_authorized WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .execute(&self.pool)
+            .await?;
         // If that was the primary pointer, promote another device (or clear it).
         if self.primary_pubkey(user_id).await? == Some(*pubkey) {
             match self.user_devices(user_id).await?.first() {
@@ -938,6 +947,21 @@ mod tests {
         // Removing the last device clears the primary pointer.
         st.remove_device(5, &b).await.unwrap();
         assert_eq!(st.primary_pubkey(5).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn removing_a_device_clears_its_oauth_binding() {
+        let st = Store::memory().await;
+        let a = [9u8; 32];
+        st.bind_oauth(&a, 5).await.unwrap();
+        st.allocate_device(tnet(), &a, 5, "laptop").await.unwrap();
+        assert_eq!(st.oauth_user(&a).await.unwrap(), Some(5));
+
+        st.remove_device(5, &a).await.unwrap();
+        // Both the device row and the login binding are gone: a removed key can't re-register on
+        // possession proof alone — it must re-enroll (fresh OAuth or an enrollment key).
+        assert_eq!(st.device_owner(&a).await.unwrap(), None);
+        assert_eq!(st.oauth_user(&a).await.unwrap(), None);
     }
 
     #[tokio::test]

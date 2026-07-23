@@ -23,6 +23,7 @@ use twilight_util::builder::command::{
 use twilight_util::builder::InteractionResponseDataBuilder;
 
 use crate::presence::Presence;
+use crate::roles::RoleSource;
 use crate::store::{match_device_by_name, DeviceMatch, Store};
 use crate::versions::{Scope, Versions};
 
@@ -35,6 +36,7 @@ pub async fn run_gateway(
     store: Arc<Store>,
     presence: Arc<Presence>,
     versions: Arc<Versions>,
+    roles: Arc<dyn RoleSource>,
 ) -> anyhow::Result<()> {
     let http = twilight_http::Client::new(token.clone());
     let app_id = http.current_user_application().await?.model().await?.id;
@@ -75,6 +77,7 @@ pub async fn run_gateway(
                     &store,
                     &presence,
                     &versions,
+                    roles.as_ref(),
                     m.guild_id.get(),
                     m.user.id.get(),
                     &held,
@@ -87,6 +90,7 @@ pub async fn run_gateway(
                     &store,
                     &presence,
                     &versions,
+                    roles.as_ref(),
                     m.guild_id.get(),
                     m.user.id.get(),
                     &HashSet::new(),
@@ -106,10 +110,14 @@ async fn revoke(
     store: &Store,
     presence: &Presence,
     versions: &Versions,
+    roles: &dyn RoleSource,
     guild_id: u64,
     user_id: u64,
     held: &HashSet<u64>,
 ) {
+    // Invalidate any cached membership first, so a register landing right after this event re-fetches
+    // the member's true roles instead of being re-admitted from a stale positive cache for its TTL.
+    roles.forget(guild_id, user_id).await;
     let nets = match store.networks_in_guild(guild_id).await {
         Ok(n) => n,
         Err(e) => {

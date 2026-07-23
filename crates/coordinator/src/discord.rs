@@ -164,6 +164,13 @@ impl RoleSource for TwilightRoleSource {
         Some(roles)
     }
 
+    async fn forget(&self, guild_id: u64, user_id: u64) {
+        self.member_cache
+            .lock()
+            .unwrap()
+            .remove(&(guild_id, user_id));
+    }
+
     async fn role_name(&self, guild_id: u64, role_id: u64) -> Option<String> {
         if let Some(hit) = self.cached_role(guild_id, role_id) {
             return hit;
@@ -187,5 +194,32 @@ impl RoleSource for TwilightRoleSource {
             },
         );
         name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::roles::RoleSource;
+
+    #[tokio::test]
+    async fn forget_drops_the_cached_membership() {
+        let src = TwilightRoleSource::new("test-token".to_string());
+        src.member_cache.lock().unwrap().insert(
+            (7, 42),
+            CachedMember {
+                fetched: Instant::now(),
+                roles: MemberRoles {
+                    nick: "n".into(),
+                    role_ids: vec![1],
+                },
+            },
+        );
+        // A fresh entry is served from cache; forgetting it forces the next lookup to re-fetch.
+        assert!(src.cached_member(7, 42).is_some());
+        src.forget(7, 42).await;
+        assert!(src.cached_member(7, 42).is_none());
+        // Forgetting an absent entry is harmless.
+        src.forget(7, 42).await;
     }
 }

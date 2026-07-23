@@ -184,8 +184,12 @@ async fn main() -> anyhow::Result<()> {
         let store = store.clone();
         let presence = presence.clone();
         let versions = versions.clone();
+        // Same `Arc` the snapshot path reads, so a revocation's cache invalidation is visible there.
+        let roles = roles.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::commands::run_gateway(token, store, presence, versions).await {
+            if let Err(e) =
+                crate::commands::run_gateway(token, store, presence, versions, roles).await
+            {
                 tracing::error!("gateway task ended: {e:#}");
             }
         });

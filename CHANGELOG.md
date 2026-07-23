@@ -7,6 +7,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Security
 
+- Removing a device now fully de-authorizes it. Previously removal deleted the device record but left
+  its interactive-login binding behind, so the same key could immediately re-register — reclaiming an
+  address and a fresh token — without logging in again; a lost or stolen device could quietly undo
+  its own removal. Removal now clears that binding, so coming back requires a fresh login or an
+  enrollment key.
+- Losing a Discord role now cuts mesh access without a lingering grace window. The coordinator evicts
+  a member the instant it sees the role change, but a cached copy of their roles could still re-admit
+  them for up to 30 seconds if they reconnected in that window. The role-change handler now discards
+  that cache entry, so the very next reconnect is judged against their real, current roles.
 - A Discord account that authorized the app but holds no network role in any served guild can no
   longer consume a mesh address or leave a permanent device record behind. The coordinator now checks
   role membership before allocating an address, so an account with no access gets an empty snapshot
