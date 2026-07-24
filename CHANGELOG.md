@@ -7,6 +7,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- The coordinator now comes back online within about two minutes of being reachable again, instead
+  of staying greyed out in the GUI for the better part of a quarter hour. While waiting for news the
+  engine holds a request open for up to 15 minutes with nothing flowing over it, and a silent
+  connection that long is easily lost — a home router quietly forgets it, or the coordinator
+  restarts underneath it — leaving the engine blocked on an answer that will never come until the
+  connection times out on its own. The engine now sends periodic keepalives on that connection, which
+  both keeps routers from dropping it and turns a dead one into a prompt reconnect. Existing tunnels
+  were never affected, only how quickly membership changes and new peers were picked up.
 - Packaged Linux installs now show peer latency and can use the LAN-discovery direct path. The
   systemd unit withheld `CAP_NET_RAW`, so the engine couldn't open the ICMP socket it uses to measure
   per-peer latency — the "latency probe disabled" warning at startup, blank latency in the GUI, and

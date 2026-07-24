@@ -218,11 +218,24 @@ async fn post(
     // request. The connect timeout is short, though: an unreachable coordinator should fail fast so
     // the daemon loop keeps ticking (peer-direct refresh, cache) instead of hanging on a dead TCP
     // connect — the OS default is ~130s, long enough to starve the mesh's own freshness path.
+    //
+    // TCP keepalive matters because a parked `/refresh` puts *zero bytes* on the wire for the whole
+    // hold (~15 min). Two things break on a silent flow that long: a NAT or middlebox between us and
+    // the coordinator expires the mapping and blackholes it, and a coordinator that dies mid-hold
+    // leaves us blocked on a socket that will never answer. Without probes the daemon only notices
+    // when TCP finally gives up (~11 min observed) or the total timeout above fires (16 min) — so a
+    // coordinator that came back a minute later still shows offline for a quarter hour. Probing at
+    // 45s idle / 15s apart / 4 retries caps detection at ~105s and keeps the mapping warm. Costs the
+    // coordinator nothing: these are bare kernel ACKs, not requests, and fewer dead sockets means
+    // fewer full reconnects.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
             common::LONGPOLL_HOLD_SECS + 60,
         ))
         .connect_timeout(std::time::Duration::from_secs(5))
+        .tcp_keepalive(std::time::Duration::from_secs(45))
+        .tcp_keepalive_interval(std::time::Duration::from_secs(15))
+        .tcp_keepalive_retries(4u32)
         .build()
         .context("building http client")?;
     let url = format!("{base_url}/{path}");
