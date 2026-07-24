@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end auto-update test: an old client updates to the tip of main over the real signed path.
 #
-# Proves the whole design-phase-3 chain on one node, offline: coordinator signs a release manifest
-# under its guild anchor -> the (older) engine verifies it against the anchor it TOFU-pinned ->
-# stages a strictly-newer, platform-matching artifact -> `ctl update` downloads it over HTTPS ->
+# Proves the whole design-phase-3 chain on one node, offline over the *release-key* path (the only
+# accepted update path — there is no guild-signed fallback): a dedicated release key is minted, the
+# baseline engine is built ARMED with its public half, the coordinator serves a manifest signed with
+# its offline private seed -> the (older) armed engine verifies `release_signed` against its baked-in
+# key -> stages a strictly-newer, platform-matching artifact -> `ctl update` downloads it over HTTPS ->
 # re-verifies the SHA-256 -> swaps the engine + bundled GUI on disk -> tears down fully and re-execs
 # (same pid) onto the new version. Only the network hop is simulated: a self-signed localhost HTTPS server stands in for
 # the GitHub Release host (the update client trusts only compiled-in webpki roots, so the baseline
@@ -42,13 +44,26 @@ if [ "${UNL_INNS:-}" != "1" ]; then
   SIZE="$(stat -c%s "$WORK/artifact.tar.gz")"
   echo "artifact: $SIZE bytes  sha256=$SHA"
 
+  # 1b. Mint the dedicated release key (needs the coordinator binary). The baseline engine is built
+  #     armed with the PUBLIC half; the coordinator later serves a manifest signed with the PRIVATE
+  #     seed. This is now the ONLY accepted update path.
+  echo "=== building coordinator + minting release key ==="
+  cargo build -p unitylan-coordinator 2>&1 | tail -3 || { echo "FAIL: coordinator build"; exit 1; }
+  COORD="$ROOT/target/debug/unitylan-coordinator"
+  SEED="$WORK/release.seed"
+  PUBHEX="$("$COORD" gen-release-key "$SEED" | sed -nE 's/.*UNITYLAN_RELEASE_PUBKEY=([0-9a-f]+).*/\1/p')"
+  [ -n "$PUBHEX" ] || { echo "FAIL: gen-release-key produced no pubkey"; exit 1; }
+  echo "release key: armed clients trust ${PUBHEX:0:16}…"
+
   # 2. The "old" client: same code, version patched down + the test-only insecure-TLS seam so it can
-  #    fetch from the self-signed local host. Cargo.toml/Cargo.lock are restored right after.
-  echo "=== building baseline (old) engine at $OLDVER with test-insecure-tls ==="
+  #    fetch from the self-signed local host, and ARMED with the release pubkey (baked in at build time
+  #    via UNITYLAN_RELEASE_PUBKEY, which `common::update::release_pubkey` reads with `option_env!`).
+  #    Cargo.toml/Cargo.lock are restored right after.
+  echo "=== building baseline (old) engine at $OLDVER with test-insecure-tls, armed ==="
   cp "$ROOT/Cargo.toml" "$WORK/Cargo.toml.bak"; cp "$ROOT/Cargo.lock" "$WORK/Cargo.lock.bak"
   restore() { cp "$WORK/Cargo.toml.bak" "$ROOT/Cargo.toml"; cp "$WORK/Cargo.lock.bak" "$ROOT/Cargo.lock"; }
   sed -i -E "0,/^version = \"$TIPVER\"/s//version = \"$OLDVER\"/" "$ROOT/Cargo.toml"
-  if ! cargo build --features test-insecure-tls -p unitylan-engine 2>&1 | tail -3; then
+  if ! UNITYLAN_RELEASE_PUBKEY="$PUBHEX" cargo build --features test-insecure-tls -p unitylan-engine 2>&1 | tail -3; then
     restore; echo "FAIL: baseline build"; exit 1
   fi
   cp "$ROOT/target/debug/unitylan-engine" "$WORK/baseline/unitylan-engine"
@@ -62,9 +77,9 @@ if [ "${UNL_INNS:-}" != "1" ]; then
     -days 1 -subj "/CN=localhost" -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1 \
     || { echo "FAIL: cert gen"; exit 1; }
 
-  export UNL_INNS=1 WORK TIPVER OLDVER SHA SIZE ROOT
+  export UNL_INNS=1 WORK TIPVER OLDVER SHA SIZE ROOT SEED
   exec unshare -Urnm --map-root-user env \
-    UNL_INNS=1 WORK="$WORK" TIPVER="$TIPVER" OLDVER="$OLDVER" SHA="$SHA" SIZE="$SIZE" ROOT="$ROOT" \
+    UNL_INNS=1 WORK="$WORK" TIPVER="$TIPVER" OLDVER="$OLDVER" SHA="$SHA" SIZE="$SIZE" ROOT="$ROOT" SEED="$SEED" \
     bash "${BASH_SOURCE[0]}"
 fi
 
@@ -89,8 +104,9 @@ httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
 httpd.serve_forever()
 PY
 
-# Coordinator with a [release] block pointing at the local artifact, plus fake-Discord membership so
-# the device enrols, holds a role (=> a guild anchor exists to sign the manifest), and pins it.
+# Coordinator with a [release] block pointing at the local artifact (a `signed_blob` is injected
+# below), plus fake-Discord membership so the device enrols, holds a role, and pins its guild anchor
+# (still needed for the mesh attestation — but no longer for updates).
 cat >"$WORK/coord.toml" <<EOF
 bind = "127.0.0.1:8080"
 database = "$WORK/coord.db"
@@ -127,6 +143,19 @@ sha256 = "$SHA"
 size = $SIZE
 EOF
 
+# Sign the manifest with the offline seed and inject `signed_blob` under [release] (right after
+# `version`, before the [[release.artifact]] sub-tables). The coordinator serves this verbatim as
+# `release_signed`; the armed engine verifies it against its baked-in key. This is the whole update path.
+blob="$("$COORD" sign-release "$WORK/coord.toml" --seed "$SEED")" || { echo "FAIL: sign-release"; cat "$WORK/coord.toml"; exit 1; }
+[ -n "$blob" ] || { echo "FAIL: sign-release produced no blob"; exit 1; }
+tmp="$(mktemp)"
+awk -v blob="$blob" '
+  /^\[release\]/ { inrel=1; print; next }
+  inrel && /^version[[:space:]]*=/ { print; print "signed_blob = \"" blob "\""; next }
+  /^\[/ { inrel=0 }
+  { print }
+' "$WORK/coord.toml" >"$tmp" && mv "$tmp" "$WORK/coord.toml"
+
 cat >"$WORK/eng.toml" <<EOF
 coordinator = "http://127.0.0.1:8080"
 allow_insecure_http = true
@@ -148,7 +177,7 @@ echo "=== baseline engine v$OLDVER running; waiting for it to stage the v$TIPVER
 "$ENG" -c "$WORK/eng.toml" run >"$WORK/eng.log" 2>&1 &
 ENG_PID=$!
 
-# The engine pins the anchor on register, then each refresh verifies the manifest + stages it.
+# The engine verifies the release-key-signed manifest against its baked-in key and stages it.
 staged=""
 for _ in $(seq 1 40); do
   kill -0 "$ENG_PID" 2>/dev/null || { echo "FAIL: engine exited early"; cat "$WORK/eng.log"; exit 1; }
@@ -157,7 +186,7 @@ for _ in $(seq 1 40); do
   sleep 0.5
 done
 [ -n "$staged" ] || { echo "FAIL: update never staged"; echo "--- status ---"; "$ENG" -c "$WORK/eng.toml" ctl status; echo "--- eng.log ---"; tail -20 "$WORK/eng.log"; exit 1; }
-echo "stage: baseline verified + staged the tip manifest against its pinned anchor ✓"
+echo "stage: baseline verified + staged the tip manifest against its baked-in release key ✓"
 
 echo "=== applying the update (ctl update) ==="
 "$ENG" -c "$WORK/eng.toml" ctl update || { echo "FAIL: ctl update rejected"; exit 1; }
@@ -192,5 +221,5 @@ else
   echo "FAIL: bundled GUI was not swapped"; exit 1
 fi
 
-echo "RESULT: PASS ✓  old client -> coordinator manifest -> verify -> download -> SHA-256 -> swap engine+gui -> re-exec onto tip"
+echo "RESULT: PASS ✓  armed old client -> release-key-signed manifest -> verify -> download -> SHA-256 -> swap engine+gui -> re-exec onto tip"
 exit 0

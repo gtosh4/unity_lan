@@ -113,15 +113,6 @@ pub fn load_anchor(state_dir: &Path, guild_id: u64) -> anyhow::Result<[u8; 32]> 
         .map_err(|_| anyhow::anyhow!("pinned anchor file for guild {guild_id} is not 32 bytes"))
 }
 
-/// Every pinned guild anchor's bytes. Used where the signing guild isn't known up front — the
-/// release manifest is signed by one guild key the caller holds, so the verifier tries each pin.
-pub fn load_all_anchors(state_dir: &Path) -> Vec<[u8; 32]> {
-    load_all_pinned(state_dir)
-        .into_iter()
-        .map(|(_, a)| a)
-        .collect()
-}
-
 /// Every pinned `(guild_id, anchor)`, the guild id parsed from the `{guild_id}.pub` filename. Used to
 /// verify an attestation whose signing guild isn't known from a coordinator response — a peer-direct
 /// (p2p) pull, where `verify_against_pinned` needs the guild id to bind the signature.

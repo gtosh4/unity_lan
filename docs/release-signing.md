@@ -8,11 +8,12 @@ binary update — so it can't push root code to a guild's members. The release k
 How it fits together:
 
 - Clients bake in the release **public** key at build time via `UNITYLAN_RELEASE_PUBKEY`
-  (`common::update::release_pubkey`). A build with it unset is *unarmed* and falls back to the legacy
-  guild-signed update path — fine for dev, and the migration default.
+  (`common::update::release_pubkey`). This is the *sole* update trust root: a build with it unset is
+  *unarmed* and **does not self-update at all** (fine for dev/CI). There is no guild-signed fallback —
+  see "No fallback" below.
 - The coordinator serves a **pre-signed** manifest blob verbatim from `[release] signed_blob`; it holds
-  no release key and never signs. A client with the pubkey baked in verifies the blob against it alone
-  and won't fall back to the guild-signed path once a coordinator offers a signed blob.
+  no release key and never signs. An armed client verifies the blob against the baked-in key alone; a
+  present-but-invalid blob is refused outright, and a response with no blob offers no update that cycle.
 
 ## One-time setup
 
@@ -49,12 +50,20 @@ This rewrites the `[release]` block (version/url/sha256/size) from the GitHub re
 injects a fresh `signed_blob`. Then reload the coordinator (`kill -HUP <pid>`, or restart). Clients on
 armed builds pick up the release-key-signed manifest on their next refresh.
 
-If the seed isn't present the script rewrites the block and skips signing (legacy guild-signed path
-only) — unarmed clients still update, armed clients wait for a signed blob.
+If the seed isn't present the script rewrites the block and skips signing — armed clients then have no
+signed blob to accept and will not update until you sign one. Always sign for a real deployment.
 
-## Retiring the legacy path
+## No fallback (the legacy path was removed)
 
-The coordinator serves both the guild-signed `release` and the release-key-signed `release_signed`
-during the transition, so old and new clients both update. Once every client in the mesh is on an
-armed build, you can stop populating the guild-signed `[release]` artifacts and serve only
-`signed_blob` — at which point a leaked guild key has no update path at all.
+Current clients accept updates **only** over the release-key path — there is no fallback to a
+guild-signed manifest. Dropping that fallback is what makes a leaked guild key unable to ship a binary
+(previously, a stripped `release_signed` field let an armed client accept a guild-signed manifest,
+which was an update-channel RCE).
+
+Consequence for a **coordinator** during a fleet upgrade: a client accepts updates using the code it is
+*already running*. Clients built before this change (their own old code) still consult the guild-signed
+`release` manifest, so keep populating the `[release]` artifacts **until every deployed client has
+upgraded to a build that includes this change**. Once they have, you can stop populating the
+guild-signed `[release.artifact]` blocks and serve only `signed_blob` — the guild-signed manifest is
+then dead weight (no current client reads it). Verify with each host's reported version before pulling
+it.

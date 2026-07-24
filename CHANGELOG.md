@@ -85,6 +85,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   signed manifest with a very high version but no artifact for your OS could push the floor past every
   real release, after which the engine refused all genuine (lower-versioned) updates until its state
   was wiped. The floor is now raised only for a manifest the engine will actually install.
+- A leaked Discord guild signing key can no longer be used to push a software update. Auto-updates
+  are verified against a dedicated, offline release key, but until now a client would still fall back
+  to accepting an update signed by a pinned guild key whenever the coordinator's response carried no
+  release-key signature — and that field could simply be stripped in transit, re-opening a path from
+  one leaked guild key to running attacker-chosen code as root on every member's machine. The client
+  now accepts updates **only** over the release-key path; there is no guild-signed fallback. A build
+  compiled without a release key baked in (development builds) no longer self-updates at all, and a
+  coordinator must serve a release-key-signed manifest for its members to update. Operators mid-upgrade
+  should keep serving the guild-signed manifest until every device is on this release; see
+  `docs/release-signing.md`.
 
 ### Changed
 
