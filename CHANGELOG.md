@@ -7,6 +7,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- Packaged Linux installs now show peer latency and can use the LAN-discovery direct path. The
+  systemd unit withheld `CAP_NET_RAW`, so the engine couldn't open the ICMP socket it uses to measure
+  per-peer latency — the "latency probe disabled" warning at startup, blank latency in the GUI, and
+  (since this release) no way for LAN discovery to confirm a direct path carries traffic before
+  adopting it. The packaged unit now grants `CAP_NET_RAW`. Existing installs pick this up on the next
+  package upgrade; to apply it now without upgrading, add the capability via
+  `systemctl edit unitylan-engine` and restart.
 - Restarting an engine (or one that exited uncleanly) no longer strands it with "coordinator
   rejected refresh: 429 Too Many Requests" until its old long-poll expired — up to 15 minutes of the
   mesh showing the coordinator offline and no new peers arriving. The coordinator allowed one held

@@ -33,9 +33,11 @@ RuntimeDirectory=unitylan
 RuntimeDirectoryMode=0750
 
 # Privilege: userspace WireGuard (ip/TUN), the nftables firewall, and resolvectl all need
-# CAP_NET_ADMIN; the `.internal` resolver may bind :53 (CAP_NET_BIND_SERVICE). Nothing else.
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+# CAP_NET_ADMIN; the `.internal` resolver may bind :53 (CAP_NET_BIND_SERVICE); the per-peer latency
+# probe (also the LAN-beacon health signal that confirms a direct path carries traffic) opens a raw
+# ICMP socket (CAP_NET_RAW). Nothing else.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 DeviceAllow=/dev/net/tun rw
 
 # Hardening — kept compatible with netlink (WG), the nft pipe, and the resolved D-Bus call.
