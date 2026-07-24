@@ -232,10 +232,13 @@ async fn register(
     // loop — exactly as the old global bump made it — but now without waking the herd; the affected
     // peer is woken by a targeted wake instead.
     if !built.caller_changed && req.since == Some(built.resp.version) {
-        let _park_permit = st.park_slots.try_acquire(req.wg_pubkey).ok_or_else(|| {
+        // Displaces this device's own earlier park, if any — a client that abandoned a held request
+        // (report to send, restart, crash) must not have to wait out the old one. Only the
+        // deployment-wide ceiling refuses.
+        let mut park_permit = st.park_slots.try_acquire(req.wg_pubkey).ok_or_else(|| {
             ApiError::new(
                 StatusCode::TOO_MANY_REQUESTS,
-                "a long-poll is already active for this device, or the server is at capacity",
+                "the coordinator is at its long-poll capacity; retry shortly",
             )
         })?;
         // Free the snapshot *before* parking. We hold this request for minutes and rebuild on wake
@@ -245,7 +248,14 @@ async fn register(
         let Built { resp, scopes, .. } = built;
         let version = resp.version;
         drop(resp);
-        let woke = wait_park(&st, &scopes, version, &mut personal).await;
+        let woke = wait_park(
+            &st,
+            &scopes,
+            version,
+            &mut personal,
+            park_permit.preempted(),
+        )
+        .await;
         // Jitter only a herd wake — a membership bump released every parked client at once, so
         // stagger the rebuilds to flatten the fan-in. A targeted personal wake is a single client
         // (no fan-in), and a hold-elapsed renewal already spreads over each client's own clock.

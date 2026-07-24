@@ -1,6 +1,6 @@
 //! Targeted-wake registry and long-poll parking for the register/refresh long-poll.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Mutex;
 
 use crate::versions::Scope;
@@ -11,18 +11,42 @@ use super::AppState;
 /// caller can otherwise open valid long-polls faster than they expire and consume every socket.
 pub struct ParkSlots {
     global: std::sync::Arc<tokio::sync::Semaphore>,
-    devices: std::sync::Arc<Mutex<HashSet<[u8; 32]>>>,
+    devices: std::sync::Arc<Mutex<HashMap<[u8; 32], Slot>>>,
+    /// Hands each permit an identity, so a departing incumbent only clears its *own* map entry.
+    next_seq: std::sync::atomic::AtomicU64,
+}
+
+/// The device's currently-parked request: which permit owns the slot, and the channel that asks it
+/// to let go.
+struct Slot {
+    seq: u64,
+    preempt: tokio::sync::watch::Sender<bool>,
 }
 
 pub struct ParkPermit {
     _global: tokio::sync::OwnedSemaphorePermit,
-    devices: std::sync::Arc<Mutex<HashSet<[u8; 32]>>>,
+    devices: std::sync::Arc<Mutex<HashMap<[u8; 32], Slot>>>,
     pubkey: [u8; 32],
+    seq: u64,
+    preempt: tokio::sync::watch::Receiver<bool>,
+}
+
+impl ParkPermit {
+    /// Fires when a newer request for this device takes the slot — see [`ParkSlots::try_acquire`].
+    pub(super) fn preempted(&mut self) -> &mut tokio::sync::watch::Receiver<bool> {
+        &mut self.preempt
+    }
 }
 
 impl Drop for ParkPermit {
     fn drop(&mut self) {
-        self.devices.lock().unwrap().remove(&self.pubkey);
+        let mut devices = self.devices.lock().unwrap();
+        // Only if we're still the occupant: a preempted permit's slot already belongs to the request
+        // that displaced it, and removing it here would leave that one unpreemptable (and leak the
+        // entry until its own drop).
+        if devices.get(&self.pubkey).is_some_and(|s| s.seq == self.seq) {
+            devices.remove(&self.pubkey);
+        }
     }
 }
 
@@ -31,21 +55,43 @@ impl ParkSlots {
         Self {
             global: std::sync::Arc::new(tokio::sync::Semaphore::new(max)),
             devices: Default::default(),
+            next_seq: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     /// At most one parked request per enrolled device, and a deployment-wide hard ceiling.
+    ///
+    /// The per-device slot is **last-writer-wins**: a new park displaces the device's incumbent
+    /// rather than being refused. A client legitimately abandons a held request whenever it has
+    /// something to report, and a crashed or restarted one leaves a park the coordinator only
+    /// notices when it next touches that connection — so refusing the newcomer would strand the
+    /// device (offline in the GUI, no fresh peers) for up to a full hold. The displaced request is
+    /// signalled to return its snapshot immediately, so this still leaves one park per device.
+    ///
+    /// A refusal is therefore always the global ceiling: genuine capacity, not this device's own
+    /// history.
     pub fn try_acquire(&self, pubkey: [u8; 32]) -> Option<ParkPermit> {
         let global = self.global.clone().try_acquire_owned().ok()?;
-        let mut devices = self.devices.lock().unwrap();
-        if !devices.insert(pubkey) {
-            return None;
+        let seq = self
+            .next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, preempt) = tokio::sync::watch::channel(false);
+        let displaced = self
+            .devices
+            .lock()
+            .unwrap()
+            .insert(pubkey, Slot { seq, preempt: tx });
+        if let Some(old) = displaced {
+            // Ignored if the incumbent has already gone away — its permit's drop found the slot
+            // reassigned and left ours alone.
+            let _ = old.preempt.send(true);
         }
-        drop(devices);
         Some(ParkPermit {
             _global: global,
             devices: self.devices.clone(),
             pubkey,
+            seq,
+            preempt,
         })
     }
 }
@@ -105,6 +151,8 @@ pub(super) enum Woke {
     Herd,
     Personal,
     Elapsed,
+    /// A newer request from the same device took the slot ([`ParkSlots::try_acquire`]).
+    Preempted,
 }
 
 /// Park until the caller's aggregate membership version moves off `since` (a herd wake — but a herd
@@ -118,6 +166,7 @@ pub(super) async fn wait_park(
     scopes: &BTreeSet<Scope>,
     since: u64,
     personal: &mut tokio::sync::watch::Receiver<u64>,
+    preempt: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Woke {
     let mut rxs: Vec<_> = scopes.iter().map(|s| st.versions.subscribe(*s)).collect();
     let hold = tokio::time::sleep(std::time::Duration::from_secs(st.longpoll_hold_secs));
@@ -134,6 +183,8 @@ pub(super) async fn wait_park(
         tokio::select! {
             r = any_changed(&mut rxs) => if r.is_err() { return Woke::Elapsed; },
             r = personal.changed() => return if r.is_err() { Woke::Elapsed } else { Woke::Personal },
+            // The sender lives in our own permit, so `changed()` only resolves on a real preemption.
+            _ = preempt.changed() => return Woke::Preempted,
             _ = &mut hold => return Woke::Elapsed,
         }
     }
@@ -221,17 +272,49 @@ mod tests {
     }
 
     #[test]
-    fn park_slots_limit_each_device_and_global_concurrency() {
+    fn park_slots_bound_global_concurrency() {
         let slots = super::ParkSlots::new(2);
         let a = slots.try_acquire([1; 32]).expect("first device admitted");
-        assert!(slots.try_acquire([1; 32]).is_none(), "duplicate refused");
         let b = slots.try_acquire([2; 32]).expect("second device admitted");
         assert!(slots.try_acquire([3; 32]).is_none(), "global cap enforced");
         drop(a);
-        let _a2 = slots
-            .try_acquire([1; 32])
-            .expect("drop releases device slot");
+        let _c = slots
+            .try_acquire([3; 32])
+            .expect("drop returns the permit to the pool");
         drop(b);
+    }
+
+    /// What [`wait_park`]'s preempt arm reacts to: the value change, or the sender going away with
+    /// the displaced slot (`changed()`/`has_changed()` report a closed channel as an error). Both
+    /// mean the same thing — someone else holds this device's slot now.
+    fn displaced(permit: &mut super::ParkPermit) -> bool {
+        permit.preempted().has_changed().unwrap_or(true)
+    }
+
+    #[test]
+    fn a_devices_new_park_displaces_its_own_incumbent() {
+        let slots = super::ParkSlots::new(4);
+        let mut first = slots.try_acquire([1; 32]).expect("admitted");
+        assert!(!displaced(&mut first), "nothing has displaced us yet");
+
+        // The device's second park is admitted (not refused) and tells the first to let go.
+        let mut second = slots
+            .try_acquire([1; 32])
+            .expect("re-park admitted, not refused");
+        assert!(
+            displaced(&mut first),
+            "the incumbent is signalled to return"
+        );
+        assert!(!displaced(&mut second), "the newcomer holds the slot");
+
+        // The displaced permit must not take the slot with it: its drop leaves the newcomer's entry
+        // in place, so a *third* park still displaces the second.
+        drop(first);
+        let _third = slots.try_acquire([1; 32]).expect("admitted");
+        assert!(
+            displaced(&mut second),
+            "the second park is still preemptable after the first one dropped"
+        );
     }
 
     #[test]

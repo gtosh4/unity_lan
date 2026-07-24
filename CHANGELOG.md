@@ -5,6 +5,15 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ## Unreleased
 
+### Fixed
+
+- Restarting an engine (or one that exited uncleanly) no longer strands it with "coordinator
+  rejected refresh: 429 Too Many Requests" until its old long-poll expired — up to 15 minutes of the
+  mesh showing the coordinator offline and no new peers arriving. The coordinator allowed one held
+  request per device and refused the newcomer; it now lets a device's newest request take the slot
+  and releases the older one immediately. A 429 on refresh now means only what it says: the
+  coordinator is at its configured long-poll capacity.
+
 ### Security
 
 - An authenticated account can no longer bloat the coordinator's database with interactive-login
