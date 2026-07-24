@@ -19,6 +19,28 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   not running. The engine now grants that directory traversal (and nothing else — no listing, no
   reading) to the same `control_group` or `sudo` user the socket itself is granted to. Packaged
   installs, whose socket lives in `/run/unitylan`, were unaffected.
+- Two devices on the same network now actually use the local path between them, instead of only
+  falling back to it once the connection has completely died. LAN discovery previously refused to
+  move a peer off the route through your router while that route still worked at all — but the whole
+  problem it exists to solve is a router whose loopback ("hairpin") works *intermittently*, dropping
+  handshakes and flapping the peer without ever failing outright. The engine now moves such a peer
+  onto the direct local path, gated on a quick authenticated check first: before switching, it asks
+  the candidate to prove it holds the peer's WireGuard key (a challenge only the real peer can
+  answer, using key material both devices already share — no new keys, nothing extra to configure),
+  so a spoofed or dead address is never adopted and can't disturb a working tunnel. Once a local path
+  has carried traffic the engine also stays on it through a longer outage (60s, was 20s) and returns
+  to it 30 seconds after a blip rather than five minutes, so brief loss no longer costs you the local
+  route. This supersedes the previous forged-beacon mitigation, which only kept a spoofed beacon from
+  churning an already-failing tunnel; the local path is now both preferred and spoof-proof.
+- The update prompt no longer stays hidden when a new release is ready to install. The app decided
+  whether to offer an update from the *coordinator's own* version rather than the version of the
+  release it publishes — so after a coordinator rolled out a new release without upgrading its own
+  binary first, every client silently held a verified, ready-to-apply update with no button to apply
+  it. The prompt now follows the staged release.
+- The peer-direct attestation refresh no longer stops working after a peer goes offline. On Linux,
+  sending to a peer that has no listener triggers an ICMP "port unreachable" that surfaces as an error
+  on the next receive; the engine treated that as fatal and tore down its refresh responder, so it
+  quietly stopped answering co-members until the next restart. It now logs and keeps serving.
 
 ### Security
 
@@ -57,18 +79,6 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   one Discord request per client, all landing on that guild's shared rate-limit bucket. Those
   simultaneous lookups are now funnelled into one request whose result the rest reuse. Restarts and
   large role changes are correspondingly less likely to trip Discord's per-guild limit.
-
-### Fixed
-
-- The update prompt no longer stays hidden when a new release is ready to install. The app decided
-  whether to offer an update from the *coordinator's own* version rather than the version of the
-  release it publishes — so after a coordinator rolled out a new release without upgrading its own
-  binary first, every client silently held a verified, ready-to-apply update with no button to apply
-  it. The prompt now follows the staged release.
-- The peer-direct attestation refresh no longer stops working after a peer goes offline. On Linux,
-  sending to a peer that has no listener triggers an ICMP "port unreachable" that surfaces as an error
-  on the next receive; the engine treated that as fatal and tore down its refresh responder, so it
-  quietly stopped answering co-members until the next restart. It now logs and keeps serving.
 
 ## v0.4.2
 

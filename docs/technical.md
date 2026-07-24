@@ -434,13 +434,28 @@ Most-direct-first (design §7.2):
   private address — that would leak topology and RFC1918 ranges collide), and consumer hairpin is
   flaky → the tunnel flaps. Each engine UDP-**broadcasts** `MAGIC|ver|wg_pubkey|listen_port` on
   `0.0.0.0:beacon_port` (default 51821) every 30s (+ a 3-packet startup burst); a received beacon
-  proves a same-segment path, so the receiver records `src_ip:advertised_port` and gives it **top
-  endpoint precedence** in `apply_seeds` (above the reflexive endpoint/ICE/relay/punch). No beacon
-  crypto — the WG handshake authenticates; `Beacon::select` runs a per-peer state machine that adopts
-  the LAN endpoint only while the peer stays ping-reachable, reverting to reflexive (and suppressing a
-  bad address for a cooldown) if a switched-to endpoint goes dark within a grace, so a forged beacon
-  costs at most a bounded blip. Candidates TTL out (90s) when a peer stops beaconing (left the LAN).
-  Off via `beacon = false`.
+  proves a same-segment path, so the receiver records `src_ip:advertised_port` as a candidate and —
+  once proven — gives it **top endpoint precedence** in `apply_seeds` (above the reflexive
+  endpoint/ICE/relay/punch). The LAN path is *preferred*, not merely a fallback: a flaky hairpin never
+  fully fails, so a working peer is moved onto its LAN endpoint too, not only a dark one.
+- **Adoption gated on an authenticated liveness probe.** The broadcast is an unauthenticated *hint*
+  (a broadcast has no pairwise recipient to MAC, and the pubkey it carries is already public). Before
+  pointing WireGuard at a candidate, `Beacon::select`'s per-peer machine (`Probing → Trying → Active`,
+  `Failed` on revert) unicasts a **probe** and requires a valid **ack**: `KIND_PROBE`/`KIND_ACK`
+  carry a 16-byte nonce + 16-byte MAC keyed by `X25519(my_wg_priv, peer_wg_pub)` — the *same* secret
+  both sides already derive from keys they hold, no new key or distribution
+  (`common::crypto::beacon_{probe,ack}_mac`, domain-separated per direction, low-order-key guarded).
+  **Only a holder of the peer's WG private key can answer**, and each ack must echo the fresh probe
+  nonce (bound to a `pending` entry the recv task checks), so a sniffed-pubkey forgery or a replayed
+  ack is rejected. `Probing` never routes, so a forged/dead candidate disturbs neither a working nor a
+  dark tunnel — it costs one unanswered probe then a 60s `PROBE_BACKOFF`. Older engines reject the
+  extra bytes and never answer, so a not-yet-upgraded peer simply gets no LAN adoption (falls back to
+  the rest of the ladder). A switched-to endpoint that then carries no WG traffic within `VERIFY_GRACE`
+  reverts. Because only the real peer can ack, a revert is a genuine broken path, not an attack, so the
+  hold-off is a short `RETRY_COOLDOWN` (30s), not a punitive suppression. Once `Active`, the endpoint
+  is sticky: demoted only after `STALE_GRACE` (60s) unreachable, then the same 30s cooldown. Candidates
+  TTL out (90s) when a peer stops beaconing (left the LAN); the candidate map is bounded to the mesh
+  size (beacons for non-member pubkeys are dropped on receipt). Off via `beacon = false`.
 - **`nat.rs`** — UPnP-IGD maps an external UDP port → local WG `listen_port`.
 - **`ice.rs`** — userspace **ICE** agent (`webrtc-ice`): host + STUN server-reflexive candidate
   gathering + hole-punch. Candidates exchanged over the coordinator long-poll (`RegisterReq.ice` →

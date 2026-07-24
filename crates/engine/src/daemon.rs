@@ -713,6 +713,7 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                         Some(crate::beacon::Beacon::spawn(
                             sock,
                             wg_pub,
+                            wg_priv,
                             cfg.listen_port,
                             cfg.beacon_port,
                         ))

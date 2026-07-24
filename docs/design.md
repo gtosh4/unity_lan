@@ -386,9 +386,15 @@ can attach to the data path:
   UDP-**broadcasts** its WG pubkey + listen port on the local segment; a beacon is only *received* by
   a host on the same L2 segment, so its source address is a proven direct LAN path (proof by receipt,
   not by guessing subnets). The receiver points WireGuard at `src_ip : advertised_port`, replacing the
-  hairpin. No beacon crypto — the WG handshake is the authenticator; adoption is guarded by a
-  reachability check that reverts to the reflexive path if the LAN endpoint doesn't carry traffic, so
-  a forged beacon costs at most a brief blip.
+  hairpin. The LAN path is *preferred*, not merely a fallback: a hairpin that works intermittently
+  would otherwise never be replaced. The broadcast itself carries no crypto (it has no single
+  recipient to key to), but **adoption is gated on an authenticated liveness probe**: before pointing
+  WireGuard at a candidate the engine unicasts a probe and waits for an ack MAC'd with the two peers'
+  shared WireGuard secret, which only the genuine peer can produce (a party that merely sniffed the
+  public key cannot). So a forged or dead candidate is never adopted at all — it can't churn a
+  working tunnel or a dark one. A switched-to endpoint that doesn't carry traffic reverts to the
+  reflexive path; an endpoint that has carried traffic is then sticky, surviving a transient outage
+  rather than handing the peer back to the hairpin.
 - **Reachable members**: open the WG listen port via **UPnP-IGD** (or manual forward) → directly
   dialable. Covers most home setups.
 - **Cone-NAT members**: a userspace **ICE** agent gathers candidates (host + STUN reflexive) and

@@ -150,6 +150,90 @@ pub fn enroll_public_from_secret(enroll_private: &[u8; 32]) -> [u8; 32] {
     PublicKey::from(&StaticSecret::from(*enroll_private)).to_bytes()
 }
 
+/// Domain tags separating the two directions of the LAN-beacon liveness handshake, so a probe MAC
+/// can never be replayed as an ack (or vice versa).
+const BEACON_PROBE_DOMAIN: &[u8] = b"unitylan-beacon-probe-v1";
+const BEACON_ACK_DOMAIN: &[u8] = b"unitylan-beacon-ack-v1";
+
+/// A truncated MAC authenticating one direction of the LAN-beacon liveness handshake between two
+/// mesh peers, keyed by the X25519 shared secret of their WireGuard keys — the *same* secret both
+/// sides derive (`X25519(my_priv, peer_pub) == X25519(peer_priv, my_pub)`), so no key distribution
+/// is needed: each peer already holds the other's WG public key from the coordinator snapshot. Only
+/// a holder of one side's WG *private* key can produce it, so a party that merely sniffed the
+/// cleartext public key off the wire cannot forge it. `nonce` binds an ack to the specific probe
+/// that solicited it, defeating replay of a captured exchange.
+///
+/// Returns `None` if the DH lands on the all-zero shared secret (a low-order peer key — never a real
+/// WireGuard key), matching [`verify_enroll_proof`]'s guard.
+fn beacon_mac(
+    my_wg_private: &WgPrivateKey,
+    peer_wg_pubkey: &WgPublicKey,
+    domain: &[u8],
+    nonce: &[u8; 16],
+) -> Option<[u8; 16]> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let shared =
+        StaticSecret::from(*my_wg_private).diffie_hellman(&PublicKey::from(*peer_wg_pubkey));
+    if shared.as_bytes() == &[0u8; 32] {
+        return None;
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(shared.as_bytes())
+        .expect("HMAC accepts a key of any length");
+    mac.update(domain);
+    mac.update(nonce);
+    let full = mac.finalize().into_bytes();
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&full[..16]);
+    Some(out)
+}
+
+/// MAC for a beacon **probe** (prover → peer): "prove you hold the private key behind `peer_wg_pubkey`
+/// by echoing this nonce under a valid ack".
+pub fn beacon_probe_mac(
+    my_wg_private: &WgPrivateKey,
+    peer_wg_pubkey: &WgPublicKey,
+    nonce: &[u8; 16],
+) -> Option<[u8; 16]> {
+    beacon_mac(my_wg_private, peer_wg_pubkey, BEACON_PROBE_DOMAIN, nonce)
+}
+
+/// MAC for a beacon **ack** (peer → prover), the answer to a valid probe.
+pub fn beacon_ack_mac(
+    my_wg_private: &WgPrivateKey,
+    peer_wg_pubkey: &WgPublicKey,
+    nonce: &[u8; 16],
+) -> Option<[u8; 16]> {
+    beacon_mac(my_wg_private, peer_wg_pubkey, BEACON_ACK_DOMAIN, nonce)
+}
+
+/// Verify a received beacon probe MAC (constant-time). `false` for a mismatch or a low-order key.
+pub fn verify_beacon_probe(
+    my_wg_private: &WgPrivateKey,
+    peer_wg_pubkey: &WgPublicKey,
+    nonce: &[u8; 16],
+    mac: &[u8; 16],
+) -> bool {
+    beacon_probe_mac(my_wg_private, peer_wg_pubkey, nonce).is_some_and(|m| ct_eq(&m, mac))
+}
+
+/// Verify a received beacon ack MAC (constant-time). `false` for a mismatch or a low-order key.
+pub fn verify_beacon_ack(
+    my_wg_private: &WgPrivateKey,
+    peer_wg_pubkey: &WgPublicKey,
+    nonce: &[u8; 16],
+    mac: &[u8; 16],
+) -> bool {
+    beacon_ack_mac(my_wg_private, peer_wg_pubkey, nonce).is_some_and(|m| ct_eq(&m, mac))
+}
+
+/// Fill a fresh 16-byte beacon nonce from the OS CSPRNG.
+pub fn gen_beacon_nonce() -> [u8; 16] {
+    let mut n = [0u8; 16];
+    OsRng.fill_bytes(&mut n);
+    n
+}
+
 /// Mint a one-time enrollment key: `unl_` + 32 hex chars (128 bits from the OS CSPRNG).
 pub fn gen_enrollment_key() -> String {
     let mut bytes = [0u8; 16];
@@ -274,6 +358,36 @@ mod tests {
         let low_order = [0u8; 32];
         let proof = enroll_proof(&[1u8; 32], &enroll_public_from_secret(&enroll_priv));
         assert!(!verify_enroll_proof(&enroll_priv, &low_order, &proof));
+    }
+
+    #[test]
+    fn beacon_mac_is_symmetric_replay_bound_and_unforgeable() {
+        let (a_priv, a_pub) = gen_wg_keypair();
+        let (b_priv, b_pub) = gen_wg_keypair();
+        let nonce = gen_beacon_nonce();
+
+        // A probes B: A macs with (a_priv, b_pub); B verifies with (b_priv, a_pub) — same secret.
+        let probe = beacon_probe_mac(&a_priv, &b_pub, &nonce).unwrap();
+        assert!(verify_beacon_probe(&b_priv, &a_pub, &nonce, &probe));
+        // B acks: A verifies with the pair it already used to probe.
+        let ack = beacon_ack_mac(&b_priv, &a_pub, &nonce).unwrap();
+        assert!(verify_beacon_ack(&a_priv, &b_pub, &nonce, &ack));
+
+        // Direction is separated: a probe MAC never passes as an ack for the same nonce/pair.
+        assert!(!verify_beacon_ack(&b_priv, &a_pub, &nonce, &probe));
+
+        // A different nonce breaks the MAC — a captured ack can't be replayed against a fresh probe.
+        let other_nonce = gen_beacon_nonce();
+        assert!(!verify_beacon_ack(&a_priv, &b_pub, &other_nonce, &ack));
+
+        // A third party who sniffed both public keys can't forge either side.
+        let (c_priv, _) = gen_wg_keypair();
+        let forged = beacon_ack_mac(&c_priv, &a_pub, &nonce).unwrap();
+        assert!(!verify_beacon_ack(&a_priv, &b_pub, &nonce, &forged));
+
+        // Low-order peer key → no MAC.
+        assert!(beacon_probe_mac(&a_priv, &[0u8; 32], &nonce).is_none());
+        assert!(!verify_beacon_ack(&a_priv, &[0u8; 32], &nonce, &ack));
     }
 
     #[test]
