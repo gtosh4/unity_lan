@@ -128,6 +128,31 @@ fn grant_socket_access(endpoint: &str, group: Option<&str>) {
     }
 }
 
+/// Give the same caller `grant_socket_access` authorized traversal (`--x`) of `dir` — the state dir,
+/// when the control socket lives inside it (the default, `<state_dir>/control.sock`).
+///
+/// The state dir is 0700 root: it holds the WG private key, device token, relay secret and pinned
+/// anchors. Without an `x` bit on it a group member cannot *reach* the socket at all, however the
+/// socket itself is owned — the 0660 `root:<group>` grant is dead letter. 0710 hands out exactly the
+/// missing piece: open a path you already know, no listing, no read. Ownership follows the same
+/// order as the socket grant so both agree on who the frontend is; unlike the socket the dir keeps
+/// `root` as owner, since only the daemon writes here.
+///
+/// Best-effort, as with the socket: a failure costs the frontend its connection, not the daemon.
+#[cfg(not(windows))]
+pub fn grant_dir_traversal(dir: &std::path::Path, group: Option<&str>) {
+    use std::os::unix::fs::{chown, PermissionsExt};
+    let gid = match group {
+        Some(name) => group_gid(name),
+        None => std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok()),
+    };
+    // No authorized non-root caller (no group, no sudo): leave the dir owner-only.
+    let Some(gid) = gid else { return };
+    if chown(dir, None, Some(gid)).is_ok() {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o710));
+    }
+}
+
 /// The control pipe's DACL (Windows). The default named-pipe security descriptor grants *read* to
 /// Everyone and the anonymous account — which leaks the status stream (peers, mesh IPs, networks,
 /// block list, device identity) to any local user, other terminal-services sessions, and remote

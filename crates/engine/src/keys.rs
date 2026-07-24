@@ -13,12 +13,30 @@ use common::wire::Signed;
 /// private key, device token, relay secret, and pinned anchors, none of which any other local user
 /// should be able to list or read. Windows inherits the service profile's ACLs. Best-effort on the
 /// permission step so a filesystem that can't represent the mode (rare) doesn't block startup.
+///
+/// An existing group-execute bit is preserved: the control socket defaults to living *inside* the
+/// state dir, and `control::grant_dir_traversal` sets `root:<control_group>` 0710 so a frontend can
+/// reach it. Clearing that bit here would revoke the grant the next time any state file is written
+/// (the relay secret is created per enrollment), silently cutting off the GUI. Group-execute alone
+/// grants traversal to a named path, not listing — and every secret in the dir is 0600.
 pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+    // Whether the dir predates this call. A dir we create ourselves gets `0777 & ~umask` from mkdir,
+    // which usually carries a group-execute bit that means nothing — only a bit found on an existing
+    // dir can be the deliberate grant below.
+    #[cfg(unix)]
+    let existed = dir.is_dir();
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        let traverse = if existed {
+            std::fs::metadata(dir)
+                .map(|m| m.permissions().mode() & 0o010)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700 | traverse))
             .with_context(|| format!("restricting permissions on {}", dir.display()))?;
     }
     Ok(())
@@ -278,6 +296,38 @@ fn install_private_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
 #[cfg(all(test, unix))]
 mod security_tests {
     use super::*;
+
+    #[test]
+    fn private_dir_tightens_but_keeps_the_control_traversal_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "unitylan-private-dir-{}-{}",
+            std::process::id(),
+            common::crypto::gen_enrollment_key()
+        ));
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+
+        // A fresh dir is owner-only.
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+
+        // A dir left group/world-readable is tightened back down — every read and list bit goes,
+        // including the group's; only its traversal bit is spared (see below).
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o710);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o744)).unwrap();
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+
+        // But the traversal bit `grant_dir_traversal` sets survives, or writing any state file
+        // (e.g. the per-enrollment relay secret) would revoke the frontend's path to the socket.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710)).unwrap();
+        create_private_dir(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o710);
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn private_write_is_owner_only_and_replaces_symlink() {

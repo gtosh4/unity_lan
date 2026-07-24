@@ -524,6 +524,14 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     {
         let name = cfg.control_name();
         let control_group = cfg.control_group.clone();
+        // The socket's default home is inside the 0700 state dir, whose missing group-execute bit
+        // would make the socket's own ownership unreachable — open up traversal (only) for the same
+        // caller the socket is granted to. Skipped for a socket configured elsewhere: that parent is
+        // not ours to re-own.
+        #[cfg(unix)]
+        if cfg.control_socket_path().parent() == Some(cfg.state_dir.as_path()) {
+            control::grant_dir_traversal(&cfg.state_dir, control_group.as_deref());
+        }
         let ctx = control::Ctx {
             status: status.clone(),
             coordinator: cfg.coordinator.clone(),

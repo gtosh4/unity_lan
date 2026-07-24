@@ -13,6 +13,12 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   request per device and refused the newcomer; it now lets a device's newest request take the slot
   and releases the older one immediately. A 429 on refresh now means only what it says: the
   coordinator is at its configured long-poll capacity.
+- The GUI can once again reach an engine whose control socket sits in the default location
+  (`<state_dir>/control.sock`). The state directory is owner-only, and locking it down left no way
+  for an authorized non-root frontend to open a socket inside it, so the GUI reported the engine as
+  not running. The engine now grants that directory traversal (and nothing else — no listing, no
+  reading) to the same `control_group` or `sudo` user the socket itself is granted to. Packaged
+  installs, whose socket lives in `/run/unitylan`, were unaffected.
 
 ### Security
 
