@@ -48,6 +48,15 @@ don't paste commit subject. Internal work with no user effect (refactors, test h
 out. Release CI lifts notes from section whose heading matches tag (`## v1.2.3`), so at release time
 `Unreleased` renamed to version — unrenamed one ships generic notes.
 
+**Cutting a release (agent-assisted), the changelog section must fit Discord.** The `announce` job in
+`release.yml` posts the tagged section as an embed *description*, which Discord hard-caps at 4096 chars
+— CI truncates at 4000 (`jq -Rs '.[:4000]'`), so an over-long section gets silently cut mid-sentence
+and its tail never announced. When renaming `Unreleased` → the version, if the rendered section runs
+past ~4000 chars, **condense it in place** so the whole announce fits: merge related bullets, drop
+internal-only detail, keep every user-visible symptom/ability. Only the CHANGELOG section is trimmed —
+the GitHub Release body (same text) is fine long, but keeping them identical is simplest. Count with
+`awk -v v="## v1.2.3" 'index($0,v)==1{f=1;next} /^## /{f=0} f' CHANGELOG.md | wc -c` before tagging.
+
 ### Running a local mesh (offline, no real Discord)
 
 ```sh
