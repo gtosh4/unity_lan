@@ -3,107 +3,76 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
+## v0.5.0
 
 ### Fixed
 
-- The coordinator now comes back online within about two minutes of being reachable again, instead
-  of staying greyed out in the GUI for the better part of a quarter hour. While waiting for news the
-  engine holds a request open for up to 15 minutes with nothing flowing over it, and a silent
-  connection that long is easily lost — a home router quietly forgets it, or the coordinator
-  restarts underneath it — leaving the engine blocked on an answer that will never come until the
-  connection times out on its own. The engine now sends periodic keepalives on that connection, which
-  both keeps routers from dropping it and turns a dead one into a prompt reconnect. Existing tunnels
-  were never affected, only how quickly membership changes and new peers were picked up.
-- Packaged Linux installs now show peer latency and can use the LAN-discovery direct path. The
-  systemd unit withheld `CAP_NET_RAW`, so the engine couldn't open the ICMP socket it uses to measure
-  per-peer latency — the "latency probe disabled" warning at startup, blank latency in the GUI, and
-  (since this release) no way for LAN discovery to confirm a direct path carries traffic before
-  adopting it. The packaged unit now grants `CAP_NET_RAW`. Existing installs pick this up on the next
-  package upgrade; to apply it now without upgrading, add the capability via
-  `systemctl edit unitylan-engine` and restart.
-- Restarting an engine (or one that exited uncleanly) no longer strands it with "coordinator
-  rejected refresh: 429 Too Many Requests" until its old long-poll expired — up to 15 minutes of the
-  mesh showing the coordinator offline and no new peers arriving. The coordinator allowed one held
-  request per device and refused the newcomer; it now lets a device's newest request take the slot
-  and releases the older one immediately. A 429 on refresh now means only what it says: the
+- The coordinator now comes back online within about two minutes of being reachable, instead of
+  staying greyed out for up to a quarter hour. A long-poll held open 15 minutes with nothing flowing is
+  easily lost (a router forgets it, the coordinator restarts), leaving the engine blocked until it
+  times out; periodic keepalives now keep it alive and reconnect promptly. Tunnels were unaffected,
+  only how fast membership changes were picked up.
+- Restarting an engine (or one that exited uncleanly) no longer strands it with "coordinator rejected
+  refresh: 429 Too Many Requests" for up to 15 minutes of the mesh showing the coordinator offline. A
+  device's newest request now takes the slot and releases the older one; a 429 now means only that the
   coordinator is at its configured long-poll capacity.
+- Packaged Linux installs now show peer latency and can use the LAN-discovery direct path. The systemd
+  unit withheld `CAP_NET_RAW`, so the engine couldn't open the ICMP socket it uses to measure latency
+  and confirm a LAN path carries traffic. The unit now grants it; existing installs pick it up on the
+  next package upgrade, or add it now via `systemctl edit unitylan-engine`.
 - The GUI can once again reach an engine whose control socket sits in the default location
-  (`<state_dir>/control.sock`). The state directory is owner-only, and locking it down left no way
-  for an authorized non-root frontend to open a socket inside it, so the GUI reported the engine as
-  not running. The engine now grants that directory traversal (and nothing else — no listing, no
-  reading) to the same `control_group` or `sudo` user the socket itself is granted to. Packaged
-  installs, whose socket lives in `/run/unitylan`, were unaffected.
-- Two devices on the same network now actually use the local path between them, instead of only
-  falling back to it once the connection has completely died. LAN discovery previously refused to
-  move a peer off the route through your router while that route still worked at all — but the whole
-  problem it exists to solve is a router whose loopback ("hairpin") works *intermittently*, dropping
-  handshakes and flapping the peer without ever failing outright. The engine now moves such a peer
-  onto the direct local path, gated on a quick authenticated check first: before switching, it asks
-  the candidate to prove it holds the peer's WireGuard key (a challenge only the real peer can
-  answer, using key material both devices already share — no new keys, nothing extra to configure),
-  so a spoofed or dead address is never adopted and can't disturb a working tunnel. Once a local path
-  has carried traffic the engine also stays on it through a longer outage (60s, was 20s) and returns
-  to it 30 seconds after a blip rather than five minutes, so brief loss no longer costs you the local
-  route. This supersedes the previous forged-beacon mitigation, which only kept a spoofed beacon from
-  churning an already-failing tunnel; the local path is now both preferred and spoof-proof.
-- The update prompt no longer stays hidden when a new release is ready to install. The app decided
-  whether to offer an update from the *coordinator's own* version rather than the version of the
-  release it publishes — so after a coordinator rolled out a new release without upgrading its own
-  binary first, every client silently held a verified, ready-to-apply update with no button to apply
-  it. The prompt now follows the staged release.
-- The peer-direct attestation refresh no longer stops working after a peer goes offline. On Linux,
-  sending to a peer that has no listener triggers an ICMP "port unreachable" that surfaces as an error
-  on the next receive; the engine treated that as fatal and tore down its refresh responder, so it
-  quietly stopped answering co-members until the next restart. It now logs and keeps serving.
+  (`<state_dir>/control.sock`). Locking down the owner-only state directory left no way for a non-root
+  frontend to open a socket inside it, so the GUI reported the engine as not running. The engine now
+  grants that directory traversal only (no listing, no reading) to the socket's `control_group`/`sudo`
+  user. Packaged installs (socket in `/run/unitylan`) were unaffected.
+- Two devices on the same network now actually use the local path between them, instead of falling back
+  to it only once the connection has fully died. LAN discovery used to refuse moving a peer off the
+  route through your router while it worked at all — but the problem it solves is a router whose
+  loopback ("hairpin") works *intermittently*, flapping the peer without failing outright. The engine
+  now moves such a peer onto the direct path, gated on an authenticated check (the candidate must prove
+  it holds the peer's WireGuard key), so a spoofed or dead address is never adopted. It also stays on a
+  proven local path through a longer outage (60s, was 20s) and returns 30s after a blip, not five
+  minutes. Supersedes the forged-beacon mitigation.
+- The update prompt no longer stays hidden when a new release is ready. The app offered an update based
+  on the *coordinator's own* version rather than the release it publishes, so a coordinator that shipped
+  a release without upgrading its own binary left every client silently holding a ready-to-apply update
+  with no button to apply it. The prompt now follows the staged release.
+- The peer-direct attestation refresh no longer stops after a peer goes offline. On Linux, sending to a
+  peer with no listener triggers an ICMP "port unreachable" that surfaces on the next receive; the
+  engine treated that as fatal and tore down its responder, silently ceasing to answer co-members until
+  restart. It now logs and keeps serving.
 
 ### Security
 
-- An authenticated account can no longer bloat the coordinator's database with interactive-login
-  bindings. Each completed Discord login binds a device key to the account, and these rows were only
-  ever removed when the device was removed — so a single account could repeat the login exchange with
-  fresh keys to grow the table without limit. The coordinator now keeps only the most recent bindings
-  per account (64), dropping the oldest; a binding is used once at enrollment, so this never affects a
-  real device.
-- Hardened local access to the engine daemon and its secrets (defense in depth). The state
-  directory (WG private key, device token, relay secret, pinned anchors) is now created owner-only
-  (0700) and tightened on startup if an older version or a loose umask left it readable. The control
-  socket now drops a connection that doesn't send its request within a short timeout and caps
-  concurrent connections, so a local caller can't tie the daemon up with idle or flooded connections.
-  A headless enrollment key can now be supplied through the `UNITYLAN_ENROLLMENT_KEY` environment
-  variable instead of `--token`, keeping the one-time secret off the world-readable command line.
-- Hardened the engine against malformed control-plane and update inputs (defense in depth). A
-  coordinator's trust-anchor rotation chain is now refused past a sane length instead of walked, so a
-  misbehaving or man-in-the-middle'd coordinator can't hand a client an oversized chain to burn its
-  CPU. An update artifact whose declared size or decompressed contents are implausibly large is now
-  rejected before it can exhaust memory or fill the disk. The built-in resolver now answers strictly
-  for names inside its own `.unity.internal` zone and stays silent for anything else.
+- Auto-updates are now accepted **only** over the dedicated, offline release-key path; the guild-signed
+  fallback is gone. A client used to fall back to a guild-key-signed update whenever the response
+  carried no release-key signature — a field that could be stripped in transit, re-opening a path from
+  one leaked guild key to attacker-chosen code as root on every member's machine. Development builds no
+  longer self-update. **Operators mid-upgrade should keep serving the guild-signed manifest until every
+  device is on this release;** see `docs/release-signing.md`.
 - A tampered but validly-signed update manifest can no longer freeze a device's auto-updates. The
-  engine records the highest release it has accepted as a rollback floor; previously it raised that
-  floor the moment a manifest passed its signature check — before confirming the release was newer
-  than the running one and actually had a build for this platform. A man-in-the-middle replaying a
-  signed manifest with a very high version but no artifact for your OS could push the floor past every
-  real release, after which the engine refused all genuine (lower-versioned) updates until its state
-  was wiped. The floor is now raised only for a manifest the engine will actually install.
-- A leaked Discord guild signing key can no longer be used to push a software update. Auto-updates
-  are verified against a dedicated, offline release key, but until now a client would still fall back
-  to accepting an update signed by a pinned guild key whenever the coordinator's response carried no
-  release-key signature — and that field could simply be stripped in transit, re-opening a path from
-  one leaked guild key to running attacker-chosen code as root on every member's machine. The client
-  now accepts updates **only** over the release-key path; there is no guild-signed fallback. A build
-  compiled without a release key baked in (development builds) no longer self-updates at all, and a
-  coordinator must serve a release-key-signed manifest for its members to update. Operators mid-upgrade
-  should keep serving the guild-signed manifest until every device is on this release; see
-  `docs/release-signing.md`.
+  engine raised its rollback floor the moment a manifest passed signature check, so a replayed
+  high-version manifest with no artifact for your OS could push the floor past every real release,
+  refusing all genuine updates until wiped. The floor is now raised only for a manifest the engine will
+  actually install.
+- Hardened the engine against malformed and abusive inputs (defense in depth): a trust-anchor rotation
+  chain is refused past a sane length; an update artifact of implausible declared/decompressed size is
+  rejected before exhausting memory or disk; the resolver answers only for its `.unity.internal` zone;
+  the state directory (WG key, device token, relay secret, anchors) is created owner-only (0700) and
+  tightened on startup if left readable; the control socket times out slow requests and caps
+  concurrency; and a headless enrollment key can be passed via `UNITYLAN_ENROLLMENT_KEY` instead of
+  `--token`, keeping the secret off the command line.
+- An authenticated account can no longer bloat the coordinator's database with interactive-login
+  bindings. These rows were only removed with the device, so an account could repeat the login exchange
+  with fresh keys to grow the table without limit. The coordinator now keeps only the 64 most recent
+  bindings per account; a binding is used once at enrollment, so real devices are unaffected.
 
 ### Changed
 
-- A busy coordinator asks Discord for far less on a cold cache. When a membership change wakes every
-  client of a guild at once, each one used to look up the same guild name, role names, and its own
-  membership before any of them had filled the coordinator's cache — so a single change turned into
-  one Discord request per client, all landing on that guild's shared rate-limit bucket. Those
-  simultaneous lookups are now funnelled into one request whose result the rest reuse. Restarts and
-  large role changes are correspondingly less likely to trip Discord's per-guild limit.
+- A busy coordinator asks Discord for far less on a cold cache. A membership change that woke every
+  client of a guild at once had each look up the same guild/role names before any had filled the cache
+  — one Discord request per client on that guild's shared rate-limit bucket. Those lookups are now
+  funnelled into one request the rest reuse, so restarts and large role changes rarely trip the limit.
 
 ## v0.4.2
 

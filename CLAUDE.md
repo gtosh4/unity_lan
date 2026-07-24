@@ -48,14 +48,20 @@ don't paste commit subject. Internal work with no user effect (refactors, test h
 out. Release CI lifts notes from section whose heading matches tag (`## v1.2.3`), so at release time
 `Unreleased` renamed to version — unrenamed one ships generic notes.
 
-**Cutting a release (agent-assisted), the changelog section must fit Discord.** The `announce` job in
-`release.yml` posts the tagged section as an embed *description*, which Discord hard-caps at 4096 chars
-— CI truncates at 4000 (`jq -Rs '.[:4000]'`), so an over-long section gets silently cut mid-sentence
-and its tail never announced. When renaming `Unreleased` → the version, if the rendered section runs
-past ~4000 chars, **condense it in place** so the whole announce fits: merge related bullets, drop
-internal-only detail, keep every user-visible symptom/ability. Only the CHANGELOG section is trimmed —
-the GitHub Release body (same text) is fine long, but keeping them identical is simplest. Count with
-`awk -v v="## v1.2.3" 'index($0,v)==1{f=1;next} /^## /{f=0} f' CHANGELOG.md | wc -c` before tagging.
+**Cutting a release (agent-assisted): CHANGELOG stays full, Discord announce comes from a separate
+summary.** The `announce` job in `release.yml` posts an embed *description* Discord hard-caps at 4096
+chars — CI cuts at 4000 (`jq -Rs '.[:4000]'`). A real release section routinely runs longer, so the
+job **prefers `announce/<tag>.md` when that file exists** (a hand-written summary that fits and won't
+clip mid-sentence) and falls back to the truncated GitHub Release body otherwise. So at release time,
+two steps instead of trimming the changelog:
+1. Rename `Unreleased` → `## vX.Y.Z` and leave it **fully detailed** — the GitHub Release body wants
+   the depth, and it's no longer length-constrained.
+2. Write `announce/vX.Y.Z.md` (≤4000 chars — verify with `wc -c`) — a scannable summary leading with
+   headline security items, then fixes, then changed; end with the release URL. This is what members
+   see in Discord.
+
+If you skip step 2 the announce silently falls back to the truncated release body (old behavior), so
+a long section still gets clipped mid-sentence — write the summary file.
 
 ### Running a local mesh (offline, no real Discord)
 

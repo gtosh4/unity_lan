@@ -192,13 +192,22 @@ jobs:
     needs: [packages, windows, image]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: Post release to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          NOTES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || echo "")
+          # The embed description is Discord-capped at 4096 (we cut at 4000). A CHANGELOG section can
+          # legitimately run longer than that, so prefer a hand-written short summary at
+          # `announce/<tag>.md` when one exists — it's written to fit and won't be clipped mid-sentence.
+          # Fall back to the GitHub release body (the full CHANGELOG section) truncated, as before.
+          if [ -f "announce/${TAG}.md" ]; then
+            NOTES=$(cat "announce/${TAG}.md")
+          else
+            NOTES=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || echo "")
+          fi
           NOTES=${NOTES:-"Release $TAG"}
           DESC=$(jq -Rs '.[:4000]' <<< "$NOTES")
           curl -fsSL -X POST "$DISCORD_WEBHOOK" \
