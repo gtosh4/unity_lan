@@ -12,6 +12,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod ctl;
+mod instance;
 mod tray;
 mod view;
 mod widgets;
@@ -90,6 +91,13 @@ fn main() -> iced::Result {
             .nth(1)
             .unwrap_or_else(|| "control.sock".to_string()),
     );
+    // Single-instance guard: only one GUI per engine socket. A second launch signals the running
+    // one to surface its window (below) and exits here without opening a duplicate.
+    let activate_rx = match instance::start(&socket) {
+        instance::Startup::AlreadyRunning => return Ok(()),
+        instance::Startup::Primary(rx) => Some(rx),
+        instance::Startup::Unsupported => None,
+    };
     // Spawn the system tray on its own thread before iced takes over the main event loop; it drives
     // connect/disconnect + reflects status over the socket itself, and hands window/quit requests
     // back to us over this channel.
@@ -103,6 +111,7 @@ fn main() -> iced::Result {
         .run_with(move || {
             let mut app = App::new(socket);
             *app.tray_rx.lock().unwrap() = tray_rx;
+            *app.activate_rx.lock().unwrap() = activate_rx;
             let open = app.open_window();
             let init = Task::batch([open, app.reload()]);
             (app, init)
@@ -180,6 +189,9 @@ struct App {
     /// Window/quit requests from the tray thread, consumed once by the subscription (`None` when
     /// there's no tray on this platform / system).
     tray_rx: Arc<Mutex<Option<UnboundedReceiver<TrayMsg>>>>,
+    /// "Show yourself" nudges from a second launch that found us already running, consumed once by
+    /// the subscription (`None` when single-instance isn't supported here).
+    activate_rx: Arc<Mutex<Option<UnboundedReceiver<()>>>>,
     /// The main window's id while it's open; `None` while hidden to the tray (the window is
     /// destroyed, not just hidden — see [`window_settings`]). Show reopens a fresh one.
     window: Option<window::Id>,
@@ -323,6 +335,8 @@ enum Message {
     TogglePeerGroup(PeerGroup),
     /// A window/quit request from the system tray.
     Tray(TrayMsg),
+    /// A second launch asked us (the running instance) to surface our window.
+    Activate,
     /// The window's close button was pressed → hide to the tray instead of exiting.
     CloseRequested,
     /// A freshly-opened window finished opening → focus it.
@@ -350,6 +364,7 @@ impl App {
             latency_ewma: HashMap::new(),
             error: None,
             tray_rx: Arc::new(Mutex::new(None)),
+            activate_rx: Arc::new(Mutex::new(None)),
             window: None,
             #[cfg(debug_assertions)]
             last_directive_seq: 0,
@@ -644,6 +659,21 @@ impl App {
                 };
             }
             Message::Tray(TrayMsg::Quit) => return iced::exit(),
+            Message::Activate => {
+                // A duplicate launch wants the existing window shown. Never hide (unlike the tray's
+                // toggle). If it was hidden to the tray, reopen it. If it's already up, un-minimize
+                // and ask to focus + flag for attention: X11/Windows raise it outright, while
+                // Wayland refuses a cross-process raise (focus-stealing prevention) and instead
+                // highlights the taskbar entry for the user to click — the standard behavior there.
+                return match self.window {
+                    None => self.open_window(),
+                    Some(id) => Task::batch([
+                        window::minimize(id, false),
+                        window::gain_focus(id),
+                        window::request_user_attention(id, Some(window::UserAttention::Critical)),
+                    ]),
+                };
+            }
             Message::CloseRequested => return self.hide_window(),
             Message::WindowOpened(id) => return window::gain_focus(id),
             Message::RenameInput(s) => self.rename_input = s,
@@ -702,6 +732,7 @@ impl App {
             self.status_subscription(),
             window::close_requests().map(|_| Message::CloseRequested),
             self.tray_subscription(),
+            self.instance_subscription(),
         ])
     }
 
@@ -730,6 +761,21 @@ impl App {
             None => stream::empty().boxed(),
         };
         Subscription::run_with_id("unitylan-tray", stream)
+    }
+
+    /// Bridge the single-instance accept thread's channel into the iced runtime, same one-shot-take
+    /// pattern as [`Self::tray_subscription`]. Each item is a second launch asking us to surface.
+    fn instance_subscription(&self) -> Subscription<Message> {
+        use iced::futures::stream::{self, BoxStream, StreamExt};
+        let taken = self.activate_rx.lock().unwrap().take();
+        let stream: BoxStream<'static, Message> = match taken {
+            Some(rx) => stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|()| (Message::Activate, rx))
+            })
+            .boxed(),
+            None => stream::empty().boxed(),
+        };
+        Subscription::run_with_id("unitylan-instance", stream)
     }
 }
 

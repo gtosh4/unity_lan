@@ -15,6 +15,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   so the system restarts the engine onto the new version even if the hand-off is missed. A leftover
   `unitylan-gui.old.exe` from each update is now also cleaned up on the next start instead of piling up.
 
+### Changed
+
+- Launching the GUI a second time (from the tray, a shortcut, or the command line) no longer opens a
+  duplicate — it surfaces the window you already have. Minimized to the tray or the taskbar, it comes
+  back and takes focus. On Wayland, where the compositor blocks one app from raising over another,
+  the existing window instead flags its taskbar entry for attention (click it to raise). Each engine
+  you point a GUI at still gets its own single window.
+
 ## v0.5.0
 
 ### Fixed
