@@ -479,6 +479,10 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     // what lets the fix apply to the very update that delivers it — see `promote_staged_gui`.
     #[cfg(windows)]
     crate::selfupdate::promote_staged_gui();
+    // Sweep any leftover aside-renamed GUI (`unitylan-gui.old.exe`) an update left behind, so it does
+    // not accumulate one per update when the user never reopens the GUI to clear it.
+    #[cfg(windows)]
+    crate::selfupdate::sweep_stale_gui_aside();
 
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the

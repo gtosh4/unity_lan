@@ -584,6 +584,37 @@ pub fn promote_staged_gui() {
     }
 }
 
+/// Startup sweep: delete a leftover `unitylan-gui.old.exe` — the aside-renamed previous GUI that
+/// [`promote_gui`] moves out of the way during an update.
+///
+/// The relaunched GUI normally clears it (`gui::clean_stale_gui`), but a user who never reopens the GUI
+/// after an update leaves it in the install dir indefinitely — one accumulates per update, and the
+/// unprivileged GUI can't delete it there. The engine (LocalSystem) can, so it sweeps on startup.
+/// Best-effort and safe even if a GUI is *still* executing from that image: Windows maps exe images
+/// share-delete, so the running process keeps its inode while the name is removed (and the GUI relaunch
+/// spawns the canonical `unitylan-gui.exe`, never `.old.exe`). A no-op when the file is absent.
+#[cfg(windows)]
+pub fn sweep_stale_gui_aside() {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let old = dir.join("unitylan-gui.old.exe");
+    if !old.exists() {
+        return;
+    }
+    match std::fs::remove_file(&old) {
+        Ok(()) => {
+            tracing::info!(path = %old.display(), "swept a leftover aside-renamed GUI from a prior update")
+        }
+        // Locked because a GUI is still running from it (no share-delete on this OS build, or an AV
+        // hook): harmless — the next successful GUI relaunch or promotion clears it.
+        Err(e) => tracing::debug!("could not sweep {}: {e}", old.display()),
+    }
+}
+
 /// Testable core of [`promote_gui`] with the install dir injected (so a test needn't stand in for the
 /// engine's real install path).
 #[cfg(windows)]

@@ -67,6 +67,21 @@ const STOP_WAIT: Duration = Duration::from_secs(30);
 const MARKED_FOR_DELETE_WAIT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
+/// Non-zero service exit code reported when the daemon exits to apply a file-swap auto-update. It's
+/// what makes the SCM's failure action (configured by [`configure_recovery`]) treat the stop as a
+/// failure and restart the service onto the new binary — the supervisor-level backstop to the
+/// in-process [`restart_after`] helper. A *clean* stop still reports `0` and never triggers recovery.
+/// Any non-zero value works; this one is distinctive in the Event Log.
+const UPDATE_RESTART_EXIT_CODE: u32 = 100;
+
+/// Seconds of healthy running after which the SCM resets the failure counter to zero. Kept modest so a
+/// normal, isolated update restart never accumulates toward a crash-loop tally. (`sc.exe failure`
+/// `reset=` argument.)
+const RECOVERY_RESET_SECS: &str = "600";
+/// The recovery actions: restart on the first, second, and third-or-later failure, with escalating
+/// back-off (5s / 10s / 30s). (`sc.exe failure` `actions=` argument.)
+const RECOVERY_ACTIONS: &str = "restart/5000/restart/10000/restart/30000";
+
 /// The raw Win32 code behind a `windows_service` error, when it came from a winapi call.
 ///
 /// Extracted rather than matched on a message so the caller can branch on the specific SCM states
@@ -183,6 +198,7 @@ fn create_or_adopt(manager: &ServiceManager, info: &ServiceInfo) -> Result<()> {
         match manager.create_service(info, ServiceAccess::CHANGE_CONFIG) {
             Ok(service) => {
                 let _ = service.set_description(SERVICE_DESCRIPTION);
+                configure_recovery();
                 return Ok(());
             }
             Err(e) if winapi_code(&e) == Some(ERROR_SERVICE_EXISTS) => {
@@ -199,6 +215,7 @@ fn create_or_adopt(manager: &ServiceManager, info: &ServiceInfo) -> Result<()> {
                     .change_config(info)
                     .context("repointing the existing service at this installation")?;
                 let _ = service.set_description(SERVICE_DESCRIPTION);
+                configure_recovery();
                 println!("Service '{SERVICE_NAME}' already existed; repointed it at this install.");
                 return Ok(());
             }
@@ -224,6 +241,65 @@ fn create_or_adopt(manager: &ServiceManager, info: &ServiceInfo) -> Result<()> {
                 return Err(anyhow::Error::new(e).context(msg));
             }
         }
+    }
+}
+
+/// Configure the service's SCM failure actions so the auto-update restart has a supervisor-level
+/// backstop independent of our own process surviving.
+///
+/// The fast path is the in-process [`spawn_restart_helper`] → [`restart_after`] chain; but that chain
+/// lives in a process the SCM may reap the instant it reports `Stopped`, and in the field a reap in
+/// that window left the engine down with no successor and no trace. So on the update path the daemon
+/// reports a *non-zero* [`UPDATE_RESTART_EXIT_CODE`], and these failure actions restart the service
+/// even if the helper never ran. Escalating delays keep a genuine crash-loop from spinning, and the
+/// reset period clears the counter after a healthy run so an isolated update never counts toward one.
+///
+/// The `failureflag` (`FailureActionsOnNonCrashFailures`) is the load-bearing half: without it the SCM
+/// acts only on an actual process *crash*, never on our clean-exit-with-error update restart. A real
+/// crash (the new binary faulting on start) is covered either way.
+///
+/// Applied from `install` (`create_or_adopt`), where it runs with the rights to change the service
+/// config — the same deferred/non-impersonated LocalSystem custom action the MSI already uses to
+/// register the service, or an elevated manual `service install`. It is deliberately **not** done from
+/// the service's own startup: a running service is denied config changes on itself
+/// (`ERROR_ACCESS_DENIED`), even as LocalSystem. That's fine for the auto-update case: failure actions
+/// live in the SCM registration, which a file-swap update never touches — so once any fixed install
+/// sets them, they persist across every later auto-update.
+///
+/// Shells out to **`sc.exe`** rather than the `windows-service` crate's `update_failure_actions`: that
+/// API is denied (`ERROR_ACCESS_DENIED`) from the LocalSystem contexts this runs in, whereas built-in
+/// `sc.exe` sets the very same actions there — both verified on real hardware. Best-effort: recovery is
+/// a safety net, so a failure here is reported and the install still succeeds.
+fn configure_recovery() {
+    // Absolute System32 path, not a bare `sc.exe`, so a hijacked PATH can't substitute a binary we run
+    // as LocalSystem.
+    let sc = {
+        let root = std::env::var_os("SystemRoot").unwrap_or_else(|| OsString::from(r"C:\Windows"));
+        Path::new(&root).join("System32").join("sc.exe")
+    };
+    let run = |args: &[&str]| -> bool {
+        std::process::Command::new(&sc)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    // `reset=`/`actions=` are separate tokens from their values — sc.exe's space-after-`=` convention.
+    if !run(&[
+        "failure",
+        SERVICE_NAME,
+        "reset=",
+        RECOVERY_RESET_SECS,
+        "actions=",
+        RECOVERY_ACTIONS,
+    ]) {
+        eprintln!("warning: could not set service recovery actions (post-update restart backstop)");
+        return;
+    }
+    if !run(&["failureflag", SERVICE_NAME, "1"]) {
+        eprintln!("warning: could not enable service recovery on non-crash failures");
     }
 }
 
@@ -510,13 +586,16 @@ fn run_service() -> Result<()> {
         .context("registering the service control handler")?;
     let _ = status_slot.set(status_handle);
 
-    let set_state = |state: ServiceState, accepted: ServiceControlAccept| -> Result<()> {
+    let set_state = |state: ServiceState,
+                     accepted: ServiceControlAccept,
+                     exit_code: ServiceExitCode|
+     -> Result<()> {
         status_handle
             .set_service_status(ServiceStatus {
                 service_type: SERVICE_TYPE,
                 current_state: state,
                 controls_accepted: accepted,
-                exit_code: ServiceExitCode::Win32(0),
+                exit_code,
                 checkpoint: 0,
                 wait_hint: Duration::default(),
                 process_id: None,
@@ -528,6 +607,7 @@ fn run_service() -> Result<()> {
     set_state(
         ServiceState::Running,
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceExitCode::Win32(0),
     )?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -536,8 +616,41 @@ fn run_service() -> Result<()> {
         .context("building tokio runtime")?;
     let result = rt.block_on(daemon::run(cfg, shutdown));
 
-    // Report Stopped regardless of how the daemon exited (the SCM needs a terminal state).
-    let stopped = set_state(ServiceState::Stopped, ServiceControlAccept::empty());
+    // A file-swap auto-update tore down fully and swapped the binary in place; we now hand the restart
+    // to a detached helper (with the SCM failure action as a backstop). Decide that *before* touching
+    // the SCM, because both steps below depend on it.
+    let restart = matches!(result, Ok(daemon::RunOutcome::RestartService));
+
+    // Spawn the restart successor BEFORE announcing Stopped. Once a service reports SERVICE_STOPPED the
+    // SCM may reap this process at any moment; spawning the helper *after* the report (the previous
+    // order) meant a reap in that window left the service down with the successor never launched — the
+    // silent post-update outage seen on real hardware. The helper is detached and blocks reading our
+    // stdin until we exit (EOF), so spawning it early is safe: it won't start the service until we're
+    // gone and the exe is free.
+    if restart {
+        if let Err(e) = spawn_restart_helper() {
+            // Not the end of the road: because we report a non-zero exit code just below, the SCM's
+            // failure-action backstop still restarts us. Log loudly so a lost restart is never silent.
+            tracing::error!(
+                "failed to spawn the post-update restart helper: {e:#} — relying on the SCM failure-action backstop"
+            );
+        }
+    }
+
+    // Report Stopped (the SCM needs a terminal state). On the update path, report a *non-zero* exit
+    // code so the SCM's failure action (installed with FailureActionsOnNonCrashFailures — see
+    // `configure_recovery`) restarts the service even if the helper above never ran. A plain stop or an
+    // uninstall keeps exit 0, so it is never treated as a failure.
+    let exit_code = if restart {
+        ServiceExitCode::ServiceSpecific(UPDATE_RESTART_EXIT_CODE)
+    } else {
+        ServiceExitCode::Win32(0)
+    };
+    let stopped = set_state(
+        ServiceState::Stopped,
+        ServiceControlAccept::empty(),
+        exit_code,
+    );
     // Then bound cleanup: reqwest's default DNS resolver runs `getaddrinfo` on tokio's *blocking*
     // pool, which can't be cancelled — so a lookup in flight at shutdown would otherwise make the
     // runtime's `Drop` block the service process past its Stopped report for the OS resolver timeout.
@@ -545,15 +658,9 @@ fn run_service() -> Result<()> {
     rt.shutdown_timeout(Duration::from_secs(2));
     stopped?;
 
-    match result? {
-        // A file-swap auto-update tore down fully and swapped the binary in place. Hand the restart to
-        // the SCM via a detached helper that waits for us to finish stopping, then starts the service
-        // onto the new binary — spawned last, right before we return and the process exits, so the exe
-        // is on its way to being free.
-        daemon::RunOutcome::RestartService => spawn_restart_helper(),
-        // A plain stop (signal, or a clean daemon exit) — nothing more to do.
-        daemon::RunOutcome::Stopped => Ok(()),
-    }
+    // Surface a daemon error (logged by `service_main`); any restart is already in flight above.
+    result?;
+    Ok(())
 }
 
 /// The engine service has no console, so append logs to a file next to the executable.

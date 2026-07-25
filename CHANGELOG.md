@@ -3,6 +3,18 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- On Windows, an auto-update no longer risks leaving the engine stopped — with the mesh down until you
+  restart it by hand or reboot. After swapping in the new version the service handed its own restart to
+  a helper it launched only *after* telling Windows it had stopped; Windows can end the process in that
+  instant, and when it did, the restart never happened and nothing was logged. The engine now launches
+  that restart before reporting stopped, and additionally registers a Windows Service recovery action
+  so the system restarts the engine onto the new version even if the hand-off is missed. A leftover
+  `unitylan-gui.old.exe` from each update is now also cleaned up on the next start instead of piling up.
+
 ## v0.5.0
 
 ### Fixed
