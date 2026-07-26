@@ -579,6 +579,63 @@ mod tests {
         assert!(decode(&bad_kind).is_none());
     }
 
+    /// `decode` is the only parser in the tree that any unauthenticated host on the LAN can reach,
+    /// and it is hand-written byte indexing — so it gets more than hand-picked cases. Three sweeps,
+    /// each aimed at the way a length-guarded parser actually breaks:
+    ///
+    /// * every length from empty to past the longest valid message, so an off-by-one in the guards
+    ///   is caught at exactly the boundary it lives on;
+    /// * every truncation of each valid shape, which is the shape a clipped or malicious datagram
+    ///   takes;
+    /// * every single-bit flip of a valid kinded message, which walks the length, magic, version
+    ///   and kind fields through values the guards must reject rather than index on.
+    ///
+    /// The assertion is only "returns rather than panics" — a decode that rejects is a fine
+    /// outcome. Anything that panics here would take the whole privileged daemon down from an
+    /// unauthenticated UDP packet.
+    #[test]
+    fn decode_survives_arbitrary_truncated_and_corrupted_datagrams() {
+        let pk = [7u8; 32];
+        let valid = [
+            encode(&pk, 51820).to_vec(),
+            encode_kinded(&pk, 51820, KIND_PROBE, &NONCE, &MAC).to_vec(),
+            encode_kinded(&pk, 51820, KIND_ACK, &NONCE, &MAC).to_vec(),
+        ];
+
+        // Random bytes at every interesting length, including the exact valid lengths (so a random
+        // body sometimes lands on the length that unlocks the deeper parsing).
+        for seed in 0..500u64 {
+            for len in 0..=KINDED_LEN + 2 {
+                decode(&crate::testutil::seeded_bytes(seed, len));
+            }
+        }
+
+        // Every prefix of every valid message: a datagram cut short at any offset.
+        for msg in &valid {
+            for n in 0..=msg.len() {
+                decode(&msg[..n]);
+            }
+            // ...and one byte too many, which matches no exact-length arm.
+            let mut over = msg.clone();
+            over.push(0);
+            assert!(decode(&over).is_none(), "trailing garbage must not decode");
+        }
+
+        // Every single-bit flip of a valid kinded message.
+        let kinded = &valid[1];
+        for byte in 0..kinded.len() {
+            for bit in 0..8 {
+                let mut m = kinded.clone();
+                m[byte] ^= 1 << bit;
+                decode(&m);
+            }
+        }
+
+        // A valid message still decodes after all that — the sweep didn't just prove `decode`
+        // rejects everything.
+        assert_eq!(decode(kinded).unwrap().pk, pk);
+    }
+
     /// Build a Beacon with a directly-seeded candidate map (no sockets), for state-machine tests.
     fn with_candidate(pk: [u8; 32], addr: SocketAddr, seen: Instant) -> Beacon {
         let candidates: Arc<Mutex<HashMap<[u8; 32], Candidate>>> = Arc::default();

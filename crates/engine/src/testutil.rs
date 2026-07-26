@@ -2,6 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// Deterministic pseudo-random bytes for the parser sweeps — see [`common::testutil::seeded_bytes`],
+/// which the coordinator's STUN tests share.
+pub use common::testutil::seeded_bytes;
+
 /// A scratch directory that deletes itself on drop.
 ///
 /// Replaces the hand-rolled "make a temp dir, `remove_dir_all` on the last line" pattern: that

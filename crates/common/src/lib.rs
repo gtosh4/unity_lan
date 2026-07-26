@@ -10,6 +10,8 @@ pub mod netid;
 pub mod p2p;
 pub mod relay;
 pub mod rotation;
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil;
 pub mod update;
 pub mod winsec;
 pub mod wire;

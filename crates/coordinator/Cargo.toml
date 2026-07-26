@@ -43,3 +43,6 @@ semver = "1"
 # Raising RLIMIT_NOFILE at startup (each parked long-poll holds an fd).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+unitylan-common = { workspace = true, features = ["testutil"] }

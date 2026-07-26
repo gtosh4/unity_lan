@@ -116,6 +116,24 @@ mod tests {
         m.to_vec().unwrap()
     }
 
+    /// The resolver answers UDP from the mesh, so every peer can reach it — and parsing happens
+    /// before any check could turn a peer away. Sweep junk at every length, plus truncations of a
+    /// real query (the shape a clipped datagram takes), asserting only that it returns. A panic
+    /// here would let one peer stop the privileged daemon.
+    #[tokio::test]
+    async fn parsing_never_panics_on_arbitrary_datagrams() {
+        let zone = empty_zone();
+        for seed in 0..200u64 {
+            for len in 0..80 {
+                answer(&crate::testutil::seeded_bytes(seed, len), &zone).await;
+            }
+        }
+        let real = query_bytes("host-b.nodeb.lan.unity.internal");
+        for n in 0..=real.len() {
+            answer(&real[..n], &zone).await;
+        }
+    }
+
     #[tokio::test]
     async fn resolves_known_name_and_nxdomains_unknown() {
         let zone = empty_zone();

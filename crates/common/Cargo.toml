@@ -8,6 +8,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only helpers (`common::testutil`), pulled in by the other crates' dev-dependencies. Gated so
+# nothing test-shaped rides along into a release build; with resolver 2 a dev-dependency's features
+# aren't unified into `cargo build`, so this stays out of the shipped binaries.
+testutil = []
+
 [lib]
 name = "common"
 path = "src/lib.rs"

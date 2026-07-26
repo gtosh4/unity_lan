@@ -129,4 +129,28 @@ mod tests {
         let src: SocketAddr = "198.51.100.7:9".parse().unwrap();
         assert!(binding_response(b"not a stun packet", src).is_none());
     }
+
+    /// The STUN socket takes unauthenticated UDP from anywhere on the internet, and decoding runs
+    /// before anything else can reject the packet. A panic here is a one-datagram denial of service
+    /// against the whole coordinator, so feed it junk at every length that matters — around the
+    /// 20-byte header boundary especially, where a decoder is most likely to trust a length field
+    /// it hasn't checked. Rejecting is a pass; only panicking fails.
+    #[test]
+    fn decoding_never_panics_on_arbitrary_datagrams() {
+        let src: SocketAddr = "198.51.100.7:9".parse().unwrap();
+        for seed in 0..200u64 {
+            for len in 0..64 {
+                binding_response(&common::testutil::seeded_bytes(seed, len), src);
+            }
+        }
+        // Junk carrying a real STUN header prefix, so decoding gets past the magic cookie and into
+        // the attribute walk rather than bailing immediately.
+        for seed in 0..200u64 {
+            for len in 0..64usize {
+                let mut pkt = vec![0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xA4, 0x42];
+                pkt.extend(common::testutil::seeded_bytes(seed, len));
+                binding_response(&pkt, src);
+            }
+        }
+    }
 }
