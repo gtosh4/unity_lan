@@ -1,0 +1,54 @@
+# cargo-deny policy: licence, source and duplicate-version checks over the dependency tree.
+#
+# Split of duties with `cargo audit`: **audit owns vulnerabilities** (it already gates CI, with the
+# triaged ignore-list in `.cargo/audit.toml`). Running advisories here too would mean two ignore
+# lists to keep in sync, so this file deliberately leaves them alone and covers what audit doesn't.
+#
+# Why licences matter here specifically: UnityLAN ships under AGPL-3.0-or-later, and the auto-update
+# path distributes compiled binaries to every member of every mesh. A dependency that quietly
+# arrived under a licence we can't distribute under would be a real problem found late.
+
+[licenses]
+# Every allowed licence is permissive or file-level-weak-copyleft, so all of them can be distributed
+# inside an AGPL binary. Anything not on this list fails the check rather than being waved through —
+# a new dependency with an unusual licence should be a decision, not a surprise.
+allow = [
+    "0BSD",
+    "AGPL-3.0-or-later", # this workspace's own crates
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    # Weak, file-level copyleft: modifications to an MPL file stay MPL, but linking it into a larger
+    # work under another licence is explicitly allowed (MPL-2.0 §3.3). Fine to ship in our binaries;
+    # it only constrains us if we start editing those crates' sources.
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# A few crates carry no machine-readable expression, or one cargo-deny scores below this. 0.8 keeps
+# the bar high enough that a garbled licence field still gets a human look.
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions of one crate are near-universal in a tree this size (753 crates) and are almost
+# always transitive — ours come from the iced/usvg GUI stack, which we don't control. Warn so the
+# list stays visible without failing CI on someone else's dependency graph.
+multiple-versions = "warn"
+wildcards = "deny" # a `*` version requirement makes builds unreproducible
+# ...except the workspace's own path dependencies. `unitylan-common` is declared by path with no
+# version, which reads as `*`; it's built from this tree, so there's no third-party version to pin.
+allow-wildcard-paths = true
+
+[sources]
+# Everything must come from crates.io. A git or path dependency sneaking into a release is how a
+# binary ends up built from a commit nobody can audit.
+unknown-registry = "deny"
+unknown-git = "deny"

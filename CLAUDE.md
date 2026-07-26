@@ -35,6 +35,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # broken intra-doc 
 # runs it too, but only when a commit changes Cargo.lock (and only if cargo-audit is installed):
 cargo audit
 
+# ...and a dependency-policy gate in the same job. Licences we can ship inside an AGPL binary,
+# crates.io as the only source, no unused manifest entries. Policy + reasoning in deny.toml.
+# Vulnerabilities stay with `cargo audit` above, so there's one ignore-list, not two:
+cargo deny check licenses bans sources
+cargo machete
+
 cargo test -p unitylan-coordinator                 # one crate's tests (append a name substring to filter)
 ```
 

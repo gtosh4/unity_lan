@@ -69,9 +69,20 @@ pub fn device_hint(net: &Ipv4Net, wg_pubkey: &[u8; 32]) -> u32 {
     }
 }
 
-/// Turn a host index (`1..host_count-1`) into its address within `net`.
+/// Whether `index` is one this net can actually hand out (`1..=allocatable`).
+///
+/// The counterpart to [`addr_from_index`]'s precondition, for callers reading an index back from
+/// storage rather than computing it: a debug assertion documents the contract but is a no-op in the
+/// release build the coordinator actually runs, where an out-of-range index would instead be turned
+/// silently into an address outside the mesh.
+pub fn index_is_valid(net: &Ipv4Net, index: u32) -> bool {
+    index >= 1 && index <= allocatable(net)
+}
+
+/// Turn a host index (`1..host_count-1`) into its address within `net`. Callers holding an index
+/// from outside their own allocation (a stored one, say) should check [`index_is_valid`] first.
 pub fn addr_from_index(net: &Ipv4Net, index: u32) -> Ipv4Addr {
-    debug_assert!(index >= 1 && index <= allocatable(net));
+    debug_assert!(index_is_valid(net, index));
     Ipv4Addr::from(u32::from(net.network()) + index)
 }
 

@@ -7,6 +7,11 @@ version = "0.5.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 rust-version = "1.96"
+# Not crates.io packages: these ship as GitHub release artifacts, .deb/.rpm, an MSI and a container
+# image. Saying so blocks an accidental `cargo publish` of a binary nobody consumes as a library,
+# and lets cargo-deny's wildcard check exempt the workspace's own path dependencies (it only does
+# that for crates that can't be published, since crates.io forbids path deps).
+publish = false
 
 # Lint policy, so a local `cargo clippy` and an IDE agree with CI instead of CI's `-D warnings`
 # being the only place it's written down. Left at `warn`: CI promotes the lot to errors, and a

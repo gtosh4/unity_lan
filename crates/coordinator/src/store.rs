@@ -491,8 +491,23 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?
         {
-            let ip = addr_from_index(&net, row.get::<i64, _>("idx") as u32);
-            return Ok((ip, row.get::<String, _>("device_name")));
+            // SQLite has no u64/u32, so an index round-trips through i64. Check it on the way back
+            // instead of casting blind: a row carrying an index this net can't hand out (a restore
+            // from a deployment with a different `mesh_cidr`, a hand-edited database) would
+            // otherwise be turned into an address *outside* the mesh and signed into an attestation.
+            // Peers reject an out-of-net seed, so this fails loudly here rather than mysteriously
+            // there.
+            let raw = row.get::<i64, _>("idx");
+            let idx = u32::try_from(raw)
+                .ok()
+                .filter(|i| common::netid::index_is_valid(&net, *i))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("device row has host index {raw}, outside {net}; re-enroll it")
+                })?;
+            return Ok((
+                addr_from_index(&net, idx),
+                row.get::<String, _>("device_name"),
+            ));
         }
 
         // A new row for this pubkey: enforce the per-account cap before consuming an address, so one
@@ -510,7 +525,9 @@ impl Store {
             .fetch_all(&self.pool)
             .await?
             .into_iter()
-            .map(|r| r.get::<i64, _>("idx") as u32)
+            // Same round-trip, but here a junk row only needs to not *become* a valid index and
+            // wrongly mark it taken — so drop it rather than failing the whole allocation.
+            .filter_map(|r| u32::try_from(r.get::<i64, _>("idx")).ok())
             .collect();
 
         let idx = pick_free_index(&net, &taken, device_hint(&net, pubkey))
@@ -1123,6 +1140,35 @@ mod tests {
         assert_eq!(st.rename_device(7, &c, "device").await.unwrap(), "device-3");
         assert_eq!(st.rename_device(7, &b, "laptop").await.unwrap(), "laptop");
         assert_eq!(st.rename_device(7, &c, "laptop").await.unwrap(), "laptop-2");
+    }
+
+    /// A stored host index round-trips through SQLite's i64. If a row comes back carrying one this
+    /// mesh can't hand out — a database restored into a deployment with a different `mesh_cidr` is
+    /// the realistic way — the old code cast it blind and handed the device an address outside the
+    /// mesh, which then got signed into an attestation that every peer would reject. Fail here, on
+    /// the row, where the message can say what to do about it.
+    #[tokio::test]
+    async fn a_device_row_indexed_outside_the_mesh_is_refused() {
+        let st = Store::memory().await;
+        let pk = [1u8; 32];
+        st.allocate_device(tnet(), &pk, 7, "laptop").await.unwrap();
+
+        // Rewrite the row as if it came from a mesh far larger than this /16.
+        sqlx::query("UPDATE devices SET idx = ? WHERE pubkey = ?")
+            .bind(9_000_000i64)
+            .bind(pk.as_slice())
+            .execute(&st.pool)
+            .await
+            .unwrap();
+
+        let err = st
+            .allocate_device(tnet(), &pk, 7, "laptop")
+            .await
+            .expect_err("an index outside the mesh must not resolve to an address");
+        assert!(
+            err.to_string().contains("9000000"),
+            "the error should name the offending index, got: {err}"
+        );
     }
 
     /// Suffixing trims the stem to fit the 63-char label cap. Both API call sites sanitize to ASCII

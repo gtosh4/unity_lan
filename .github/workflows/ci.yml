@@ -60,3 +60,19 @@ jobs:
           tool: cargo-audit
       - name: cargo audit
         run: cargo audit
+
+  # Dependency policy that isn't about vulnerabilities: licences we can distribute inside an AGPL
+  # binary, no dependency arriving from anywhere but crates.io, no unused entries in a manifest.
+  # Policy and its reasoning live in deny.toml; advisories stay with `cargo audit` above so there
+  # is only one ignore-list to maintain.
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-machete
+      - name: cargo deny
+        run: cargo deny check licenses bans sources
+      - name: cargo machete
+        run: cargo machete

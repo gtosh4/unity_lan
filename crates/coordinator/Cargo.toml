@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
@@ -46,3 +47,8 @@ libc = "0.2"
 
 [dev-dependencies]
 unitylan-common = { workspace = true, features = ["testutil"] }
+
+# `unitylan-common` is imported as `common` (its [lib] name), which cargo-machete's source scan
+# doesn't follow — it reports the crate as unused. It isn't.
+[package.metadata.cargo-machete]
+ignored = ["unitylan-common"]
