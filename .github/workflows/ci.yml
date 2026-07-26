@@ -23,6 +23,13 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace
+      # The doc comments carry this project's design record, and they cross-reference each other
+      # heavily. Without a gate, a rename silently turns `[`Foo`]` into plain text and the rot is
+      # invisible until someone reads the generated docs.
+      - name: doc
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
 
   # Dev happens mostly on Linux, so the Windows-only modules (wg/fw/resolver/windows.rs,
   # service.rs) never compile in the `check` job. Build + test them here so drift surfaces on

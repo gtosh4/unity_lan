@@ -2,7 +2,9 @@
 //! correct answers on a UDP socket; this makes the OS actually *route* `.unity.internal` queries there.
 //!
 //! Per-OS backends behind [`ResolverHook`]: Linux drives systemd-resolved (per-link routing
-//! domain, [`linux`]); Windows drives NRPT (namespace policy, [`windows`]). macOS (`/etc/resolver`)
+//! domain, `linux.rs`); Windows drives NRPT (namespace policy, `windows.rs`). Named without doc
+//! links because each module is `cfg`-gated: whichever one isn't being compiled has no item to
+//! resolve to. macOS (`/etc/resolver`)
 //! is a future backend. Where no backend exists, [`platform_hook`] returns `None` and `.unity.internal`
 //! names still resolve when queried directly at the resolver's mesh IP — they just aren't wired into the OS
 //! resolver automatically.

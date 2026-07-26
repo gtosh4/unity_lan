@@ -22,10 +22,14 @@ Deeper design: `docs/design.md` (concepts, trust model, NAT), `docs/technical.md
 ```sh
 cargo build                                        # whole workspace (debug); -p unitylan-engine for one crate
 
-# The three gates CI enforces (a pre-commit hook in .githooks runs these):
+# The four gates CI enforces (a pre-commit hook in .githooks runs these):
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps   # broken intra-doc links rot silently
+
+# Lint policy lives in `[workspace.lints]` (root Cargo.toml), not only in the clippy flag above, so
+# a local run and an IDE see the same set. Add a lint there only if the tree already passes it.
 
 # CI also runs a dependency-vuln gate (cargo audit, ignore-list in .cargo/audit.toml). The hook
 # runs it too, but only when a commit changes Cargo.lock (and only if cargo-audit is installed):

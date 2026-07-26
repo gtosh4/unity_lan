@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
-    /// Base URL of the coordinator, e.g. "https://coord.example.com" (or loopback http for dev).
+    /// Base URL of the coordinator, e.g. `https://coord.example.com` (or loopback http for dev).
     pub coordinator: String,
     /// Allow a plaintext-`http` coordinator URL to a **non-loopback** host. Off by default: the
     /// engine refuses such URLs at load, since an on-path attacker who can tamper the plaintext

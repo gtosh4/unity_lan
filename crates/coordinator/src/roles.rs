@@ -2,7 +2,7 @@
 //! (possibly multiple) guilds a coordinator serves.
 //!
 //! Two impls behind the trait: [`FakeRoleSource`] (config-seeded, offline dev/tests) and the live
-//! twilight bot-token source ([`TwilightRoleSource`] in `discord.rs`).
+//! twilight bot-token source ([`crate::discord::TwilightRoleSource`]).
 
 use std::collections::HashMap;
 

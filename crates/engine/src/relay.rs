@@ -7,7 +7,8 @@
 //!
 //! Authorization uses the standard long-term-credential / coturn `use-auth-secret` scheme: the
 //! coordinator mints a short-lived `<expiry>` username + HMAC credential (see [`common::relay`]),
-//! and this server's [`LongTermAuthHandler`] validates it against the same `relay_secret` without
+//! and this server's `LongTermAuthHandler` (from the `turn` crate) validates it against the same
+//! `relay_secret` without
 //! ever contacting the coordinator. The secret is per-relay and shared with the coordinator only.
 
 use std::collections::{HashMap, HashSet};

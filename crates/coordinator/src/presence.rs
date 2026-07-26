@@ -103,7 +103,8 @@ impl Presence {
         set
     }
 
-    /// Record a device in the per-user online set (own-device peering). Semantics mirror [`record`]:
+    /// Record a device in the per-user online set (own-device peering). Semantics mirror
+    /// [`Presence::record`]:
     /// returns `true` if it changed the map (new device / altered fields) so the caller bumps the
     /// version; an identical re-record refreshes `last_seen` only.
     pub fn record_self(

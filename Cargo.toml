@@ -8,6 +8,38 @@ edition = "2021"
 license = "AGPL-3.0-or-later"
 rust-version = "1.96"
 
+# Lint policy, so a local `cargo clippy` and an IDE agree with CI instead of CI's `-D warnings`
+# being the only place it's written down. Left at `warn`: CI promotes the lot to errors, and a
+# warning mid-edit shouldn't fail a local build. Every lint here already passes — this locks in
+# practices the code follows rather than filing new work.
+[workspace.lints.rust]
+# All 10 `unsafe` blocks are already explicit; keep it that way as edition 2024 approaches.
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+# Every `unsafe` block in the tree carries a SAFETY comment. This is what keeps the 11th honest.
+undocumented_unsafe_blocks = "warn"
+# Placeholders that should never reach a release of a privileged daemon.
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+
+# Release binaries ship in the auto-update bundle (`packaging/build.sh` tars engine + gui), so every
+# byte here is a download every device takes on every release. On the default profile that tarball
+# packs to 15.24 MB; the settings below bring it to 12.63 MB (-17%), for about a minute more build
+# time — paid once per release, saved on every device.
+#
+# Deliberately *not* set: `panic = "abort"`, which would turn a panicking tokio task into a dead
+# process rather than a dead task, and `opt-level = "z"`, which trades throughput on a data-plane
+# daemon doing crypto for size the settings below get more cheaply.
+[profile.release]
+# Drop DWARF but keep the symbol table, so a panic report from a field install still names
+# functions. `strip = "symbols"` packs to 11.50 MB (-25%) and gives that up — not worth it for a
+# daemon that auto-updates into places we can't attach a debugger to.
+strip = "debuginfo"
+lto = "thin"
+codegen-units = 1
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

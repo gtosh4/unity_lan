@@ -41,7 +41,7 @@ const MAX_ROTATION_CHAIN: usize = 64;
 /// we reach `target`. Each hop is verified cryptographically under the key we already trust, so an
 /// attacker without a legitimately-signed successor can't bridge the gap. `chain` is the coordinator's
 /// certs oldest→newest, but the walk doesn't rely on their order. Bounded by `chain.len()` hops so a
-/// cyclic/forged set can't loop forever, and refused outright past [`MAX_ROTATION_CHAIN`] certs so an
+/// cyclic/forged set can't loop forever, and refused outright past `MAX_ROTATION_CHAIN` certs so an
 /// oversized chain can't burn CPU. `true` ⇒ the caller may re-pin to `target`.
 pub fn walk_chain(pinned: [u8; 32], target: [u8; 32], chain: &[Signed]) -> bool {
     if chain.len() > MAX_ROTATION_CHAIN {

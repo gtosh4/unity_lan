@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-commit: the same gates CI enforces (fmt + clippy + test), run locally so drift
+# Pre-commit: the same gates CI enforces (fmt + clippy + test + doc), run locally so drift
 # never reaches a push. Enable once per clone:  git config core.hooksPath .githooks
 # Bypass a single commit with:  git commit --no-verify
 set -euo pipefail
@@ -20,6 +20,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 echo "pre-commit: cargo test --workspace"
 cargo test --workspace
+
+# Doc links rot silently: rename an item and every `[`Foo`]` pointing at it degrades to plain text
+# with no build error. Cheap with --no-deps, and the doc comments are this project's design record.
+echo "pre-commit: cargo doc --workspace --no-deps"
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
 
 # Dependency-vuln audit — only when this commit touches Cargo.lock (deps are all it checks), so it
 # stays off the hot path of everyday commits. Skipped if cargo-audit isn't installed.

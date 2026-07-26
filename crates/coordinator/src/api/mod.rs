@@ -65,7 +65,8 @@ pub struct AppState {
     pub oauth: Option<Arc<dyn OauthProvider>>,
     /// Proxy hops whose `X-Forwarded-For` we trust, so `client_ip` can recover a caller's real
     /// address behind a reverse proxy. Shared with the rate-limit middleware; also used to record
-    /// each device's coordinator-observed source IP for reflexive validation (see [`source_ip`]).
+    /// each device's coordinator-observed source IP for reflexive validation (see
+    /// [`AppState::source_ip`]).
     pub trusted_proxies: Arc<Vec<ipnet::IpNet>>,
     /// Each device's source IP as the coordinator itself observed it on that device's own
     /// register/refresh (proxy-corrected via `client_ip`). A peer-reported reflexive for device `V`
