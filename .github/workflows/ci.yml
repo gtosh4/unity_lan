@@ -61,6 +61,20 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
+  # `rust-version` in Cargo.toml is a promise to anyone building from source (distro packagers,
+  # people on an older toolchain). The other jobs run on `stable`, which satisfies it trivially and
+  # would keep satisfying it as stable moves on — so the promise is only worth something if one job
+  # actually builds on the declared floor. `check` rather than `test`: this is about the code
+  # compiling on 1.96, and the test run is already covered above.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check on the declared MSRV
+        run: cargo check --workspace --all-targets
+
   # Dependency policy that isn't about vulnerabilities: licences we can distribute inside an AGPL
   # binary, no dependency arriving from anywhere but crates.io, no unused entries in a manifest.
   # Policy and its reasoning live in deny.toml; advisories stay with `cargo audit` above so there
