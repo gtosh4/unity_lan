@@ -413,10 +413,7 @@ impl Store {
     /// bindings to [`MAX_OAUTH_BINDINGS_PER_USER`], dropping their oldest, so a flood of
     /// `/oauth/complete` calls with fresh pubkeys can't grow the table without limit (TM-2).
     pub async fn bind_oauth(&self, pubkey: &[u8; 32], user_id: u64) -> anyhow::Result<()> {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        let now = common::now_unix() as i64;
         sqlx::query(
             "INSERT OR REPLACE INTO oauth_authorized (pubkey, user_id, bound_at) VALUES (?, ?, ?)",
         )

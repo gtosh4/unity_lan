@@ -34,6 +34,29 @@ struct Entry {
     client_version: String,
 }
 
+/// Shared body of [`Presence::record`] and [`Presence::record_self`]: stamp `now` on the entry and
+/// report whether the *presence* part changed (a new device, or altered fields) — the caller bumps
+/// the matching membership scope. The two differ only in which map and key they address.
+fn record_in<K: std::hash::Hash + Eq>(
+    map: &Mutex<HashMap<K, Entry>>,
+    key: K,
+    p: MemberPresence,
+    client_version: String,
+    now: u64,
+) -> bool {
+    let mut map = map.lock().unwrap();
+    let changed = map.get(&key).map(|e| &e.p) != Some(&p);
+    map.insert(
+        key,
+        Entry {
+            p,
+            last_seen: now,
+            client_version,
+        },
+    );
+    changed
+}
+
 #[derive(Default)]
 pub struct Presence {
     // (guild_id, role_id, device_pubkey) -> entry
@@ -60,18 +83,13 @@ impl Presence {
         client_version: String,
         now: u64,
     ) -> bool {
-        let key = (guild_id, role_id, p.pubkey);
-        let mut map = self.map.lock().unwrap();
-        let changed = map.get(&key).map(|e| &e.p) != Some(&p);
-        map.insert(
-            key,
-            Entry {
-                p,
-                last_seen: now,
-                client_version,
-            },
-        );
-        changed
+        record_in(
+            &self.map,
+            (guild_id, role_id, p.pubkey),
+            p,
+            client_version,
+            now,
+        )
     }
 
     /// Every device pubkey currently present — in any network (`map`) or as an own-device peer
@@ -95,18 +113,7 @@ impl Presence {
         client_version: String,
         now: u64,
     ) -> bool {
-        let key = (user_id, p.pubkey);
-        let mut map = self.self_map.lock().unwrap();
-        let changed = map.get(&key).map(|e| &e.p) != Some(&p);
-        map.insert(
-            key,
-            Entry {
-                p,
-                last_seen: now,
-                client_version,
-            },
-        );
-        changed
+        record_in(&self.self_map, (user_id, p.pubkey), p, client_version, now)
     }
 
     /// Drop a device from the per-user online set (own-device peering) — on opt-out, pause, role

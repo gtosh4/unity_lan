@@ -110,21 +110,9 @@ fn admin_auth(st: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match presented {
-        Some(p) if ct_eq(p.as_bytes(), token.as_bytes()) => Ok(()),
+        Some(p) if common::crypto::ct_eq(p.as_bytes(), token.as_bytes()) => Ok(()),
         _ => Err(ApiError::new(StatusCode::UNAUTHORIZED, "unauthorized")),
     }
-}
-
-/// Constant-time byte-slice equality. Length still differs observably, acceptable for a secret.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 /// `GET /admin`: the operator dashboard **shell** (a self-contained HTML+JS app). Unauthenticated

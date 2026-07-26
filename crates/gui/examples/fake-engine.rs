@@ -42,12 +42,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 fn to_name(path: &str) -> std::io::Result<Name<'static>> {
     #[cfg(windows)]
     {
-        let stem = std::path::Path::new(path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("control")
-            .to_string();
-        format!("unitylan-{stem}").to_ns_name::<GenericNamespaced>()
+        common::control::pipe_name(Some(std::path::Path::new(path)))
+            .to_ns_name::<GenericNamespaced>()
     }
     #[cfg(not(windows))]
     {

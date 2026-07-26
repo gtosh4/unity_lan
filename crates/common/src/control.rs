@@ -18,6 +18,19 @@ pub use expose::{ExposeOp, ExposeResp, ExposeScope, ExposedPort, Proto, RemoveSc
 /// SCM entry point) and the GUI (status query + start/stop) address the same service.
 pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
 
+/// The Windows named-pipe name for a control socket path — `unitylan-<file stem>`, which
+/// `interprocess` maps to `\\.\pipe\unitylan-<stem>`. The engine derives it from its configured
+/// `control_socket`, each frontend from the path it was pointed at; shared here so the two sides
+/// can't drift and a default `control.sock` everywhere agrees on `unitylan-control`. `None` (no
+/// path configured) yields the same name as an unset default.
+pub fn pipe_name(control_socket: Option<&std::path::Path>) -> String {
+    let stem = control_socket
+        .and_then(|p| p.file_stem())
+        .and_then(|s| s.to_str())
+        .unwrap_or("control");
+    format!("unitylan-{stem}")
+}
+
 /// Display label for the synthetic "own devices" grouping: the pseudo-network the GUI shows for the
 /// always-on own-device peering toggle, and the tag on peers that are the owner's other devices. Not
 /// a real network (never on the coordinator wire) — a client-side display convention only, so both
@@ -383,8 +396,33 @@ pub fn classify_reach(punched: bool, connected: bool, attempt_age_secs: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_reach, ExposeOp, ExposeScope, PeerReach, Proto, RemoveScope, StatusReport,
+        classify_reach, pipe_name, ExposeOp, ExposeScope, PeerReach, Proto, RemoveScope,
+        StatusReport,
     };
+
+    /// The engine and every frontend derive the Windows pipe name from their own copy of the socket
+    /// path; they only meet if that derivation is identical, so it lives here. The default path on
+    /// both sides must land on `unitylan-control`.
+    #[test]
+    fn pipe_name_agrees_on_the_default_and_strips_the_extension() {
+        assert_eq!(pipe_name(None), "unitylan-control");
+        assert_eq!(
+            pipe_name(Some(std::path::Path::new("control.sock"))),
+            "unitylan-control"
+        );
+        // Only the file stem survives, so a full install path still names the same pipe. Spelled
+        // with `/` because `Path` splits on the *host's* separator and this test also runs on unix.
+        assert_eq!(
+            pipe_name(Some(std::path::Path::new(
+                "C:/ProgramData/UnityLAN/control.sock"
+            ))),
+            "unitylan-control"
+        );
+        assert_eq!(
+            pipe_name(Some(std::path::Path::new("/run/unitylan/dev.sock"))),
+            "unitylan-dev"
+        );
+    }
 
     /// The scope a frontend sends must be the scope the engine acts on. Both spellings of each
     /// legacy scope decode, and every scope round-trips.

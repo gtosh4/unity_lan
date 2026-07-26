@@ -188,33 +188,49 @@ struct CgnatConflict {
     rule: String,
 }
 
+/// Walk an `nft list ruleset` dump, yielding every rule line paired with the `family`/`table`/`chain`
+/// enclosing it — the coordinates `nft insert`/`nft delete rule` need. The `table`/`chain` headers
+/// themselves only update the context; they're never yielded as rules.
+fn rules_in_context(ruleset: &str) -> impl Iterator<Item = (String, String, String, &str)> {
+    ruleset
+        .lines()
+        .scan(
+            (String::new(), String::new(), String::new()),
+            |(family, table, chain), line| {
+                let l = line.trim();
+                if let Some(rest) = l.strip_prefix("table ") {
+                    let mut it = rest.split_whitespace();
+                    *family = it.next().unwrap_or_default().to_string();
+                    *table = it.next().unwrap_or_default().to_string();
+                    Some(None)
+                } else if let Some(rest) = l.strip_prefix("chain ") {
+                    *chain = rest
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_string();
+                    Some(None)
+                } else {
+                    Some(Some((family.clone(), table.clone(), chain.clone(), l)))
+                }
+            },
+        )
+        .flatten()
+}
+
 /// Heuristic: an `nft` rule that both drops/rejects and references the CGNAT block, outside our own
-/// table (our default-deny is a bare `drop`, so it never matches). Walks the ruleset tracking the
-/// enclosing `table`/`chain` so the caller knows where to insert the exemption.
+/// table (our default-deny is a bare `drop`, so it never matches).
 fn cgnat_conflict(ruleset: &str) -> Option<CgnatConflict> {
-    let (mut family, mut table, mut chain) = (String::new(), String::new(), String::new());
-    for line in ruleset.lines() {
-        let l = line.trim();
-        if let Some(rest) = l.strip_prefix("table ") {
-            let mut it = rest.split_whitespace();
-            family = it.next().unwrap_or_default().to_string();
-            table = it.next().unwrap_or_default().to_string();
-        } else if let Some(rest) = l.strip_prefix("chain ") {
-            chain = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-        } else if (l.contains("drop") || l.contains("reject")) && l.contains("100.64.0.0/10") {
-            return Some(CgnatConflict {
-                family: family.clone(),
-                table: table.clone(),
-                chain: chain.clone(),
-                rule: l.to_string(),
-            });
-        }
-    }
-    None
+    rules_in_context(ruleset)
+        .find(|(_, _, _, l)| {
+            (l.contains("drop") || l.contains("reject")) && l.contains("100.64.0.0/10")
+        })
+        .map(|(family, table, chain, rule)| CgnatConflict {
+            family,
+            table,
+            chain,
+            rule: rule.to_string(),
+        })
 }
 
 /// One exemption we want present in the foreign chain: the `nft` arguments that create it, plus a
@@ -274,32 +290,13 @@ fn compat_present(ruleset: &str, key: &str) -> bool {
 /// Locate every exemption we previously inserted, with the coordinates `nft delete rule` needs.
 /// Handles are listed newest-first so deleting in the returned order stays valid.
 fn compat_handles(ruleset: &str) -> Vec<(String, String, String, String)> {
-    let (mut family, mut table, mut chain) = (String::new(), String::new(), String::new());
-    let mut found = Vec::new();
-    for line in ruleset.lines() {
-        let l = line.trim();
-        if let Some(rest) = l.strip_prefix("table ") {
-            let mut it = rest.split_whitespace();
-            family = it.next().unwrap_or_default().to_string();
-            table = it.next().unwrap_or_default().to_string();
-        } else if let Some(rest) = l.strip_prefix("chain ") {
-            chain = rest
-                .split_whitespace()
-                .next()
-                .unwrap_or_default()
-                .to_string();
-        } else if l.contains(COMPAT_COMMENT) {
-            if let Some(h) = l.rsplit("# handle ").next() {
-                found.push((
-                    family.clone(),
-                    table.clone(),
-                    chain.clone(),
-                    h.trim().to_string(),
-                ));
-            }
-        }
-    }
-    found
+    rules_in_context(ruleset)
+        .filter(|(_, _, _, l)| l.contains(COMPAT_COMMENT))
+        .filter_map(|(family, table, chain, l)| {
+            let h = l.rsplit("# handle ").next()?;
+            Some((family, table, chain, h.trim().to_string()))
+        })
+        .collect()
 }
 
 fn nft_ruleset(args: &[&str]) -> Option<String> {

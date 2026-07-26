@@ -23,11 +23,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 fn to_name(path: PathBuf) -> std::io::Result<Name<'static>> {
     #[cfg(windows)]
     {
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("control");
-        format!("unitylan-{stem}").to_ns_name::<GenericNamespaced>()
+        common::control::pipe_name(Some(&path)).to_ns_name::<GenericNamespaced>()
     }
     #[cfg(not(windows))]
     {
@@ -35,8 +31,13 @@ fn to_name(path: PathBuf) -> std::io::Result<Name<'static>> {
     }
 }
 
-/// One request/response round-trip. Errors are stringified for display in the UI.
-async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, String> {
+/// Connect to the control socket and write `req`, returning the reader its reply lines arrive on.
+/// Shared by the one-shot [`request`] and the long-lived `Watch` subscription, which differ only in
+/// how many lines they then read. Errors are stringified for display in the UI.
+async fn connect_and_send(
+    path: PathBuf,
+    req: ControlRequest,
+) -> Result<BufReader<LocalStream>, String> {
     let name = to_name(path).map_err(|e| e.to_string())?;
     let stream = LocalStream::connect(name)
         .await
@@ -50,6 +51,12 @@ async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, 
         .await
         .map_err(|e| e.to_string())?;
     reader.get_mut().flush().await.map_err(|e| e.to_string())?;
+    Ok(reader)
+}
+
+/// One request/response round-trip. Errors are stringified for display in the UI.
+async fn request(path: PathBuf, req: ControlRequest) -> Result<ControlResponse, String> {
+    let mut reader = connect_and_send(path, req).await?;
     let mut line = String::new();
     reader
         .read_line(&mut line)
@@ -166,25 +173,6 @@ pub async fn unblock_peer(path: PathBuf, user_id: u64) -> Result<StatusReport, S
 /// (e.g. it restarts after an auto-update). Matches the old status-poll cadence.
 const WATCH_RECONNECT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Open a `Watch` subscription: connect and send the request, returning the reader to stream
-/// [`ControlResponse::Status`] lines from.
-async fn connect_watch(path: PathBuf) -> Result<BufReader<LocalStream>, String> {
-    let name = to_name(path).map_err(|e| e.to_string())?;
-    let stream = LocalStream::connect(name)
-        .await
-        .map_err(|e| format!("connect (is the daemon running?): {e}"))?;
-    let mut reader = BufReader::new(stream);
-    let mut bytes = serde_json::to_vec(&ControlRequest::Watch).map_err(|e| e.to_string())?;
-    bytes.push(b'\n');
-    reader
-        .get_mut()
-        .write_all(&bytes)
-        .await
-        .map_err(|e| e.to_string())?;
-    reader.get_mut().flush().await.map_err(|e| e.to_string())?;
-    Ok(reader)
-}
-
 /// Live status stream backing the GUI's push subscription: connect, subscribe to `Watch`, and yield
 /// a `StatusReport` every time the engine's status changes (the engine sends the current one first,
 /// so this replaces polling for the initial state too). Reconnects with a short backoff if the
@@ -203,7 +191,7 @@ pub fn watch_status(
         async move {
             let mut reader = match state {
                 State::Read(reader) => reader,
-                State::Connect => match connect_watch(path).await {
+                State::Connect => match connect_and_send(path, ControlRequest::Watch).await {
                     Ok(reader) => reader,
                     Err(e) => {
                         tokio::time::sleep(WATCH_RECONNECT).await;

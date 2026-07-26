@@ -327,13 +327,7 @@ impl Config {
     pub fn control_name(&self) -> String {
         #[cfg(windows)]
         {
-            let stem = self
-                .control_socket
-                .as_ref()
-                .and_then(|p| p.file_stem())
-                .and_then(|s| s.to_str())
-                .unwrap_or("control");
-            format!("unitylan-{stem}")
+            common::control::pipe_name(self.control_socket.as_deref())
         }
         #[cfg(not(windows))]
         {

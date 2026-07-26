@@ -648,12 +648,16 @@ impl App {
         col.into()
     }
 
-    fn networks_section(&self) -> Element<'_, Message> {
-        let nets = self
-            .status
+    /// The networks in the latest status, or empty before the first one lands.
+    fn networks(&self) -> &[common::api::NetworkStatus] {
+        self.status
             .as_ref()
             .map(|s| s.networks.as_slice())
-            .unwrap_or(&[]);
+            .unwrap_or(&[])
+    }
+
+    fn networks_section(&self) -> Element<'_, Message> {
+        let nets = self.networks();
         // Secure default: newly-discovered networks stay off until enabled here. No status yet
         // (socket not up) → assume the secure posture. Sits at the top of the card: it's a
         // section-wide policy governing the list below, not a per-network control.
@@ -869,12 +873,7 @@ impl App {
                 ExposeScope::OwnDevices.fallback_label(),
             ),
         ];
-        let nets = self
-            .status
-            .as_ref()
-            .map(|s| s.networks.as_slice())
-            .unwrap_or(&[]);
-        for n in nets {
+        for n in self.networks() {
             let scope = ExposeScope::Net {
                 guild_id: n.guild_id,
                 role_id: n.role_id,

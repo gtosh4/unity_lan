@@ -68,7 +68,15 @@ pub async fn run_gateway(
                 Err(e) => tracing::warn!(guild = %gc.id(), "registering commands: {e:#}"),
             },
             Event::InteractionCreate(interaction) => {
-                handle_interaction(&http, app_id, &store, &versions, interaction.0).await;
+                handle_interaction(
+                    &http,
+                    app_id,
+                    &store,
+                    &versions,
+                    roles.as_ref(),
+                    interaction.0,
+                )
+                .await;
             }
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
@@ -182,6 +190,7 @@ async fn handle_interaction(
     app_id: Id<ApplicationMarker>,
     store: &Store,
     versions: &Versions,
+    roles: &dyn RoleSource,
     interaction: Interaction,
 ) {
     let Some(InteractionData::ApplicationCommand(data)) = interaction.data.clone() else {
@@ -190,7 +199,7 @@ async fn handle_interaction(
     if data.name != "unitylan" {
         return;
     }
-    let content = process(http, store, versions, &interaction, &data).await;
+    let content = process(store, versions, roles, &interaction, &data).await;
 
     let response = InteractionResponse {
         kind: InteractionResponseType::ChannelMessageWithSource,
@@ -211,9 +220,9 @@ async fn handle_interaction(
 }
 
 async fn process(
-    http: &twilight_http::Client,
     store: &Store,
     versions: &Versions,
+    roles: &dyn RoleSource,
     interaction: &Interaction,
     data: &CommandData,
 ) -> String {
@@ -229,7 +238,7 @@ async fn process(
             if !is_admin(interaction) {
                 return "You need the Manage Server permission.".to_string();
             }
-            handle_network(http, store, versions, guild_id.get(), subs).await
+            handle_network(store, versions, roles, guild_id.get(), subs).await
         }
         // /unitylan enroll — any member mints a one-time key for their own headless device.
         ("enroll", CommandOptionValue::SubCommand(_)) => {
@@ -262,15 +271,28 @@ async fn process(
     }
 }
 
+/// Unwrap a subcommand group's chosen subcommand into `(name, options)`. `None` when the
+/// interaction carries no subcommand or one whose value isn't a subcommand — the caller answers
+/// "Unknown subcommand."
+fn subcommand(
+    subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
+) -> Option<(
+    &str,
+    &[twilight_model::application::interaction::application_command::CommandDataOption],
+)> {
+    let sub = subs.first()?;
+    let CommandOptionValue::SubCommand(opts) = &sub.value else {
+        return None;
+    };
+    Some((sub.name.as_str(), opts))
+}
+
 async fn handle_primary(
     store: &Store,
     user_id: u64,
     subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
 ) -> String {
-    let Some(sub) = subs.first() else {
-        return "Unknown subcommand.".to_string();
-    };
-    let CommandOptionValue::SubCommand(opts) = &sub.value else {
+    let Some((sub_name, opts)) = subcommand(subs) else {
         return "Unknown subcommand.".to_string();
     };
 
@@ -283,7 +305,7 @@ async fn handle_primary(
     }
     let primary = store.primary_pubkey(user_id).await.ok().flatten();
 
-    match sub.name.as_str() {
+    match sub_name {
         "list" => {
             let mut s = String::from("Your devices:\n");
             for (pk, name) in &devices {
@@ -333,16 +355,13 @@ fn is_admin(interaction: &Interaction) -> bool {
 }
 
 async fn handle_network(
-    http: &twilight_http::Client,
     store: &Store,
     versions: &Versions,
+    roles: &dyn RoleSource,
     guild_id: u64,
     subs: &[twilight_model::application::interaction::application_command::CommandDataOption],
 ) -> String {
-    let Some(sub) = subs.first() else {
-        return "Unknown subcommand.".to_string();
-    };
-    let CommandOptionValue::SubCommand(opts) = &sub.value else {
+    let Some((sub_name, opts)) = subcommand(subs) else {
         return "Unknown subcommand.".to_string();
     };
     let role_opt = || {
@@ -352,7 +371,7 @@ async fn handle_network(
         })
     };
 
-    match sub.name.as_str() {
+    match sub_name {
         "add" => {
             let Some(role) = role_opt() else {
                 return "Missing role.".to_string();
@@ -364,7 +383,8 @@ async fn handle_network(
             // The network name is always the role's own Discord name, resolved live from the API on
             // each build_snapshot; fall back to `role-{id}` only if that lookup fails (e.g. the role
             // was just deleted).
-            let name = role_name(http, guild_id, role.get())
+            let name = roles
+                .role_name(guild_id, role.get())
                 .await
                 .unwrap_or_else(|| format!("role-{role}"));
             match store.upsert_network(guild_id, role.get(), &name).await {
@@ -416,22 +436,6 @@ async fn handle_network(
         },
         _ => "Unknown subcommand.".to_string(),
     }
-}
-
-/// The Discord display name of a role in a guild, if the API lookup succeeds. Used to default a
-/// network's name to the role name at registration.
-async fn role_name(http: &twilight_http::Client, guild_id: u64, role_id: u64) -> Option<String> {
-    let roles = http
-        .roles(Id::new(guild_id))
-        .await
-        .ok()?
-        .model()
-        .await
-        .ok()?;
-    roles
-        .into_iter()
-        .find(|r| r.id.get() == role_id)
-        .map(|r| r.name)
 }
 
 #[cfg(test)]
@@ -502,10 +506,10 @@ mod tests {
         }]
     }
 
-    /// A `twilight_http::Client` performs no I/O until a request is actually issued, so every path
-    /// below (none of which reaches `role_name`) leaves it untouched.
-    fn http() -> twilight_http::Client {
-        twilight_http::Client::new("token".to_string())
+    /// An empty offline role source: its `role_name` always returns `None`, so any path that does
+    /// reach the lookup falls back to `role-{id}` instead of touching the network.
+    fn roles() -> crate::roles::FakeRoleSource {
+        crate::roles::FakeRoleSource::new(crate::config::FakeConfig { guilds: Vec::new() })
     }
 
     #[test]
@@ -539,8 +543,8 @@ mod tests {
         let store = Store::memory().await;
         let versions = Versions::default();
         // `@everyone`'s role id equals the guild id; it is every member, not an ACL group. The
-        // guard must fire before the role-name lookup, so this reaches no HTTP call.
-        let out = handle_network(&http(), &store, &versions, 42, &sub("add", Some(42))).await;
+        // guard must fire before the role-name lookup, so nothing is registered.
+        let out = handle_network(&store, &versions, &roles(), 42, &sub("add", Some(42))).await;
         assert_eq!(out, "`@everyone` cannot be a network.");
         assert!(store.networks_in_guild(42).await.unwrap().is_empty());
     }
@@ -550,7 +554,7 @@ mod tests {
         let store = Store::memory().await;
         let versions = Versions::default();
         for name in ["add", "remove"] {
-            let out = handle_network(&http(), &store, &versions, 42, &sub(name, None)).await;
+            let out = handle_network(&store, &versions, &roles(), 42, &sub(name, None)).await;
             assert_eq!(out, "Missing role.");
         }
     }
@@ -563,7 +567,7 @@ mod tests {
         let scopes: BTreeSet<Scope> = [Scope::Guild(42)].into_iter().collect();
         let before = versions.aggregate(&scopes);
 
-        let out = handle_network(&http(), &store, &versions, 42, &sub("remove", Some(7))).await;
+        let out = handle_network(&store, &versions, &roles(), 42, &sub("remove", Some(7))).await;
 
         assert_eq!(out, "Unregistered <@&7>.");
         assert!(store.networks_in_guild(42).await.unwrap().is_empty());
@@ -578,7 +582,7 @@ mod tests {
     async fn network_list_renders_empty_and_populated() {
         let store = Store::memory().await;
         let versions = Versions::default();
-        let out = handle_network(&http(), &store, &versions, 42, &sub("list", None)).await;
+        let out = handle_network(&store, &versions, &roles(), 42, &sub("list", None)).await;
         assert_eq!(out, "No networks registered.");
 
         store.upsert_network(42, 7, "gamers").await.unwrap();
@@ -586,7 +590,7 @@ mod tests {
         // A network in another guild must not leak into this guild's listing.
         store.upsert_network(99, 9, "elsewhere").await.unwrap();
 
-        let out = handle_network(&http(), &store, &versions, 42, &sub("list", None)).await;
+        let out = handle_network(&store, &versions, &roles(), 42, &sub("list", None)).await;
         assert!(out.starts_with("Networks:\n"));
         assert!(out.contains("• <@&7> — gamers\n"));
         assert!(out.contains("• <@&8> — modders\n"));
@@ -597,9 +601,9 @@ mod tests {
     async fn network_rejects_unknown_and_empty_subcommands() {
         let store = Store::memory().await;
         let versions = Versions::default();
-        let out = handle_network(&http(), &store, &versions, 42, &sub("nope", Some(7))).await;
+        let out = handle_network(&store, &versions, &roles(), 42, &sub("nope", Some(7))).await;
         assert_eq!(out, "Unknown subcommand.");
-        let out = handle_network(&http(), &store, &versions, 42, &[]).await;
+        let out = handle_network(&store, &versions, &roles(), 42, &[]).await;
         assert_eq!(out, "Unknown subcommand.");
     }
 }
