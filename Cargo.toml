@@ -44,6 +44,13 @@ dbg_macro = "warn"
 strip = "debuginfo"
 lto = "thin"
 codegen-units = 1
+# On by default only in debug builds, which means every overflow in a *shipped* binary silently
+# wraps. Almost all the arithmetic here derives from network input — host indices, mesh addresses,
+# TTLs and expiry seconds, byte counters — and a wrapped value there is not a smaller problem than a
+# crash: it is a device handed the wrong address, or an attestation treated as live past its expiry.
+# Wrong-but-running is the worse failure for something that signs and routes. Costs a branch per
+# arithmetic op, which is noise next to the crypto and syscalls on these paths.
+overflow-checks = true
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
