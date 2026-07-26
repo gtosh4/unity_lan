@@ -222,7 +222,10 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
     }
     let resp = match req {
         ControlRequest::Status => ControlResponse::Status(Box::new(ctx.status.borrow().clone())),
-        ControlRequest::Watch => unreachable!("Watch handled above"),
+        // Handled above; this arm only keeps the match exhaustive. An error beats `unreachable!`
+        // here: the request comes from a local client, and a root daemon should not have a panic
+        // path reachable by anything it parses off the socket.
+        ControlRequest::Watch => ControlResponse::Error("Watch is not a one-shot request".into()),
         ControlRequest::Manage(op) => match ctx.token.read().await.clone() {
             None => ControlResponse::Error("device not enrolled yet".into()),
             Some(token) => match coord::manage(&ctx.coordinator, token, op).await {

@@ -563,7 +563,11 @@ impl Store {
         // At most `taken.len()` names are in the way, so a free suffix exists within that many tries.
         for n in 2..=taken.len() + 2 {
             let suffix = format!("-{n}");
-            let stem = &desired[..desired.len().min(63 - suffix.len())];
+            // Trim to fit the 63-char label cap. `desired` is expected to be sanitized (ASCII), but
+            // slice by a *character* boundary rather than a byte offset so an unsanitized caller
+            // costs us a mis-trimmed name instead of panicking mid-request.
+            let keep = 63usize.saturating_sub(suffix.len());
+            let stem: String = desired.chars().take(keep).collect();
             let candidate = format!("{stem}{suffix}");
             if !taken.contains(&candidate) {
                 return Ok(candidate);
@@ -1119,5 +1123,24 @@ mod tests {
         assert_eq!(st.rename_device(7, &c, "device").await.unwrap(), "device-3");
         assert_eq!(st.rename_device(7, &b, "laptop").await.unwrap(), "laptop");
         assert_eq!(st.rename_device(7, &c, "laptop").await.unwrap(), "laptop-2");
+    }
+
+    /// Suffixing trims the stem to fit the 63-char label cap. Both API call sites sanitize to ASCII
+    /// first, so a multi-byte name shouldn't arrive — but trimming used a byte offset, which would
+    /// panic mid-request on a char boundary if one ever did. Long *and* multi-byte, so the trim
+    /// actually has to cut.
+    #[tokio::test]
+    async fn a_long_multibyte_name_is_trimmed_not_panicked_on() {
+        let st = Store::memory().await;
+        let long = "é".repeat(80);
+        st.allocate_device(tnet(), &[1u8; 32], 7, &long)
+            .await
+            .unwrap();
+        let (_, second) = st
+            .allocate_device(tnet(), &[2u8; 32], 7, &long)
+            .await
+            .unwrap();
+        assert!(second.ends_with("-2"));
+        assert_eq!(second.chars().count(), 63);
     }
 }

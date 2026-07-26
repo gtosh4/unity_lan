@@ -404,17 +404,15 @@ fn unpack_bundle_capped(bytes: &[u8], state_dir: &Path, max_entry: u64) -> anyho
     for entry in ar.entries().context("reading update archive")? {
         let mut entry = entry.context("reading update archive entry")?;
         let path = entry.path().context("update archive entry path")?;
-        let slot = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) if n == BUNDLE_ENGINE => &mut bundle.engine,
-            Some(n) if n == BUNDLE_GUI => &mut bundle.gui,
+        // Carry the matched name out of the match rather than re-deriving it from `path`, which
+        // needed an `expect` to restate what the match already proved (and held a borrow of `entry`
+        // that the extraction below wants back).
+        let (name, slot) = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if n == BUNDLE_ENGINE => (BUNDLE_ENGINE, &mut bundle.engine),
+            Some(n) if n == BUNDLE_GUI => (BUNDLE_GUI, &mut bundle.gui),
             _ => continue,
         };
-        let out = state_dir.join(format!(
-            "{}.update",
-            path.file_name()
-                .and_then(|n| n.to_str())
-                .expect("matched above")
-        ));
+        let out = state_dir.join(format!("{name}.update"));
         let mut f =
             std::fs::File::create(&out).with_context(|| format!("writing {}", out.display()))?;
         // Bound the extracted size: a `.tar.gz` compresses well, so a tiny archive can inflate to

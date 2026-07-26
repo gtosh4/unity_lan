@@ -26,8 +26,20 @@ fn sip_bytes(bytes: &[u8]) -> u64 {
 
 /// The number of host indices in `net`, i.e. `2^(32 - prefix)`. Index 0 (network) and the last
 /// index (broadcast) are reserved, so allocatable indices are `1..host_count(net) - 1`.
-fn host_count(net: &Ipv4Net) -> u32 {
-    1u32 << (32 - net.prefix_len())
+///
+/// Returned as `u64` so a `/0` (count `2^32`) is representable: in `u32` that shift is an overflow
+/// panic, and the callers below subtract 2 from it, which underflows for a `/31` or `/32`. The
+/// coordinator rejects anything outside `/8..=/30` at startup, so those prefixes shouldn't reach
+/// here — but this is shared arithmetic with no view of that check, and a division by zero is a
+/// poor way to learn a CIDR slipped through. See [`allocatable`].
+fn host_count(net: &Ipv4Net) -> u64 {
+    1u64 << (32 - net.prefix_len())
+}
+
+/// How many indices in `net` can actually be handed to a device — `host_count` less the reserved
+/// network and broadcast indices. `0` for a `/31` or `/32`, which have no room for either.
+fn allocatable(net: &Ipv4Net) -> u32 {
+    host_count(net).saturating_sub(2) as u32
 }
 
 /// The default mesh CIDR for a deployment: a `/16` inside 100.64.0.0/10, chosen deterministically
@@ -49,20 +61,27 @@ pub fn nets_overlap(a: &Ipv4Net, b: &Ipv4Net) -> bool {
 /// from its WG public key. The coordinator is the authority and resolves collisions; this is the
 /// hint.
 pub fn device_hint(net: &Ipv4Net, wg_pubkey: &[u8; 32]) -> u32 {
-    // `host_count - 2` allocatable slots (index 0 and the last are reserved), offset by 1.
-    (sip_bytes(wg_pubkey) % (host_count(net) as u64 - 2)) as u32 + 1
+    // Index 0 and the last are reserved, so the hint spans the `allocatable` slots offset by 1. A
+    // net with no allocatable slots has no valid hint; `pick_free_index` refuses it anyway.
+    match allocatable(net) {
+        0 => 1,
+        n => (sip_bytes(wg_pubkey) % n as u64) as u32 + 1,
+    }
 }
 
 /// Turn a host index (`1..host_count-1`) into its address within `net`.
 pub fn addr_from_index(net: &Ipv4Net, index: u32) -> Ipv4Addr {
-    debug_assert!(index >= 1 && index < host_count(net) - 1);
+    debug_assert!(index >= 1 && index <= allocatable(net));
     Ipv4Addr::from(u32::from(net.network()) + index)
 }
 
 /// Pick a free host index in `1..host_count-1`, starting at `hint` and probing upward (wrapping).
-/// Returns `None` only if `net`'s addresses are exhausted.
+/// Returns `None` if `net`'s addresses are exhausted — or if it is too small to hold any device.
 pub fn pick_free_index(net: &Ipv4Net, taken: &BTreeSet<u32>, hint: u32) -> Option<u32> {
-    let last = host_count(net) - 2; // highest allocatable index (broadcast reserved)
+    let last = allocatable(net); // highest allocatable index (broadcast reserved)
+    if last == 0 {
+        return None;
+    }
     let mut idx = hint.clamp(1, last);
     for _ in 0..last {
         if !taken.contains(&idx) {
@@ -108,7 +127,7 @@ mod tests {
     #[test]
     fn addr_within_configured_range() {
         let n = net("100.72.0.0/16");
-        for idx in [1u32, 2, 255, 4242, host_count(&n) - 2] {
+        for idx in [1u32, 2, 255, 4242, allocatable(&n)] {
             let addr = addr_from_index(&n, idx);
             assert!(n.contains(&addr), "{addr} (idx {idx}) not in {n}");
         }
@@ -143,7 +162,23 @@ mod tests {
         let key = [7u8; 32];
         let a = device_hint(&n, &key);
         assert_eq!(a, device_hint(&n, &key));
-        assert!((1..host_count(&n) - 1).contains(&a));
+        assert!((1..=allocatable(&n)).contains(&a));
+    }
+
+    /// The coordinator rejects these prefixes at startup, so they are not expected here — but this
+    /// arithmetic is a crate away from that check, and used to underflow (`/31`, `/32`) or overflow
+    /// the shift (`/0`) rather than say "no room".
+    #[test]
+    fn degenerate_prefixes_report_no_room_instead_of_panicking() {
+        for s in ["10.0.0.0/31", "10.0.0.1/32"] {
+            let n = net(s);
+            assert_eq!(allocatable(&n), 0, "{s} has no allocatable index");
+            assert_eq!(pick_free_index(&n, &BTreeSet::new(), 1), None);
+            device_hint(&n, &[3u8; 32]); // must not divide by zero
+        }
+        let all = net("0.0.0.0/0");
+        assert_eq!(host_count(&all), 1u64 << 32);
+        assert!(pick_free_index(&all, &BTreeSet::new(), 1).is_some());
     }
 
     #[test]
