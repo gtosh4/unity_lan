@@ -442,7 +442,7 @@ async fn register_once(config: Option<String>, token: Option<String>) -> anyhow:
         .ok()
         .map(|ep| common::crypto::enroll_proof(&wg_priv, &ep));
 
-    let (_resp, device) = coord::register(
+    let (resp, device) = coord::register(
         &cfg.coordinator,
         &cfg.state_dir,
         coord::CoordReq {
@@ -465,6 +465,15 @@ async fn register_once(config: Option<String>, token: Option<String>) -> anyhow:
     )
     .await?;
     // `register` pins/verifies the anchor internally (trust-on-first-use, then rotation-chain).
+
+    // Persist the device bearer token, exactly as the daemon does. The coordinator hands it out
+    // *only* on the register that first enrols the pubkey, and every later register/refresh —
+    // this path or the daemon's — must present it. Dropping it here would enrol the device and
+    // throw away its only credential: the state dir is then permanently 401'd ("device token
+    // missing or invalid"), with no recovery short of deleting `wg.key`.
+    if let Some(tok) = &resp.device_token {
+        keys::save_token(&cfg.state_dir, tok)?;
+    }
 
     match device {
         None => tracing::warn!("registered, but hold no networks (no roles)"),

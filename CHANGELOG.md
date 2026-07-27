@@ -3,6 +3,16 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- Running `unitylan-engine` bare once — the one-shot "register and print my address" check — no longer
+  wedges that install. It enrolled the device but discarded the credential the coordinator issues on
+  enrolment, so every later run, including the daemon's, was refused with "device token missing or
+  invalid" and retried forever; the only way out was deleting the device's key and starting over. The
+  one-shot path now stores the credential the same way the daemon does.
+
 ## v0.5.1
 
 ### Fixed

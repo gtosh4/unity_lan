@@ -208,7 +208,11 @@ echo "A=10.0.0.1 (relay)  B=$B_IP  C=$C_IP (behind isolated NATs)"
 # pair is the only one that validates here).
 echo "=== waiting for ICE to connect (punch fails → Unreachable → ICE agent → relay pair) ==="
 CONNECTED=0
-for _ in $(seq 1 200); do
+# 300s. A pass takes ~40s on an idle desktop, but the gate is reached only after the punch has run
+# its full timeout, so the whole chain shifts under CPU contention — on a loaded CI runner the old
+# 100s ceiling expired mid-negotiation and reported "never connected" for a path that was working.
+# A ceiling only costs wall clock when the test genuinely fails, so size it for the slow machine.
+for _ in $(seq 1 600); do
   if grep -q "ice: connected" "$TMP/b.log" 2>/dev/null && grep -q "ice: connected" "$TMP/c.log" 2>/dev/null; then
     CONNECTED=1; break
   fi

@@ -206,7 +206,10 @@ echo "A=10.0.0.1 (relay)  B=$B_IP  C=$C_IP (behind isolated NATs)"
 # both allocate on it. Gate on both nodes allocating a TURN relay (the punch simply never completes).
 echo "=== waiting for relay allocation (punch fails → Unreachable → relay via A) ==="
 RELAYED=0
-for _ in $(seq 1 200); do
+# 300s, for the same reason as ice-test.sh: the gate opens only after the punch times out, so the
+# whole chain slides under CPU contention and a ceiling sized for an idle desktop reports a working
+# relay as "never allocated". It costs wall clock only on a real failure.
+for _ in $(seq 1 600); do
   if grep -q "relay: allocated" "$TMP/b.log" 2>/dev/null && grep -q "relay: allocated" "$TMP/c.log" 2>/dev/null; then
     RELAYED=1; break
   fi

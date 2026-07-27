@@ -197,7 +197,23 @@ Linux (or WSL2):
 | `oauth-test.sh` / `gui-login-test.sh` | interactive Discord login (offline fake OAuth) |
 | `expose-net-test.sh` / `net-toggle-test.sh` | per-network expose scoping and peering toggles |
 | `rotation-test.sh` | coordinator trust-anchor rotation |
+| `gossip-test.sh` | peer-direct attestation refresh with the coordinator cut off |
+| `ice-test.sh` / `relay-test.sh` | ICE negotiation and the ciphertext TURN relay fallback |
+| `own-device-test.sh` | a user's own devices peering with no shared network |
+| `update-test.sh` | the signed auto-update path, manifest → verify → swap → restart |
 | `resolver-hook-test.sh` | live systemd-resolved hookup (needs root + real resolved) |
+
+**CI runs these** (`.github/workflows/e2e.yml`) on every PR, so a break here fails the build just
+like a failing unit test. Excluded there, and why: `resolver-hook-test.sh` needs real host root and a
+live `systemd-resolved`; `readme-demo.sh` needs a desktop; `coordinator-scale-test.sh` is a metrics
+probe with no assertion; `update-test.sh` builds the workspace twice, so it runs nightly instead; and
+`relay-test.sh` is known-broken on `main` (the relayed-address exchange never completes — see the
+roadmap). Re-add that one to the workflow's list as part of fixing it.
+
+The NAT-traversal three (`nat`, `ice`, `relay`) gate on a punch failing before the fallback engages,
+so their wait windows are sized for a loaded CI runner rather than a fast desktop — a pass takes well
+under a minute here, and the ceiling only costs wall clock on a genuine failure. Don't run several of
+them at once: they're timing-sensitive enough that CPU contention alone fails them.
 
 For Windows-specific driver paths there are `unitylan-engine` dev subcommands that drive the real
 backends on an elevated box: `wg-smoke` (bring a WG interface up/down) and

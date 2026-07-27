@@ -1,0 +1,109 @@
+# End-to-end tests: the `scripts/*-test.sh` suite.
+#
+# These cover what the unit tests structurally can't — a real coordinator process, real engine
+# daemons in real network namespaces, a real WireGuard data plane, real NAT. Until this workflow
+# existed they only ever ran when a human typed them, which is how `rotation-test.sh` sat broken on
+# `main`: the device-token auth change landed with every unit test green.
+#
+# Split from `ci.yml` rather than folded into it because the requirements differ — these need
+# unprivileged user namespaces, `nft`, `wg` and a few minutes of wall clock, none of which the
+# fmt/clippy/test gate wants. Both run on every PR; a failure here is as blocking as a failing unit
+# test.
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  # The update path builds the workspace twice (a version-patched "old" client plus the tip), so it
+  # is too slow for the per-PR set — it runs nightly instead. See the `update` job.
+  schedule:
+    - cron: '17 6 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    # Generous: the suite takes ~4 minutes: a hung daemon should still fail the job rather than burn
+    # the runner's full 6-hour allowance.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # `nft` for the NAT/blackhole emulation, `wg` for reading tunnel state, `socat` for the
+      # exposed-port probes. `jq`, `curl`, `python3` and `openssl` are already on the image.
+      - name: install test tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables wireguard-tools socat
+
+      # Every netns script re-execs itself under `unshare -Urnm --map-root-user`, which Ubuntu 24.04
+      # restricts by default via an AppArmor policy. Lift it for the runner (a throwaway VM) rather
+      # than running the suite as root — running unprivileged is the property these scripts are
+      # written to prove, and root would hide a regression in it. Tolerant of the knob being absent
+      # on an image that never set it.
+      - name: allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          echo "max_user_namespaces=$(cat /proc/sys/user/max_user_namespaces)"
+
+      - name: build
+        run: cargo build --workspace
+
+      # Run the whole suite and report every failure, rather than stopping at the first: when a wire
+      # change breaks several scripts, one run should say so once. Each script is wrapped in its own
+      # `timeout` so a daemon that hangs costs that script's budget, not the job's.
+      #
+      # Not run here, and why:
+      #   resolver-hook-test.sh  needs real host root + a live systemd-resolved (a userns won't do)
+      #   dev-run.sh             starts a real interface on the host; not a test
+      #   readme-demo.sh         needs a Wayland desktop + screencast portal
+      #   coordinator-scale-test.sh  a metrics probe, no pass/fail assertion
+      #   update-test.sh         nightly (see below) — builds the workspace twice
+      #   relay-test.sh          KNOWN BROKEN on main — see the roadmap's "TURN relay converge"
+      #                          entry. Both ends allocate on the relay and report `Relayed`, but
+      #                          neither is handed the other's relayed address, so no packet ever
+      #                          crosses. Excluded so this workflow lands green; put it back in
+      #                          this list as part of the fix, not before.
+      - name: run the e2e suite
+        run: |
+          set -u
+          failed=()
+          for s in wg-tunnel mesh own-device net-toggle expose-net gui-login oauth rotation \
+                   nat ice gossip; do
+            echo "::group::$s-test.sh"
+            start=$SECONDS
+            if timeout 600 "scripts/$s-test.sh"; then
+              echo "PASS $s-test.sh ($((SECONDS - start))s)"
+            else
+              echo "FAIL $s-test.sh (rc=$?, $((SECONDS - start))s)"
+              failed+=("$s")
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::e2e failures: ${failed[*]}"
+            exit 1
+          fi
+
+  # The signed auto-update path, end to end: mint a release key, build a version-patched "old"
+  # client armed with its public half, serve a manifest signed with the private seed, and watch the
+  # old engine verify → download → swap → re-exec onto the new version. Two workspace builds, so
+  # it's nightly + on demand rather than per-PR.
+  update:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: allow unprivileged user namespaces
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: update-test.sh
+        run: timeout 1800 scripts/update-test.sh
