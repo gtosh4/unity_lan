@@ -17,7 +17,9 @@ CFG="$TMP/coordinator.toml"
   echo "bind = \"127.0.0.1:$PORT\""
   echo "database = \"$TMP/coordinator.db\""
   echo 'trusted_proxies = ["127.0.0.1/32"]'
-  echo 'attestation_ttl_secs = 30'
+  # `MIN_ATTESTATION_TTL_SECS` is the floor the coordinator's config validation enforces; below it
+  # the process refuses to start. This said 30 and had been unloadable since that check landed.
+  echo 'attestation_ttl_secs = 60'
   echo '[[fake.guild]]'
   echo 'id = 1'
   echo 'name = "Scale"'

@@ -93,7 +93,8 @@ session, impossible (no password).
 
 | Script | How to run |
 | --- | --- |
-| `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
+| `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
+| `gossip-test.sh` | directly, self-unshares — `timeout 400 scripts/gossip-test.sh` (~3m10s: its phases are multiples of the attestation TTL, which can't go below the coordinator's `MIN_ATTESTATION_TTL_SECS`) |
 | `oauth-test.sh`, `rotation-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG) |
 | `update-test.sh` | directly, self-unshares — `timeout 420 scripts/update-test.sh` (builds twice; needs `openssl` + `python3`) |
 | `resolver-hook-test.sh` | **real host root** — needs live `systemd-resolved`, a userns won't do |

@@ -16,7 +16,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
 COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
-TTL=20 # attestation lifetime (s) — short so expiry/refresh happen in seconds
+# Attestation lifetime (s). The whole test is timed in multiples of this, so it wants to be as short
+# as possible — but `MIN_ATTESTATION_TTL_SECS` in the coordinator's config validation is the floor,
+# and a config below it makes the coordinator refuse to start. Keep them in step: this used to be 20,
+# which stopped being loadable when that validation landed, and the test then failed several phases
+# later with "nodes did not mesh" rather than saying so.
+TTL=60
 
 if [ "${UNL_INNS:-}" != "1" ]; then
   [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
@@ -98,7 +103,16 @@ gossip = true
 EOF
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 & COORD_PID=$!
-for _ in $(seq 1 40); do curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done
+# Insist the coordinator is actually serving before going on. Falling through a timed-out readiness
+# loop is what turned a one-line config-validation error into a failure three phases downstream that
+# said nothing about the cause.
+COORD_UP=0
+for _ in $(seq 1 40); do
+  curl -sf http://10.0.0.1:8080/healthz >/dev/null 2>&1 && { COORD_UP=1; break; }
+  kill -0 "$COORD_PID" 2>/dev/null || break # it exited; no point waiting out the loop
+  sleep 0.25
+done
+[ "$COORD_UP" = 1 ] || { echo "FAIL: coordinator never came up"; cat "$TMP/coord.log"; exit 1; }
 
 # A in the child ns with daemon debug on, so the peer-direct refresh line is captured as evidence.
 $NSA env RUST_LOG="info,unitylan_engine::daemon=debug" "$ENG" -c "$TMP/a.toml" run >"$TMP/a.log" 2>&1 &
@@ -147,7 +161,7 @@ for _ in $(seq 1 15); do
   sleep 1
 done
 [ "$PINGED" = 1 ] || { echo "FAIL: mesh ping never recovered while A coordinator-isolated"; exit 1; }
-echo "A still meshed with B past $((TTL * 4))s of coordinator isolation ✓  (peer-direct carried it)"
+echo "A still meshed with B past $((TTL * 2))s of coordinator isolation ✓  (peer-direct carried it)"
 
 # ---- Now kill B: A can no longer refresh B from anywhere -> A drops B on expiry ----
 echo "=== kill node B; A can refresh B neither from coordinator (blocked) nor from B (dead) ==="
