@@ -57,10 +57,21 @@ pub(super) async fn acme_challenge(
         ));
     };
 
-    let mut records = vec![(
-        challenge_name(&format!("{device_name}.{username}"), &dns.domain),
-        req.device.clone(),
-    )];
+    if req.device.is_empty() || req.device.len() > common::api::MAX_DEVICE_CHALLENGES {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "a certificate order raises one or two challenges for a device's own name",
+        ));
+    }
+
+    // One name, possibly two values: the certificate covers `<device>.<user>` and its wildcard, and
+    // a wildcard authorization validates at the same `_acme-challenge` name as the base one.
+    let device_challenge = challenge_name(&format!("{device_name}.{username}"), &dns.domain);
+    let mut records: Vec<_> = req
+        .device
+        .iter()
+        .map(|value| (device_challenge.clone(), value.clone()))
+        .collect();
 
     // The bare `<user>` alias is the primary device's alone, so a non-primary device asking for it
     // is ignored rather than honoured — otherwise any of an owner's devices could hold a certificate
@@ -81,7 +92,14 @@ pub(super) async fn acme_challenge(
         .publish(&records)
         .map_err(|e| ApiError::new(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
 
-    let names = records.into_iter().map(|(name, _)| name).collect();
+    // Distinct names, not one per record: the device's two values share a name, and the client is
+    // checking which names were published, not how many values sit under each.
+    let mut names: Vec<String> = Vec::new();
+    for (name, _) in records {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
     Ok(Json(AcmeChallengeResp { names }))
 }
 

@@ -98,29 +98,38 @@ echo "  enrolled ✓"
 DEVICE_NAME="host-a.nodea"
 
 echo "=== publish a challenge, then read it back as a CA would ==="
+# `$2` is a JSON *array*: a real order raises two challenges for the device's own name — the name
+# itself and its `*.` wildcard, which RFC 8555 validates at the same `_acme-challenge` name.
 publish() {
   curl -s -o "$TMP/pub.out" -w '%{http_code}' -X POST "http://127.0.0.1:$PORT/acme-challenge" \
     -H 'content-type: application/json' \
-    -d "{\"token\":\"$1\",\"device\":\"$2\",\"primary\":${3:-null}}"
+    -d "{\"token\":\"$1\",\"device\":$2,\"primary\":${3:-null}}"
 }
-CODE=$(publish "$TOKEN" "token-value-one" "\"alias-value-one\"")
+CODE=$(publish "$TOKEN" '["token-value-one","wildcard-value-one"]' "\"alias-value-one\"")
 check "POST /acme-challenge accepted" "$CODE" "200"
 grep -q "_acme-challenge.$DEVICE_NAME.$DOMAIN" "$TMP/pub.out" \
   && ok "published the device's own name" || bad "device name missing: $(cat "$TMP/pub.out")"
+# Two values, one name — and one unit of the shared weekly budget, since it is still one certificate.
+COUNT=$(grep -o "_acme-challenge\.$DEVICE_NAME\.$DOMAIN" "$TMP/pub.out" | wc -l)
+[ "$COUNT" = "1" ] \
+  && ok "the wildcard shares the device's challenge name" \
+  || bad "the device's name is listed $COUNT times: $(cat "$TMP/pub.out")"
 # This device is the owner's only one, so it is primary and the bare `<user>` alias is published too.
 grep -q "_acme-challenge.nodea.$DOMAIN" "$TMP/pub.out" \
   && ok "published the primary's bare alias" || bad "primary alias missing: $(cat "$TMP/pub.out")"
 
 dig_() { dig @127.0.0.1 -p "$DNS_PORT" "$@" +time=2 +tries=1; }
 
-TXT=$(dig_ +short TXT "_acme-challenge.$DEVICE_NAME.$DOMAIN" | tr -d '"')
-check "TXT resolves to the published value" "$TXT" "token-value-one"
+# Both values come back at the one name — the CA accepts the authorization whose value matches, so
+# the base name's challenge and the wildcard's each validate against the same record set.
+TXT=$(dig_ +short TXT "_acme-challenge.$DEVICE_NAME.$DOMAIN" | tr -d '"' | sort | tr '\n' ' ')
+check "TXT resolves to both published values" "$TXT" "token-value-one wildcard-value-one "
 TXT=$(dig_ +short TXT "_acme-challenge.nodea.$DOMAIN" | tr -d '"')
 check "the alias TXT resolves too" "$TXT" "alias-value-one"
 
 # A resolver that gets a truncated UDP answer retries over TCP, so a UDP-only server silently fails.
-TXT=$(dig_ +tcp +short TXT "_acme-challenge.$DEVICE_NAME.$DOMAIN" | tr -d '"')
-check "the same answer over TCP" "$TXT" "token-value-one"
+TXT=$(dig_ +tcp +short TXT "_acme-challenge.$DEVICE_NAME.$DOMAIN" | tr -d '"' | sort | tr '\n' ' ')
+check "the same answer over TCP" "$TXT" "token-value-one wildcard-value-one "
 
 echo "=== the zone carries challenges and nothing else ==="
 ST=$(dig_ TXT "_acme-challenge.nobody.$DOMAIN" | grep -oE 'status: [A-Z]+' | cut -d' ' -f2)
@@ -145,7 +154,7 @@ dig_ +noall +comment TXT "_acme-challenge.$DEVICE_NAME.$DOMAIN" | grep -q ' ra[;
   && bad "offered recursion" || ok "never offers recursion (no ra flag)"
 
 echo "=== a device cannot publish for a name it does not hold ==="
-CODE=$(publish "not-a-real-token" "stolen-value")
+CODE=$(publish "not-a-real-token" '["stolen-value"]')
 check "an invalid device token is rejected" "$CODE" "401"
 
 echo "=== full ACME issuance against a local CA ==="
@@ -218,9 +227,14 @@ EOF
 
   if [ -s "$TMP/a/certs/cert.pem" ] && [ -s "$TMP/a/certs/key.pem" ]; then
     ok "a certificate was issued and written"
-    openssl x509 -in "$TMP/a/certs/cert.pem" -noout -text 2>/dev/null \
-      | grep -q "$DEVICE_NAME.$DOMAIN" \
+    SANS=$(openssl x509 -in "$TMP/a/certs/cert.pem" -noout -ext subjectAltName 2>/dev/null)
+    echo "$SANS" | grep -q "DNS:$DEVICE_NAME.$DOMAIN" \
       && ok "it names this device" || bad "the certificate does not name $DEVICE_NAME.$DOMAIN"
+    # The wildcard is what makes one certificate serve a reverse proxy's vhosts — `plex.<device>…`,
+    # `git.<device>…` — so a CA that quietly dropped it would leave that use case broken.
+    echo "$SANS" | grep -q "DNS:\*\.$DEVICE_NAME.$DOMAIN" \
+      && ok "it names everything one label below this device" \
+      || bad "the certificate has no *.$DEVICE_NAME.$DOMAIN name: $SANS"
     # The key is the one secret here. Only the last digit matters: any "other" bit set means every
     # local account can read it. 600 (default) and 640 (`[cert] group`) both pass; 644 must not.
     MODE=$(stat -c '%a' "$TMP/a/certs/key.pem")
@@ -244,7 +258,7 @@ echo "=== the weekly budget refuses rather than spending the last of it ==="
 # above ran, and a hard-coded expectation would pass or fail for the wrong reason.
 DRAINED=0
 for i in $(seq 1 6); do
-  CODE=$(publish "$TOKEN" "drain-value-$i")
+  CODE=$(publish "$TOKEN" "[\"drain-value-$i\"]")
   if [ "$CODE" = "429" ]; then DRAINED=1; break; fi
   [ "$CODE" = "200" ] || { bad "unexpected $CODE while draining the budget"; break; }
 done

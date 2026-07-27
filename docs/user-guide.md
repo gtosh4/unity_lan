@@ -98,6 +98,16 @@ is also `laptop.alice.mesh.unitylan.com` — and ticking the box gets a real, pu
 certificate for it. The app then shows where the certificate and key live so you can point your
 server at them. Renewal is automatic.
 
+**The certificate also covers every name one level below your device.** For a device called
+`server`, that's `server.alice.mesh.unitylan.com` *and* anything of the form
+`<something>.server.alice.mesh.unitylan.com` — `plex.server.alice…`, `git.server.alice…`, as many as
+you like. Those names resolve to the same machine with no extra setup, so a reverse proxy on it can
+serve a different site per name from the one certificate, and you never have to ask for another.
+
+It stops there on purpose. The certificate never covers `*.alice.mesh.unitylan.com`, because that
+pattern would also match your *other* devices' names, and one machine holding a certificate for the
+rest of yours is a worse trade than a little convenience.
+
 **The warning next to that checkbox is worth taking seriously.** Getting a certificate publishes
 this device's name to public certificate-transparency logs, **permanently**, where anyone can search
 them. Unticking the box later stops renewals but cannot unpublish what's already there. That's why
@@ -119,6 +129,7 @@ Your machines get names other members can use:
 | --- | --- |
 | `laptop.alice.unity.internal` | Alice's device named `laptop` |
 | `alice.unity.internal` | Whichever of Alice's devices is set primary |
+| `plex.laptop.alice.unity.internal` | Also Alice's `laptop` — anything one label below a device name reaches it, for serving several sites from one machine |
 
 If your coordinator is configured with a certificate domain, the same machines answer to matching
 names under it — `laptop.alice.mesh.unitylan.com` on the hosted one — which is what makes a real

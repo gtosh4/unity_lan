@@ -229,7 +229,9 @@ impl TestCoordinator {
             "/acme-challenge",
             serde_json::json!({
                 "token": self.token(pubkey),
-                "device": "device-challenge-value",
+                // Two values, as a real order does: the device's own name and its wildcard raise
+                // separate authorizations that validate at the one challenge name.
+                "device": ["device-challenge-value", "wildcard-challenge-value"],
                 "primary": primary,
             }),
         )
@@ -313,6 +315,50 @@ async fn the_bare_user_alias_is_only_published_for_the_primary_device() {
 }
 
 #[tokio::test]
+async fn a_wildcard_shares_the_device_name_and_costs_one_unit_of_budget() {
+    // The wildcard SAN validates at the same `_acme-challenge` name as the base name, so the reply
+    // names it once — and the whole order is one certificate against the CA's cap, so a budget of
+    // one still admits it.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 1);
+    c.enrol(1, 7, "laptop").await;
+
+    let (status, body) = c.acme(1, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<String> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["_acme-challenge.laptop.user7.mesh.example.com".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn more_challenge_values_than_an_order_can_raise_are_refused() {
+    // The values land in an in-memory list under one name; a client that could push an arbitrary
+    // number of them would grow the coordinator's map at will.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+
+    for values in [serde_json::json!([]), serde_json::json!(["a", "b", "c"])] {
+        let (status, _) = c
+            .send(
+                "/acme-challenge",
+                serde_json::json!({ "token": c.token(1), "device": values }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
 async fn issuance_is_refused_when_the_deployment_configured_no_domain() {
     // No `[dns]` → the feature does not exist here, and the client is told so rather than left to
     // fail against the CA.
@@ -331,7 +377,7 @@ async fn a_bad_device_token_cannot_publish_a_challenge() {
     let (status, _) = c
         .send(
             "/acme-challenge",
-            serde_json::json!({ "token": "not-a-real-token", "device": "v" }),
+            serde_json::json!({ "token": "not-a-real-token", "device": ["v"] }),
         )
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);

@@ -22,6 +22,14 @@ use crate::coord::{SeedPeer, SelfDevice};
 pub struct ZoneData {
     /// Name (lower-case, no trailing dot) → IPv4.
     names: HashMap<String, Ipv4Addr>,
+    /// Device names — and their certificate aliases — under which *one* further label also
+    /// resolves to the same device, so `plex.server.alice.<domain>` reaches the machine running
+    /// the reverse proxy. Exactly the span the `*.<device>.<user>.<domain>` SAN certifies
+    /// ([`crate::cert::CertNames::wildcard`]): what resolves is what a certificate can name.
+    ///
+    /// The bare `<user>` alias is deliberately absent. With it here, a typo'd device name would
+    /// strip its first label and answer with the owner's primary device instead of NXDOMAIN.
+    wildcard: HashMap<String, Ipv4Addr>,
     /// The deployment's certificate domain, when it has one. Mesh names gain an alias under it, so
     /// it is a second suffix we speak for — see [`certificate_alias`].
     cert_domain: Option<String>,
@@ -30,6 +38,15 @@ pub struct ZoneData {
 impl ZoneData {
     pub fn insert(&mut self, name: String, ip: Ipv4Addr) -> Option<Ipv4Addr> {
         self.names.insert(name, ip)
+    }
+
+    /// The address for `name`: an exact record, else the device one label above it.
+    fn lookup(&self, name: &str) -> Option<Ipv4Addr> {
+        if let Some(ip) = self.names.get(name) {
+            return Some(*ip);
+        }
+        let (_, base) = name.split_once('.')?;
+        self.wildcard.get(base).copied()
     }
 
     /// Whether this name is one we are entitled to speak for at all.
@@ -59,26 +76,36 @@ pub fn empty_zone() -> Zone {
 /// the write and the log rather than churning an identical map every couple of seconds.
 pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) -> bool {
     let mut map = HashMap::new();
+    let mut wildcard = HashMap::new();
     let domain = me.dns_domain.as_deref();
-    let mut add = |name: &str, ip: Ipv4Addr| {
+    // `sub` says whether names below this one resolve to it too — true for a device's own name,
+    // false for the bare `<user>` alias, which sits one label above every sibling device.
+    let mut add = |name: &str, ip: Ipv4Addr, sub: bool| {
         let name = norm(name);
         if let Some(alias) = certificate_alias(&name, domain) {
+            if sub {
+                wildcard.insert(alias.clone(), ip);
+            }
             map.insert(alias, ip);
+        }
+        if sub {
+            wildcard.insert(name.clone(), ip);
         }
         map.insert(name, ip);
     };
-    add(&me.hostname, me.wg_ip);
+    add(&me.hostname, me.wg_ip, true);
     if let Some(alias) = &me.primary_alias {
-        add(alias, me.wg_ip);
+        add(alias, me.wg_ip, false);
     }
     for s in seeds {
-        add(&s.hostname, s.ip);
+        add(&s.hostname, s.ip, true);
         if let Some(alias) = &s.primary_alias {
-            add(alias, s.ip);
+            add(alias, s.ip, false);
         }
     }
     let next = ZoneData {
         names: map,
+        wildcard,
         cert_domain: me.dns_domain.clone(),
     };
     if *zone.read().await == next {
@@ -146,8 +173,8 @@ async fn answer(bytes: &[u8], zone: &Zone) -> Option<Vec<u8>> {
         if !map.ours(&name) {
             continue;
         }
-        if let Some(ip) = map.names.get(&name) {
-            resp.add_answer(Record::from_rdata(q.name().clone(), 30, RData::A(A(*ip))));
+        if let Some(ip) = map.lookup(&name) {
+            resp.add_answer(Record::from_rdata(q.name().clone(), 30, RData::A(A(ip))));
             answered = true;
         } else if name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
             // An unknown name in `.unity.internal` is our own missing record, so NXDOMAIN. We are
@@ -272,6 +299,85 @@ mod tests {
             let msg = Message::from_vec(&reply).unwrap();
             assert_eq!(msg.answers.len(), 1, "{name} should resolve");
         }
+    }
+
+    /// A zone built the way the daemon builds it: our own primary device plus one peer.
+    async fn built_zone(domain: Option<&str>) -> Zone {
+        let me = SelfDevice {
+            community_name: "c".into(),
+            user_id: 1,
+            username: "gordon".into(),
+            networks: Vec::new(),
+            wg_ip: Ipv4Addr::new(100, 73, 61, 4),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
+            hostname: "laptop.gordon.unity.internal".into(),
+            is_primary: true,
+            grant_expires_at: 0,
+            primary_alias: Some("gordon.unity.internal".into()),
+            networks_status: Vec::new(),
+            dns_domain: domain.map(str::to_string),
+        };
+        let peer = SeedPeer {
+            ip: Ipv4Addr::new(100, 73, 61, 9),
+            hostname: "server.alice.unity.internal".into(),
+            primary_alias: Some("alice.unity.internal".into()),
+            ..crate::testutil::seed_peer()
+        };
+        let zone = empty_zone();
+        update(&zone, &me, &[peer]).await;
+        zone
+    }
+
+    async fn resolved(zone: &Zone, name: &str) -> Option<Ipv4Addr> {
+        let reply = answer(&query_bytes(name), zone).await.unwrap();
+        let msg = Message::from_vec(&reply).unwrap();
+        match msg.answers.first().map(|r| &r.data) {
+            Some(RData::A(a)) => Some(a.0),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn one_label_below_a_device_resolves_to_that_device() {
+        // What makes the `*.<device>.<user>.<domain>` SAN usable: a reverse proxy on `server` can
+        // serve `plex.server.alice.…` only if that name reaches the machine in the first place.
+        let zone = built_zone(Some("mesh.example.com")).await;
+        let alice = Ipv4Addr::new(100, 73, 61, 9);
+
+        for name in [
+            "plex.server.alice.unity.internal.",
+            "plex.server.alice.mesh.example.com.",
+            "git.server.alice.mesh.example.com.",
+        ] {
+            assert_eq!(resolved(&zone, name).await, Some(alice), "{name}");
+        }
+
+        // Two labels down is outside what the wildcard certifies, so it stays unresolved.
+        assert_eq!(
+            resolved(&zone, "a.b.server.alice.mesh.example.com.").await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_below_the_bare_user_alias_is_not_answered() {
+        // `<user>` sits one label above every one of that owner's devices, so treating it as a
+        // wildcard base would answer a mistyped device name with the owner's primary device
+        // instead of NXDOMAIN — and certificates never cover `*.<user>.<domain>` either.
+        let zone = built_zone(Some("mesh.example.com")).await;
+
+        let reply = answer(&query_bytes("nosuchdevice.alice.unity.internal."), &zone)
+            .await
+            .unwrap();
+        let msg = Message::from_vec(&reply).unwrap();
+        assert!(msg.answers.is_empty());
+        assert_eq!(msg.metadata.response_code, ResponseCode::NXDomain);
+
+        // The alias itself still resolves, as before.
+        assert_eq!(
+            resolved(&zone, "alice.unity.internal.").await,
+            Some(Ipv4Addr::new(100, 73, 61, 9))
+        );
     }
 
     #[tokio::test]

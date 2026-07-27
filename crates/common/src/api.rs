@@ -371,14 +371,24 @@ pub struct OauthCompleteReq {
 pub struct AcmeChallengeReq {
     /// The requesting device's bearer token (identifies the owner + device, and authenticates).
     pub token: String,
-    /// Challenge value for the device's own name, `<device>.<user>.<domain>`.
-    pub device: String,
+    /// Challenge values for the device's own name, `<device>.<user>.<domain>`.
+    ///
+    /// A list because the certificate also covers `*.<device>.<user>.<domain>`, and a wildcard
+    /// authorization names the base domain with the `*.` stripped (RFC 8555 §7.1.4) — so both
+    /// authorizations validate at the *same* `_acme-challenge` name with different values, and the
+    /// CA accepts whichever matches. At most [`MAX_DEVICE_CHALLENGES`].
+    pub device: Vec<String>,
     /// Challenge value for the bare `<user>.<domain>` alias, when the order also covers it. A CA
     /// raises one authorization per name in the certificate, so a primary device covering both names
     /// has two distinct values. Ignored unless this device is the owner's primary.
     #[serde(default)]
     pub primary: Option<String>,
 }
+
+/// How many values one request may publish at the device's challenge name. Two is what an order for
+/// `<device>.<user>.<domain>` plus its wildcard raises; the cap is here so a client cannot grow the
+/// coordinator's in-memory value list without bound.
+pub const MAX_DEVICE_CHALLENGES: usize = 2;
 
 /// The names the coordinator actually published, so a client can check they match the order it
 /// created rather than discovering a mismatch as an opaque CA validation failure.
