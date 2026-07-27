@@ -54,6 +54,19 @@ self-replace = "1"
 # lockstep (the engine and GUI speak an unversioned control protocol). Both Linux and Windows use it.
 tar = "0.4"
 flate2 = "1"
+# ACME (DNS-01) for publicly-trusted certificates on mesh names. `ring` rather than the default
+# `aws-lc-rs`: that backend builds a C library (`aws-lc-sys`) the Windows cross-build does not want,
+# and the rest of the tree is already rustls-on-ring. The `rcgen` feature is what provides
+# `Order::finalize`, which mints the keypair and CSR locally — the private key is generated on the
+# device and never leaves it.
+instant-acme = { version = "0.8.5", default-features = false, features = [
+    "ring",
+    "hyper-rustls",
+    "rcgen",
+] }
+# Read `notAfter` off the issued certificate, so renewal is driven by what the CA actually granted
+# rather than by assuming its lifetime. Already in the tree via instant-acme's rcgen.
+x509-parser = "0.18.1"
 
 [target.'cfg(unix)'.dependencies]
 # Resolve `control_group` (name → gid) to own the control socket root:<group>.

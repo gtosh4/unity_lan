@@ -17,11 +17,40 @@ use tokio::sync::RwLock;
 
 use crate::coord::{SeedPeer, SelfDevice};
 
-/// Name (lower-case, no trailing dot) → IPv4. Swapped in on each refresh.
-pub type Zone = Arc<RwLock<HashMap<String, Ipv4Addr>>>;
+/// The names we answer for, and the suffixes we are willing to speak for at all.
+#[derive(Default, PartialEq, Eq)]
+pub struct ZoneData {
+    /// Name (lower-case, no trailing dot) → IPv4.
+    names: HashMap<String, Ipv4Addr>,
+    /// The deployment's certificate domain, when it has one. Mesh names gain an alias under it, so
+    /// it is a second suffix we speak for — see [`certificate_alias`].
+    cert_domain: Option<String>,
+}
+
+impl ZoneData {
+    pub fn insert(&mut self, name: String, ip: Ipv4Addr) -> Option<Ipv4Addr> {
+        self.names.insert(name, ip)
+    }
+
+    /// Whether this name is one we are entitled to speak for at all.
+    ///
+    /// Checked *before* the map, so a name that somehow reached the map from outside our zones is
+    /// still not answered — the map is built only from verified attestations, and this keeps that a
+    /// belt-and-braces property rather than the sole guarantee.
+    fn ours(&self, name: &str) -> bool {
+        name.ends_with(&format!(".{}", common::DNS_SUFFIX))
+            || self
+                .cert_domain
+                .as_ref()
+                .is_some_and(|d| name.ends_with(&format!(".{d}")))
+    }
+}
+
+/// Swapped in on each refresh.
+pub type Zone = Arc<RwLock<ZoneData>>;
 
 pub fn empty_zone() -> Zone {
-    Arc::new(RwLock::new(HashMap::new()))
+    Arc::new(RwLock::new(ZoneData::default()))
 }
 
 /// Rebuild the zone from our own device plus the current set of seed peers.
@@ -30,26 +59,52 @@ pub fn empty_zone() -> Zone {
 /// the write and the log rather than churning an identical map every couple of seconds.
 pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) -> bool {
     let mut map = HashMap::new();
-    map.insert(norm(&me.hostname), me.wg_ip);
+    let domain = me.dns_domain.as_deref();
+    let mut add = |name: &str, ip: Ipv4Addr| {
+        let name = norm(name);
+        if let Some(alias) = certificate_alias(&name, domain) {
+            map.insert(alias, ip);
+        }
+        map.insert(name, ip);
+    };
+    add(&me.hostname, me.wg_ip);
     if let Some(alias) = &me.primary_alias {
-        map.insert(norm(alias), me.wg_ip);
+        add(alias, me.wg_ip);
     }
     for s in seeds {
-        map.insert(norm(&s.hostname), s.ip);
+        add(&s.hostname, s.ip);
         if let Some(alias) = &s.primary_alias {
-            map.insert(norm(alias), s.ip);
+            add(alias, s.ip);
         }
     }
-    if *zone.read().await == map {
+    let next = ZoneData {
+        names: map,
+        cert_domain: me.dns_domain.clone(),
+    };
+    if *zone.read().await == next {
         return false;
     }
-    tracing::debug!(names = map.len(), "dns zone updated");
-    *zone.write().await = map;
+    tracing::debug!(names = next.names.len(), "dns zone updated");
+    *zone.write().await = next;
     true
 }
 
 fn norm(name: &str) -> String {
     name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The same mesh name under the deployment's certificate domain — `<device>.<user>.<domain>` for a
+/// `<device>.<user>.unity.internal` name. `None` when the deployment issues no certificates, or the
+/// name is not one of ours.
+///
+/// The alias is *additional*: `unity.internal` stays the canonical name and keeps working untouched.
+/// It exists because a publicly-trusted certificate can never name `.internal` — that suffix is
+/// reserved, so no CA will ever issue for it — while the same host under a real domain can be named
+/// and reached identically inside the mesh.
+fn certificate_alias(name: &str, domain: Option<&str>) -> Option<String> {
+    let domain = domain?;
+    let stem = name.strip_suffix(&format!(".{}", common::DNS_SUFFIX))?;
+    Some(format!("{stem}.{domain}").to_ascii_lowercase())
 }
 
 /// Serve the zone on an already-bound UDP socket until the task is dropped. The caller binds so it
@@ -85,16 +140,19 @@ async fn answer(bytes: &[u8], zone: &Zone) -> Option<Vec<u8>> {
             continue;
         }
         let name = norm(&q.name().to_ascii());
-        // Only ever speak for our own zone: a query outside `.unity.internal` gets no answer here (no
-        // record, no authoritative NXDOMAIN) even if a name somehow collided in the map — we are not
-        // its authority. In-zone names resolve from the map or NXDOMAIN as our own missing records.
-        if !name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
+        // Only ever speak for our own zones: a query outside them gets no answer here (no record, no
+        // authoritative NXDOMAIN) even if a name somehow collided in the map — we are not its
+        // authority.
+        if !map.ours(&name) {
             continue;
         }
-        if let Some(ip) = map.get(&name) {
+        if let Some(ip) = map.names.get(&name) {
             resp.add_answer(Record::from_rdata(q.name().clone(), 30, RData::A(A(*ip))));
             answered = true;
-        } else {
+        } else if name.ends_with(&format!(".{}", common::DNS_SUFFIX)) {
+            // An unknown name in `.unity.internal` is our own missing record, so NXDOMAIN. We are
+            // *not* the authority for the certificate domain — the coordinator serves that zone — so
+            // an unknown name under it draws no denial we have no standing to make.
             ours_but_missing = true;
         }
     }
@@ -162,6 +220,79 @@ mod tests {
             .unwrap();
         let msg = Message::from_vec(&reply).unwrap();
         assert!(msg.answers.is_empty());
+        assert_eq!(msg.metadata.response_code, ResponseCode::NXDomain);
+    }
+
+    #[test]
+    fn a_certificate_alias_swaps_the_suffix_and_nothing_else() {
+        // `.internal` is reserved, so no CA will ever issue for a `unity.internal` name. The alias is
+        // the same host under a real domain, which *can* be certified.
+        assert_eq!(
+            certificate_alias("laptop.gordon.unity.internal", Some("mesh.example.com")).as_deref(),
+            Some("laptop.gordon.mesh.example.com")
+        );
+        // The bare primary alias too.
+        assert_eq!(
+            certificate_alias("gordon.unity.internal", Some("mesh.example.com")).as_deref(),
+            Some("gordon.mesh.example.com")
+        );
+        // No configured domain → no alias; the deployment issues no certificates.
+        assert_eq!(
+            certificate_alias("laptop.gordon.unity.internal", None),
+            None
+        );
+        // Not one of ours → left alone.
+        assert_eq!(
+            certificate_alias("evil.example.com", Some("mesh.example.com")),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_certificate_alias_resolves_to_the_same_address() {
+        let zone = empty_zone();
+        {
+            let mut z = zone.write().await;
+            z.cert_domain = Some("mesh.example.com".into());
+            z.insert(
+                "laptop.gordon.unity.internal".into(),
+                Ipv4Addr::new(100, 73, 61, 4),
+            );
+            z.insert(
+                "laptop.gordon.mesh.example.com".into(),
+                Ipv4Addr::new(100, 73, 61, 4),
+            );
+        }
+
+        for name in [
+            "laptop.gordon.unity.internal.",
+            "laptop.gordon.mesh.example.com.",
+        ] {
+            let reply = answer(&query_bytes(name), &zone).await.unwrap();
+            let msg = Message::from_vec(&reply).unwrap();
+            assert_eq!(msg.answers.len(), 1, "{name} should resolve");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_name_under_the_certificate_domain_draws_no_denial() {
+        // The coordinator is authoritative for that zone, not us — we serve only the specific alias
+        // names we hold attestations for, so we have no standing to say a name does not exist.
+        let zone = empty_zone();
+        zone.write().await.cert_domain = Some("mesh.example.com".into());
+
+        let reply = answer(&query_bytes("nobody.mesh.example.com."), &zone)
+            .await
+            .unwrap();
+        let msg = Message::from_vec(&reply).unwrap();
+        assert!(msg.answers.is_empty());
+        assert_eq!(msg.metadata.response_code, ResponseCode::NoError);
+
+        // ...whereas an unknown name in our own zone is an authoritative NXDOMAIN, as before.
+        let reply = answer(&query_bytes("nobody.unity.internal."), &zone)
+            .await
+            .unwrap();
+        let msg = Message::from_vec(&reply).unwrap();
         assert_eq!(msg.metadata.response_code, ResponseCode::NXDomain);
     }
 

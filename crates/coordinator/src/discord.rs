@@ -1,5 +1,5 @@
 //! Live Discord role source via a bot token (twilight). Reads guild names + member
-//! roles/nick over REST. The bot must be in the guild (single-member REST fetch does not need
+//! roles/username over REST. The bot must be in the guild (single-member REST fetch does not need
 //! the privileged members intent).
 
 use std::collections::HashMap;
@@ -17,7 +17,7 @@ use crate::roles::{MemberRoles, RoleSource};
 /// on a per-guild bucket).
 const ROLE_NAME_TTL: Duration = Duration::from_secs(300);
 
-/// How long a member's roles/nick are trusted before a re-fetch. Kept short because this snapshot is
+/// How long a member's roles/username are trusted before a re-fetch. Kept short because this snapshot is
 /// the *authorization* input (which networks the user's roles grant), so a stale entry lets a poll
 /// (not gateway) revocation linger up to this long — well under the attestation TTL, and only ever
 /// caches a *successful* fetch (a user who left the guild / a failed lookup is never cached, so those
@@ -45,7 +45,7 @@ struct CachedName {
     name: String,
 }
 
-/// A member's roles/nick with the instant fetched (for TTL expiry).
+/// A member's roles/username with the instant fetched (for TTL expiry).
 struct CachedMember {
     fetched: Instant,
     roles: MemberRoles,
@@ -219,12 +219,14 @@ impl RoleSource for TwilightRoleSource {
                         .model()
                         .await
                         .ok()?;
-                    let nick = member
-                        .nick
-                        .clone()
-                        .unwrap_or_else(|| member.user.name.clone());
+                    // The *username*, deliberately not `member.nick`. A guild nickname is arbitrary
+                    // Unicode and not unique within a guild, so two members could set the same one
+                    // and contend for a hostname; a username is globally unique and stable across
+                    // guilds, so a member's mesh name doesn't change with which server you meet them
+                    // in. It only seeds the label — `Store::user_label` allocates the real one.
+                    let username = member.user.name.clone();
                     let roles = MemberRoles {
-                        nick,
+                        username,
                         role_ids: member.roles.iter().map(|r| r.get()).collect(),
                     };
                     // Cache only this successful fetch; a miss/failure is never cached, so a departed
@@ -296,7 +298,7 @@ mod tests {
             CachedMember {
                 fetched: Instant::now(),
                 roles: MemberRoles {
-                    nick: "n".into(),
+                    username: "n".into(),
                     role_ids: vec![1],
                 },
             },

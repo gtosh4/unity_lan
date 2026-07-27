@@ -64,15 +64,15 @@ id = 1
 name = "Test"
 [[fake.guild.member]]
 user_id = 1
-nick = "nodea"
+username = "nodea"
 role_ids = [10, 20]
 [[fake.guild.member]]
 user_id = 2
-nick = "nodeb"
+username = "nodeb"
 role_ids = [10]
 [[fake.guild.member]]
 user_id = 3
-nick = "nodec"
+username = "nodec"
 role_ids = [20]
 [[network]]
 guild_id = 1
@@ -89,11 +89,11 @@ id = 2
 name = "Other"
 [[fake.guild.member]]
 user_id = 1
-nick = "nodea"
+username = "nodea"
 role_ids = [30]
 [[fake.guild.member]]
 user_id = 3
-nick = "nodec"
+username = "nodec"
 role_ids = [30]
 [[network]]
 guild_id = 2

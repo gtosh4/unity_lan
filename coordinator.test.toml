@@ -1,5 +1,6 @@
 # Offline test config (fake Discord). Run: unitylan-coordinator coordinator.test.toml
-# Two guilds served by one coordinator → demonstrates multi-tenant + per-guild nicks.
+# Two guilds served by one coordinator → demonstrates multi-tenant membership. A username is global,
+# so the same user carries the same one into every guild (see design.md §6.2).
 
 bind = "127.0.0.1:8080"
 database = "coordinator.test.db"
@@ -9,7 +10,7 @@ id = 111
 name = "My Community"
 [[fake.guild.member]]
 user_id = 333
-nick = "Alice"
+username = "Alice"
 role_ids = [222, 223]
 
 [[fake.guild]]
@@ -17,7 +18,7 @@ id = 555
 name = "Gamers Inc"
 [[fake.guild.member]]
 user_id = 333
-nick = "AliceG"
+username = "Alice"
 role_ids = [666]
 
 # Networks (normally added via /unitylan network add; seeded here for testing)

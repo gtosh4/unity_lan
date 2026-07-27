@@ -16,6 +16,7 @@ mod signer;
 mod store;
 mod stun;
 mod versions;
+mod zone;
 
 use std::sync::Arc;
 
@@ -231,6 +232,31 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Authoritative DNS for `[dns] domain`, when configured: the `_acme-challenge` TXT records a CA
+    // reads to validate a device's certificate order. Mesh names resolve to CGNAT addresses no CA can
+    // reach, so DNS-01 is the only challenge available and this is what answers it. Like STUN, it
+    // carries no traffic and runs detached; unlike STUN, a failure to bind is fatal — an operator who
+    // configured `[dns]` and silently got no zone would only find out when certificates stopped
+    // renewing weeks later.
+    let dns_state = match cfg.dns.clone() {
+        Some(dns) => {
+            let challenges = Arc::new(crate::zone::ChallengeStore::new(dns.max_certs_per_week));
+            // Bind here rather than inside the task so a bad address aborts boot instead of logging
+            // into the void after startup has already reported success.
+            let serving = crate::zone::bind(&dns, Arc::clone(&challenges)).await?;
+            tokio::spawn(async move {
+                if let Err(e) = serving.run().await {
+                    tracing::error!("DNS responder exited: {e:#}");
+                }
+            });
+            Some(Arc::new(crate::zone::DnsState {
+                domain: dns.domain,
+                challenges,
+            }))
+        }
+        None => None,
+    };
+
     // Parse + validate the auto-update manifest from `[release]`. It's signed per-request under a
     // guild key the caller holds (§3.1), so we hold the *parsed* manifest, not a pre-signed string.
     // Fails closed at startup: a malformed `[release]` aborts boot. Behind a RwLock so SIGHUP can
@@ -298,6 +324,8 @@ async fn main() -> anyhow::Result<()> {
         oauth,
         trusted_proxies: Arc::new(cfg.trusted_proxies.clone()),
         source_ip: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        user_labels: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        dns: dns_state,
         reflexive: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relays: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         relay_allocs: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),

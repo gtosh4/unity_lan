@@ -56,6 +56,9 @@ struct State {
     connected: bool,
     disable_new_networks: bool,
     peer_own_devices: bool,
+    /// Certificate opt-in. On in the fixture so a regenerated screenshot shows the feature — the
+    /// checkbox only appears once a port is exposed, which this fixture also does.
+    certs_enabled: bool,
     /// The full peer set, served when `connected`; disconnect returns an empty peer list.
     peers: Vec<PeerStatus>,
     networks: Vec<NetworkStatus>,
@@ -93,6 +96,7 @@ impl State {
             connected: true,
             disable_new_networks: true,
             peer_own_devices: true,
+            certs_enabled: true,
             peers: fixture_peers(),
             networks: fixture_networks(),
             devices: fixture_devices(),
@@ -147,6 +151,20 @@ impl State {
             })
     }
 
+    /// A settled certificate, so a regenerated screenshot shows the feature in its normal state
+    /// rather than mid-issuance. Paths and expiry are what a headless operator reads off `ctl cert`.
+    fn cert_status(&self) -> common::control::CertStatus {
+        common::control::CertStatus {
+            enabled: self.certs_enabled,
+            domain: Some("mesh.unitylan.com".into()),
+            names: vec!["laptop.alice.mesh.unitylan.com".into()],
+            cert_path: Some("/var/lib/unitylan/certs/cert.pem".into()),
+            key_path: Some("/var/lib/unitylan/certs/key.pem".into()),
+            expires_at: common::now_unix() + 74 * 24 * 60 * 60,
+            blocked: None,
+        }
+    }
+
     /// A live status snapshot; byte counters grow with elapsed time so a video shows traffic moving.
     fn status(&self) -> StatusReport {
         let secs = self.started.elapsed().as_secs();
@@ -174,6 +192,7 @@ impl State {
             connected: self.connected,
             disable_new_networks: self.disable_new_networks,
             peer_own_devices: self.peer_own_devices,
+            cert: self.cert_status(),
             identity: Some("alice#4021".into()),
             coordinator_online: true,
             blocked: self.blocked.clone(),
@@ -451,6 +470,11 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
 
         ControlRequest::SetOwnDevicePeering { enabled } => {
             s.peer_own_devices = enabled;
+            ControlResponse::Status(Box::new(s.status()))
+        }
+
+        ControlRequest::SetCertsEnabled { enabled } => {
+            s.certs_enabled = enabled;
             ControlResponse::Status(Box::new(s.status()))
         }
 

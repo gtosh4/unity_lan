@@ -2,6 +2,7 @@
 //! attestations, pin the trust anchor, and print the resulting IPs + hostnames.
 
 mod beacon;
+mod cert;
 mod config;
 mod control;
 mod coord;
@@ -199,6 +200,21 @@ enum CtlCmd {
     OwnDevices {
         /// `on` to always peer with your own devices, `off` to peer only via shared networks.
         action: OnOff,
+    },
+    /// Show or set this device's publicly-trusted TLS certificate.
+    #[command(long_about = "\
+Show this device's TLS certificate state, or turn issuance on/off.
+
+With no argument, prints the certificate and key paths for a TLS server's own config, plus what the
+certificate covers and when it expires.
+
+Issuance needs three things: the coordinator must be configured with a certificate domain, this
+device must expose at least one port (a certificate is only useful if something is listening), and
+you must opt in here. It is off by default because issuing publishes this device's name to public
+Certificate Transparency logs, permanently — turning it back off does not unpublish it.")]
+    Cert {
+        /// `on` to opt in, `off` to stop issuing and renewing. Omit to show the current state.
+        action: Option<OnOff>,
     },
     /// Locally block a peer's owner (all their devices) by handle — drops them from the mesh.
     Block {
@@ -644,7 +660,7 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
         .await
         .ok()
         .map(|ep| common::crypto::enroll_proof(&wg_priv, &ep));
-    let (_, device) = coord::register(
+    let (resp, device) = coord::register(
         &cfg.coordinator,
         &cfg.state_dir,
         coord::CoordReq {
@@ -666,6 +682,16 @@ async fn login(cfg: Config) -> anyhow::Result<()> {
         },
     )
     .await?;
+    // Persist the bearer token, for the same reason `register_once` does. This register is the one
+    // that enrols the pubkey, so it is the *only* time the coordinator hands the token out; dropping
+    // it here enrolled the device and threw away its sole credential, leaving the state dir
+    // permanently 401'd ("device token missing or invalid") with no recovery short of deleting
+    // `wg.key`. The daemon-mediated login path (`daemon.rs`) always saved it; this headless one did
+    // not.
+    if let Some(tok) = &resp.device_token {
+        keys::save_token(&cfg.state_dir, tok)?;
+    }
+
     match device {
         Some(dev) => println!("Logged in ✓  {} — {}", dev.wg_ip, dev.hostname),
         None => println!("Logged in ✓  (no networks yet — join a role in Discord)"),
@@ -841,6 +867,16 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             }
             Ok(())
         }
+        CtlCmd::Cert { action } => {
+            let status = match action {
+                Some(a) => {
+                    control::client_set_certs_enabled(&socket, matches!(a, OnOff::On)).await?
+                }
+                None => control::client_status(&socket).await?,
+            };
+            print_cert(&status.cert);
+            Ok(())
+        }
         CtlCmd::OwnDevices { action } => {
             let enabled = matches!(action, OnOff::On);
             let status = control::client_set_own_device_peering(&socket, enabled).await?;
@@ -913,6 +949,30 @@ fn expose_scope(
         // networks — refusing if two guilds share the role name rather than guessing.
         (Some(n), false) => common::control::ExposeScope::Unresolved { guild, name: n },
         (None, false) => common::control::ExposeScope::AllPeers,
+    }
+}
+
+/// Print certificate state for a headless operator — chiefly the two paths, which is what a TLS
+/// server's own config needs to point at.
+fn print_cert(cert: &common::control::CertStatus) {
+    let Some(domain) = &cert.domain else {
+        println!("certificates: unavailable (this coordinator issues none)");
+        return;
+    };
+    println!(
+        "certificates: {} (domain {domain})",
+        if cert.enabled { "on" } else { "off" }
+    );
+    if let (Some(cert_path), Some(key_path)) = (&cert.cert_path, &cert.key_path) {
+        println!("  certificate  {cert_path}");
+        println!("  private key  {key_path}");
+        println!("  covers       {}", cert.names.join(", "));
+        let remaining = cert.expires_at.saturating_sub(common::now_unix());
+        println!("  expires      in {} days", remaining / 86_400);
+    } else if let Some(why) = &cert.blocked {
+        println!("  no certificate yet: {why}");
+    } else if cert.enabled {
+        println!("  no certificate yet");
     }
 }
 

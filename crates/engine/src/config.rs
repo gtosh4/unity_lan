@@ -144,7 +144,49 @@ pub struct Config {
     /// UDP port the discovery beacon broadcasts on and listens at (distinct from `listen_port`).
     #[serde(default = "default_beacon_port")]
     pub beacon_port: u16,
+    /// TLS certificate handling. Only consulted when the deployment issues certificates at all and
+    /// this device has opted in — see [`CertConfig`].
+    #[serde(default)]
+    pub cert: CertConfig,
 }
+
+/// The `[cert]` block: what to do with a certificate once it has been issued.
+///
+/// The engine runs as root, so a key written owner-only is unreadable by whatever daemon actually
+/// terminates TLS, and a certificate that is renewed but never re-read leaves that daemon serving an
+/// expired one for the rest of its life. Both are why this block exists; neither is UnityLAN
+/// integrating with any particular server.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct CertConfig {
+    /// Group to own the certificate key (mode `0640`, `root:<group>`), so the service that serves
+    /// TLS can read it without running as root. Unset leaves the key owner-only — correct when the
+    /// consumer is itself root, and the safer default otherwise. Unix only; on Windows use an ACL on
+    /// the certs directory.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Command to run after a certificate is issued or renewed, as `["program", "arg", …]`. Most TLS
+    /// servers read their certificate once at startup, so without this a renewal ~60 days in swaps
+    /// the file under a process that never notices.
+    ///
+    /// Taken from config only and executed as argv — never a shell string, and never anything a peer
+    /// or the coordinator can influence. Killed if it outlives [`RELOAD_TIMEOUT`].
+    #[serde(default)]
+    pub reload_command: Vec<String>,
+    /// ACME directory URL. Defaults to Let's Encrypt production; point it at their staging directory
+    /// (or a local pebble) when testing, so a mistake does not spend the real weekly budget.
+    #[serde(default)]
+    pub acme_directory: Option<String>,
+    /// PEM root to trust for the ACME server itself, instead of the system roots. Only needed for a
+    /// local test CA (pebble serves its API over HTTPS with its own root); leave unset for Let's
+    /// Encrypt, staging included. Not a way to trust an arbitrary CA for *issuance* — it only governs
+    /// the TLS connection to the directory.
+    #[serde(default)]
+    pub acme_root: Option<PathBuf>,
+}
+
+/// How long a `reload_command` may run before it is killed. It should be a signal or a service
+/// reload, not work — a hung one must not stall the daemon's reconcile loop.
+pub const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A config-seeded port exposure. `proto` defaults to `tcp`, and the scope to every peer.
 ///

@@ -5,11 +5,17 @@
 //! admin slash commands) — useful in the test config; in production networks are managed via
 //! `/unitylan network`.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use serde::Deserialize;
 
 const MIN_ADMIN_TOKEN_BYTES: usize = 32;
+
+/// Wire limits from RFC 1035 §2.3.4, enforced on `[dns] domain` so an over-long name fails at
+/// startup instead of producing an unencodable response later.
+const MAX_DNS_NAME_LEN: usize = 253;
+const MAX_DNS_LABEL_LEN: usize = 63;
 
 /// Floor on `attestation_ttl_secs`, **relaxed in debug builds**.
 ///
@@ -140,6 +146,11 @@ pub struct Config {
     /// Enrollment-time device possession proof.
     #[serde(default)]
     pub enrollment: EnrollmentConfig,
+    /// Public DNS domain this deployment issues TLS certificates under. Absent → no certificate
+    /// feature: peers are reachable as `<device>.<user>.unity.internal` only, and clients are told
+    /// so (`RegisterResp::dns_domain` is `None`), so they never attempt issuance.
+    #[serde(default)]
+    pub dns: Option<DnsConfig>,
 }
 
 /// The `[enrollment]` block: policy for the DH possession proof a device presents when it first
@@ -196,6 +207,64 @@ pub struct AdminConfig {
     /// and random. Compared in constant time.
     pub token: String,
 }
+
+/// The `[dns]` block: the public domain mesh certificate names live under, plus the authoritative
+/// responder that proves control of it to a CA.
+///
+/// A mesh name resolves to a `100.64.0.0/10` address only reachable inside the mesh, so a CA can
+/// never connect to it — HTTP-01 and TLS-ALPN-01 are both unusable, and DNS-01 is the only challenge
+/// left. That needs a `_acme-challenge` TXT record in *public* DNS, which is what this responder
+/// serves. Delegate `domain` here with one `NS` record in the parent zone:
+///
+/// ```text
+/// mesh   NS   coordinator.example.com.
+/// ```
+///
+/// The zone carries challenge records and nothing else — no `A` records, so mesh addresses are never
+/// published. Clients resolve those locally through the engine's resolver hook, as they always have.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DnsConfig {
+    /// Public domain certificate names live under, e.g. `mesh.example.com`. Devices are named
+    /// `<device>.<user>.<domain>`, alongside (never replacing) their `unity.internal` name.
+    pub domain: String,
+    /// Address the authoritative responder binds, UDP **and** TCP (a truncated UDP answer is retried
+    /// over TCP, so a UDP-only responder fails for any resolver that retries). Bind an unprivileged
+    /// port and publish it as 53 rather than granting the coordinator `CAP_NET_BIND_SERVICE`; in
+    /// Docker that is `53:5353/udp` plus `53:5353/tcp`.
+    pub bind: SocketAddr,
+    /// Ceiling on certificate issuances admitted per rolling week, across the whole deployment.
+    ///
+    /// Let's Encrypt caps certificates per *registered domain* (eTLD+1) per week. Until `domain`'s
+    /// parent is on the Public Suffix List, every user here shares the parent's single bucket, and
+    /// exhausting it locks the deployment out for the remainder of the week — worse than declining
+    /// early. Keep this under the CA's real cap so a burst (a LAN party enrolling at once) is refused
+    /// with a clear error instead of spending the last of the budget.
+    ///
+    /// The client-side gates — opt-in per device, and only for devices exposing a port — keep normal
+    /// use far below this. It exists for the burst.
+    #[serde(default = "default_max_certs_per_week")]
+    pub max_certs_per_week: u32,
+}
+
+fn default_max_certs_per_week() -> u32 {
+    40
+}
+
+/// Suffixes no public CA will ever issue for: reserved or special-use names (RFC 6761 `.test`,
+/// `.example`, `.invalid`, `.localhost`; RFC 6762 `.local`; RFC 7686 `.onion`; RFC 8375 `.home.arpa`;
+/// RFC 9476 `.alt`; and ICANN's `.internal`). Configuring one is always a mistake, and catching it at
+/// startup beats discovering it when the first client's order is rejected days later.
+const UNISSUABLE_SUFFIXES: &[&str] = &[
+    "internal",
+    "local",
+    "localhost",
+    "test",
+    "example",
+    "invalid",
+    "onion",
+    "alt",
+    "home.arpa",
+];
 
 /// The `[release]` block: the version to advertise plus one `[[release.artifact]]` per platform.
 #[derive(Debug, Deserialize, Clone)]
@@ -310,7 +379,8 @@ pub struct FakeGuild {
 #[derive(Debug, Deserialize, Clone)]
 pub struct FakeMember {
     pub user_id: u64,
-    pub nick: String,
+    /// The member's global Discord username. Seeds the `<user>` DNS label.
+    pub username: String,
     #[serde(default)]
     pub role_ids: Vec<u64>,
 }
@@ -319,7 +389,11 @@ impl Config {
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))?;
-        let cfg: Self = toml::from_str(&text)?;
+        let mut cfg: Self = toml::from_str(&text)?;
+        if let Some(dns) = &mut cfg.dns {
+            dns.normalize();
+            dns.validate()?;
+        }
         if cfg.max_longpolls == 0 {
             anyhow::bail!("max_longpolls must be at least 1");
         }
@@ -422,6 +496,80 @@ impl ReleaseConfig {
     }
 }
 
+impl DnsConfig {
+    /// Lower-case the domain and drop a trailing root dot, so `Mesh.Example.Com.` and
+    /// `mesh.example.com` are the same config. DNS is case-insensitive, but the rest of the
+    /// coordinator compares these as plain strings — normalising once here keeps that safe.
+    pub(crate) fn normalize(&mut self) {
+        self.domain = self
+            .domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+    }
+
+    /// Reject a domain no CA could ever issue for, at startup rather than at the first client's
+    /// order — the failure would otherwise surface days later, in a client's logs, as an opaque CA
+    /// rejection nowhere near the config that caused it.
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let domain = &self.domain;
+        if domain.is_empty() {
+            anyhow::bail!("dns domain must not be empty");
+        }
+        if domain.len() > MAX_DNS_NAME_LEN {
+            anyhow::bail!("dns domain exceeds the {MAX_DNS_NAME_LEN}-byte DNS name limit");
+        }
+        let labels: Vec<&str> = domain.split('.').collect();
+        if labels.len() < 2 {
+            anyhow::bail!(
+                "dns domain {domain:?} must be a fully-qualified public domain of at least two \
+                 labels, e.g. \"mesh.example.com\""
+            );
+        }
+        for label in &labels {
+            if label.is_empty() {
+                anyhow::bail!("dns domain {domain:?} has an empty label");
+            }
+            if label.len() > MAX_DNS_LABEL_LEN {
+                anyhow::bail!(
+                    "dns domain label {label:?} exceeds the {MAX_DNS_LABEL_LEN}-byte limit"
+                );
+            }
+            if !label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                anyhow::bail!(
+                    "dns domain label {label:?} may contain only ASCII letters, digits, and hyphens \
+                     (punycode an internationalised name before configuring it)"
+                );
+            }
+            if label.starts_with('-') || label.ends_with('-') {
+                anyhow::bail!("dns domain label {label:?} may not start or end with a hyphen");
+            }
+        }
+        // An all-digit final label means this is an IP address, not a name a CA can validate.
+        if labels[labels.len() - 1].bytes().all(|b| b.is_ascii_digit()) {
+            anyhow::bail!("dns domain {domain:?} looks like an IP address, not a domain name");
+        }
+        for suffix in UNISSUABLE_SUFFIXES {
+            if domain == suffix || domain.ends_with(&format!(".{suffix}")) {
+                anyhow::bail!(
+                    "dns domain {domain:?} ends in the reserved suffix {suffix:?}: no publicly-trusted \
+                     CA will ever issue a certificate for it. Use a domain you own, or leave [dns] \
+                     out entirely to run without certificates on unity.internal names"
+                );
+            }
+        }
+        if self.max_certs_per_week == 0 {
+            anyhow::bail!(
+                "max_certs_per_week must be at least 1 (omit [dns] to disable certificates instead)"
+            );
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +593,100 @@ mod tests {
         assert_eq!(a.sha256[31], 1);
         assert_eq!(a.sha256[0], 0);
         assert_eq!(a.size, 1024);
+    }
+
+    /// Parse a `[dns]` body, normalise it, and validate — the same order `Config::load` uses.
+    fn dns(body: &str) -> anyhow::Result<DnsConfig> {
+        let mut cfg: DnsConfig = toml::from_str(body)?;
+        cfg.normalize();
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    #[test]
+    fn dns_domain_is_normalized() {
+        let cfg = dns("domain = 'Mesh.Example.Com.'\nbind = '0.0.0.0:5353'").unwrap();
+        assert_eq!(cfg.domain, "mesh.example.com");
+        assert_eq!(cfg.max_certs_per_week, 40);
+    }
+
+    #[test]
+    fn dns_rejects_unissuable_suffixes() {
+        // The whole point of the block is getting a *publicly-trusted* certificate, and no CA will
+        // issue for a reserved suffix — so these must fail at startup, not at the first order.
+        for domain in [
+            "mesh.unity.internal",
+            "sub.internal",
+            "mesh.local",
+            "box.home.arpa",
+            "foo.test",
+            "site.example",
+            "hidden.onion",
+        ] {
+            let err = dns(&format!("domain = '{domain}'\nbind = '0.0.0.0:5353'")).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved suffix"),
+                "{domain} should be rejected as reserved, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn dns_rejects_malformed_domains() {
+        for domain in [
+            "example",     // single label
+            "internal",    // ...including a bare reserved one
+            "mesh..com",   // empty label
+            "mesh_1.com",  // underscore is not a hostname character
+            "-mesh.com",   // leading hyphen
+            "mesh-.com",   // trailing hyphen
+            "192.168.1.1", // an address, not a name
+        ] {
+            assert!(
+                dns(&format!("domain = '{domain}'\nbind = '0.0.0.0:5353'")).is_err(),
+                "{domain} should be rejected"
+            );
+        }
+        assert!(dns("domain = 'mesh.example.com'\nbind = '0.0.0.0:5353'").is_ok());
+    }
+
+    #[test]
+    fn dns_rejects_zero_cert_budget() {
+        let err = dns("domain = 'mesh.example.com'\nbind = '0.0.0.0:5353'\nmax_certs_per_week = 0")
+            .unwrap_err();
+        assert!(err.to_string().contains("max_certs_per_week"));
+    }
+
+    #[test]
+    fn dns_block_is_optional_and_validated_at_load() {
+        let base = "bind = '127.0.0.1:8080'\ndatabase = 'test.db'\n";
+        let dir = common::testutil::TempDir::new("dns-block");
+
+        // Absent → no certificate feature, and the coordinator still starts.
+        let path = dir.join("no-dns.toml");
+        std::fs::write(&path, base).unwrap();
+        assert!(Config::load(&path).unwrap().dns.is_none());
+
+        // Present but unissuable → refuse to start, rather than failing per-client later.
+        let path = dir.join("bad-dns.toml");
+        std::fs::write(
+            &path,
+            format!("{base}[dns]\ndomain = 'mesh.unity.internal'\nbind = '0.0.0.0:5353'\n"),
+        )
+        .unwrap();
+        assert!(Config::load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved suffix"));
+
+        let path = dir.join("good-dns.toml");
+        std::fs::write(
+            &path,
+            format!("{base}[dns]\ndomain = 'mesh.example.com'\nbind = '0.0.0.0:5353'\n"),
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap().dns.unwrap();
+        assert_eq!(cfg.domain, "mesh.example.com");
     }
 
     #[test]

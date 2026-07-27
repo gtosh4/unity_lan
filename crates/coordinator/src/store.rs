@@ -7,7 +7,7 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 
 use anyhow::Context;
-use common::netid::{addr_from_index, device_hint, pick_free_index};
+use common::netid::{addr_from_index, device_hint, pick_free_index, sanitize_label};
 use ipnet::Ipv4Net;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -25,6 +25,24 @@ const MAX_DEVICES_PER_USER: u64 = 32;
 /// keeping just the most recent bindings per user costs nothing legitimate: set above the device cap
 /// so a real fleet's in-flight logins never fall off.
 const MAX_OAUTH_BINDINGS_PER_USER: u64 = 64;
+
+/// How many `-2`, `-3`, … suffixes [`Store::user_label`] tries before falling back to a label built
+/// from the user id. Collisions need two accounts whose names differ only in `_` versus `.` (or a
+/// leading separator), so even a handful is generous; the bound exists so the search terminates.
+const MAX_LABEL_SUFFIX: u32 = 32;
+
+/// The 63-byte DNS label cap. Both a Discord username and a nickname stop at 32, so this only bites
+/// a caller that hands us something unsanitised.
+const MAX_LABEL_LEN: usize = 63;
+
+/// `desired` with a `-n` suffix, trimmed to fit [`MAX_LABEL_LEN`]. Slices on a character boundary so
+/// an unsanitised caller costs a mis-trimmed name rather than a panic mid-request.
+fn suffixed_label(desired: &str, n: u32) -> String {
+    let suffix = format!("-{n}");
+    let keep = MAX_LABEL_LEN.saturating_sub(suffix.len());
+    let stem: String = desired.chars().take(keep).collect();
+    format!("{stem}{suffix}")
+}
 
 /// A registered network = a role designated as a UnityLAN network.
 #[derive(Clone, Debug)]
@@ -197,6 +215,10 @@ impl Store {
             CREATE TABLE IF NOT EXISTS user_handles (
                 user_id INTEGER PRIMARY KEY,  -- captured at interactive login
                 handle  TEXT    NOT NULL      -- Discord display handle, the <user> DNS label
+            );
+            CREATE TABLE IF NOT EXISTS user_labels (
+                user_id INTEGER PRIMARY KEY,      -- allocated once, on first sight
+                label   TEXT    NOT NULL UNIQUE   -- the <user> DNS label, unique deployment-wide
             );
             CREATE TABLE IF NOT EXISTS guild_rotation_certs (
                 idx      INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
@@ -678,6 +700,94 @@ impl Store {
         unreachable!("a free suffix always exists within taken.len()+1 candidates")
     }
 
+    /// This user's `<user>` DNS label, allocating one on first sight seeded from `seed`.
+    ///
+    /// **Allocated once and kept**, rather than recomputed from the current Discord name on every
+    /// snapshot, for two reasons:
+    ///
+    /// * *Uniqueness.* [`sanitize_label`] is lossy — it maps both `_` and `.` onto `-`, so the
+    ///   distinct Discord accounts `alice.smith` and `alice_smith` sanitise to one label, as do
+    ///   `_alice` and `alice`. Without an allocation the coordinator would sign two users
+    ///   attestations asserting the same name; peers verify those against the pinned anchor and both
+    ///   check out, so whichever lands last silently owns the hostname (`engine/src/dns.rs` inserts
+    ///   into a map). The `UNIQUE` index makes that unrepresentable.
+    /// * *Stability.* A name that tracked the live Discord name would change under a rename, which
+    ///   is harmless for a dynamically-resolved `.unity.internal` name but breaks a TLS certificate
+    ///   issued against it for the next 90 days.
+    ///
+    /// Existing deployments allocate lazily, on each user's next register, so nobody's name moves at
+    /// upgrade unless it was already colliding — which is the case worth changing.
+    pub async fn user_label(&self, user_id: u64, seed: &str) -> anyhow::Result<String> {
+        if let Some(label) = self.lookup_user_label(user_id).await? {
+            return Ok(label);
+        }
+        let desired = sanitize_label(seed);
+        // Let the `UNIQUE` index arbitrate rather than reading the taken set first: two devices of
+        // two users can register concurrently, and a read-then-write would hand both the same label.
+        for n in 0..MAX_LABEL_SUFFIX {
+            let candidate = if n == 0 {
+                desired.clone()
+            } else {
+                suffixed_label(&desired, n + 1)
+            };
+            match sqlx::query("INSERT INTO user_labels (user_id, label) VALUES (?, ?)")
+                .bind(user_id as i64)
+                .bind(&candidate)
+                .execute(&self.pool)
+                .await
+            {
+                Ok(_) => return Ok(candidate),
+                Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+                    // Either this user was allocated a label concurrently (take it), or the label
+                    // belongs to somebody else (try the next suffix).
+                    if let Some(label) = self.lookup_user_label(user_id).await? {
+                        return Ok(label);
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Every suffix we were willing to try is taken. The user id is unique by construction, so
+        // this always terminates the search.
+        let fallback = format!("user-{user_id}");
+        sqlx::query("INSERT INTO user_labels (user_id, label) VALUES (?, ?)")
+            .bind(user_id as i64)
+            .bind(&fallback)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("allocating a DNS label for user {user_id}"))?;
+        Ok(fallback)
+    }
+
+    /// This user's already-allocated label, or `None` if they have never registered. Unlike
+    /// [`Store::user_label`] this never allocates — a caller with no snapshot behind it has no
+    /// trustworthy seed, and inventing one would let a name be claimed off a path that never
+    /// consulted the role source.
+    pub async fn allocated_user_label(&self, user_id: u64) -> anyhow::Result<Option<String>> {
+        self.lookup_user_label(user_id).await
+    }
+
+    /// This device's name, by pubkey.
+    pub async fn device_name_of(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<String>> {
+        Ok(
+            sqlx::query("SELECT device_name FROM devices WHERE pubkey = ?")
+                .bind(pubkey.as_slice())
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get::<String, _>("device_name")),
+        )
+    }
+
+    async fn lookup_user_label(&self, user_id: u64) -> anyhow::Result<Option<String>> {
+        Ok(
+            sqlx::query("SELECT label FROM user_labels WHERE user_id = ?")
+                .bind(user_id as i64)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|r| r.get::<String, _>("label")),
+        )
+    }
+
     /// The device's bearer token (minting one for a legacy row that predates the column).
     pub async fn device_token(&self, pubkey: &[u8; 32]) -> anyhow::Result<Option<String>> {
         let row = sqlx::query("SELECT token FROM devices WHERE pubkey = ?")
@@ -936,6 +1046,52 @@ mod tests {
     /// A test mesh CIDR for allocation calls.
     fn tnet() -> Ipv4Net {
         "100.72.0.0/16".parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn distinct_accounts_never_share_a_dns_label() {
+        // `sanitize_label` maps both `_` and `.` onto `-`, so these three globally-unique Discord
+        // usernames all sanitise to `alice-smith`. Without allocation the coordinator would sign
+        // three users attestations asserting one hostname — each verifying cleanly against the
+        // pinned anchor — and whichever landed last would silently own the name.
+        let st = Store::memory().await;
+        let a = st.user_label(1, "alice.smith").await.unwrap();
+        let b = st.user_label(2, "alice_smith").await.unwrap();
+        let c = st.user_label(3, "alice.smith").await.unwrap();
+        assert_eq!(a, "alice-smith");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    #[tokio::test]
+    async fn a_leading_separator_does_not_collide() {
+        // `_alice` sanitises to `alice`, because a separator with nothing before it is dropped
+        // rather than becoming a dash.
+        let st = Store::memory().await;
+        assert_eq!(st.user_label(1, "alice").await.unwrap(), "alice");
+        assert_ne!(st.user_label(2, "_alice").await.unwrap(), "alice");
+    }
+
+    #[tokio::test]
+    async fn a_label_is_allocated_once_and_then_stable() {
+        // The seed only ever seeds. A later rename must not move the name, or every certificate
+        // issued against it breaks for the rest of its 90-day life.
+        let st = Store::memory().await;
+        let first = st.user_label(1, "alice").await.unwrap();
+        assert_eq!(st.user_label(1, "alice").await.unwrap(), first);
+        assert_eq!(st.user_label(1, "renamed").await.unwrap(), first);
+    }
+
+    #[tokio::test]
+    async fn an_unusable_seed_still_yields_a_unique_label() {
+        // A name with no alphanumerics at all sanitises to the literal `device`, so two of them
+        // would otherwise share a label — the fallback is a collision bucket, not a rarity.
+        let st = Store::memory().await;
+        let a = st.user_label(1, "...").await.unwrap();
+        let b = st.user_label(2, "___").await.unwrap();
+        assert_eq!(a, "device");
+        assert_ne!(a, b);
     }
 
     #[tokio::test]

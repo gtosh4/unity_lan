@@ -12,7 +12,7 @@ use interprocess::local_socket::tokio::Stream as LocalStream;
 use interprocess::local_socket::ListenerOptions;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use super::status::{set_blocked, set_disable_new, set_peer_own, Ctx};
+use super::status::{set_blocked, set_certs_enabled, set_disable_new, set_peer_own, Ctx};
 use super::to_name;
 use crate::coord;
 use crate::fw::Firewall;
@@ -173,8 +173,11 @@ fn control_pipe_sd(
 }
 
 /// Look up a group's gid by name via `getgrnam`. `None` if the group doesn't exist.
+///
+/// Shared with [`crate::cert`], which hands the certificate key to a group so a non-root TLS server
+/// can read it — the same "name in config → gid" step this module does for the control socket.
 #[cfg(not(windows))]
-fn group_gid(name: &str) -> Option<u32> {
+pub(crate) fn group_gid(name: &str) -> Option<u32> {
     let cname = std::ffi::CString::new(name).ok()?;
     // SAFETY: getgrnam returns a pointer into a static buffer; we read gr_gid before returning and
     // make no further libc calls that would clobber it. Single-threaded startup context.
@@ -369,6 +372,19 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         // Own-device peering toggle: update the local policy (persisted, source of truth). Wakes the
         // daemon to re-register — the coordinator adds/evicts this device from its siblings' seeds —
         // then re-mesh. Mirror it into the live status so the GUI reflects it at once.
+        // Certificate opt-in: local policy (persisted, source of truth). Wakes the daemon so its
+        // reconcile loop issues (or stops renewing) at once rather than on the next tick. Turning it
+        // off leaves anything already issued alone — and cannot unpublish the name from certificate
+        // transparency logs, which is why turning it *on* is an explicit act.
+        ControlRequest::SetCertsEnabled { enabled } => {
+            match ctx.localnet.set_certs_enabled(enabled) {
+                Ok(_) => {
+                    set_certs_enabled(&ctx.status, enabled);
+                    ControlResponse::Status(Box::new(ctx.status.borrow().clone()))
+                }
+                Err(e) => ControlResponse::Error(format!("{e:#}")),
+            }
+        }
         ControlRequest::SetOwnDevicePeering { enabled } => {
             match ctx.localnet.set_peer_own_devices(enabled) {
                 Ok(_) => {
