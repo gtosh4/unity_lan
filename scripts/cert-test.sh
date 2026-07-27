@@ -17,11 +17,23 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
 COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
-[ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
-command -v dig >/dev/null || { echo "needs dig (bind-utils / dnsutils)"; exit 1; }
 
+# Re-exec under a user+net+mount namespace. Only the issuance leg needs it — a real daemon, and so a
+# real WireGuard interface — but the whole script runs inside so the coordinator, pebble and the
+# daemon share one loopback. No host root required.
+if [ "${UNL_INNS:-}" != "1" ]; then
+  [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
+  command -v dig >/dev/null || { echo "needs dig (bind-utils / dnsutils)"; exit 1; }
+  exec unshare -Urnm --map-root-user env UNL_INNS=1 ENG="$ENG" COORD="$COORD" \
+    PATH="$PATH" bash "${BASH_SOURCE[0]}"
+fi
+
+# ---------------- inside the user+net+mount namespace ----------------
 TMP="$(mktemp -d)"
 trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
+mount -t tmpfs none /run 2>/dev/null || { echo "FAIL: mount /run"; exit 1; }
+mkdir -p /run/wireguard
+ip link set lo up
 
 PORT=8089
 DNS_PORT=15353
@@ -139,29 +151,48 @@ check "an invalid device token is rejected" "$CODE" "401"
 echo "=== full ACME issuance against a local CA ==="
 # The legs above prove the coordinator's half. This proves the device's: a real ACME conversation,
 # ending in a certificate on disk. It needs `pebble` (Let's Encrypt's test CA) because talking to the
-# real one from a test would spend the weekly budget on every run.
+# real one from a test would spend the weekly budget on every run. Grab the release binary:
 #
-#   go install github.com/letsencrypt/pebble/v2/cmd/pebble@latest
+#   curl -sL https://github.com/letsencrypt/pebble/releases/latest/download/pebble-linux-amd64.tar.gz \
+#     | tar xz && install -m755 pebble-linux-amd64/linux/amd64/pebble ~/.local/bin/pebble
 #
 # Pebble is pointed at our zone with `-dnsserver`, so it resolves `_acme-challenge` from the
 # coordinator exactly as Let's Encrypt would; the engine is pointed back at pebble with
-# `[cert] acme_directory` and trusts its self-signed API root via `acme_root`.
+# `[cert] acme_directory`, trusting its API certificate via `acme_root`.
 if ! command -v pebble >/dev/null; then
   SKIPPED_ACME=1
   echo "  SKIPPED: pebble not installed — the ACME path is NOT covered by this run"
   echo "           install it to cover issuance end to end (see the comment above)"
 else
-  PEBBLE_DIR="$(dirname "$(command -v pebble)")/../test/certs/pebble.minica.pem"
+  # Mint pebble's own API certificate here rather than reaching into its source tree: the release
+  # tarball ships the binary alone, and `go install` likewise leaves no `test/certs` to point at.
+  #
+  # Two tiers, not one self-signed file: rustls rejects a CA certificate presented as a server leaf
+  # (`CaUsedAsEndEntity`), so the root the engine trusts must be distinct from the leaf pebble serves.
+  # This governs the TLS connection to the ACME directory only — it is not a CA for issuance.
+  {
+    openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+      -keyout "$TMP/ca-key.pem" -out "$TMP/ca.pem" -subj "/CN=pebble-test-ca" &&
+    openssl req -newkey rsa:2048 -nodes -keyout "$TMP/pebble-key.pem" \
+      -out "$TMP/pebble.csr" -subj "/CN=localhost" &&
+    openssl x509 -req -in "$TMP/pebble.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca-key.pem" \
+      -CAcreateserial -days 1 -out "$TMP/pebble-cert.pem" \
+      -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n')
+  } >/dev/null 2>&1 \
+    || { bad "could not mint pebble's API certificate (needs openssl)"; SKIPPED_ACME=1; }
   cat >"$TMP/pebble.json" <<EOF
 { "pebble": {
     "listenAddress": "127.0.0.1:14000",
     "managementListenAddress": "127.0.0.1:15000",
-    "certificate": "$(dirname "$(command -v pebble)")/../test/certs/localhost/cert.pem",
-    "privateKey": "$(dirname "$(command -v pebble)")/../test/certs/localhost/key.pem",
+    "certificate": "$TMP/pebble-cert.pem",
+    "privateKey": "$TMP/pebble-key.pem",
     "httpPort": 5002, "tlsPort": 5001, "ocspResponderURL": "" } }
 EOF
-  # `-dnsserver` sends every validation query at the coordinator's zone.
-  pebble -config "$TMP/pebble.json" -dnsserver "127.0.0.1:$DNS_PORT" >"$TMP/pebble.log" 2>&1 &
+  # `-dnsserver` sends every validation query at the coordinator's zone. `NOSLEEP` drops pebble's
+  # deliberate random validation delay, which exists to catch clients that assume it is instant —
+  # we are not testing that here, and it would add tens of seconds per run.
+  PEBBLE_VA_NOSLEEP=1 \
+    pebble -config "$TMP/pebble.json" -dnsserver "127.0.0.1:$DNS_PORT" >"$TMP/pebble.log" 2>&1 &
   for _ in $(seq 1 40); do
     curl -sfk https://127.0.0.1:14000/dir >/dev/null 2>&1 && break; sleep 0.25
   done
@@ -170,24 +201,37 @@ EOF
 
 [cert]
 acme_directory = "https://127.0.0.1:14000/dir"
-acme_root = "$PEBBLE_DIR"
+acme_root = "$TMP/ca.pem"
 EOF
+  # Issuance is reconciled by the *daemon*, so this leg needs one running — `login` above was a
+  # one-shot and leaves no control socket behind.
+  "$ENG" -c "$TMP/a.toml" run >"$TMP/engine.log" 2>&1 &
+  for _ in $(seq 1 60); do [ -S "$TMP/a/control.sock" ] && break; sleep 0.5; done
+  [ -S "$TMP/a/control.sock" ] || { bad "the daemon never opened its control socket"; tail -15 "$TMP/engine.log"; }
+
   # Expose a port and opt in — both gates the daemon requires before it will issue.
-  "$ENG" -c "$TMP/a.toml" ctl expose 8443 >/dev/null 2>&1
-  "$ENG" -c "$TMP/a.toml" ctl cert on >/dev/null 2>&1
-  for _ in $(seq 1 60); do [ -s "$TMP/a/certs/cert.pem" ] && break; sleep 1; done
+  "$ENG" -c "$TMP/a.toml" ctl expose 8443 >>"$TMP/ctl.log" 2>&1 \
+    || bad "ctl expose failed: $(tail -2 "$TMP/ctl.log")"
+  "$ENG" -c "$TMP/a.toml" ctl cert on >>"$TMP/ctl.log" 2>&1 \
+    || bad "ctl cert on failed: $(tail -2 "$TMP/ctl.log")"
+  for _ in $(seq 1 90); do [ -s "$TMP/a/certs/cert.pem" ] && break; sleep 1; done
 
   if [ -s "$TMP/a/certs/cert.pem" ] && [ -s "$TMP/a/certs/key.pem" ]; then
     ok "a certificate was issued and written"
     openssl x509 -in "$TMP/a/certs/cert.pem" -noout -text 2>/dev/null \
       | grep -q "$DEVICE_NAME.$DOMAIN" \
       && ok "it names this device" || bad "the certificate does not name $DEVICE_NAME.$DOMAIN"
-    # The key is the one secret here; it must not be world-readable.
+    # The key is the one secret here. Only the last digit matters: any "other" bit set means every
+    # local account can read it. 600 (default) and 640 (`[cert] group`) both pass; 644 must not.
     MODE=$(stat -c '%a' "$TMP/a/certs/key.pem")
-    case "$MODE" in *0|*4) bad "the private key is mode $MODE (readable beyond its owner/group)";;
-                     *) ok "the private key is not world-readable (mode $MODE)";; esac
+    case "$MODE" in
+      *0) ok "the private key is not world-readable (mode $MODE)" ;;
+      *)  bad "the private key is mode $MODE — readable by every local account" ;;
+    esac
   else
-    bad "no certificate was issued"; tail -20 "$TMP/pebble.log" 2>/dev/null
+    bad "no certificate was issued"
+    echo "--- engine ---"; grep -iE "cert|acme" "$TMP/engine.log" 2>/dev/null | tail -15
+    echo "--- pebble ---"; tail -10 "$TMP/pebble.log" 2>/dev/null
   fi
 fi
 

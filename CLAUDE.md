@@ -94,7 +94,8 @@ session, impossible (no password).
 | Script | How to run |
 | --- | --- |
 | `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
-| `oauth-test.sh`, `rotation-test.sh`, `cert-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG; `cert-test.sh` also needs `dig`) |
+| `cert-test.sh` | directly, self-unshares — `timeout 300 scripts/cert-test.sh`. Needs `dig`; the ACME leg needs `pebble` on PATH (release binary, no Go) and is **skipped with a loud notice** without it |
+| `oauth-test.sh`, `rotation-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG) |
 | `update-test.sh` | directly, self-unshares — `timeout 420 scripts/update-test.sh` (builds twice; needs `openssl` + `python3`) |
 | `resolver-hook-test.sh` | **real host root** — needs live `systemd-resolved`, a userns won't do |
 | `dev-run.sh` | **real host root** — engine builds a real `wg` interface on host |
