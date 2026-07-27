@@ -13,7 +13,8 @@
 #
 # Deps:  cargo, ffmpeg, and the flatpak com.dec05eba.gpu_screen_recorder
 #        (flatpak install flathub com.dec05eba.gpu_screen_recorder)
-# Usage: scripts/readme-demo.sh            # writes assets/demo.gif, assets/peers.png, assets/networks.png
+# Usage: scripts/readme-demo.sh            # writes assets/demo.gif, assets/demo-peers.gif (site hero),
+#                                          # assets/peers.png, assets/exposed.png, assets/networks.png
 #        SECS=30 FPS=15 WIDTH=400 scripts/readme-demo.sh
 set -uo pipefail
 
@@ -82,6 +83,13 @@ VF="fps=$FPS,scale=$WIDTH:-1:flags=lanczos"
 ffmpeg -y -v error -i "$WORK/tour.mkv" -vf "$VF,palettegen=max_colors=128" "$WORK/palette.png"
 ffmpeg -y -v error -i "$WORK/tour.mkv" -i "$WORK/palette.png" \
   -lavfi "$VF[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" "$OUT/demo.gif"
+# A second, single-purpose cut for the site's hero: just the Peers list with its counters ticking,
+# ending before the peer menu opens (tour t=8, i.e. ~6s into the recording). The full tour is the
+# right thing in the README, where there's room to explain it, but a landing page wants one idea.
+# Keep the end below that menu mark if the tour timings in `fake-engine.rs` ever move.
+ffmpeg -y -v error -ss 1.3 -t 3.5 -i "$WORK/tour.mkv" -vf "$VF,palettegen=max_colors=128" "$WORK/palette-peers.png"
+ffmpeg -y -v error -ss 1.3 -t 3.5 -i "$WORK/tour.mkv" -i "$WORK/palette-peers.png" \
+  -lavfi "$VF[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" -loop 0 "$OUT/demo-peers.gif"
 # Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
 # list in the menu-closed window (tour ~18-22s), the Manage tab mid-dwell for the exposed ports
 # (tour 22-31s), and Networks from the tour's end (it returns to the Networks tab at tour t=31 and
@@ -91,4 +99,4 @@ ffmpeg -y -v error -ss 27 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
 ffmpeg -y -v error -ss 32 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
-ls -la "$OUT/demo.gif" "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"
+ls -la "$OUT/demo.gif" "$OUT/demo-peers.gif" "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"

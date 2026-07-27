@@ -257,8 +257,10 @@ fn fixture_peers() -> Vec<PeerStatus> {
             "bob#1180",
             &[("Engineering", "acme"), ("Gaming", "playhouse")],
         ),
+        // The game box the site's hero illustrates connecting to — same name in both places, so the
+        // "type a name, not an address" claim and the app's peer list line up.
         peer(
-            "phone.bob.unity.internal",
+            "mc.bob.unity.internal",
             11,
             PeerReach::Ice,
             true,
@@ -323,9 +325,11 @@ fn fixture_devices() -> Vec<DeviceInfo> {
         is_primary: primary,
         is_self,
     };
+    // All three are platforms UnityLAN actually ships for today — a `phone` here would advertise a
+    // client that doesn't exist yet (mobile is roadmap, see README "Why you might not").
     vec![
         d("laptop", true, true),
-        d("phone", false, false),
+        d("steamdeck", false, false),
         d("desktop", false, false),
     ]
 }

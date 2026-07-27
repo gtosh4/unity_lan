@@ -768,6 +768,30 @@ distribution docs, and a deliberate version decision — not broken functionalit
          between simultaneously-gamed meshes needs a **separate interface per mesh** — same broadcast
          constraint, different axis. Ship layer 1 only if direct-IP-by-hand is judged worth it on its
          own; otherwise treat the pair as one milestone gated on the relay.
+- [ ] **Reclaim abandoned guild-device addresses** — today only **personal-scope** rows are ever
+      swept: `store::reclaim_idle_personal_devices` filters on `personal = 1`, and the only other
+      paths that free a row are user-initiated (`ctl remove` / `uninstall` → `api/devices.rs`) and
+      the same-owner supersede in `api/snapshot.rs`. Nothing in the role-revocation path touches the
+      `devices` table — it evicts from presence only — so a device enrolled through a guild keeps its
+      row and its `idx` (hence its mesh address) forever, including after its owner loses the role or
+      leaves the server. `pick_free_index` already reuses any freed slot, so the allocation *would*
+      return to the pool; nothing triggers the free. Not a security hole (access is gated by
+      attestations, which are only minted for current role-holders) and not urgent at a default `/16`
+      (~65k addresses), but it's unbounded stale state, and a long-lived deployment's `devices` table
+      only grows. Three candidate policies, ascending in blast radius:
+      1. **Prune on eviction** — remove the row where the revocation path already evicts from
+         presence. Reclaims at the moment membership actually ends, but a member who regains the role
+         re-enrolls on a *new* address (breaks the "same address forever" property people rely on for
+         firewall rules and bookmarks).
+      2. **Extend the idle sweep to guild devices** on a much longer window (a year?) — the existing
+         query minus the `personal = 1` filter plus its own constant. Cheapest, keeps the
+         stable-address property for anyone still using their device, and reclaims only the genuinely
+         abandoned. Probably the right first move.
+      3. **Flip `personal` when a device stops holding any guild role**, letting the existing 30-day
+         sweep pick it up. Tidiest conceptually, but it repurposes a column the snapshot path reads,
+         so it needs the most care — and a device whose owner is simply between roles would churn.
+      Gate on a real deployment's table growth; option 2 is a small enough change to do sooner if
+      address pressure ever shows up in the admin dashboard.
 - [ ] **Peer-to-peer file sharing** — send/receive files directly between peers over the mesh, with
       no Discord upload-size cap in the way. Rides the existing P2P tunnel + `.unity.internal` names
       (transfer targets a peer by hostname/IP; the coordinator stays off the path — pure data plane,

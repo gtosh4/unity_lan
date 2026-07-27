@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UnityLAN — turn your Discord roles into a private, encrypted network</title>
+<meta name="description" content="UnityLAN is a WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, and no accounts to invite. Free and open source.">
+<link rel="canonical" href="https://unitylan.com/">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<meta name="theme-color" content="#0f1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://unitylan.com/">
+<meta property="og:site_name" content="UnityLAN">
+<meta property="og:title" content="UnityLAN — turn your Discord roles into a private, encrypted network">
+<meta property="og:description" content="A WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, no accounts to invite.">
+<meta property="og:image" content="https://unitylan.com/assets/app-icon-1024.png">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="/" aria-label="UnityLAN home">
+      <img src="assets/wordmark.svg" alt="UnityLAN" width="170" height="50">
+    </a>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#how">How it works</a>
+      <a href="#security">Security</a>
+      <a href="#start">Get started</a>
+      <a href="https://discord.gg/QAmz2j54kS">Discord</a>
+      <a href="https://github.com/gtosh4/unity_lan">GitHub</a>
+    </nav>
+    <a class="btn btn-primary btn-sm" href="https://github.com/gtosh4/unity_lan/releases/latest">Download</a>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero">
+  <div class="mesh" aria-hidden="true"></div>
+  <div class="wrap hero-inner">
+    <p class="eyebrow"><span class="dot"></span> Free and open source · AGPL-3.0 · <span data-latest-tag>pre-1.0</span></p>
+    <h1>Turn your Discord roles <br class="wide-only">into a private, encrypted network.</h1>
+    <p class="lede">
+      You already have a group organized in Discord — a gaming community, a homelab crew, a project
+      team. UnityLAN turns those roles into a private LAN. Give a role a network, and everyone who
+      holds it can reach each other's machines directly, as if they were plugged into the same
+      switch. Lose the role, lose access — automatically.
+    </p>
+    <div class="cta">
+      <a class="btn btn-primary" href="#start">Get started</a>
+      <a class="btn btn-ghost" href="https://github.com/gtosh4/unity_lan">
+        <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+        View source
+      </a>
+    </div>
+
+    <div class="hero-demos">
+    <figure class="demo">
+      <div class="dialog" role="img" aria-label="A game's add-server dialog, with the server address filled in as mc.bob.unity.internal instead of an IP address">
+        <p class="dialog-title">Add Server</p>
+        <p class="field-label">Server Name</p>
+        <p class="field">Bob's survival world</p>
+        <p class="field-label">Server Address</p>
+        <p class="field addr">mc.bob.unity.internal<span class="cur"></span></p>
+        <p class="dialog-actions"><span class="fake-btn primary">Done</span><span class="fake-btn">Cancel</span></p>
+      </div>
+      <figcaption>Your friends type a name, not an address. Nothing to look up, no port to forward,
+      no “what's my IP again?” in chat.</figcaption>
+    </figure>
+
+    <figure class="shot hero-shot">
+      <img src="assets/demo-peers.gif" alt="The UnityLAN desktop app showing the live peer list: each machine's name, whether the path is direct, and its traffic counters" width="400" height="602" fetchpriority="high" decoding="async">
+      <figcaption>And the app shows who's on, how each one is reached, and what's moving.</figcaption>
+    </figure>
+    </div>
+  </div>
+</section>
+
+<section class="strip" aria-label="At a glance">
+  <div class="wrap strip-grid">
+    <div><strong>Direct P2P</strong><span>WireGuard tunnels peer&#8209;to&#8209;peer</span></div>
+    <div><strong>No traffic relay</strong><span>Control plane never carries data</span></div>
+    <div><strong>Free, no accounts</strong><span>Discord login, no seats or plans</span></div>
+    <div><strong>Linux &amp; Windows</strong><span>macOS and mobile planned</span></div>
+  </div>
+</section>
+
+<section class="sec" id="why">
+  <div class="wrap">
+    <h2>What people use it for</h2>
+    <p class="sub">Three ways it tends to get used.</p>
+    <div class="cards">
+      <article class="card">
+        <h3>A game-server community</h3>
+        <p>Give a role you create — say <code>@regulars</code> — a network, and everyone holding it
+        can hit the Minecraft or Valheim box by name, with no port forwarding and no public
+        exposure. Take the role away and they're off the LAN. Games that only do LAN multiplayer
+        work the way they always did.</p>
+      </article>
+      <article class="card">
+        <h3>A homelab and a few trusted people</h3>
+        <p>Share the NAS, Jellyfin, a git server — with exactly the people who hold a role. No VPN
+        accounts to provision by hand, nothing published to the open internet, and no exit server
+        in the middle slowing traffic down.</p>
+      </article>
+      <article class="card">
+        <h3>A team without an identity provider</h3>
+        <p>You want a private LAN but don't want to stand up an IdP. You already have one: the
+        Discord server everyone's already in. Roles you already maintain become the access
+        control.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="sec alt" id="what">
+  <div class="wrap">
+    <h2>What it actually is</h2>
+    <div class="cards">
+      <article class="card">
+        <h3>A WireGuard mesh</h3>
+        <p>Every online member forms a <a href="https://www.wireguard.com/">WireGuard</a> tunnel to
+        every other member they share a network with. Traffic goes directly between peers when the
+        network path allows it; difficult NAT pairs can use an opted-in member as a
+        ciphertext&#8209;only relay. There is no exit server.</p>
+      </article>
+      <article class="card">
+        <h3>Membership = Discord roles</h3>
+        <p>An admin registers a Discord role as a <em>network</em> with one slash command. Holding
+        the role gets you in; a role change in Discord takes effect on the mesh within seconds.
+        <code>@everyone</code> can't be a network, so nobody joins just by being in the server.</p>
+      </article>
+      <article class="card">
+        <h3>A lightweight control plane</h3>
+        <p>A <em>coordinator</em> authenticates people against Discord, hands out addresses, and
+        helps peers find each other — then gets out of the way. Use the hosted instance or run your
+        own. Either way it carries no traffic and holds no one's private keys.</p>
+      </article>
+      <article class="card">
+        <h3>Human-readable names</h3>
+        <p>Machines get names like <code>laptop.alice.unity.internal</code>, or just
+        <code>alice.unity.internal</code> for a member's primary device — instead of raw IPs you
+        have to remember.</p>
+      </article>
+    </div>
+    <p class="aside">If you know Tailscale: same <em>shape</em> — control plane plus P2P WireGuard
+    data plane — but the identity source is <strong>your own Discord server</strong>. No third-party
+    account, no company in the middle.</p>
+  </div>
+</section>
+
+<section class="sec" id="own">
+  <div class="wrap two-col">
+    <div>
+      <p class="kicker">No server required</p>
+      <h2>Or just your own devices</h2>
+      <p>You don't need a Discord server — your own or anyone else's. Install UnityLAN, log in with
+      Discord on each device, and they find each other. No network to create, no role to grant,
+      nothing for an admin to approve.</p>
+      <p>Your devices get the usual names and are reachable from each other and
+      <strong>nobody else</strong> — a stranger who signs in the same way sees nothing of yours.
+      Join a community later and nothing changes: same address, same names, same tunnels. The
+      community's networks simply appear alongside them.</p>
+      <ol class="steps compact">
+        <li>Install on the first device and log in.</li>
+        <li>Do the same on the second.</li>
+        <li>That's it.</li>
+      </ol>
+    </div>
+    <figure class="shot">
+      <img src="assets/networks.png" alt="The Networks tab of the desktop app, showing the My devices toggle alongside per-community networks" width="448" height="674" loading="lazy">
+    </figure>
+  </div>
+</section>
+
+<section class="sec alt" id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="sub">The 60-second version.</p>
+    <ol class="steps">
+      <li>
+        <h3>A coordinator watches your Discord server</h3>
+        <p>Invite the hosted bot, or self-host your own. It holds an independent Ed25519 signing key
+        for <em>each</em> Discord server it serves, so every server has its own trust anchor and
+        compromise of one cannot forge membership in another.</p>
+      </li>
+      <li>
+        <h3>A member installs the client and logs in with Discord</h3>
+        <p>A privileged background <em>engine</em> plus an unprivileged desktop <em>app</em>.</p>
+      </li>
+      <li>
+        <h3>The coordinator issues a short-lived, signed attestation</h3>
+        <p>A token that cryptographically binds <em>this user + this device + this IP + this
+        WireGuard key</em> to your Discord server. It can't be forged without that server's signing
+        key, and it expires — so it must be continually re-earned.</p>
+      </li>
+      <li>
+        <h3>Peers verify each other and form direct tunnels</h3>
+        <p>Each peer checks the attestation against the pinned key for the server it names. From
+        here the data plane is pure peer-to-peer.</p>
+      </li>
+      <li>
+        <h3>Members discover each other by long-polling</h3>
+        <p>No gossip flood, no always-on connection to babysit. A role change bumps that server's
+        version and every affected client re-syncs at once; clients in unrelated servers stay
+        parked.</p>
+      </li>
+    </ol>
+    <p class="aside">The design goal throughout is <strong>decentralization</strong>. Once tunnels
+    are up, peers hand each other the coordinator's freshly-minted attestations directly over those
+    tunnels — so if <em>your</em> path to the coordinator breaks while your peers still have one,
+    your mesh keeps running indefinitely. The coordinator itself going down is a different case:
+    nothing new gets minted, so credentials lapse at their TTL (30 minutes by default) and tunnels
+    close. A mesh rides out a coordinator restart, not a sustained outage — and enrollment and
+    finding peers you've never met need it either way.</p>
+  </div>
+</section>
+
+<section class="sec" id="security">
+  <div class="wrap">
+    <h2>Security model, briefly</h2>
+    <div class="cards">
+      <article class="card">
+        <h3>Your keys never leave your machine</h3>
+        <p>The coordinator never sees your traffic and never holds a peer's private key. WireGuard
+        keys are generated on each device and stay there.</p>
+      </article>
+      <article class="card">
+        <h3>A separate trust anchor per Discord server</h3>
+        <p>The coordinator generates its own signing key for each server it serves — independently,
+        on first use. Clients pin that key on first contact and verify every peer against it, so a
+        compromised one's blast radius is a single server, never across servers.</p>
+      </article>
+      <article class="card">
+        <h3>Access expires unless re-earned</h3>
+        <p>Attestations are short-lived and reissued on a TTL, so taking a Discord role away takes
+        mesh access with it. No peer can extend another's credential — only the coordinator mints —
+        so a removed member drops off when theirs lapses, whether or not anyone can reach the
+        coordinator at the time.</p>
+      </article>
+      <article class="card accent">
+        <h3>Nothing is exposed by default</h3>
+        <p>Joining a network does <em>not</em> open your box up. The engine installs a host firewall
+        that drops all inbound on the mesh interface except what you explicitly share — a peer can
+        ping you and nothing else. Your regular LAN and localhost traffic is never touched.</p>
+      </article>
+    </div>
+    <figure class="shot wide">
+      <img src="assets/exposed.png" alt="The Manage tab: each exposed port listed with a chip per scope allowed to reach it" width="448" height="674" loading="lazy">
+      <figcaption>Sharing a port is explicit, and can be scoped to one network's members — or to
+      just your own devices.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="sec alt" id="compare">
+  <div class="wrap">
+    <h2>How it compares</h2>
+    <p class="sub">Same family, different answer to one question: who decides who's on the
+    network?</p>
+    <div class="table-scroll">
+      <table class="cmp">
+        <thead>
+          <tr>
+            <th scope="col">&nbsp;</th>
+            <th scope="col">Who decides who's in</th>
+            <th scope="col">Control plane</th>
+            <th scope="col">Data plane</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="us">
+            <th scope="row">UnityLAN</th>
+            <td>A Discord role you already maintain</td>
+            <td>Open source; self-host it or use the hosted one. Carries no traffic either way</td>
+            <td>WireGuard, direct peer-to-peer; hard NAT pairs fall back to an opted-in member as a
+            ciphertext-only relay</td>
+          </tr>
+          <tr>
+            <th scope="row">Tailscale</th>
+            <td>An SSO identity (Google, GitHub, Microsoft…) plus an ACL policy file</td>
+            <td>Vendor-hosted and closed source; self-hosting means Headscale, a third-party
+            reimplementation</td>
+            <td>WireGuard, direct peer-to-peer with vendor-run DERP relays as fallback</td>
+          </tr>
+          <tr>
+            <th scope="row">NetBird</th>
+            <td>Your identity provider over OIDC, plus policy rules</td>
+            <td>Open source; self-host or use their cloud</td>
+            <td>WireGuard, direct peer-to-peer with a relay fallback</td>
+          </tr>
+          <tr>
+            <th scope="row">ZeroTier</th>
+            <td>Manual approval of each device in a network controller</td>
+            <td>Vendor-hosted controller; self-hostable</td>
+            <td>Its own layer-2 overlay, not WireGuard</td>
+          </tr>
+          <tr>
+            <th scope="row">Hamachi / Radmin VPN</th>
+            <td>Whoever has the network's password</td>
+            <td>Vendor-hosted, closed source</td>
+            <td>Proprietary, and leans heavily on the vendor's relays</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="table-hint" aria-hidden="true">Scroll the table sideways for the rest of the
+    columns.</p>
+    <p class="aside"><strong>Where they're ahead.</strong> Tailscale and NetBird are mature products
+    with macOS and mobile clients, audited code, real ACL tooling and actual support behind them.
+    UnityLAN is pre-1.0, Linux and Windows only, and maintained by one person. If you need something
+    that just works on every device your group owns, pick one of those — genuinely.</p>
+    <p class="aside"><strong>Where UnityLAN differs.</strong> Membership comes from a Discord server
+    you already run, so there's no separate directory to maintain and no third-party account for
+    anyone to create. The trust anchor can be yours — self-host and the signing key never leaves your
+    box. And the control plane is open source end to end, so the hosted instance is a convenience,
+    not a lock-in.</p>
+    <p class="fineprint">Compared July 2026 from each project's public documentation, on
+    architecture rather than pricing or limits, which change. Spot something wrong or out of date?
+    <a href="https://github.com/gtosh4/unity_lan/issues">Tell us</a> and we'll correct it.</p>
+  </div>
+</section>
+
+<section class="sec" id="honest">
+  <div class="wrap narrow">
+    <p class="kicker">Read this before you install</p>
+    <h2>Why you might <em>not</em> — yet</h2>
+    <p class="sub">Being upfront so you can decide before installing.</p>
+    <dl class="caveats">
+      <dt>Pre-1.0.</dt>
+      <dd>UnityLAN works end to end on Linux and Windows, but it's young software. Treat it as
+      such.</dd>
+      <dt>NAT traversal is still maturing.</dt>
+      <dd>A userspace ICE agent (STUN plus UDP hole-punching) forms direct tunnels for common NATs,
+      and a ciphertext-only relay fallback carries the hardest CGNAT and symmetric-NAT pairs. A pair
+      can still fail to connect when no suitable relay is online. Most home connections are
+      fine.</dd>
+      <dt>Everyone needs a Discord account.</dt>
+      <dd>Identity comes from Discord, so every member — and every machine you enroll — signs in with
+      a Discord account. There's no email-and-password path and no plan for one. If that's a
+      dealbreaker for your group, this isn't the tool for you.</dd>
+      <dt>macOS and mobile aren't ready, and builds are x86-64 only.</dt>
+      <dd>Linux and Windows on x86-64 are the current first-class targets — no ARM packages yet, so
+      a Raspberry Pi means building from source. The data plane is portable userspace WireGuard by
+      design, so the rest is planned — just not here yet.</dd>
+      <dt>Much of it was written with AI assistance.</dt>
+      <dd>With a human in the loop directing the work, reviewing changes, and making the design
+      decisions. If that gives you pause, that's fair — especially for software that touches your
+      network and handles keys. It's open source, so you don't have to take anyone's word for how it
+      works, and CI enforces formatting, linting, a full test suite, and end-to-end network tests on
+      every change. <a href="https://github.com/gtosh4/unity_lan#a-note-on-ai-assistance">More on
+      that</a>.</dd>
+    </dl>
+  </div>
+</section>
+
+<section class="sec alt" id="start">
+  <div class="wrap">
+    <h2>Get started</h2>
+    <p class="sub">Two ways in, depending on which end you're at.</p>
+    <div class="lanes">
+      <article class="card lane">
+        <p class="kicker">You were invited — or it's just your devices</p>
+        <h3>Install the app</h3>
+        <p>Someone else already registered the network, or you're meshing machines you own. Either
+        way there's nothing to set up and no account to create.</p>
+        <ol class="steps compact">
+          <li>Install UnityLAN and start the engine.</li>
+          <li>Log in with Discord.</li>
+          <li>Peers you share a network with appear. Your own devices find each other with no
+          network at all.</li>
+        </ol>
+        <p class="cta">
+          <a class="btn btn-primary" href="#install">Get the app</a>
+        </p>
+      </article>
+      <article class="card lane">
+        <p class="kicker">You run the Discord server</p>
+        <h3>Add the bot</h3>
+        <p>Registering a role as a network takes one slash command. Members do nothing but install
+        and log in — you don't provision anyone.</p>
+        <ol class="steps compact">
+          <li>Invite the bot to your server.</li>
+          <li>Run <code>/unitylan network add &lt;role&gt;</code>.</li>
+          <li>Tell your members to install the app.</li>
+        </ol>
+        <p class="cta">
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1525265707821170818">Invite the bot</a>
+          <a class="btn btn-ghost" href="#coordinator">Or self-host</a>
+        </p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="install">
+  <div class="wrap">
+    <h2>Install</h2>
+    <p class="sub">Free, and packaged installs already point at the hosted coordinator — there's
+    nothing to configure. Linux and Windows, x86-64. After installing, log in with Discord from the
+    app (or <code>unitylan-engine login</code> on a headless box).</p>
+    <div class="cards install">
+      <article class="card">
+        <h3>Linux desktop</h3>
+        <p>The <code>unitylan-desktop</code> package pulls in the engine, CLI, and app.</p>
+        <pre><code>sudo apt install ./unitylan-desktop_*.deb
+sudo systemctl enable --now unitylan-engine</code></pre>
+        <p class="dl">
+          <a class="btn btn-primary btn-sm" data-dl="deb-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">.deb</a>
+          <a class="btn btn-ghost btn-sm" data-dl="rpm-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">.rpm</a>
+        </p>
+      </article>
+      <article class="card">
+        <h3>Windows</h3>
+        <p>Run the <code>.msi</code>. The wizard installs the engine and app, bundles the WireGuard
+        driver, registers and starts the service, and offers to open the app when it finishes.</p>
+        <p class="dl">
+          <a class="btn btn-primary btn-sm" data-dl="msi" href="https://github.com/gtosh4/unity_lan/releases/latest">.msi</a>
+        </p>
+      </article>
+      <article class="card">
+        <h3>Headless server</h3>
+        <p>Engine and CLI only, no graphics libraries. Mint a one-time key in Discord with
+        <code>/unitylan enroll</code>, then hand it to the engine — no browser on the box.</p>
+        <pre><code>sudo unitylan-engine --token unl_… run</code></pre>
+        <p class="dl">
+          <a class="btn btn-ghost btn-sm" data-dl="deb" href="https://github.com/gtosh4/unity_lan/releases/latest">.deb</a>
+          <a class="btn btn-ghost btn-sm" data-dl="rpm" href="https://github.com/gtosh4/unity_lan/releases/latest">.rpm</a>
+          <a class="btn btn-ghost btn-sm" data-dl="tar" href="https://github.com/gtosh4/unity_lan/releases/latest">.tar.gz</a>
+        </p>
+      </article>
+    </div>
+    <p class="aside">SHA256 checksums ship with every release, and auto-updates are verified against
+    a dedicated release key whose private half stays offline — separate from the keys that sign
+    membership, so neither can stand in for the other. Prefer to build it yourself? It's a Rust
+    workspace —
+    <a href="https://github.com/gtosh4/unity_lan/blob/main/CONTRIBUTING.md"><code>cargo build --release</code></a>.</p>
+  </div>
+</section>
+
+<section class="sec alt" id="coordinator">
+  <div class="wrap two-col flip">
+    <div>
+      <p class="kicker">For admins</p>
+      <h2>Get a coordinator</h2>
+      <p><strong>Easiest — use the hosted instance.</strong> A canonical coordinator and bot is up
+      and free to use, run by the project's maintainer —
+      <a href="https://github.com/gtosh4">gtosh4</a> on GitHub, <code>tosh</code> on Discord. Invite
+      the bot to your server, run <code>/unitylan network add &lt;role&gt;</code>, and you're done.
+      You're trusting that instance to gate access to your mesh; it still never sees your traffic or
+      your keys.</p>
+      <p><strong>Full control — self-host.</strong> One container. You'll need a Discord app with a
+      bot token and somewhere to run it behind HTTPS.</p>
+      <p class="cta">
+        <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1525265707821170818">Invite the bot</a>
+        <a class="btn btn-ghost" href="https://github.com/gtosh4/unity_lan/blob/main/docs/coordinator-setup.md">Self-host guide</a>
+      </p>
+    </div>
+    <figure class="shot">
+      <img src="assets/coordinator-admin.png" alt="The coordinator's admin dashboard, showing registered networks and live member counts" width="1280" height="720" loading="lazy">
+    </figure>
+  </div>
+</section>
+
+<section class="sec" id="faq">
+  <div class="wrap narrow">
+    <h2>Questions people ask</h2>
+    <div class="faq">
+      <details>
+        <summary>Will it slow my internet down?</summary>
+        <p>No. There's no exit node and nothing is proxied — your default route is untouched. Only
+        traffic addressed to another mesh member goes into a tunnel; everything else leaves your
+        machine exactly as it did before.</p>
+      </details>
+      <details>
+        <summary>Can other members get into my machine?</summary>
+        <p>Not unless you let them. The engine installs a host firewall that drops all inbound on the
+        mesh interface except the ports you explicitly share — a peer can ping you and nothing else.
+        Sharing a port is a deliberate act, and can be scoped to one network's members or to just
+        your own devices. Your regular LAN and localhost traffic is never touched.</p>
+      </details>
+      <details>
+        <summary>Can whoever runs the coordinator see my traffic?</summary>
+        <p>No. It isn't on the data path — packets go peer to peer — and it never holds a peer's
+        private key, so there is nothing for it to decrypt even in principle.</p>
+        <p>Why there's a trusted party at all: Discord gives one user no way to check another
+        user's roles — only a bot can read a server's member list. So membership has to be vouched
+        for by something holding a bot token, and that something is the coordinator. It's a Discord
+        limitation, not a design preference.</p>
+        <p>The honest caveat that follows: the coordinator generates its own signing key for each
+        Discord server it serves — UnityLAN's key, nothing Discord issues or knows about — and holds
+        it. So whoever runs the coordinator <em>could</em> mint an attestation and place a device of
+        their own into your networks. That device would still land behind your firewall rules like any other peer, and
+        it could not read traffic between existing peers. If that residual trust bothers you,
+        self-host — then the signing key is on your box and nobody else's.</p>
+      </details>
+      <details>
+        <summary>What does the coordinator actually store about me?</summary>
+        <p>Your Discord user ID and display handle, your device names and their WireGuard
+        <em>public</em> keys, an index that determines your mesh address, a per-device token, and a
+        last-seen timestamp. That's the lot.</p>
+        <p>It does not store your traffic (it never sees any), and it keeps no record of the
+        addresses your peers connect from — reflexive candidates are brokered in memory to help two
+        peers find each other and are never written down. The coordinator logs operational events
+        like start-up and membership changes, not a per-request access log.</p>
+      </details>
+      <details>
+        <summary>Does it work alongside Tailscale?</summary>
+        <p>On Linux, yes, automatically. Both use the same <code>100.64.0.0/10</code> address range,
+        and Tailscale installs a firewall rule that drops that range on interfaces which aren't its
+        own — which silently blackholes every UnityLAN packet while peers still <em>look</em>
+        reachable. The engine detects that rule and narrowly exempts the mesh interface, rechecking
+        after every Tailscale restart.</p>
+        <p><strong>On Windows this isn't handled yet.</strong> If you run both there and mesh traffic
+        vanishes while peers show as connected, this is why.</p>
+      </details>
+      <details>
+        <summary>Do I need to forward ports or touch my router?</summary>
+        <p>No. Peers negotiate a direct path themselves, hole-punching where the NAT allows it. The
+        hardest cases — CGNAT, symmetric NAT on both ends — fall back to an opted-in member relaying
+        ciphertext it cannot read.</p>
+      </details>
+      <details>
+        <summary>Is it fast enough for games?</summary>
+        <p>When a direct path exists, traffic takes the same route it would without UnityLAN, plus
+        WireGuard's encryption overhead — so latency is close to a plain internet connection between
+        the same two machines, and there's no server in the middle adding a detour. A pair that ends
+        up on the relay fallback pays whatever the detour through that member costs.</p>
+      </details>
+      <details>
+        <summary>What names do my machines get?</summary>
+        <p><code>&lt;device&gt;.&lt;you&gt;.unity.internal</code> — so
+        <code>laptop.alice.unity.internal</code>. Whichever device you mark primary also answers to
+        the bare <code>alice.unity.internal</code>.</p>
+      </details>
+      <details>
+        <summary>What happens if I stop using it?</summary>
+        <p>Nothing dramatic. A device stays enrolled and keeps its address until you remove it —
+        <code>ctl remove</code> for one you no longer have, or <code>uninstall</code> when you're
+        done with a machine. Removing it returns the address to the pool.</p>
+        <p>There's one automatic cleanup: if you mesh only your own machines, with no Discord server
+        involved, an address that goes 30 days without connecting is released and you get a fresh
+        one next time you log in.</p>
+      </details>
+      <details>
+        <summary>Is the hosted coordinator really free?</summary>
+        <p>Yes, and it's meant to stay that way — there are no seats, plans, or limits to grow into.
+        It's a control plane that carries no traffic, so it's cheap to run. If you'd rather not
+        depend on someone else's goodwill, self-hosting is one container.</p>
+      </details>
+      <details>
+        <summary>What kind of support should I expect?</summary>
+        <p>Best-effort. UnityLAN is a side project, not a company or anyone's day job — there's no
+        SLA, and the hosted coordinator comes with no uptime promise. Questions in
+        <a href="https://discord.gg/QAmz2j54kS">Discord</a> get answered when there's time. Everything
+        is open source and self-hostable precisely so you're never stuck waiting on one person.</p>
+      </details>
+    </div>
+  </div>
+</section>
+
+<section class="sec alt" id="docs">
+  <div class="wrap narrow">
+    <h2>Documentation</h2>
+    <p class="kicker">Using it</p>
+    <ul class="docs">
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/user-guide.md"><strong>User guide</strong><span>The desktop app: logging in, sharing a port, managing devices</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/headless.md"><strong>Headless servers</strong><span>Game servers and media boxes: enrolling with a key, the full CLI</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md"><strong>Troubleshooting</strong><span>Unreachable peers, names not resolving, the Tailscale collision</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/coordinator-setup.md"><strong>Coordinator setup</strong><span>Discord app and bot, config, admin dashboard</span></a></li>
+    </ul>
+    <p class="kicker spaced">Under the hood</p>
+    <ul class="docs">
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/design.md"><strong>Design</strong><span>Concepts, trust model, addressing, NAT strategy, alternatives considered</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/technical.md"><strong>Technical reference</strong><span>Wire protocols, engine internals, platform splits</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/CONTRIBUTING.md"><strong>Contributing</strong><span>Building, running a local mesh, the checks CI enforces</span></a></li>
+    </ul>
+    <p class="aside">Stuck, or want to ask something before you install? The
+    <a href="https://discord.gg/QAmz2j54kS">UnityLAN Discord</a> is where questions get answered —
+    the maintainer is <code>tosh</code> there. Bugs and feature requests are better as
+    <a href="https://github.com/gtosh4/unity_lan/issues">GitHub issues</a>; security problems go
+    <a href="https://github.com/gtosh4/unity_lan/blob/main/SECURITY.md">privately</a>, never in
+    chat.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="foot">
+  <div class="wrap foot-inner">
+    <div class="foot-brand">
+      <img src="assets/logo.svg" alt="" width="40" height="40" aria-hidden="true">
+      <div>
+        <p>A WireGuard mesh VPN with membership defined by Discord roles. Free and open source under
+        the <a href="https://github.com/gtosh4/unity_lan/blob/main/LICENSE">AGPL-3.0</a>. Built and
+        maintained by <a href="https://github.com/gtosh4">gtosh4</a>.</p>
+        <p class="disclaimer">Not affiliated with, sponsored by, or endorsed by Discord Inc.
+        “Discord” is a trademark of Discord Inc.</p>
+      </div>
+    </div>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="https://discord.gg/QAmz2j54kS">Community Discord</a>
+      <a href="https://github.com/gtosh4/unity_lan">Source</a>
+      <a href="https://github.com/gtosh4/unity_lan/releases">Releases</a>
+      <a href="https://github.com/gtosh4/unity_lan/blob/main/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/gtosh4/unity_lan/blob/main/SECURITY.md">Report a vulnerability</a>
+      <a href="https://github.com/gtosh4/unity_lan/issues">Issues</a>
+      <a href="https://ko-fi.com/gtosh4">Support the project</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+// Resolve the latest release once, so download buttons point at real files and the version
+// in the hero is never stale. Every button already links to /releases/latest, so a failed or
+// rate-limited request just leaves the page as served.
+(async () => {
+  const PATTERNS = {
+    'deb-desktop': /^unitylan-desktop_.*\.deb$/,
+    'rpm-desktop': /^unitylan-desktop-.*\.rpm$/,
+    'msi':         /\.msi$/,
+    'deb':         /^unitylan_.*\.deb$/,
+    'rpm':         /^unitylan-\d.*\.rpm$/,
+    'tar':         /^unitylan-linux-amd64\.tar\.gz$/,
+  };
+  try {
+    const r = await fetch('https://api.github.com/repos/gtosh4/unity_lan/releases/latest');
+    if (!r.ok) return;
+    const rel = await r.json();
+    for (const el of document.querySelectorAll('[data-latest-tag]')) el.textContent = rel.tag_name;
+    for (const [key, re] of Object.entries(PATTERNS)) {
+      const asset = rel.assets.find(a => re.test(a.name));
+      if (!asset) continue;
+      for (const el of document.querySelectorAll(`[data-dl="${key}"]`)) {
+        el.href = asset.browser_download_url;
+        el.title = asset.name;
+      }
+    }
+  } catch { /* offline or rate-limited: keep the static links */ }
+})();
+</script>
+</body>
+</html>
