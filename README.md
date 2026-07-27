@@ -9,6 +9,7 @@
   <a href="https://github.com/gtosh4/unity_lan/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/gtosh4/unity_lan/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
   <a href="https://github.com/gtosh4/unity_lan/actions/workflows/e2e.yml"><img src="https://img.shields.io/github/actions/workflow/status/gtosh4/unity_lan/e2e.yml?branch=main&amp;label=e2e" alt="E2E"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
+  <a href="https://ko-fi.com/gtosh4"><img src="https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=ko-fi&amp;logoColor=white" alt="Support UnityLAN on Ko-fi"></a>
 </p>
 
 You already have a group of people organized in Discord — a gaming community, a homelab crew, a
@@ -290,13 +291,8 @@ are welcome. Found a security issue? Please report it privately — see [SECURIT
 ## Support the project
 
 UnityLAN is free and open source, built in spare time. If it's useful to you and you'd like to help
-keep it going, you can buy me a coffee — every bit is appreciated and entirely optional.
-
-<p align="center">
-  <a href="https://ko-fi.com/gtosh4">
-    <img src="https://img.shields.io/badge/Support%20on-Ko--fi-FF5E5B?logo=ko-fi&logoColor=white" alt="Support UnityLAN on Ko-fi">
-  </a>
-</p>
+keep it going, you can [buy me a coffee](https://ko-fi.com/gtosh4) — every bit is appreciated and
+entirely optional.
 
 ## License
 
