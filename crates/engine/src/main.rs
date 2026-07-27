@@ -17,6 +17,7 @@ mod netcfg;
 mod oauth;
 mod p2p;
 mod ping;
+mod proxy;
 mod relay;
 mod resolver;
 mod selfupdate;

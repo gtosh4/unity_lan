@@ -512,6 +512,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     // What peers have announced they serve. Outside the enrollment loop so a reconnect keeps the
     // names resolving rather than blanking them until every peer has been asked again.
     let service_book = crate::mesh_services::ServiceBook::default();
+    // The TLS proxy, while this device has web services to serve. Dropping it kills it, so it goes
+    // down with the engine rather than outliving it holding 443.
+    let mut tls_proxy: Option<crate::proxy::Proxy> = None;
+    // Whether we have already explained why the proxy is not running. A refusal (no `[proxy] user`
+    // under a root engine, a missing binary) does not get better by retrying, and repeating it every
+    // couple of seconds would bury everything else in the log.
+    let mut proxy_complaint: Option<String> = None;
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = Arc::new(tokio::sync::Notify::new());
     // Signalled by `ApplyUpdate` once a file-swap update has swapped the binary: the mesh loop tears
@@ -822,6 +829,17 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     control::set_services(ctx.status, &peer_services(&ctx, &last_seeds, &resolved));
                 }
             }
+
+            // Keep the TLS proxy matched to what there is to serve. Same tick as everything else:
+            // it is a cheap comparison, and a proxy that died (a port it could not bind, a crash)
+            // comes back on the next one rather than staying down until something else changes.
+            sync_proxy(
+                &cfg,
+                &ctx,
+                &last_device,
+                &mut tls_proxy,
+                &mut proxy_complaint,
+            );
 
             // Read WireGuard's own view of every peer, probe each one, and advance its reachability
             // FSM — see `poll_peer_health`. Purely local, so the held long-poll below keeps waiting.
@@ -1569,6 +1587,71 @@ struct MeshCtx<'a> {
     my_pubkey: [u8; 32],
     /// What the certificate reconcile needs but the mesh loop otherwise doesn't.
     cert: CertCtx,
+}
+
+/// Start or stop the TLS proxy so it is running exactly while this device has web services.
+///
+/// Also restarts one that died: [`crate::proxy::Proxy::alive`] reports a child that exited, which
+/// makes the next reconcile see "services, nothing running" and start it again.
+fn sync_proxy(
+    cfg: &Config,
+    ctx: &MeshCtx<'_>,
+    device: &Option<SelfDevice>,
+    held: &mut Option<crate::proxy::Proxy>,
+    complaint: &mut Option<String>,
+) {
+    use crate::proxy::Action;
+
+    if held.as_mut().is_some_and(|p| !p.alive()) {
+        tracing::warn!("the TLS proxy exited; restarting it");
+        *held = None;
+    }
+    let has_services = cfg.proxy.enabled
+        && device.as_ref().is_some_and(|dev| {
+            ctx.fw.as_ref().is_some_and(|fw| {
+                !fw.web_routes(&dev.username, dev.dns_domain.as_deref())
+                    .is_empty()
+            })
+        });
+    match crate::proxy::decide(has_services, held.is_some()) {
+        Action::Leave => {}
+        Action::Stop => {
+            tracing::info!("no web services left; stopping the TLS proxy");
+            *held = None; // dropping kills it
+        }
+        Action::Start => {
+            #[cfg(unix)]
+            // SAFETY: `geteuid` reads the calling process's own effective uid. It takes no
+            // arguments, touches no memory we own, and cannot fail.
+            let euid = unsafe { libc::geteuid() };
+            #[cfg(not(unix))]
+            let euid = 1;
+            let started = crate::proxy::run_as(cfg.proxy.user.as_deref(), euid).and_then(|user| {
+                let binary = crate::proxy::binary(cfg.proxy.binary.as_deref());
+                crate::proxy::spawn(
+                    &binary,
+                    std::path::Path::new(&cfg.control_name()),
+                    user.as_deref(),
+                )
+                .map_err(|e| format!("{e:#}"))
+            });
+            match started {
+                Ok(proxy) => {
+                    tracing::info!("TLS proxy started");
+                    *complaint = None;
+                    *held = Some(proxy);
+                }
+                // Said once, not every couple of seconds: none of these failures resolve themselves,
+                // and repeating would drown the log the operator needs to read to fix it.
+                Err(why) => {
+                    if complaint.as_deref() != Some(why.as_str()) {
+                        tracing::error!("not serving web services over TLS: {why}");
+                        *complaint = Some(why);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Resolve every service claim — ours plus what peers announced — into the names that win.

@@ -131,7 +131,7 @@ timestamp with no matching log line = snapshot rebuild, not a real tunnel drop �
 
 ## Architecture
 
-Four crates (`crates/*`), two planes:
+Five crates (`crates/*`), two planes:
 
 | Crate | Binary | Role |
 | --- | --- | --- |
@@ -139,6 +139,7 @@ Four crates (`crates/*`), two planes:
 | `coordinator` | `unitylan-coordinator` | **control plane**: Discord auth (OAuth PKCE), role→network registry, signs attestations |
 | `engine` | `unitylan-engine` | **data plane**, privileged daemon: WireGuard, host firewall, DNS resolver, control socket |
 | `gui` | `unitylan-gui` | unprivileged iced desktop app, drives engine over its control socket |
+| `proxy` | `unitylan-proxy` | unprivileged TLS terminator for **web services**: reads its config off the engine's `Watch` push, forwards to loopback. Separate process so HTTP parsing never happens in the root daemon; a root engine with no `[proxy] user` refuses to start it |
 
 **GUI screenshots are docs.** When a GUI change alters what app looks like, regenerate README images
 — `assets/demo.gif`, `assets/exposed.png` — with `scripts/readme-demo.sh` (fake-engine canned fixtures + scripted tour +

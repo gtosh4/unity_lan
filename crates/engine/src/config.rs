@@ -148,6 +148,9 @@ pub struct Config {
     /// this device has opted in — see [`CertConfig`].
     #[serde(default)]
     pub cert: CertConfig,
+    /// The TLS proxy that serves this device's web services — see [`ProxyConfig`].
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 /// The `[cert]` block: what to do with a certificate once it has been issued.
@@ -203,6 +206,24 @@ pub const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// port = 22
 /// own_devices = true      # only this owner's other devices
 /// ```
+/// The TLS proxy the engine supervises — `[proxy]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct ProxyConfig {
+    /// Run it at all. On by default: a device with no web services starts nothing either way, so
+    /// the only reason to turn this off is serving TLS yourself (nginx, Caddy) from the same
+    /// certificate.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The unprivileged account to run it as. **Required when the engine runs as root** — see
+    /// [`crate::proxy::run_as`]. The packages create `unitylan-proxy` and put it in the group that
+    /// owns the certificate key.
+    #[serde(default)]
+    pub user: Option<String>,
+    /// Path to the proxy binary, when it is not beside the engine.
+    #[serde(default)]
+    pub binary: Option<PathBuf>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ExposeSeed {
     pub port: u16,

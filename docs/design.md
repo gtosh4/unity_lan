@@ -452,6 +452,19 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   default, and offered only where a port is actually exposed. And CAs cap certificates per registered
   domain per week; the coordinator meters issuance (`max_certs_per_week`) so a burst is refused early
   rather than exhausting a budget the whole deployment shares.
+- **TLS is terminated by a separate, unprivileged process.** `unitylan-proxy` serves the web services
+  on the mesh address's `:443` and forwards to loopback backends, so an app needs no TLS
+  configuration of its own. It is a distinct binary because the engine is root — it drives WireGuard,
+  the firewall and the resolver — and parsing HTTP sent by mesh peers is the archetypal work that
+  should not happen there. A root engine with no `[proxy] user` **refuses** to start it rather than
+  running it privileged (`proxy::run_as`). Its configuration arrives on the engine's existing `Watch`
+  push, so a renewal or a new service needs no restart and there is no file to drift; when the engine
+  is unreachable it serves nothing, since its last word may already be stale. Two gates, both fail
+  closed: the firewall opens 443 to the union of everyone allowed *some* web service (a synthetic
+  exposure per scope, `Firewall::effective_exposed`), and the proxy narrows that to the one service
+  asked for — the distinction a packet filter cannot make once they share a port. Forwarding is
+  loopback-only by construction: the address is built from a port the engine supplied, never from
+  anything in the request.
 - **Not a private CA.** Issuing from a coordinator-held CA would avoid all of the above, but requires
   installing a root into every member's system trust store — which would let a compromised
   coordinator MITM TLS on every member's machine, an escalation from today, where it cannot read peer

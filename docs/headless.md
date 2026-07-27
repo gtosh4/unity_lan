@@ -118,6 +118,27 @@ coordinator is told about — only it can publish the DNS record the certificate
 it stores nothing beyond the label. Everything in the certificate section below applies: it is opt-in,
 and the name is published to public Certificate Transparency logs permanently.
 
+**Jellyfin itself needs no TLS configuration.** The engine runs a small TLS proxy
+(`unitylan-proxy`) that serves your web services on the mesh and forwards to them over plain HTTP on
+loopback, so several of them share port 443 under different names and none of them has to learn about
+certificates. It reads its whole configuration from the engine as it changes, so a renewal or a newly
+named service needs no restart.
+
+It runs as its **own unprivileged user**, because parsing web requests from mesh peers has no
+business happening in a daemon that holds your WireGuard keys. The packages create that account and
+put it in the certificate key's group; if you built from source, say who it should be:
+
+```toml
+[proxy]
+user = "unitylan-proxy"    # required when the engine runs as root
+# enabled = false          # ...or turn it off and serve TLS yourself with nginx/Caddy
+[cert]
+group = "unitylan-proxy"   # so the proxy can read the key
+```
+
+A root engine with no `[proxy] user` **refuses to start the proxy** and logs what to set, rather than
+running it as root — that would look like it worked while giving away the isolation it exists for.
+
 Two behaviours to expect. Naming several web services in a row reissues **once**, about ten minutes
 after you stop — CAs cap certificates per domain per week and that cap is shared by every device on
 your coordinator, so a burst is batched rather than spent one at a time. And a label another of your
