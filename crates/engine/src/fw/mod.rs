@@ -416,23 +416,15 @@ mod tests {
         }
     }
 
-    /// A resolved network scope. Fixture ids are derived from the name so two helpers agree.
+    /// A resolved network scope, addressed by the shared fixture ids so a scope built here matches
+    /// a seed built from the same name elsewhere — see [`crate::testutil::network_ids`].
     fn net(name: &str) -> ExposeScope {
-        let (guild_id, role_id) = fixture_ids(name);
+        let (guild_id, role_id) = crate::testutil::network_ids(name);
         ExposeScope::Net { guild_id, role_id }
     }
 
-    fn fixture_ids(name: &str) -> (u64, u64) {
-        match name {
-            "minecraft" => (900_100, 7001),
-            "factorio" => (900_200, 7002),
-            "mesh" => (900_100, 7003),
-            other => panic!("unknown fixture network {other}"),
-        }
-    }
-
     fn info(guild: &str, name: &str, ips: Vec<Ipv4Addr>) -> NetInfo {
-        let (guild_id, role_id) = fixture_ids(name);
+        let (guild_id, role_id) = crate::testutil::network_ids(name);
         NetInfo {
             guild_id,
             role_id,

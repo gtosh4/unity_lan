@@ -26,6 +26,25 @@ pub use common::testutil::TempDir;
 /// ```ignore
 /// let s = SeedPeer { user_id: 3, ip: Ipv4Addr::new(100, 64, 0, 7), ..seed_peer() };
 /// ```
+/// Stable `(guild_id, role_id)` for a fixture network name.
+///
+/// Networks are identified on the wire by their ids, not their names, so a test that builds a seed
+/// in one module and asserts on a firewall set in another only lines up if both derive the ids the
+/// same way. That used to be two copies of this table agreeing by hand — and they had already
+/// stopped: `fw`'s copy grew a `mesh` entry `daemon`'s never got.
+///
+/// `mesh` deliberately shares `minecraft`'s guild with a different role, so the two-networks-in-one-
+/// guild case is covered. Unknown names panic rather than inventing an id: a typo should fail the
+/// test that made it, not silently address a network nothing else refers to.
+pub fn network_ids(name: &str) -> (u64, u64) {
+    match name {
+        "minecraft" => (900_100, 7001),
+        "factorio" => (900_200, 7002),
+        "mesh" => (900_100, 7003),
+        other => panic!("unknown fixture network {other}"),
+    }
+}
+
 pub fn seed_peer() -> SeedPeer {
     SeedPeer {
         pubkey: [0; 32],

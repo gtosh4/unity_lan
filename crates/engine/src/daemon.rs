@@ -2142,14 +2142,7 @@ mod tests {
 
     const STUCK: u64 = common::control::STUCK_AFTER_SECS;
 
-    /// Stable fake ids per role name, so two seeds naming the same network agree on its identity.
-    fn ids(name: &str) -> (u64, u64) {
-        match name {
-            "minecraft" => (900_100, 7001),
-            "factorio" => (900_200, 7002),
-            other => panic!("unknown fixture network {other}"),
-        }
-    }
+    use crate::testutil::network_ids as ids;
 
     fn seed(user_id: u64, last_octet: u8, nets: &[&str]) -> SeedPeer {
         SeedPeer {
