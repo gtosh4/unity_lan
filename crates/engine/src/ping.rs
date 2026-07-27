@@ -8,7 +8,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
 use anyhow::Context;
-use surge_ping::{Client, Config, PingIdentifier, PingSequence};
+pub use surge_ping::Client;
+use surge_ping::{Config, PingIdentifier, PingSequence};
 
 /// Timeout for a single echo — a peer that doesn't answer within this reads as "no latency".
 const PROBE_TIMEOUT: Duration = Duration::from_secs(1);

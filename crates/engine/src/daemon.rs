@@ -607,134 +607,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             device.networks.join(", ")
         );
 
-        // Bring up the single interface with our device /32.
-        let mut backend = wg::new_backend(&cfg.iface)?;
-        backend.up(&IfaceConfig {
-            private_key: wg_priv,
-            addresses: vec![(device.wg_ip, 32)],
-            listen_port: cfg.listen_port,
-        })?;
-        tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
-
-        // Check the coordinator's mesh range against local interfaces once at join: an overlap with
-        // the user's real LAN could shadow it. Advisory — routes come from signed attestations — so
-        // we warn and surface it, we don't refuse.
-        let overlap = crate::netcfg::lan_overlap_warning(device.wg_net, &cfg.iface);
-        if let Some(w) = &overlap {
-            tracing::warn!("{w}");
-        }
-        control::set_lan_overlap(&status, overlap);
-
-        // The CGNAT exemption needs our own mesh address as well as the interface: anything we send
-        // to ourselves (the resolver below is exactly that) loops back on `lo`, where a rule scoped
-        // to the mesh interface can't match it.
-        if let Some(fw) = &fw {
-            if let Err(e) = fw.set_mesh_addr(device.wg_ip) {
-                tracing::warn!("firewall: recording mesh address: {e:#}");
-            }
-        }
-
-        // Resolver address: this device's own mesh IP (now on the interface) + the configured port.
-        // Bound here, not on loopback, so `:53` is free on every platform and Windows NRPT (port-53
-        // only) can forward to it. The IP is pubkey-derived, so it changes on re-key — hence the
-        // server is (re)bound per enrollment and torn down with the interface below.
-        let dns_bind = cfg
-            .dns
-            .then(|| SocketAddr::new(device.wg_ip.into(), DNS_PORT));
-
-        // Serve the `.unity.internal` zone on that address. Held so the logout/shutdown paths can stop
-        // it before the interface (and thus its bound IP) goes away.
-        let dns_task = dns_bind.map(|bind| {
-            let z = zone.clone();
-            tokio::spawn(async move {
-                match tokio::net::UdpSocket::bind(bind).await {
-                    Ok(sock) => {
-                        tracing::info!(%bind, "dns resolver listening");
-                        if let Err(e) = dns::serve(sock, z).await {
-                            tracing::error!("dns resolver ended: {e:#}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("dns resolver bind {bind} failed ({e}); name resolution off")
-                    }
-                }
-            })
-        });
-
-        // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
-        // clean shutdown; also clears with the link if we exit uncleanly.
-        let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, dns_bind) {
-            (true, Some(bind)) => match crate::resolver::platform_hook() {
-                Some(hook) => {
-                    if let Err(e) = hook.install(&cfg.iface, bind) {
-                        tracing::warn!(
-                            "resolver hook (set `resolver_hook = false` to disable): {e:#}"
-                        );
-                    }
-                    Some(hook)
-                }
-                None => None, // no OS resolver backend on this platform yet (e.g. macOS /etc/resolver)
-            },
-            _ => None,
-        };
-
-        // Peer-direct attestation refresh (docs/gossip-refresh.md, stage 1): serve our own
-        // coordinator-minted attestations to meshed co-members over the tunnel, so the mesh can keep
-        // credentials fresh without the coordinator fanning them out. Off unless `gossip` is set; the
-        // coordinator stays the fallback. Bound to our mesh /32 (now on the interface), torn down with
-        // it. `own_atts` is refreshed from the grant on every register below.
-        let own_atts = crate::p2p::OwnAttestations::default();
-        let p2p_task = cfg.gossip.then(|| {
-            own_atts.set(grant_attestations(&resp));
-            let bind = SocketAddr::new(device.wg_ip.into(), common::p2p::P2P_PORT);
-            let own = own_atts.clone();
-            tokio::spawn(async move {
-                match tokio::net::UdpSocket::bind(bind).await {
-                    Ok(sock) => {
-                        tracing::info!(%bind, "p2p attestation service listening");
-                        if let Err(e) = crate::p2p::serve(sock, own).await {
-                            tracing::warn!("p2p service ended: {e:#}");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("p2p bind {bind} failed ({e}); peer-direct refresh off")
-                    }
-                }
-            })
-        });
-
-        // LAN discovery beacon (`beacon.rs`): broadcast our WG pubkey + listen port on the local
-        // segment so two peers behind one NAT find a direct LAN path instead of hairpinning through
-        // the router's public IP. Bound to `0.0.0.0` (the physical segment, not the mesh /32) so it
-        // can send/receive segment broadcasts. Off when `beacon` is unset; a bind / broadcast failure
-        // is non-fatal (the mesh still works via coordinator-supplied endpoints).
-        let mut beacon = if cfg.beacon {
-            let bind = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cfg.beacon_port));
-            match tokio::net::UdpSocket::bind(bind).await {
-                Ok(sock) => match sock.set_broadcast(true) {
-                    Ok(()) => {
-                        tracing::info!(port = cfg.beacon_port, "LAN discovery beacon active");
-                        Some(crate::beacon::Beacon::spawn(
-                            sock,
-                            wg_pub,
-                            wg_priv,
-                            cfg.listen_port,
-                            cfg.beacon_port,
-                        ))
-                    }
-                    Err(e) => {
-                        tracing::warn!("beacon: set_broadcast failed ({e}); LAN discovery off");
-                        None
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!("beacon bind {bind} failed ({e}); LAN discovery off");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        // Bring the interface up and everything that binds to the mesh address it carries —
+        // see `bring_up_host`. All of it belongs to this enrollment and is rebuilt on the next.
+        let EnrolledHost {
+            backend,
+            dns_task,
+            p2p_task,
+            resolver,
+            mut beacon,
+            own_atts,
+        } = bring_up_host(&cfg, &device, wg_priv, wg_pub, &fw, &status, &zone, &resp).await?;
 
         // Apply the initial snapshot; then keep the last one so a local network toggle can re-mesh
         // immediately (filtering by the opt-out set) even while the coordinator is unreachable.
@@ -871,145 +753,32 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                 }
             }
 
-            // Read live per-peer WG stats. Report where WG sees each peer sending from (its reflexive
-            // NAT mapping) so the coordinator can hand two NAT'd co-members each other's address to
-            // hole-punch. The reflexive appears only after a peer handshakes — later than a long-poll
-            // hold would return — so we re-read every couple seconds and report on change (a cheap
-            // local uapi read; no network traffic unless the set actually changed). A failed read
-            // (boringtun's uapi is racy under load) is treated as "unchanged" so it never flaps.
-            let stats = backend.peer_stats().ok();
-            let observed = match &stats {
-                Some(map) => {
-                    let mut v: Vec<common::api::ObservedEndpoint> = map
-                        .iter()
-                        .filter_map(|(pk, s)| {
-                            s.endpoint.map(|endpoint| common::api::ObservedEndpoint {
-                                pubkey: *pk,
-                                endpoint,
-                            })
-                        })
-                        .collect();
-                    v.sort_by_key(|o| o.pubkey);
-                    v
-                }
-                None => sent.observed.clone(),
-            };
-
-            // Reachability diagnostics (§7.2): classify each peer and overlay it onto the status so a
-            // stuck hole punch surfaces. A peer is "punched" if its only endpoint is a punch target
-            // (no dialable endpoint); "connected" if WG has a recent handshake for it.
-            let now = std::time::Instant::now();
-            // Latency probe: one concurrent ICMP echo per peer's wg IP (peers answer ping by default).
-            let peer_ips: Vec<Ipv4Addr> = peers
-                .values()
-                .filter_map(|c| c.allowed_ips.first().map(|(ip, _)| *ip))
-                .collect();
-            let latency = match &ping_client {
-                Some(pc) => ping::probe(pc, &peer_ips).await,
-                None => HashMap::new(),
-            };
-            let mut live: HashMap<Ipv4Addr, control::PeerLive> = HashMap::new();
-            // Per-peer ping reachability this iteration — the health signal the beacon adoption check
-            // uses to confirm a LAN endpoint carries traffic (a switched-to endpoint keeps the old WG
-            // session, so only live round-trips, not handshake age, prove the new path).
-            let mut reach_by_pk: HashMap<[u8; 32], bool> = HashMap::new();
-            // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`)
-            // *plus* those we're already relaying — a working relay tunnel reads as connected, so
-            // without this it would drop out of `need_relay` and the coordinator would withdraw the
-            // relay, flapping it.
-            let mut want_relay: Vec<[u8; 32]> = Vec::new();
-            for (pk, cfg) in &peers {
-                let punched = last_seeds
-                    .iter()
-                    .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
-                let last_handshake = stats
-                    .as_ref()
-                    .and_then(|m| m.get(pk))
-                    .and_then(|s| s.last_handshake);
-                let last_handshake_secs = last_handshake
-                    .and_then(|t| t.elapsed().ok())
-                    .map(|d| d.as_secs());
-                let connected = last_handshake
-                    .is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
-                // A peer with no dialable endpoint *and* no punch target (no observer reported a
-                // reflexive) that hasn't connected — the bootstrap case, cleared the moment a punch
-                // target or handshake appears.
-                let unpunchable = last_seeds
-                    .iter()
-                    .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_none());
-                let relaying = relays.is_relaying(pk);
-                let icing = ice.is_connected(pk);
-                // Advance this peer's connection FSM from the liveness above: age the attempt/bootstrap
-                // timers and classify reachability (relay/ICE override the punch classifier).
-                let step = conns.entry(*pk).or_default().step(
-                    now,
-                    punched,
-                    connected,
-                    unpunchable,
-                    relaying,
-                    icing,
-                );
-                let r = step.reach;
-                // Log the flip (not every recheck): the state is otherwise only visible via
-                // `ctl status`, so a peer flapping down leaves no trace. Carries the handshake age so
-                // a stale-read glitch (age tiny) reads differently from a real outage (age large).
-                if let Some((was_up, was_reach)) = step.flipped {
-                    tracing::info!(
-                        peer = %hex8(pk),
-                        up = connected,
-                        was_up,
-                        reach = ?r,
-                        was_reach = ?was_reach,
-                        last_handshake_secs = ?last_handshake_secs,
-                        "peer reachability changed"
-                    );
-                }
-                if relaying
-                    || icing
-                    || r == common::control::PeerReach::Unreachable
-                    || (ice_enabled && step.bootstrap_stuck)
-                {
-                    want_relay.push(*pk);
-                }
-                if let Some((ip, _)) = cfg.allowed_ips.first() {
-                    reach_by_pk.insert(*pk, latency.contains_key(ip));
-                    let (rx_bytes, tx_bytes) = stats
-                        .as_ref()
-                        .and_then(|m| m.get(pk))
-                        .map_or((0, 0), |s| (s.rx_bytes, s.tx_bytes));
-                    live.insert(
-                        *ip,
-                        control::PeerLive {
-                            reach: r,
-                            up: connected,
-                            latency_ms: latency.get(ip).copied(),
-                            rx_bytes,
-                            tx_bytes,
-                            last_handshake_secs,
-                        },
-                    );
-                }
-            }
-            // Drop bookkeeping for peers that have left the mesh.
-            conns.retain(|pk, _| peers.contains_key(pk));
-            control::set_live(&status, &live);
-
-            // Recompute direct LAN endpoints from received beacons + this iteration's ping health.
-            // `lan_changed` flags an adoption/reversion so the local-recheck branch re-applies at once
-            // (this transition is async to the long-poll, like an ICE session coming up).
-            let lan_changed = if let Some(b) = beacon.as_mut() {
-                let new = b.select(now, &reach_by_pk);
-                let changed = new != lan_eps;
-                lan_eps = new;
-                changed
-            } else {
-                false
-            };
+            // Read WireGuard's own view of every peer, probe each one, and advance its reachability
+            // FSM — see `poll_peer_health`. Purely local, so the held long-poll below keeps waiting.
+            let PeerHealth {
+                observed,
+                want_relay,
+                lan_changed,
+            } = poll_peer_health(
+                backend.as_ref(),
+                &peers,
+                &last_seeds,
+                &mut conns,
+                &relays,
+                &ice,
+                ice_enabled,
+                ping_client.as_ref(),
+                beacon.as_mut(),
+                &mut lan_eps,
+                &status,
+                &sent.observed,
+            )
+            .await;
 
             // This iteration's relay report: our fixed capability (from `relay_report`) plus the
             // dynamic per-loop bits — peers we want relayed and the relayed addresses we've allocated.
             // Sorted for a stable change comparison against the last report.
-            want_relay.sort();
+            //
             // The stuck-peer set for this iteration (Unreachable ∪ relaying ∪ ICE-connected) — the
             // peers we run ICE / request a relay for.
             let want_set: HashSet<[u8; 32]> = want_relay.iter().copied().collect();
@@ -1288,42 +1057,414 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         }
 
         // Reached only when the mesh loop broke on a logout signal.
-        tracing::info!("logout: un-enrolling and tearing down the mesh");
-        // Un-enroll this device at the coordinator (best-effort — the re-key below already prevents any
-        // reuse of the old identity, so a failure here just leaves an orphaned device row to expire).
-        if let Some(tok) = token.read().await.clone() {
-            let op = common::api::ManageOp::Remove {
-                device_name: cfg.device_name(),
-            };
-            if let Err(e) = coord::manage(&cfg.coordinator, tok, op).await {
-                tracing::warn!("logout: coordinator un-enroll failed (continuing): {e:#}");
-            }
-        }
-        // Drop every peer and destroy the interface; a fresh one comes up on the next login.
-        if let Err(e) = backend.down() {
-            tracing::warn!("logout: interface down: {e:#}");
-        }
-        if let Some(fw) = &fw {
-            if let Err(e) = fw.update_peers(crate::fw::PeerSets::default()) {
-                tracing::warn!("logout: clearing firewall peers: {e:#}");
-            }
-        }
-        if let Some(r) = &resolver {
-            if let Err(e) = r.revert(&cfg.iface) {
-                tracing::warn!("logout: resolver revert: {e:#}");
-            }
-        }
-        if let Some(t) = &dns_task {
-            t.abort();
-        }
-        if let Some(t) = &p2p_task {
-            t.abort();
-        }
+        logout_teardown(
+            &cfg,
+            &token,
+            &fw,
+            &resolver,
+            backend.as_ref(),
+            &dns_task,
+            &p2p_task,
+        )
+        .await;
         // Discard the local key + token so the next register re-keys and reports not-logged-in.
         keys::clear_enrollment(&cfg.state_dir)?;
         *token.write().await = None;
         control::set_logged_out(&status);
         continue 'lifecycle;
+    }
+}
+
+/// Un-enroll and drop the mesh on an interactive logout, then leave the host as it was before this
+/// enrollment so `'lifecycle` can re-key and wait for the next login.
+///
+/// Distinct from [`teardown`], which serves a *stop* or an update restart: this one also tells the
+/// coordinator we're gone, and deliberately keeps nothing — a logged-out device must not stay in
+/// anyone's snapshot, and the interface it held is rebuilt from scratch on the next login. Every
+/// step is best-effort and logged: the re-key that follows already prevents reuse of this identity,
+/// so a failure here costs at most an orphaned device row that expires on its own.
+async fn logout_teardown(
+    cfg: &Config,
+    token: &tokio::sync::RwLock<Option<String>>,
+    fw: &Option<Arc<Firewall>>,
+    resolver: &Option<Box<dyn ResolverHook>>,
+    backend: &dyn WgBackend,
+    dns_task: &Option<tokio::task::JoinHandle<()>>,
+    p2p_task: &Option<tokio::task::JoinHandle<()>>,
+) {
+    tracing::info!("logout: un-enrolling and tearing down the mesh");
+    if let Some(tok) = token.read().await.clone() {
+        let op = common::api::ManageOp::Remove {
+            device_name: cfg.device_name(),
+        };
+        if let Err(e) = coord::manage(&cfg.coordinator, tok, op).await {
+            tracing::warn!("logout: coordinator un-enroll failed (continuing): {e:#}");
+        }
+    }
+    // Drop every peer and destroy the interface; a fresh one comes up on the next login.
+    if let Err(e) = backend.down() {
+        tracing::warn!("logout: interface down: {e:#}");
+    }
+    if let Some(fw) = fw {
+        if let Err(e) = fw.update_peers(crate::fw::PeerSets::default()) {
+            tracing::warn!("logout: clearing firewall peers: {e:#}");
+        }
+    }
+    if let Some(r) = resolver {
+        if let Err(e) = r.revert(&cfg.iface) {
+            tracing::warn!("logout: resolver revert: {e:#}");
+        }
+    }
+    if let Some(t) = dns_task {
+        t.abort();
+    }
+    if let Some(t) = p2p_task {
+        t.abort();
+    }
+}
+
+/// The host-side machinery one enrollment owns: the WireGuard interface, and everything bound to
+/// the mesh address that interface carries.
+///
+/// It is grouped because it shares one lifetime. The address is derived from the device key, so a
+/// logout — which re-keys — invalidates every one of these at once: the resolver would answer on an
+/// address that no longer exists, the DNS and p2p sockets are bound to it, and the beacon advertises
+/// a key that has been retired. `'lifecycle` therefore tears the whole set down together and calls
+/// this again on the next login.
+struct EnrolledHost {
+    backend: Box<dyn WgBackend>,
+    /// The `.unity.internal` resolver, bound to this device's own mesh IP.
+    dns_task: Option<tokio::task::JoinHandle<()>>,
+    /// Peer-direct attestation refresh (docs/gossip-refresh.md), serving `own_atts`.
+    p2p_task: Option<tokio::task::JoinHandle<()>>,
+    /// The OS resolver hook pointing `.unity.internal` at `dns_task`, reverted on the way out.
+    resolver: Option<Box<dyn ResolverHook>>,
+    /// LAN discovery, if enabled and its socket bound.
+    beacon: Option<crate::beacon::Beacon>,
+    /// Our own coordinator-minted attestations, refreshed from every register/refresh so the p2p
+    /// service always hands peers a current one.
+    own_atts: crate::p2p::OwnAttestations,
+}
+
+/// Bring up this enrollment's interface and the services that live on its address.
+///
+/// Every optional piece degrades rather than aborts: a failed resolver hook, DNS bind, p2p bind or
+/// beacon bind costs that feature and logs why, because none of them is load-bearing for the mesh
+/// itself — peers still reach each other over coordinator-supplied endpoints and IPs.
+#[allow(clippy::too_many_arguments)]
+async fn bring_up_host(
+    cfg: &Config,
+    device: &SelfDevice,
+    wg_priv: [u8; 32],
+    wg_pub: [u8; 32],
+    fw: &Option<Arc<Firewall>>,
+    status: &control::Shared,
+    zone: &dns::Zone,
+    resp: &common::api::RegisterResp,
+) -> anyhow::Result<EnrolledHost> {
+    // Bring up the single interface with our device /32.
+    let mut backend = wg::new_backend(&cfg.iface)?;
+    backend.up(&IfaceConfig {
+        private_key: wg_priv,
+        addresses: vec![(device.wg_ip, 32)],
+        listen_port: cfg.listen_port,
+    })?;
+    tracing::info!(iface = %cfg.iface, port = cfg.listen_port, "interface up");
+
+    // Check the coordinator's mesh range against local interfaces once at join: an overlap with
+    // the user's real LAN could shadow it. Advisory — routes come from signed attestations — so
+    // we warn and surface it, we don't refuse.
+    let overlap = crate::netcfg::lan_overlap_warning(device.wg_net, &cfg.iface);
+    if let Some(w) = &overlap {
+        tracing::warn!("{w}");
+    }
+    control::set_lan_overlap(status, overlap);
+
+    // The CGNAT exemption needs our own mesh address as well as the interface: anything we send
+    // to ourselves (the resolver below is exactly that) loops back on `lo`, where a rule scoped
+    // to the mesh interface can't match it.
+    if let Some(fw) = &fw {
+        if let Err(e) = fw.set_mesh_addr(device.wg_ip) {
+            tracing::warn!("firewall: recording mesh address: {e:#}");
+        }
+    }
+
+    // Resolver address: this device's own mesh IP (now on the interface) + the configured port.
+    // Bound here, not on loopback, so `:53` is free on every platform and Windows NRPT (port-53
+    // only) can forward to it. The IP is pubkey-derived, so it changes on re-key — hence the
+    // server is (re)bound per enrollment and torn down with the interface below.
+    let dns_bind = cfg
+        .dns
+        .then(|| SocketAddr::new(device.wg_ip.into(), DNS_PORT));
+
+    // Serve the `.unity.internal` zone on that address. Held so the logout/shutdown paths can stop
+    // it before the interface (and thus its bound IP) goes away.
+    let dns_task = dns_bind.map(|bind| {
+        let z = zone.clone();
+        tokio::spawn(async move {
+            match tokio::net::UdpSocket::bind(bind).await {
+                Ok(sock) => {
+                    tracing::info!(%bind, "dns resolver listening");
+                    if let Err(e) = dns::serve(sock, z).await {
+                        tracing::error!("dns resolver ended: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("dns resolver bind {bind} failed ({e}); name resolution off")
+                }
+            }
+        })
+    });
+
+    // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
+    // clean shutdown; also clears with the link if we exit uncleanly.
+    let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, dns_bind) {
+        (true, Some(bind)) => match crate::resolver::platform_hook() {
+            Some(hook) => {
+                if let Err(e) = hook.install(&cfg.iface, bind) {
+                    tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
+                }
+                Some(hook)
+            }
+            None => None, // no OS resolver backend on this platform yet (e.g. macOS /etc/resolver)
+        },
+        _ => None,
+    };
+
+    // Peer-direct attestation refresh (docs/gossip-refresh.md, stage 1): serve our own
+    // coordinator-minted attestations to meshed co-members over the tunnel, so the mesh can keep
+    // credentials fresh without the coordinator fanning them out. Off unless `gossip` is set; the
+    // coordinator stays the fallback. Bound to our mesh /32 (now on the interface), torn down with
+    // it. `own_atts` is refreshed from the grant on every register below.
+    let own_atts = crate::p2p::OwnAttestations::default();
+    let p2p_task = cfg.gossip.then(|| {
+        own_atts.set(grant_attestations(resp));
+        let bind = SocketAddr::new(device.wg_ip.into(), common::p2p::P2P_PORT);
+        let own = own_atts.clone();
+        tokio::spawn(async move {
+            match tokio::net::UdpSocket::bind(bind).await {
+                Ok(sock) => {
+                    tracing::info!(%bind, "p2p attestation service listening");
+                    if let Err(e) = crate::p2p::serve(sock, own).await {
+                        tracing::warn!("p2p service ended: {e:#}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("p2p bind {bind} failed ({e}); peer-direct refresh off")
+                }
+            }
+        })
+    });
+
+    // LAN discovery beacon (`beacon.rs`): broadcast our WG pubkey + listen port on the local
+    // segment so two peers behind one NAT find a direct LAN path instead of hairpinning through
+    // the router's public IP. Bound to `0.0.0.0` (the physical segment, not the mesh /32) so it
+    // can send/receive segment broadcasts. Off when `beacon` is unset; a bind / broadcast failure
+    // is non-fatal (the mesh still works via coordinator-supplied endpoints).
+    let beacon = if cfg.beacon {
+        let bind = SocketAddr::from((Ipv4Addr::UNSPECIFIED, cfg.beacon_port));
+        match tokio::net::UdpSocket::bind(bind).await {
+            Ok(sock) => match sock.set_broadcast(true) {
+                Ok(()) => {
+                    tracing::info!(port = cfg.beacon_port, "LAN discovery beacon active");
+                    Some(crate::beacon::Beacon::spawn(
+                        sock,
+                        wg_pub,
+                        wg_priv,
+                        cfg.listen_port,
+                        cfg.beacon_port,
+                    ))
+                }
+                Err(e) => {
+                    tracing::warn!("beacon: set_broadcast failed ({e}); LAN discovery off");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!("beacon bind {bind} failed ({e}); LAN discovery off");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Ok(EnrolledHost {
+        backend,
+        dns_task,
+        p2p_task,
+        resolver,
+        beacon,
+        own_atts,
+    })
+}
+
+/// What one pass over the live peer set concluded — the mesh loop's inputs for this iteration.
+struct PeerHealth {
+    /// Where WireGuard sees each peer sending from (its NAT mapping), sorted so a change compare
+    /// against the last report is stable. Reported to the coordinator so it can hand two NAT'd
+    /// co-members each other's address to punch to.
+    observed: Vec<common::api::ObservedEndpoint>,
+    /// Peers a punch can't reach: `Unreachable`, already relaying, ICE-connected, or stuck at
+    /// bootstrap. The set we run ICE for and ask the coordinator to pair with a relay.
+    want_relay: Vec<[u8; 32]>,
+    /// A beacon adopted or reverted a direct LAN endpoint this pass. That transition is async to
+    /// the long-poll, so the caller re-applies at once rather than waiting out the hold.
+    lan_changed: bool,
+}
+
+/// Everything the mesh loop reads about its peers each pass, in one place: WireGuard's own stats,
+/// an ICMP round-trip per peer, and the per-peer reachability FSM advanced from both.
+///
+/// Runs every `STATS_RECHECK`, entirely locally — one uapi read, one batch of pings, no coordinator
+/// traffic. It is the loop's eyes: a reflexive appears here (only after a handshake, later than a
+/// long-poll would return), a stuck punch is classified here, and a LAN path proves itself here.
+/// Mutates `conns` (the FSM), `lan_eps` (beacon adoption) and the status snapshot as it goes.
+#[allow(clippy::too_many_arguments)]
+async fn poll_peer_health(
+    backend: &dyn WgBackend,
+    peers: &HashMap<[u8; 32], PeerConfig>,
+    last_seeds: &[SeedPeer],
+    conns: &mut HashMap<[u8; 32], PeerConn>,
+    relays: &crate::relay::RelayManager,
+    ice: &crate::ice::IceManager,
+    ice_enabled: bool,
+    ping_client: Option<&ping::Client>,
+    beacon: Option<&mut crate::beacon::Beacon>,
+    lan_eps: &mut HashMap<[u8; 32], SocketAddr>,
+    status: &control::Shared,
+    last_observed: &[common::api::ObservedEndpoint],
+) -> PeerHealth {
+    // A failed read (boringtun's uapi is racy under load) is treated as "unchanged" so it never
+    // flaps: we report what we reported last time rather than an empty set.
+    let stats = backend.peer_stats().ok();
+    let observed = match &stats {
+        Some(map) => {
+            let mut v: Vec<common::api::ObservedEndpoint> = map
+                .iter()
+                .filter_map(|(pk, s)| {
+                    s.endpoint.map(|endpoint| common::api::ObservedEndpoint {
+                        pubkey: *pk,
+                        endpoint,
+                    })
+                })
+                .collect();
+            v.sort_by_key(|o| o.pubkey);
+            v
+        }
+        None => last_observed.to_vec(),
+    };
+
+    let now = std::time::Instant::now();
+    // Latency probe: one concurrent ICMP echo per peer's wg IP (peers answer ping by default).
+    let peer_ips: Vec<Ipv4Addr> = peers
+        .values()
+        .filter_map(|c| c.allowed_ips.first().map(|(ip, _)| *ip))
+        .collect();
+    let latency = match ping_client {
+        Some(pc) => ping::probe(pc, &peer_ips).await,
+        None => HashMap::new(),
+    };
+    let mut live: HashMap<Ipv4Addr, control::PeerLive> = HashMap::new();
+    // Per-peer ping reachability this iteration — the health signal the beacon adoption check uses
+    // to confirm a LAN endpoint carries traffic (a switched-to endpoint keeps the old WG session, so
+    // only live round-trips, not handshake age, prove the new path).
+    let mut reach_by_pk: HashMap<[u8; 32], bool> = HashMap::new();
+    // Peers to ask the coordinator for a relay: those whose punch is stuck (`Unreachable`) *plus*
+    // those we're already relaying — a working relay tunnel reads as connected, so without this it
+    // would drop out of `need_relay` and the coordinator would withdraw the relay, flapping it.
+    let mut want_relay: Vec<[u8; 32]> = Vec::new();
+    for (pk, peer_cfg) in peers {
+        let punched = last_seeds
+            .iter()
+            .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_some());
+        let last_handshake = stats
+            .as_ref()
+            .and_then(|m| m.get(pk))
+            .and_then(|s| s.last_handshake);
+        let last_handshake_secs = last_handshake
+            .and_then(|t| t.elapsed().ok())
+            .map(|d| d.as_secs());
+        let connected =
+            last_handshake.is_some_and(|t| t.elapsed().map_or(true, |d| d < HANDSHAKE_FRESH));
+        // A peer with no dialable endpoint *and* no punch target (no observer reported a reflexive)
+        // that hasn't connected — the bootstrap case, cleared the moment a punch target or handshake
+        // appears.
+        let unpunchable = last_seeds
+            .iter()
+            .any(|s| s.pubkey == *pk && s.endpoint.is_none() && s.punch.is_none());
+        let relaying = relays.is_relaying(pk);
+        let icing = ice.is_connected(pk);
+        // Advance this peer's connection FSM from the liveness above: age the attempt/bootstrap
+        // timers and classify reachability (relay/ICE override the punch classifier).
+        let step = conns.entry(*pk).or_default().step(
+            now,
+            punched,
+            connected,
+            unpunchable,
+            relaying,
+            icing,
+        );
+        let r = step.reach;
+        // Log the flip (not every recheck): the state is otherwise only visible via `ctl status`, so
+        // a peer flapping down leaves no trace. Carries the handshake age so a stale-read glitch
+        // (age tiny) reads differently from a real outage (age large).
+        if let Some((was_up, was_reach)) = step.flipped {
+            tracing::info!(
+                peer = %hex8(pk),
+                up = connected,
+                was_up,
+                reach = ?r,
+                was_reach = ?was_reach,
+                last_handshake_secs = ?last_handshake_secs,
+                "peer reachability changed"
+            );
+        }
+        if relaying
+            || icing
+            || r == common::control::PeerReach::Unreachable
+            || (ice_enabled && step.bootstrap_stuck)
+        {
+            want_relay.push(*pk);
+        }
+        if let Some((ip, _)) = peer_cfg.allowed_ips.first() {
+            reach_by_pk.insert(*pk, latency.contains_key(ip));
+            let (rx_bytes, tx_bytes) = stats
+                .as_ref()
+                .and_then(|m| m.get(pk))
+                .map_or((0, 0), |s| (s.rx_bytes, s.tx_bytes));
+            live.insert(
+                *ip,
+                control::PeerLive {
+                    reach: r,
+                    up: connected,
+                    latency_ms: latency.get(ip).copied(),
+                    rx_bytes,
+                    tx_bytes,
+                    last_handshake_secs,
+                },
+            );
+        }
+    }
+    // Drop bookkeeping for peers that have left the mesh.
+    conns.retain(|pk, _| peers.contains_key(pk));
+    control::set_live(status, &live);
+
+    // Recompute direct LAN endpoints from received beacons + this iteration's ping health.
+    let lan_changed = match beacon {
+        Some(b) => {
+            let new = b.select(now, &reach_by_pk);
+            let changed = new != *lan_eps;
+            *lan_eps = new;
+            changed
+        }
+        None => false,
+    };
+
+    want_relay.sort();
+    PeerHealth {
+        observed,
+        want_relay,
+        lan_changed,
     }
 }
 

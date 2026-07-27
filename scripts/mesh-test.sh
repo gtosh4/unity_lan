@@ -154,16 +154,27 @@ $NS1 socat TCP-LISTEN:9002,fork,reuseaddr /dev/null >/dev/null 2>&1 &
 sleep 0.5
 # A new TCP connect from A to B: exit 0 if open; a dropped (default-deny) port hangs → timeout.
 probe() { timeout 3 bash -c "exec 3<>/dev/tcp/$B_IP/$1" >/dev/null 2>&1; }
+# `ctl expose`/`ctl unexpose` return once the daemon has *accepted* the request; installing or
+# removing the nftables rule happens just after, so probing once here races the rule landing (seen
+# failing about 1 run in 10 on a loaded machine). Wait for the port to reach the expected state
+# instead — the assertion is unchanged, only the deadline is generous.
+becomes() { # becomes <port> open|closed
+  for _ in $(seq 1 20); do
+    if probe "$1"; then [ "$2" = open ] && return 0; else [ "$2" = closed ] && return 0; fi
+    sleep 0.25
+  done
+  return 1
+}
 
 probe 9001 && { echo "FAIL: 9001 reachable before expose (default-deny not enforced)"; exit 1; }
 echo "pre-expose: 9001 blocked by default-deny ✓"
 "$ENG" -c "$TMP/b.toml" ctl expose 9001
-probe 9001 || { echo "FAIL: 9001 unreachable after expose"; exit 1; }
+becomes 9001 open || { echo "FAIL: 9001 unreachable after expose"; exit 1; }
 echo "post-expose: 9001 reachable ✓"
 probe 9002 && { echo "FAIL: never-exposed 9002 reachable"; exit 1; }
 echo "unexposed 9002 still blocked ✓"
 "$ENG" -c "$TMP/b.toml" ctl unexpose 9001
-probe 9001 && { echo "FAIL: 9001 still reachable after unexpose"; exit 1; }
+becomes 9001 closed || { echo "FAIL: 9001 still reachable after unexpose"; exit 1; }
 echo "post-unexpose: 9001 blocked again ✓"
 
 # Revocation: strip node B's role and restart the coordinator (persistent DB, empty presence).
