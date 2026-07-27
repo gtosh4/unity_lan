@@ -15,6 +15,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   peer's next contact. The same fix makes ordinary NAT traversal converge faster, since the address
   and candidate exchanges it depends on were losing notifications the same way.
 
+- A first start on a fresh install no longer sometimes comes up with a dead control socket — the app
+  and `ctl` reporting "is the daemon running?" against a daemon that plainly was, until you restarted
+  it. The daemon opened its socket inside a state directory it only created a moment later, and losing
+  that race left the socket unopened for the rest of the run. The directory is now in place first.
+
 - Running `unitylan-engine` bare once — the one-shot "register and print my address" check — no longer
   wedges that install. It enrolled the device but discarded the credential the coordinator issues on
   enrolment, so every later run, including the daemon's, was refused with "device token missing or

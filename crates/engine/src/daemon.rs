@@ -518,6 +518,12 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     // Host firewall (default-deny), installed before we register — see `build_firewall`.
     let fw = build_firewall(&cfg)?;
 
+    // The state dir must exist before the control socket binds inside it: on a cold start nothing
+    // else has created it yet (the keypair below does, but only once the enrollment loop is reached),
+    // and the socket task runs concurrently — losing that race left a fresh install with a daemon
+    // whose socket never came up, since the bind is not retried.
+    keys::create_private_dir(&cfg.state_dir)?;
+
     // Control socket up first — so a frontend (GUI) can drive interactive login before we're
     // enrolled. status starts empty; `needs_login` is toggled by the register loop below.
     let status = control::shared();
