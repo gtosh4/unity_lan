@@ -171,7 +171,9 @@ impl Store {
                 idx         INTEGER NOT NULL UNIQUE,
                 user_id     INTEGER NOT NULL,
                 device_name TEXT    NOT NULL,
-                token       TEXT             -- per-device bearer token for control mutations
+                token       TEXT,            -- per-device bearer token for control mutations
+                last_seen   INTEGER,         -- unix secs of the row's last register; NULL = never
+                personal    INTEGER NOT NULL DEFAULT 0  -- 1 = held only under the personal scope
             );
             CREATE TABLE IF NOT EXISTS enrollment_keys (
                 key        TEXT    PRIMARY KEY,
@@ -192,6 +194,10 @@ impl Store {
                 user_id  INTEGER NOT NULL,
                 bound_at INTEGER NOT NULL DEFAULT 0  -- unix secs; orders the per-user cap prune
             );
+            CREATE TABLE IF NOT EXISTS user_handles (
+                user_id INTEGER PRIMARY KEY,  -- captured at interactive login
+                handle  TEXT    NOT NULL      -- Discord display handle, the <user> DNS label
+            );
             CREATE TABLE IF NOT EXISTS guild_rotation_certs (
                 idx      INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
                 guild_id INTEGER NOT NULL,                   -- the guild whose key was rotated
@@ -203,6 +209,15 @@ impl Store {
         .await?;
         // Add the token column to devices tables created before it existed (ignore if present).
         let _ = sqlx::query("ALTER TABLE devices ADD COLUMN token TEXT")
+            .execute(&self.pool)
+            .await;
+        // Likewise the reclaim columns. An existing row starts with `last_seen` NULL and `personal`
+        // 0, i.e. never reclaimable until its owner's next register stamps it — a device from before
+        // this release must not be swept on the strength of a column that was never written.
+        let _ = sqlx::query("ALTER TABLE devices ADD COLUMN last_seen INTEGER")
+            .execute(&self.pool)
+            .await;
+        let _ = sqlx::query("ALTER TABLE devices ADD COLUMN personal INTEGER NOT NULL DEFAULT 0")
             .execute(&self.pool)
             .await;
         // Retain the historical ratchet column for schema compatibility. Current releases require a
@@ -445,6 +460,76 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|r| r.get::<i64, _>("user_id") as u64))
+    }
+
+    /// Stamp a device as seen now, recording whether it currently holds its identity only under the
+    /// personal scope. Both facts feed [`Self::reclaim_idle_personal_devices`]; `personal` is
+    /// re-written every time so a device that later joins a guild stops being reclaimable.
+    pub async fn touch_device(&self, pubkey: &[u8; 32], personal: bool) -> anyhow::Result<()> {
+        sqlx::query("UPDATE devices SET last_seen = ?, personal = ? WHERE pubkey = ?")
+            .bind(common::now_unix() as i64)
+            .bind(i64::from(personal))
+            .bind(pubkey.as_slice())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Free the mesh IPs of personal-scope devices that stopped registering `idle_secs` ago.
+    ///
+    /// Only personal rows: a role-holding device's allocation is anchored to a membership an admin
+    /// granted, and reclaiming it would renumber someone's mesh behind their back. A personal row
+    /// has no such anchor — anyone with a Discord account can mint up to the per-account cap — so
+    /// without this, abandoned signups accumulate addresses forever. Rows never stamped (`last_seen`
+    /// NULL, i.e. from before this column existed) are left alone.
+    ///
+    /// Returns how many rows were freed. A reclaimed device isn't locked out: it re-enrolls like a
+    /// new one, and gets whatever address is free then. Removal goes through [`Self::remove_device`]
+    /// rather than a bulk `DELETE`, so the login binding and primary pointer are cleaned up with it —
+    /// a stray `oauth_authorized` row would otherwise let the reclaimed key re-register on possession
+    /// proof alone.
+    pub async fn reclaim_idle_personal_devices(&self, idle_secs: u64) -> anyhow::Result<u64> {
+        let cutoff = common::now_unix().saturating_sub(idle_secs) as i64;
+        let rows = sqlx::query(
+            "SELECT pubkey, user_id FROM devices
+             WHERE personal = 1 AND last_seen IS NOT NULL AND last_seen < ?",
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut freed = 0;
+        for row in rows {
+            let pubkey = pubkey_from_blob(row.get::<Vec<u8>, _>("pubkey"))?;
+            let user_id = row.get::<i64, _>("user_id") as u64;
+            self.remove_device(user_id, &pubkey).await?;
+            freed += 1;
+        }
+        Ok(freed)
+    }
+
+    /// Remember the handle a user logged in with. Kept in its own table rather than on the binding
+    /// row, which is pruned per-user and cleared when a device is removed — the handle has to
+    /// outlive both, since it is the `<user>` label in every hostname the account's devices answer
+    /// to.
+    pub async fn set_user_handle(&self, user_id: u64, handle: &str) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO user_handles (user_id, handle) VALUES (?, ?)
+             ON CONFLICT (user_id) DO UPDATE SET handle = excluded.handle",
+        )
+        .bind(user_id as i64)
+        .bind(handle)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The handle captured at this user's last interactive login, if they have ever done one.
+    pub async fn user_handle(&self, user_id: u64) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query("SELECT handle FROM user_handles WHERE user_id = ?")
+            .bind(user_id as i64)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.get::<String, _>("handle")))
     }
 
     // ---- community slug (the <community> DNS label; admin-set, defaults to guild name) ----
@@ -1011,6 +1096,58 @@ mod tests {
         // possession proof alone — it must re-enroll (fresh OAuth or an enrollment key).
         assert_eq!(st.device_owner(&a).await.unwrap(), None);
         assert_eq!(st.oauth_user(&a).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn reclaim_frees_only_idle_personal_devices() {
+        let st = Store::memory().await;
+        let (idle, active, role_holder, never) = ([1u8; 32], [2u8; 32], [3u8; 32], [4u8; 32]);
+        for (i, pk) in [idle, active, role_holder, never].iter().enumerate() {
+            st.allocate_device(tnet(), pk, 5, &format!("d{i}"))
+                .await
+                .unwrap();
+        }
+        st.bind_oauth(&idle, 5).await.unwrap();
+        st.touch_device(&idle, true).await.unwrap();
+        st.touch_device(&active, true).await.unwrap();
+        st.touch_device(&role_holder, false).await.unwrap();
+        // Age the two we want treated as stale; `never` keeps a NULL `last_seen`, standing in for a
+        // row written before the column existed.
+        for pk in [idle, role_holder] {
+            sqlx::query("UPDATE devices SET last_seen = ? WHERE pubkey = ?")
+                .bind(common::now_unix() as i64 - 100)
+                .bind(pk.as_slice())
+                .execute(&st.pool)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(st.reclaim_idle_personal_devices(50).await.unwrap(), 1);
+        assert_eq!(
+            st.device_owner(&idle).await.unwrap(),
+            None,
+            "idle + personal"
+        );
+        assert_eq!(
+            st.oauth_user(&idle).await.unwrap(),
+            None,
+            "and its login binding with it, or the key re-registers on possession proof alone"
+        );
+        assert_eq!(
+            st.device_owner(&active).await.unwrap(),
+            Some(5),
+            "still registering"
+        );
+        assert_eq!(
+            st.device_owner(&role_holder).await.unwrap(),
+            Some(5),
+            "idle, but its address is anchored to a granted role — never reclaimed"
+        );
+        assert_eq!(
+            st.device_owner(&never).await.unwrap(),
+            Some(5),
+            "never stamped: no evidence of idleness, so no sweep"
+        );
     }
 
     #[tokio::test]

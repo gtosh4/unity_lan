@@ -67,19 +67,30 @@ struct Membership {
     community: HashMap<u64, String>,
     /// The caller's handle, taken from any held role (even a disabled network's).
     username: String,
+    /// The caller holds no network role anywhere, but asked to peer its own devices — so it is
+    /// attested under [`common::attestation::PERSONAL_SCOPE`] instead of a guild. Never set
+    /// alongside a non-empty [`Self::status`]: a caller with a role is attested under its guilds,
+    /// and re-scoping those callers would churn pins for no gain.
+    personal: bool,
 }
 
 impl Membership {
-    /// Every guild the caller holds a role in, enabled or not. Drives the self-grant attestations
-    /// and the response anchors; a peer's shared guilds are always a subset of this.
+    /// Every scope the caller's attestations are signed under: the guilds it holds a role in
+    /// (enabled or not), or [`PERSONAL_SCOPE`](common::attestation::PERSONAL_SCOPE) when it holds
+    /// none and peers only its own devices. Drives the self-grant attestations and the response
+    /// anchors; a peer's shared guilds are always a subset of this.
     fn guilds(&self) -> BTreeSet<u64> {
+        if self.personal {
+            return [common::attestation::PERSONAL_SCOPE].into_iter().collect();
+        }
         self.status.iter().map(|n| n.guild_id).collect()
     }
 
-    /// Whether the caller holds ≥1 network role — i.e. whether it gets an identity at all. Without
-    /// one there is no anchor to attest it (or a sibling) under.
+    /// Whether the caller gets an identity (IP, name, grant) at all — it holds ≥1 network role, or
+    /// it qualifies for the personal scope. Without either there is no anchor to attest it (or a
+    /// sibling) under.
     fn has_identity(&self) -> bool {
-        !self.status.is_empty()
+        !self.status.is_empty() || self.personal
     }
 }
 
@@ -100,7 +111,13 @@ pub(super) async fn build_snapshot(
     // Always sign the V2 layout. V2 read support shipped in v0.3.0 and the whole fleet is past it, so
     // the per-client capability gate that once kept V1 alive for older readers is retired.
     let att_schema = common::attestation::ATTESTATION_SCHEMA_V2;
-    let networks = st.store.all_networks().await.map_err(internal)?;
+    let all_networks = st.store.all_networks().await.map_err(internal)?;
+    // A caller we recently walked and found no role for skips the walk entirely: for a personal-scope
+    // user it is one Discord member lookup per registered guild, all returning "not a member", every
+    // renewal and every herd wake (see [`crate::roleless`]). Handing the phases an empty network list
+    // is exactly what that walk would have concluded, without the calls.
+    let walked = !st.roleless.fresh(user_id);
+    let networks: &[Network] = if walked { &all_networks } else { &[] };
 
     // Cache per-guild member lookups so we hit the role source once per guild — shared across both
     // phases below, so a guild is queried from Discord once per snapshot rather than once per pass.
@@ -111,19 +128,34 @@ pub(super) async fn build_snapshot(
     // change crosses guilds, so it's scoped to the owning user instead.
     let mut changed: BTreeSet<Scope> = BTreeSet::new();
 
-    let device = resolve_device(st, req, user_id, &networks, &mut member_cache).await?;
+    let device = resolve_device(st, req, user_id, networks, &mut member_cache).await?;
     retire_superseded(st, req, user_id, &mut changed).await?;
     let membership = resolve_membership(
         st,
         req,
         user_id,
-        &networks,
+        networks,
         &device,
         &mut member_cache,
         now,
         &mut changed,
     )
     .await?;
+    // A walk that turned up nothing is what the memo above is for; remember it so the next renewal
+    // costs no lookups. Only ever written after a real walk, and never refreshed on a hit, so an
+    // entry ages out on schedule instead of being held alive by an active client.
+    if walked && membership.status.is_empty() {
+        st.roleless.remember(user_id);
+    }
+    // Stamp liveness for the reclaim sweep. Only meaningful for a device that actually holds an
+    // allocation, and it re-writes the personal flag each time, so a device that gains a role stops
+    // being reclaimable from that register on.
+    if membership.has_identity() {
+        st.store
+            .touch_device(&req.wg_pubkey, membership.personal)
+            .await
+            .map_err(internal)?;
+    }
     record_own_device(st, req, user_id, &device, &membership, now, &mut changed);
 
     let grant_guilds = membership.guilds();
@@ -174,8 +206,15 @@ pub(super) async fn build_snapshot(
     // in. Its wire `version` aggregates exactly these, so nothing outside them can wake it. A
     // network registered in a guild the caller has no role in is therefore picked up on its next
     // renewal rather than instantly — that's an admin-rare event, unlike presence churn.
+    // The personal scope is not a membership scope — nothing ever bumps it, and a personal caller's
+    // wakes all arrive on its user scope — so it's filtered out rather than tracked as a guild.
     let scopes: BTreeSet<Scope> = std::iter::once(Scope::User(user_id))
-        .chain(grant_guilds.iter().map(|&g| Scope::Guild(g)))
+        .chain(
+            grant_guilds
+                .iter()
+                .filter(|&&g| g != common::attestation::PERSONAL_SCOPE)
+                .map(|&g| Scope::Guild(g)),
+        )
         .collect();
     let version = st.versions.aggregate(&scopes);
 
@@ -227,11 +266,18 @@ pub(super) async fn build_snapshot(
 
 /// Phase 1 — allocate (or recover) this device's mesh identity.
 ///
-/// The role check runs **before** the allocation. A caller who holds no network role — e.g. a
-/// Discord user who authorized the app but was never granted a role — must not consume a mesh IP or
-/// leave a permanent device row behind, or an account with no access could exhaust the mesh `/16`
-/// and bloat the store (TM-2). Such a caller gets a zeroed [`Device`]; every reader of these fields
-/// is gated on holding ≥1 role, so the placeholder is never observed.
+/// The role check runs **before** the allocation. A caller who holds no network role *and* isn't
+/// asking to peer its own devices — e.g. a Discord user who authorized the app and then walked away
+/// — must not consume a mesh IP or leave a permanent device row behind, or an account with no access
+/// could exhaust the mesh range and bloat the store (TM-2). Such a caller gets a zeroed [`Device`];
+/// every reader of these fields is gated on [`Membership::has_identity`], so the placeholder is
+/// never observed.
+///
+/// A roleless caller that *did* ask for own-device peering does allocate — that's the personal mesh
+/// (see [`PERSONAL_SCOPE`](common::attestation::PERSONAL_SCOPE)). What holds TM-2 there is
+/// enrollment itself: an OAuth-bound Discord account plus the possession proof in
+/// [`super::auth::resolve_user`], bounded by the per-account device cap, and reclaimed when the
+/// device goes idle.
 async fn resolve_device(
     st: &AppState,
     req: &RegisterReq,
@@ -239,7 +285,9 @@ async fn resolve_device(
     networks: &[Network],
     member_cache: &mut HashMap<u64, Option<MemberRoles>>,
 ) -> Result<Device, ApiError> {
-    if !holds_any_network_role(st.roles.as_ref(), networks, user_id, member_cache).await {
+    if !holds_any_network_role(st.roles.as_ref(), networks, user_id, member_cache).await
+        && !wants_personal_scope(req)
+    {
         return Ok(Device {
             ip: Ipv4Addr::UNSPECIFIED,
             name: String::new(),
@@ -313,6 +361,7 @@ async fn resolve_membership(
         network_names: Vec::new(),
         community: HashMap::new(),
         username: format!("user-{user_id}"), // fallback until a role source gives a handle
+        personal: false,                     // decided below, once we know whether any role landed
     };
 
     for net in networks {
@@ -412,14 +461,39 @@ async fn resolve_membership(
         }
     }
 
+    // No role landed anywhere, but the caller wants its own devices meshed: attest it under the
+    // personal scope instead of a guild. `status` being empty is exactly the role check
+    // `resolve_device` already ran, so this costs no extra role-source lookups and the two agree.
+    m.personal = m.status.is_empty() && wants_personal_scope(req);
+    if m.personal {
+        // No role means no member lookup ever supplies a nick, so the handle captured at login is
+        // the only name this user has. A local read, and only for personal callers.
+        if let Some(h) = st.store.user_handle(user_id).await.map_err(internal)? {
+            let label = sanitize_label(&h);
+            if !label.is_empty() {
+                m.username = label;
+            }
+        }
+    }
+
     Ok(m)
+}
+
+/// Whether a caller with no network role still gets an identity — it asked to peer its own devices.
+///
+/// Deliberately **not** gated on `paused`: pausing withdraws presence (see [`record_own_device`])
+/// but must not dissolve the identity, for the same reason a role-holding caller keeps its grant
+/// while paused — it re-meshes instantly on reconnect instead of re-deriving its name and IP.
+fn wants_personal_scope(req: &RegisterReq) -> bool {
+    req.peer_own_devices
 }
 
 /// Own-device peering: record this device in the per-user online set (independent of networks) so
 /// its siblings can seed it even with no shared enabled network. Gated on the client opting in
-/// (`peer_own_devices`, default on), not being paused, and holding an identity (≥1 role → a grant
-/// is issued; without one there's no anchor to attest a sibling under). Evict in every other case so
-/// an opt-out / pause / role-loss withdraws this device from its siblings' seeds.
+/// (`peer_own_devices`, default on), not being paused, and holding an identity (a role's guild or
+/// the personal scope → a grant is issued; without one there's no anchor to attest a sibling under).
+/// Evict in every other case so an opt-out / pause / role-loss withdraws this device from its
+/// siblings' seeds.
 fn record_own_device(
     st: &AppState,
     req: &RegisterReq,
@@ -552,10 +626,11 @@ async fn build_seeds(
     }
     // Own-device peering: fold in the caller's other online devices (same user) not already seeded
     // via a shared network. They carry no `SharedNetwork` (they share none) and are attested under
-    // the caller's own guilds — same user → identical guild membership → the caller already pins each
-    // anchor, so every attestation verifies. Guarded on the caller opting in *and* holding an identity
-    // (`grant_guilds` non-empty), since each seed needs ≥1 guild-signed attestation or the client
-    // rejects the whole batch. `or_insert_with` keeps a sibling already present via a shared network
+    // the caller's own scopes — same user → identical guild membership (or the same personal scope)
+    // → the caller already pins each anchor, so every attestation verifies. Guarded on the caller
+    // opting in *and* holding an identity (`grant_guilds` non-empty), since each seed needs ≥1
+    // signed attestation or the client rejects the whole batch. `or_insert_with` keeps a sibling
+    // already present via a shared network
     // (its narrower shared-guild set stands).
     if req.peer_own_devices && m.has_identity() {
         for mp in st.presence.others_of_user(user_id, &req.wg_pubkey) {
@@ -814,9 +889,13 @@ async fn build_anchors(
     Ok(anchors)
 }
 
-/// Auto-update manifest, signed on demand with a guild key the caller holds (the smallest `guild_id`,
+/// Auto-update manifest, signed on demand with a key the caller holds (the smallest `guild_id`,
 /// deterministically) so the client verifies it against an anchor it has pinned (design.md §3.1 — no
-/// deployment-wide key). `None` when no manifest is configured or the caller holds no guild.
+/// separate deployment-wide key). `None` when no manifest is configured or the caller holds no
+/// scope. A personal-scope caller signs under
+/// [`PERSONAL_SCOPE`](common::attestation::PERSONAL_SCOPE), which *is* one key per deployment — but
+/// it is a key this coordinator already holds alongside every guild key, so it widens no trust
+/// boundary that a guild key didn't already sit on.
 async fn sign_release(
     st: &AppState,
     grant_guilds: &BTreeSet<u64>,

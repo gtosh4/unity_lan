@@ -9,6 +9,7 @@ mod discord;
 mod limiter;
 mod oauth;
 mod presence;
+mod roleless;
 mod roles;
 mod rotate;
 mod signer;
@@ -24,6 +25,11 @@ use common::update::ReleaseManifest;
 
 use crate::api::AppState;
 use crate::config::Config;
+
+/// How long a personal-scope device may go unregistered before its mesh IP is reclaimed. Long enough
+/// to survive a holiday, a spare laptop in a drawer, or a machine that only comes out on weekends —
+/// this reclaims abandoned signups, not devices someone still uses.
+const PERSONAL_IDLE_RECLAIM_SECS: u64 = 30 * 24 * 3600;
 use crate::roles::{FakeRoleSource, RoleSource};
 use crate::signer::GuildKeys;
 use crate::store::Store;
@@ -177,6 +183,7 @@ async fn main() -> anyhow::Result<()> {
 
     let presence = Arc::new(crate::presence::Presence::default());
     let versions = Arc::new(crate::versions::Versions::default());
+    let roleless = Arc::new(crate::roleless::RolelessMemo::default());
 
     // Live Discord: run the gateway for `/unitylan` slash commands + role-revocation events.
     if let Some(d) = &discord {
@@ -184,11 +191,15 @@ async fn main() -> anyhow::Result<()> {
         let store = store.clone();
         let presence = presence.clone();
         let versions = versions.clone();
+        // Likewise for the roleless memo: a role change must drop it, or a user who was just granted
+        // one waits out its TTL before their networks appear.
+        let roleless = roleless.clone();
         // Same `Arc` the snapshot path reads, so a revocation's cache invalidation is visible there.
         let roles = roles.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                crate::commands::run_gateway(token, store, presence, versions, roles).await
+                crate::commands::run_gateway(token, store, presence, versions, roles, roleless)
+                    .await
             {
                 tracing::error!("gateway task ended: {e:#}");
             }
@@ -283,6 +294,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         presence,
         versions,
+        roleless,
         oauth,
         trusted_proxies: Arc::new(cfg.trusted_proxies.clone()),
         source_ip: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -322,6 +334,30 @@ async fn main() -> anyhow::Result<()> {
                         .reap(common::now_unix(), common::PRESENCE_TTL_SECS),
                 );
                 api::prune_nat_tables(&st, &st.presence.present_pubkeys());
+            }
+        });
+    }
+
+    // Reclaim sweep: free the mesh IPs of personal-scope devices nobody has registered in a month.
+    // A role-holding device's address is anchored to an admin-granted membership and is never touched;
+    // a personal one is minted by anyone with a Discord account, so abandoned signups would otherwise
+    // hold addresses (and rows) forever. Hourly is far more often than a 30-day window needs — it just
+    // avoids a thundering sweep after a long uptime.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                match st
+                    .store
+                    .reclaim_idle_personal_devices(PERSONAL_IDLE_RECLAIM_SECS)
+                    .await
+                {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(devices = n, "reclaimed idle personal-scope devices"),
+                    Err(e) => tracing::warn!("reclaim sweep: {e:#}"),
+                }
             }
         });
     }

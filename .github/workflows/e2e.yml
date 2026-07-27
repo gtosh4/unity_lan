@@ -69,8 +69,8 @@ jobs:
         run: |
           set -u
           failed=()
-          for s in wg-tunnel mesh own-device net-toggle expose-net gui-login oauth rotation \
-                   nat ice relay gossip; do
+          for s in wg-tunnel mesh own-device personal-mesh net-toggle expose-net gui-login oauth \
+                   rotation nat ice relay gossip; do
             echo "::group::$s-test.sh"
             start=$SECONDS
             if timeout 600 "scripts/$s-test.sh"; then

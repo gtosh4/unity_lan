@@ -200,6 +200,7 @@ Linux (or WSL2):
 | `gossip-test.sh` | peer-direct attestation refresh with the coordinator cut off |
 | `ice-test.sh` / `relay-test.sh` | ICE negotiation and the ciphertext TURN relay fallback |
 | `own-device-test.sh` | a user's own devices peering with no shared network |
+| `personal-mesh-test.sh` | a user who holds no role at all meshing their own devices |
 | `update-test.sh` | the signed auto-update path, manifest → verify → swap → restart |
 | `resolver-hook-test.sh` | live systemd-resolved hookup (needs root + real resolved) |
 

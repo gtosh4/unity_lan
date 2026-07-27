@@ -82,7 +82,7 @@ scripts/dev-run.sh                                           # engine (via sudo)
 
 `scripts/*.sh` = Linux-only end-to-end tests over network namespaces (fake Discord/OAuth
 coordinator + `nft`/`veth`). `mesh-test.sh`, `nat-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`,
-`rotation-test.sh`, `own-device-test.sh` exercise coordinator↔engine path; prefer running the
+`rotation-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh` exercise coordinator↔engine path; prefer running the
 relevant one to verify behavior change end-to-end. `update-test.sh` covers signed auto-update path
 (manifest → verify → download → swap → restart onto new version); temporarily patches workspace
 version to build fake-old client, then restores.
@@ -93,7 +93,7 @@ session, impossible (no password).
 
 | Script | How to run |
 | --- | --- |
-| `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
+| `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
 | `oauth-test.sh`, `rotation-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG) |
 | `update-test.sh` | directly, self-unshares — `timeout 420 scripts/update-test.sh` (builds twice; needs `openssl` + `python3`) |
 | `resolver-hook-test.sh` | **real host root** — needs live `systemd-resolved`, a userns won't do |
@@ -149,6 +149,10 @@ regardless of how many networks they share. Coordinator holds **one Ed25519 sign
 (the trust anchor; independently generated on first use — design.md §3.1) and signs short-lived
 attestations binding device identity + guild — `guild + user + device + ip + wg_pubkey (+ is_primary)`,
 **not** role. A device in N guilds gets N attestations (same identity, different signer/guild).
+A user holding **no** role anywhere is attested under a reserved **personal scope** (`guild_id = 0`,
+`common::attestation::PERSONAL_SCOPE`) instead — one key per deployment — so a Discord account with
+no server can still mesh its own devices; issued only if the device opted into own-device peering,
+and its allocation is reclaimed after 30 days idle.
 Role/network membership rides separately in snapshot (each peer lists networks it shares with you);
 coordinator gates access by only putting peers you share a network with into your snapshot. Peers
 **pin one anchor per guild** (TOFU), verify each peer's attestation against matching guild anchor,

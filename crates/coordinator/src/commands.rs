@@ -37,6 +37,7 @@ pub async fn run_gateway(
     presence: Arc<Presence>,
     versions: Arc<Versions>,
     roles: Arc<dyn RoleSource>,
+    roleless: Arc<crate::roleless::RolelessMemo>,
 ) -> anyhow::Result<()> {
     let http = twilight_http::Client::new(token.clone());
     let app_id = http.current_user_application().await?.model().await?.id;
@@ -81,6 +82,10 @@ pub async fn run_gateway(
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
                 let held: HashSet<u64> = m.roles.iter().map(|r| r.get()).collect();
+                // This is also how a role is *gained*, so drop any "holds nothing anywhere" memo:
+                // the user's next snapshot must walk the guilds again rather than skip straight to a
+                // personal scope (see `crate::roleless`).
+                roleless.forget(m.user.id.get());
                 revoke(
                     &store,
                     &presence,
@@ -94,6 +99,7 @@ pub async fn run_gateway(
             }
             // A member left the guild: evict them from every network in it.
             Event::MemberRemove(m) => {
+                roleless.forget(m.user.id.get());
                 revoke(
                     &store,
                     &presence,

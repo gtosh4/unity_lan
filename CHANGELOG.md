@@ -5,6 +5,17 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ## Unreleased
 
+### Added
+
+- You can now use UnityLAN for just your own machines, without joining or running a Discord server.
+  Log in, install it on a second device, and the two find each other — no server to set up, no role
+  for an admin to grant, nothing to configure. Previously an account that held no role anywhere got
+  no address at all, so the only way to reach your own laptop from your own desktop was to stand up a
+  server first. Your devices get the same hostnames they always would (`laptop.you.unity.internal`),
+  and joining a community later changes nothing about them. Turning off "My devices" still opts out
+  completely; a personal address that goes unused for 30 days is released, and comes back on the next
+  login.
+
 ### Fixed
 
 - Peers behind strict NATs now connect through a relay instead of appearing stuck. When a hole punch

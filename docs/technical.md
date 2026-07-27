@@ -265,6 +265,23 @@ coordinator's own window), `caps`, `server_version`, `release?`. All version/rel
 **A device that participates in N guilds carries N attestations** — `Grant.attestations` /
 `Seed.attestations` are `Vec<GuildAttestation>`, one per guild, each signed by that guild's key.
 
+**A device in no guild carries one, under the personal scope** (`PERSONAL_SCOPE`, `guild_id = 0` —
+design.md §4.1). `Membership::has_identity` is what gates every identity-bearing field, and it is
+true for either case; `Membership::guilds()` yields `{0}` for the personal one, so anchors, grant and
+own-device seeds all fall out of the same code with no branch. Two consequences worth knowing:
+`resolve_device` allocates for a roleless caller **only** when it set `peer_own_devices` (a roleless
+account with nothing to mesh must consume no address — TM-2), and the personal scope is filtered out
+of the caller's `Scope` set, since nothing ever bumps it and a personal caller's wakes all arrive on
+`Scope::User`.
+
+Answering "does this caller hold a role anywhere?" costs one member lookup **per registered guild**
+for a user who is in none — `discord.rs` caches successful fetches only, by design. That is the whole
+per-renewal cost of a personal user, so the answer is memoized per user in `roleless.rs`: a hit skips
+the network walk entirely rather than making it cheaper (one entry per user, not per guild-user
+pair). It is invalidated by `MemberUpdate` — the event a role *gain* also fires — with a 10-minute
+TTL as the backstop for a dropped event. Staleness is fail-closed: a user who gains a role waits, and
+is never wrongly admitted.
+
 ### 4.2 Discovery — long-poll (`api.rs`)
 **Not gossip.** Clients long-poll `/register`+`/refresh` carrying their last-seen `version`
 (`since`). The handler:
