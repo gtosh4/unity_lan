@@ -94,6 +94,25 @@ The browser flow binds this device to your Discord account, and the background s
 - On a headless box, prefer an enrollment key over the browser flow entirely — see
   [`headless.md`](headless.md).
 
+## No HTTPS certificate arrives
+
+Issuance needs three things at once, and whichever is missing is named by
+`sudo unitylan-engine ctl cert` (or shown in the app under the checkbox):
+
+- **`certificates: unavailable (this coordinator issues none)`** — the coordinator has no
+  certificate domain configured. Nothing to do on this end; ask whoever runs it.
+- **`no port is exposed, so this certificate will not be renewed`** — a certificate is only issued
+  for a device actually serving something. Expose the port first.
+- **`no certificate yet`** with the option on — it's still working. First issuance takes a moment.
+- Anything else after `no certificate yet:` is the error from the certificate authority verbatim.
+
+In the app the checkbox is **hidden entirely** until the deployment offers certificates *and* you
+have a port exposed — so if you can't find it, that's why.
+
+Renewal is automatic and the file paths never change, so a server pointed at them keeps working
+across renewals. If a certificate has lapsed and isn't coming back, check the port is still exposed:
+closing your last one stops renewal.
+
 ## A peer keeps connecting and dropping
 
 Usually one of:

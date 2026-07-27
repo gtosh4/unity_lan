@@ -538,6 +538,20 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         the bare <code>alice.unity.internal</code>.</p>
       </details>
       <details>
+        <summary>Can I serve a website or media library over the mesh?</summary>
+        <p>Yes, and it can have a real HTTPS certificate rather than a browser warning. Mesh names
+        end in <code>.unity.internal</code>, which no certificate authority will ever certify — so a
+        deployment can also configure a domain it owns, under which every device gets a matching
+        public name (<code>laptop.alice.mesh.unitylan.com</code> on the hosted coordinator) and can
+        obtain a publicly-trusted certificate for it. Your device runs the whole exchange and keeps
+        its own key; the coordinator never sees key material.</p>
+        <p>It's off by default and opt-in per device, for a reason worth knowing: every
+        publicly-trusted certificate publishes its names to public transparency logs,
+        <strong>permanently</strong>, where anyone can search them. Turning it back off stops
+        renewals but can't unpublish what's there. The app only offers the option once you're
+        actually serving something.</p>
+      </details>
+      <details>
         <summary>What happens if I stop using it?</summary>
         <p>Nothing dramatic. A device stays enrolled and keeps its address until you remove it —
         <code>ctl remove</code> for one you no longer have, or <code>uninstall</code> when you're

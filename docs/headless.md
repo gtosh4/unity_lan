@@ -87,6 +87,50 @@ These commands find `/etc/unitylan/engine.toml` on their own. An `engine.toml` i
 directory wins if there is one, and `-c <path>` overrides both — worth remembering when a command
 seems to be talking to the wrong daemon.
 
+## Serving HTTPS without a warning page (optional)
+
+Mesh names end in `.unity.internal`, which ICANN reserves — no certificate authority will ever
+certify one, so a browser hitting your media server over the mesh gets a warning page and no amount
+of configuration fixes it.
+
+If your coordinator is configured with a certificate domain, every device also answers to an alias
+under it, and can obtain a **publicly-trusted certificate** for that alias itself. On the canonical
+coordinator the domain is `mesh.unitylan.com`, so `mediabox.alice.unity.internal` is also
+`mediabox.alice.mesh.unitylan.com`.
+
+```sh
+sudo unitylan-engine ctl cert            # show the current state
+sudo unitylan-engine ctl cert on         # opt in
+sudo unitylan-engine ctl cert off        # stop issuing and renewing
+```
+
+With a certificate held, `ctl cert` prints what a TLS server's config needs:
+
+```
+certificates: on (domain mesh.unitylan.com)
+  certificate  /var/lib/unitylan/certs/cert.pem
+  private key  /var/lib/unitylan/certs/key.pem
+  covers       mediabox.alice.mesh.unitylan.com
+  expires      in 74 days
+```
+
+Point nginx, Caddy, Jellyfin, or whatever you're running at those two paths. Renewal is automatic;
+the paths don't change.
+
+**Read this before turning it on.** Issuing a certificate publishes this device's name to public
+**Certificate Transparency logs, permanently** — that's how CT works, and it applies to every
+publicly-trusted certificate. Anyone can search those logs. Turning the option back off later stops
+renewal but does **not** unpublish what's already there. That's why it's off by default and opt-in
+per device.
+
+Three things must all be true for issuance to happen: the coordinator has a certificate domain
+configured, this device exposes at least one port (a certificate is only useful if something is
+listening), and you've opted in. `ctl cert` names whichever one is missing.
+
+The client is deliberately cautious with the CA's rate limits — it creates its ACME account once per
+device lifetime, refuses to reissue while a valid certificate is held, and backs off failures up to
+a day. A crash-looping daemon can't burn a week's allowance.
+
 ## Day-to-day
 
 ```sh
@@ -147,6 +191,7 @@ Then remove the package. Un-enrolling is what returns the mesh address to the po
 | `ctl exposes` | List open ports and who can reach them |
 | `ctl net <enable\|disable> <network>` | Peer with a network, or stop |
 | `ctl own-devices <on\|off>` | Peer with your own devices, or stop |
+| `ctl cert [on\|off]` | Show the TLS certificate and its paths, or opt in and out of issuance |
 | `ctl block <user>` / `ctl unblock <user>` | Locally drop every device of one Discord account |
 | `ctl connect` / `ctl disconnect` | Mesh up or down without stopping the daemon |
 | `ctl update` | Apply a staged, verified update |

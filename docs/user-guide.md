@@ -86,6 +86,23 @@ Add the same port again with a different scope to widen it; **close** removes it
 A Minecraft server on this machine, shared with just your Gaming network, is one port (`25565`,
 TCP) with one scope.
 
+### Getting an HTTPS certificate (advanced)
+
+Once a port is exposed, a checkbox appears: **Get an HTTPS certificate for this device**. It's there
+for people serving something a browser opens — a media library, a dashboard, a web UI.
+
+Mesh names end in `.unity.internal`, which no certificate authority will ever certify, so browsers
+show a warning page. If your coordinator is set up for it, your device also answers to a name under
+a real domain — on the hosted coordinator that's `mesh.unitylan.com`, so `laptop.alice.unity.internal`
+is also `laptop.alice.mesh.unitylan.com` — and ticking the box gets a real, publicly-trusted
+certificate for it. The app then shows where the certificate and key live so you can point your
+server at them. Renewal is automatic.
+
+**The warning next to that checkbox is worth taking seriously.** Getting a certificate publishes
+this device's name to public certificate-transparency logs, **permanently**, where anyone can search
+them. Unticking the box later stops renewals but cannot unpublish what's already there. That's why
+it's off unless you choose it, and why it only appears once you're actually serving something.
+
 ## Minimising to the tray
 
 Closing the window doesn't quit — UnityLAN lives in the system tray. Clicking the tray icon hides
@@ -102,6 +119,10 @@ Your machines get names other members can use:
 | --- | --- |
 | `laptop.alice.unity.internal` | Alice's device named `laptop` |
 | `alice.unity.internal` | Whichever of Alice's devices is set primary |
+
+If your coordinator is configured with a certificate domain, the same machines answer to matching
+names under it — `laptop.alice.mesh.unitylan.com` on the hosted one — which is what makes a real
+HTTPS certificate possible (see above).
 
 They work from any meshed device with no setup — type the name into a game's server browser, a
 browser address bar, or a file manager. Only the `unity.internal` suffix is affected; the rest of

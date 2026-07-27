@@ -49,7 +49,10 @@ bob@nas       ~ $
   Either way it **carries no traffic and holds no one's private keys.**
 - **Human-readable names.** Machines get DNS names like
   `laptop.alice.unity.internal` (or just `alice.unity.internal` for a member's primary device)
-  instead of raw IPs.
+  instead of raw IPs. A deployment can also configure a domain it owns, giving every device a
+  matching public name (`laptop.alice.mesh.unitylan.com` on the hosted coordinator) that it can get
+  a **real HTTPS certificate** for — so a browser opening a service on the mesh doesn't hit a
+  warning page. Opt-in per device; see [`docs/headless.md`](docs/headless.md#serving-https-without-a-warning-page-optional).
 
 If you know Tailscale: it's the same *shape* (control plane + P2P WireGuard data plane), but the
 identity source is **your own Discord server** — no third-party account, no company in the middle.

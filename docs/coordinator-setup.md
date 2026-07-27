@@ -187,6 +187,47 @@ metrics, and listening sockets. If the ceiling is full, a new park receives `429
 
 ---
 
+## Certificate domain (optional — publicly-trusted TLS on mesh names)
+
+Mesh names live under `.unity.internal`, which ICANN reserves, so no certificate authority will ever
+certify one — a browser opening a service on the mesh gets a warning page and nothing fixes it.
+
+Configure a domain **you own** and every device gains an alias under it alongside its
+`unity.internal` name, and can obtain a publicly-trusted certificate for that alias itself. On the
+canonical deployment the domain is `mesh.unitylan.com`, so `laptop.alice.unity.internal` is also
+`laptop.alice.mesh.unitylan.com`.
+
+```toml
+[dns]
+domain = "mesh.example.com"     # a domain you control, delegated to this coordinator
+bind = "0.0.0.0:5353"           # where the zone responder listens
+max_certs_per_week = 40         # deployment-wide issuance budget
+```
+
+Then, at your registrar or DNS host, delegate the subdomain to this coordinator with an `NS` record,
+and let UDP and TCP reach the port you bound. The coordinator answers only the `_acme-challenge`
+zone; it is not a general-purpose nameserver.
+
+**Why the coordinator has to be in this at all.** A mesh address is CGNAT space no certificate
+authority can reach, so HTTP-01 and TLS-ALPN-01 are both impossible — DNS-01 is the only challenge
+left, and it needs something authoritative for the name. The device still runs ACME itself and
+generates and keeps its own key; **the coordinator never sees key material.**
+
+**Two things to weigh before enabling it:**
+
+- **Certificate Transparency is permanent.** Every publicly-trusted certificate publishes its names
+  to public logs, so a device's name — which contains a member's Discord label — becomes searchable
+  forever. That is why issuance is **opt-in per device and off by default**, and why the client only
+  offers it where a port is already exposed.
+- **A CA's rate limits are per-domain, and they're shared across your whole deployment.** Exhausting
+  the weekly cap locks *everyone* out until the window rolls, so `max_certs_per_week` meters it
+  coordinator-side. Watch `unitylan_certs_issued_week` in the metrics below; a LAN party enrolling
+  thirty devices at once is exactly the burst that would otherwise blow the budget.
+
+Verify the whole path — zone delegation, challenge, issuance — with `scripts/cert-test.sh`.
+
+---
+
 ## Admin dashboard & metrics (monitoring)
 
 For watching a live deployment — how many servers the coordinator serves, networks per server,
