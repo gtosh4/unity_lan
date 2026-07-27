@@ -435,6 +435,55 @@ impl Firewall {
         out
     }
 
+    /// What the TLS proxy should serve: one route per web service, with the names it answers to and
+    /// the addresses allowed to reach it.
+    ///
+    /// The allow-list comes from the same source sets the firewall installs, so the proxy's check
+    /// and the packet filter's can never disagree about who a service is for. Both are enforced —
+    /// the firewall opens 443 to the union of everyone allowed *any* web service, and the proxy
+    /// narrows that to the one service actually being asked for, which the firewall cannot see once
+    /// every service shares a port.
+    pub fn web_routes(
+        &self,
+        user: &str,
+        cert_domain: Option<&str>,
+    ) -> Vec<common::control::ProxyRoute> {
+        let peers = self.peers.lock().unwrap();
+        let mut out: Vec<common::control::ProxyRoute> = Vec::new();
+        for e in self.exposed.lock().unwrap().iter() {
+            if e.kind != common::service::ServiceKind::Web {
+                continue;
+            }
+            let Some(name) = &e.name else { continue };
+            let allow = peers.sources(&e.scope).map(<[Ipv4Addr]>::to_vec);
+            let hostnames: Vec<String> =
+                std::iter::once(format!("{name}.{user}.{}", common::DNS_SUFFIX))
+                    .chain(cert_domain.map(|d| format!("{name}.{user}.{d}")))
+                    .map(|h| h.to_ascii_lowercase())
+                    .collect();
+            // One service may be exposed to several scopes; the route is one entry whose allow-list
+            // is their union, since the proxy answers one name from one port either way.
+            match out.iter_mut().find(|r| r.hostnames == hostnames) {
+                Some(existing) => match (&mut existing.allow, allow) {
+                    // Any scope that restricts nobody makes the whole route unrestricted.
+                    (slot @ Some(_), None) => *slot = None,
+                    (Some(have), Some(more)) => {
+                        have.extend(more);
+                        have.sort_unstable();
+                        have.dedup();
+                    }
+                    (None, _) => {}
+                },
+                None => out.push(common::control::ProxyRoute {
+                    hostnames,
+                    port: e.port,
+                    allow,
+                }),
+            }
+        }
+        out
+    }
+
     /// The labels of our **web** services — the names a certificate should cover, and the only
     /// service state the coordinator is ever told about.
     pub fn web_service_labels(&self) -> Vec<String> {
@@ -469,6 +518,38 @@ impl Firewall {
             }
         }
         out
+    }
+
+    /// What the backend installs: the owner's exposures, plus a synthetic opening of the HTTPS port
+    /// for every scope that has a web service in it.
+    ///
+    /// A web service's backend port is never opened to the mesh — the proxy reaches it over
+    /// loopback — so without this, nothing could arrive for it at all. Synthesized per *scope*
+    /// rather than as one blanket rule so the packet filter still narrows to the union of everyone
+    /// allowed some web service; the proxy then narrows that to the one service actually asked for,
+    /// which the filter cannot do once they share a port.
+    ///
+    /// Deliberately not in [`Self::list`] or on disk: it is derived from the web services and would
+    /// be a second, staler copy of the same fact anywhere else.
+    fn effective_exposed(&self) -> Vec<Exposed> {
+        let stored = self.exposed.lock().unwrap().clone();
+        let mut scopes: Vec<ExposeScope> = Vec::new();
+        for e in stored
+            .iter()
+            .filter(|e| e.kind == common::service::ServiceKind::Web && e.name.is_some())
+        {
+            if !scopes.contains(&e.scope) {
+                scopes.push(e.scope.clone());
+            }
+        }
+        let synthetic = scopes.into_iter().map(|scope| Exposed {
+            proto: Proto::Tcp,
+            port: common::control::HTTPS_PORT,
+            scope,
+            name: None,
+            kind: common::service::ServiceKind::Port,
+        });
+        stored.iter().cloned().chain(synthetic).collect()
     }
 
     /// Write the exposed set through to `exposed.json`. Errors propagate to the caller: a rule we
@@ -509,7 +590,7 @@ impl Firewall {
             self.tailscale_compat,
         );
         let mesh_addr = *self.mesh_addr.lock().unwrap();
-        let exposed = self.exposed.lock().unwrap().clone();
+        let exposed = self.effective_exposed();
         let peers = self.peers.lock().unwrap().clone();
         self.backend.apply(&self.iface, mesh_addr, &exposed, &peers)
     }
@@ -753,6 +834,60 @@ mod tests {
         assert_eq!(f.web_service_labels(), vec!["jellyfin".to_string()]);
         // ...while both are announced to peers, which is where a game server belongs.
         assert_eq!(f.own_services().len(), 2);
+    }
+
+    /// A web service's own port is never opened to the mesh — the proxy reaches it over loopback —
+    /// so the firewall has to open the HTTPS port instead, scoped the same way, or nothing could
+    /// arrive for it at all.
+    #[test]
+    fn a_web_service_opens_the_https_port_to_its_own_scope_and_no_further() {
+        let d = TempDir::new("svc-443");
+        let f = fw(&d, vec![]);
+        let inside = Ipv4Addr::new(100, 64, 0, 5);
+        f.update_peers(peers_with(&[inside], &[])).unwrap();
+        f.expose(
+            Proto::Tcp,
+            8096,
+            net("minecraft"),
+            Some("jellyfin".into()),
+            ServiceKind::Web,
+        )
+        .unwrap();
+
+        let effective = f.effective_exposed();
+        let https: Vec<&Exposed> = effective
+            .iter()
+            .filter(|e| e.port == common::control::HTTPS_PORT)
+            .collect();
+        assert_eq!(https.len(), 1, "one opening, for the service's own scope");
+        assert_eq!(https[0].scope, net("minecraft"));
+        // The backend port itself is opened too — the owner asked for 8096 — but what matters here
+        // is that 443 carries the *same* scope, so the packet filter admits exactly the peers who
+        // could reach the service anyway.
+        assert!(effective.iter().any(|e| e.port == 8096));
+
+        // The owner's own view is unchanged: the 443 rule is derived, not something they created,
+        // and showing it would invite closing a port that would just come back.
+        assert!(f
+            .list()
+            .iter()
+            .all(|e| e.port != common::control::HTTPS_PORT));
+
+        // A plain port service implies no HTTPS opening at all.
+        let d2 = TempDir::new("svc-443-none");
+        let g = fw(&d2, vec![]);
+        g.expose(
+            Proto::Tcp,
+            25565,
+            ExposeScope::AllPeers,
+            Some("mc".into()),
+            ServiceKind::Port,
+        )
+        .unwrap();
+        assert!(g
+            .effective_exposed()
+            .iter()
+            .all(|e| e.port != common::control::HTTPS_PORT));
     }
 
     /// A state file written before names existed must still load, with its ports unnamed.

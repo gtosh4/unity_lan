@@ -34,6 +34,18 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   about ten minutes for you to finish before reissuing, because certificate authorities cap how many
   a domain may have per week and that cap is shared by everyone on your coordinator.
 
+  **And the service itself needs no TLS setup at all.** A new `unitylan-proxy` serves your web
+  services on the mesh: run Jellyfin on plain HTTP as you always have, and
+  `https://jellyfin.alice.mesh.unitylan.com` works — certificate handled, several services on one
+  machine, no port numbers. It runs as its own unprivileged process rather than inside the engine,
+  because parsing web requests is not something a daemon holding your WireGuard keys should do; it
+  reads its whole configuration live from the engine, so a renewed certificate or a newly-named
+  service needs no restart.
+
+  Access control is unchanged and enforced twice: the firewall admits only peers who could reach
+  *some* web service of yours, and the proxy then narrows that to the one being asked for. A name
+  nothing serves gets nothing — there is no default backend to fall through to.
+
 - Mesh services can now serve **real HTTPS**, with a certificate browsers already trust — no warning
   page, no root certificate to install on every machine. Tick "Get an HTTPS certificate" beside your
   exposed ports (or run `unitylan-engine ctl cert on`), and the device obtains and renews one by

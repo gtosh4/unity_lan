@@ -17,14 +17,15 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
 COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
+PROXY="${PROXY:-$ROOT/target/debug/unitylan-proxy}"
 
 # Re-exec under a user+net+mount namespace. Only the issuance leg needs it — a real daemon, and so a
 # real WireGuard interface — but the whole script runs inside so the coordinator, pebble and the
 # daemon share one loopback. No host root required.
 if [ "${UNL_INNS:-}" != "1" ]; then
-  [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
+  [ -x "$ENG" ] && [ -x "$COORD" ] && [ -x "$PROXY" ] || { echo "build first: cargo build"; exit 1; }
   command -v dig >/dev/null || { echo "needs dig (bind-utils / dnsutils)"; exit 1; }
-  exec unshare -Urnm --map-root-user env UNL_INNS=1 ENG="$ENG" COORD="$COORD" \
+  exec unshare -Urnm --map-root-user env UNL_INNS=1 ENG="$ENG" COORD="$COORD" PROXY="$PROXY" \
     PATH="$PATH" bash "${BASH_SOURCE[0]}"
 fi
 
@@ -252,6 +253,63 @@ EOF
       *0) ok "the private key is not world-readable (mode $MODE)" ;;
       *)  bad "the private key is mode $MODE — readable by every local account" ;;
     esac
+
+    # --- the proxy actually serving that certificate -------------------------------------------
+    # The point of the whole feature: a browser reaches the service over HTTPS and the service
+    # itself was never configured for TLS. Run the proxy directly rather than under the engine's
+    # supervisor — supervision decides *whether* and *as whom* to run it, which is unit-tested;
+    # this leg is about the bytes on the wire.
+    echo "=== the proxy serves the web service over that certificate ==="
+    A_MESH=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/engine.log" | head -1 | awk '{print $1}')
+    if [ -z "$A_MESH" ]; then
+      bad "could not find the device's mesh address in the engine log"
+    else
+      # A backend that answers plain HTTP and nothing else — exactly what a real service would be
+      # before anyone taught it about certificates.
+      python3 -c '
+import http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body = b"hello from the backend"
+        self.send_response(200)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+socketserver.TCPServer(("127.0.0.1", 8096), H).serve_forever()
+' >/dev/null 2>&1 &
+      "$PROXY" "$TMP/a/control.sock" >"$TMP/proxy.log" 2>&1 &
+      for _ in $(seq 1 40); do
+        grep -q "serving web services" "$TMP/proxy.log" 2>/dev/null && break; sleep 0.5
+      done
+
+      NAME="jellyfin.nodea.$DOMAIN"
+      # Pebble's *issuing* root, which is not `ca.pem` — that one only signs pebble's own API
+      # listener. Generated fresh per run and served from the management port.
+      curl -sk "https://127.0.0.1:15000/roots/0" -o "$TMP/pebble-root.pem" 2>/dev/null \
+        || curl -s "http://127.0.0.1:15000/roots/0" -o "$TMP/pebble-root.pem" 2>/dev/null
+      # `--resolve` because the name resolves through the mesh resolver, which this test doesn't
+      # install; `--cacert` because pebble's root is not a public one. Neither weakens the check —
+      # the certificate still has to be valid *for that name*, and chain up to that root, or curl
+      # refuses.
+      OUT=$(curl -sS --max-time 5 --cacert "$TMP/pebble-root.pem" \
+              --resolve "$NAME:443:$A_MESH" "https://$NAME/" 2>&1)
+      if [ "$OUT" = "hello from the backend" ]; then
+        ok "a browser reaches the service over HTTPS, with the backend speaking plain HTTP"
+      else
+        bad "proxying failed: $OUT"; tail -5 "$TMP/proxy.log" 2>/dev/null
+      fi
+
+      # No default backend: a name nothing serves must not be quietly answered by the first route.
+      # Uses a name *under this device* so the wildcard SAN covers it — the TLS handshake has to
+      # succeed for the routing decision to be the thing under test.
+      UNSERVED="nosuch.$DEVICE_NAME.$DOMAIN"
+      CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 --cacert "$TMP/pebble-root.pem" \
+               --resolve "$UNSERVED:443:$A_MESH" "https://$UNSERVED/" 2>&1)
+      [ "$CODE" = "404" ] \
+        && ok "a name no service answers to gets nothing, even with a valid certificate" \
+        || bad "an unserved name returned $CODE, expected 404"
+    fi
   else
     bad "no certificate was issued"
     echo "--- engine ---"; grep -iE "cert|acme" "$TMP/engine.log" 2>/dev/null | tail -15
@@ -280,7 +338,7 @@ if [ "$FAILED" = "0" ]; then
   if [ "$SKIPPED_ACME" = "1" ]; then
     echo "RESULT: PASS ✓  coordinator half verified — ACME issuance SKIPPED (no pebble)"
   else
-    echo "RESULT: PASS ✓  challenge published, served, zone hardened, budget enforced, certificate issued"
+    echo "RESULT: PASS ✓  challenge published, served, zone hardened, budget enforced, certificate issued and proxied"
   fi
   exit 0
 fi

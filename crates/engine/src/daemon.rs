@@ -1772,6 +1772,10 @@ async fn apply_state(
             ctx.localnet.disable_new(),
             ctx.localnet.peer_own_devices(),
             coord_online,
+            ctx.fw
+                .as_ref()
+                .map(|fw| fw.web_routes(&dev.username, dev.dns_domain.as_deref()))
+                .unwrap_or_default(),
         );
         // After the rebuild, which starts each peer's service list from what it last held.
         control::set_services(ctx.status, &peer_services(ctx, &active, &resolved));

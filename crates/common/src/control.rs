@@ -194,6 +194,10 @@ pub struct CertStatus {
 pub struct StatusReport {
     pub device: Option<DeviceStatus>,
     pub peers: Vec<PeerStatus>,
+    /// What the TLS proxy should serve, when this device runs one. Empty means nothing to serve, in
+    /// which case the proxy should not be holding a port at all.
+    #[serde(default)]
+    pub proxy_routes: Vec<ProxyRoute>,
     /// Every network this device's roles grant (role@guild) + per-device enabled state — the
     /// source for the GUI's peering toggle. Empty when not joined.
     #[serde(default)]
@@ -324,6 +328,7 @@ impl Default for StatusReport {
         Self {
             device: None,
             peers: Vec::new(),
+            proxy_routes: Vec::new(),
             networks: Vec::new(),
             needs_login: false,
             connected: true,
@@ -397,6 +402,35 @@ pub struct PeerStatus {
     /// is offline, or that predates services.
     #[serde(default)]
     pub services: Vec<PeerService>,
+}
+
+/// The port mesh peers reach web services on.
+///
+/// Fixed rather than configurable: it is what a browser assumes when someone types a bare name,
+/// which is the whole point. Shared so the proxy binds the port the firewall opens.
+pub const HTTPS_PORT: u16 = 443;
+
+/// One web service the TLS proxy should serve: which names reach it, where to forward, and who is
+/// allowed to.
+///
+/// Rides the existing [`StatusReport`] push rather than a channel of its own — the proxy needs
+/// exactly the events the status already fires on (membership changed, a service was added, a
+/// certificate was renewed), and a second subscription would be a second thing to keep in step. The
+/// certificate paths are not repeated here: the proxy reads them from [`StatusReport::cert`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyRoute {
+    /// Every name this route answers to — the certificate-domain name and its `unity.internal`
+    /// alias, because a person may type either. Lower-case, no trailing dot.
+    pub hostnames: Vec<String>,
+    /// The loopback port to forward to. Always loopback: forwarding anywhere else would make this a
+    /// relay for whatever the backend can reach.
+    pub port: u16,
+    /// Who may reach it. `None` means the service's scope restricts nobody, so any mesh peer —
+    /// which is anyone who can deliver to the mesh interface at all. `Some(list)` is exactly those
+    /// addresses, and an **empty** list is nobody: a scope whose peers are all offline must stay
+    /// closed rather than fall open, the same rule the firewall follows.
+    #[serde(default)]
+    pub allow: Option<Vec<Ipv4Addr>>,
 }
 
 /// One of a peer's services, as the frontend needs to show it: the full name it answers to, and

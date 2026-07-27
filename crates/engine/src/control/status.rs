@@ -154,6 +154,7 @@ pub fn update(
     disable_new_networks: bool,
     peer_own_devices: bool,
     coordinator_online: bool,
+    proxy_routes: Vec<common::control::ProxyRoute>,
 ) {
     // Capture the update overlay before rebuilding, dropping the read guard before the write below.
     // Also carry each peer's last-known live telemetry (keyed by wg_ip) across the rebuild: this
@@ -182,6 +183,7 @@ pub fn update(
         )
     };
     let report = StatusReport {
+        proxy_routes,
         device: Some(DeviceStatus {
             wg_ip: device.wg_ip,
             hostname: device.hostname.clone(),
