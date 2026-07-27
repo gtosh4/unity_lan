@@ -330,6 +330,17 @@ old "no relay in v1" stance (`docs/prior-art.md` §6.3, design §7.2).
       traverses netns NAT reliably, unlike the punch). `ctl status` shows `[relayed]`. Relay carries WG
       ciphertext by construction (boringtun frames; the relay holds no keys). `mesh-test.sh` +
       `nat-test.sh` still green. **Remaining:** the consent/DoS rate-caps item above (not GA-blocking).
+- [ ] **REGRESSED — the relayed-address exchange no longer completes.** Found 2026-07-26 when the
+      scripts were first wired into CI (`.github/workflows/e2e.yml`), and reproduced on older commits,
+      so it has been broken for some time with nothing watching. Both stuck peers allocate on the relay
+      and report `Relayed`, each publishes its relayed address as `relay_allocated`, but neither is ever
+      handed the other's as `RelayInfo::peer_relayed` — so `relay.rs`'s shim has no destination and the
+      data-plane ping fails. The ~2-round converge appears to stop after the first: the second exchange
+      round never fires. Suspect the targeted wake or the report/apply loop rather than the shim, which
+      looks correct. Whether this matters in practice depends on M5.5: ICE supersedes the relay as the
+      primary fallback on the userspace path (which is every shipped build), and `ice-test.sh` passes —
+      so the exposed surface is the kernel-backend path and any pair ICE also can't connect. `relay-test.sh`
+      is left out of the CI list until this is fixed; **put it back as part of the fix**.
 
 ### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
 **Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,
@@ -600,9 +611,11 @@ elevated box. macOS `/etc/resolver` still deferred.
 
 ## GA release checklist
 From a 2026-07-18 readiness review (docs · roadmap · code quality · security · packaging). Code and
-the crypto/trust core are in good shape (all 4 CI gates green — fmt/clippy/114 tests; pinned-anchor
-TOFU invariant enforced + test-covered end to end; no code-quality blockers). The gating work is
-release plumbing, distribution docs, and a deliberate version decision — not broken functionality.
+the crypto/trust core are in good shape (CI green — fmt/clippy/tests/docs, plus an MSRV build, a
+`cargo audit` vuln gate, a `cargo deny` licence/source gate, a Windows build+test job, and since
+2026-07-26 the end-to-end script suite in `.github/workflows/e2e.yml`; pinned-anchor TOFU invariant
+enforced + test-covered end to end; no code-quality blockers). The gating work is release plumbing,
+distribution docs, and a deliberate version decision — not broken functionality.
 
 > **Progress (2026-07-18 fix pass).** Items marked `[x]` below landed on branch `worktree-ga-prep`.
 > The still-open blockers all need release infrastructure or hardware you own (code signing, a
@@ -619,9 +632,9 @@ release plumbing, distribution docs, and a deliberate version decision — not b
 - [ ] **No code signing anywhere** (`.github/workflows/release.yml`) — MSI is unsigned (a LocalSystem
       service installer → SmartScreen "unknown publisher" + UAC); `.deb`/`.rpm`/`SHA256SUMS` unsigned
       too. Unsigned Windows especially is a hard "download and run" blocker. **(needs signing certs)**
-- [ ] **Rehearse the release pipeline** — it has never run (`git tag` empty; CI does fmt/clippy/test
-      only, never invokes `build.sh`/nfpm/WiX/Docker). Cut a `v0.x.0-rc1` pre-release tag to exercise
-      the whole path (build all artifacts, install on clean Linux + a real Windows box) before the GA tag.
+- [x] **Rehearse the release pipeline** — done, and then some: `v0.1.0` through `v0.5.1` have shipped
+      through it, so `release.yml` (build.sh · nfpm · WiX · Docker · the Discord announce) is exercised
+      on every tag rather than rehearsed once.
 - [x] **Linux desktop GUI can't reach the engine out of the box** — packaging now creates a `unitylan`
       group, the systemd unit runs the engine `Group=unitylan` (so `/run/unitylan` + the socket are
       group-owned), engine.toml sets `control_group`, and postinstall guides `usermod -aG`.
@@ -629,10 +642,11 @@ release plumbing, distribution docs, and a deliberate version decision — not b
       the README's "young/pre-1.0" framing is consistent with this.
 
 ### Should-fix (not blocking)
-- [ ] **Windows is compile-verified only, never run on real hardware** (wg-nt backend, NRPT resolver,
-      firewall, service, tray, file-swap self-update apply + SCM restart, and the legacy MSI-upgrade
-      fallback). If GA claims Windows support → needs live sign-off; otherwise ship **Linux-first,
-      Windows beta**. **(needs a Windows box)**
+- [~] **Windows on real hardware** — partly closed. The file-swap self-update path was validated on a
+      real box (2026-07-25), which surfaced and fixed the restart-helper job-object bug now covered in
+      v0.5.1. CI additionally builds + tests the Windows-only modules on every PR. Still unrun on real
+      hardware: the **MSI upgrade path** (`msiexec`) and the wg-nt backend under sustained load.
+      **(needs a Windows box)**
 - [x] **Defense-in-depth: validate seed `wg_ip` against the signed `wg_net`** — `verified_seeds` now
       skips any peer whose signed `wg_ip` falls outside its signed `wg_net` (+regression test).
 - [x] **Narrow systemd `ReadWritePaths`** — engine installs to `/usr/lib/unitylan/unitylan-engine`
