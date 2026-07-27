@@ -9,7 +9,7 @@
 //! through, [`server`] the daemon-side listener/dispatch, [`client`] the frontend-side wrappers.
 
 mod client;
-mod server;
+pub(crate) mod server;
 mod status;
 
 pub use client::*;

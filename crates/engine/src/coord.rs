@@ -67,6 +67,11 @@ pub struct SelfDevice {
     pub primary_alias: Option<String>,
     /// Every network our roles grant (role@guild) with per-device enabled state — for the toggle.
     pub networks_status: Vec<common::api::NetworkStatus>,
+    /// The deployment's public certificate domain (`RegisterResp::dns_domain`), if it issues
+    /// certificates at all. Every mesh name gains an alias under it — `<device>.<user>.<domain>`
+    /// alongside the `unity.internal` name, never replacing it — and that alias is what a
+    /// publicly-trusted certificate can be issued for. `None` on a deployment with no `[dns]`.
+    pub dns_domain: Option<String>,
 }
 
 /// This device's relay-related fields for a register/refresh (§7.2, M5.4): whether we offer
@@ -314,6 +319,7 @@ async fn post(
                 grant_expires_at: att.expires_at,
                 primary_alias,
                 networks_status: resp.networks.clone(),
+                dns_domain: resp.dns_domain.clone(),
             })
         }
         None => None,
@@ -481,6 +487,33 @@ pub async fn manage(
         .context("sending /devices/manage")?;
     let resp = ensure_ok(resp, "manage").await?;
     resp.json().await.context("decoding ManageResp")
+}
+
+/// Ask the coordinator to publish this device's ACME DNS-01 challenge values, so the CA can validate
+/// the order we are running against it ([`crate::cert`]).
+///
+/// Values only — the coordinator derives the names from our own allocation. There is deliberately no
+/// way to name the hostname we want validated: that would let any enrolled device obtain a
+/// publicly-trusted certificate for another member's name.
+pub async fn acme_challenge(
+    base_url: &str,
+    token: String,
+    device: String,
+    primary: Option<String>,
+) -> anyhow::Result<common::api::AcmeChallengeResp> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/acme-challenge"))
+        .json(&common::api::AcmeChallengeReq {
+            token,
+            device,
+            primary,
+        })
+        .send()
+        .await
+        .context("sending /acme-challenge")?;
+    let resp = ensure_ok(resp, "acme-challenge").await?;
+    resp.json().await.context("decoding AcmeChallengeResp")
 }
 
 /// Verify the seeds in a response against the **pinned** per-guild anchors → the co-members to peer

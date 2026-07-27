@@ -10,17 +10,19 @@ use crate::config::FakeConfig;
 
 #[derive(Clone)]
 pub struct MemberRoles {
-    pub nick: String,
+    /// The member's Discord *username* — globally unique, stable across guilds. Seeds the `<user>`
+    /// DNS label; [`crate::store::Store::user_label`] allocates the label itself.
+    pub username: String,
     pub role_ids: Vec<u64>,
 }
 
-/// Reads guild names + a member's roles/nick. The only party that may do this authoritatively.
+/// Reads guild names + a member's roles/username. The only party that may do this authoritatively.
 /// Async because the live source hits the Discord REST API.
 #[async_trait::async_trait]
 pub trait RoleSource: Send + Sync {
     /// Display name of a guild the bot serves, if known.
     async fn guild_name(&self, guild_id: u64) -> Option<String>;
-    /// A member's roles + nick in a specific guild; `None` if not a member.
+    /// A member's roles + username in a specific guild; `None` if not a member.
     async fn member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles>;
     /// Drop any cached membership for `(guild, user)` so the next `member` call re-fetches. Called on
     /// a role-change/leave event: without it a revoked member would keep being served from a stale
@@ -54,7 +56,7 @@ impl FakeRoleSource {
                         (
                             m.user_id,
                             MemberRoles {
-                                nick: m.nick,
+                                username: m.username,
                                 role_ids: m.role_ids,
                             },
                         )

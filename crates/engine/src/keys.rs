@@ -190,6 +190,12 @@ fn write_secret(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     write_private_atomic(path, bytes)
 }
 
+/// Write an owner-only file at an arbitrary path, for secrets that live outside this module's own
+/// naming (the ACME account credential and the certificate key — see [`crate::cert`]).
+pub fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    write_private_atomic(path, bytes)
+}
+
 /// Atomically replace `path` with a regular owner-only file. The temporary file is created beside
 /// the destination so rename stays atomic; restrictive permissions are installed before any secret
 /// bytes are written, and rename replaces a destination symlink rather than following it.

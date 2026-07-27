@@ -74,6 +74,8 @@ pub struct LocalNet {
     /// share no enabled network. Seeded from config on first run, then GUI-settable; persisted to
     /// `peer_own_devices.json`. Rides to the coordinator on each register/refresh.
     peer_own: Mutex<bool>,
+    /// Whether this device holds a publicly-trusted TLS certificate for its mesh name.
+    certs_enabled: Mutex<bool>,
     /// Users this device has locally blocked, `user_id -> username` (the handle kept only for
     /// display). A blocked user's peers are filtered out of the mesh regardless of shared networks.
     /// Client is the source of truth (never sent to the coordinator); persisted to
@@ -84,6 +86,7 @@ pub struct LocalNet {
     known_path: PathBuf,
     disable_new_path: PathBuf,
     peer_own_path: PathBuf,
+    certs_enabled_path: PathBuf,
     blocked_path: PathBuf,
     /// Notified whenever the disabled set *or* the paused flag changes, so the daemon re-meshes
     /// (or tears the mesh down) at once.
@@ -111,6 +114,10 @@ impl LocalNet {
         let disable_new = read_json_or(&disable_new_path, disable_new_default);
         let peer_own_path = state_dir.join("peer_own_devices.json");
         let peer_own = read_json_or(&peer_own_path, peer_own_default);
+        let certs_enabled_path = state_dir.join("certs_enabled.json");
+        // Off unless the owner asked: issuing publishes this device's name to public certificate
+        // transparency logs, permanently.
+        let certs_enabled = read_json_or(&certs_enabled_path, false);
         let blocked_path = state_dir.join("blocked_users.json");
         let blocked = read_json_or(&blocked_path, Vec::<(u64, String)>::new())
             .into_iter()
@@ -121,12 +128,14 @@ impl LocalNet {
             known: Mutex::new(known),
             disable_new: Mutex::new(disable_new),
             peer_own: Mutex::new(peer_own),
+            certs_enabled: Mutex::new(certs_enabled),
             blocked: Mutex::new(blocked),
             path,
             paused_path,
             known_path,
             disable_new_path,
             peer_own_path,
+            certs_enabled_path,
             blocked_path,
             wake: Notify::new(),
         }
@@ -189,6 +198,30 @@ impl LocalNet {
         };
         if changed {
             write_json(&self.peer_own_path, &enabled)?;
+            self.wake.notify_one();
+        }
+        Ok(changed)
+    }
+
+    /// Whether this device is opted in to holding a publicly-trusted TLS certificate.
+    pub fn certs_enabled(&self) -> bool {
+        *self.certs_enabled.lock().unwrap()
+    }
+
+    /// Opt in or out of certificate issuance. Persists + wakes the daemon if it changed, so the
+    /// reconcile loop picks it up rather than waiting out its tick.
+    ///
+    /// Turning it *off* does not revoke or delete anything already issued, and cannot unpublish the
+    /// name from certificate transparency logs — it only stops future issuance and renewal.
+    pub fn set_certs_enabled(&self, enabled: bool) -> anyhow::Result<bool> {
+        let changed = {
+            let mut p = self.certs_enabled.lock().unwrap();
+            let changed = *p != enabled;
+            *p = enabled;
+            changed
+        };
+        if changed {
+            write_json(&self.certs_enabled_path, &enabled)?;
             self.wake.notify_one();
         }
         Ok(changed)

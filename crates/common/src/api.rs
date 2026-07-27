@@ -258,6 +258,17 @@ pub struct RegisterResp {
     /// ones (so they can be re-enabled); disabled networks are excluded from `grant`/`seeds`.
     #[serde(default)]
     pub networks: Vec<NetworkStatus>,
+    /// The public domain this deployment issues TLS certificates under (`[dns] domain`), if any.
+    ///
+    /// When set, a device is additionally reachable at `<device>.<user>.<domain>` — an alias
+    /// alongside its `unity.internal` name, never a replacement — and may request a publicly-trusted
+    /// certificate for it via `/acme-challenge`. `None` (the default, and what every pre-certificate
+    /// coordinator sends) means the deployment issues no certificates, so the client never tries.
+    ///
+    /// Deliberately not a capability flag: this field's presence *is* the signal, and a flag nobody
+    /// reads would be a second source of truth for the same fact.
+    #[serde(default)]
+    pub dns_domain: Option<String>,
     /// The UDP port of the coordinator-hosted STUN Binding responder (§7.2, M5.5), if configured —
     /// the ICE agent's server-reflexive fallback when no relay co-member is online to STUN. `None`
     /// disables the fallback (clients rely on relay-node STUN only).
@@ -348,6 +359,32 @@ pub struct PkceConfigResp {
 pub struct OauthCompleteReq {
     pub wg_pubkey: [u8; 32],
     pub access_token: String,
+}
+
+/// `POST /acme-challenge`: publish this device's ACME DNS-01 challenge values so a CA can validate
+/// its certificate order.
+///
+/// The request carries **values only, never names**. The coordinator derives the names from the
+/// calling device's own allocation — a client-supplied name would let any device request a challenge
+/// for another user's hostname and obtain a publicly-trusted certificate for it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcmeChallengeReq {
+    /// The requesting device's bearer token (identifies the owner + device, and authenticates).
+    pub token: String,
+    /// Challenge value for the device's own name, `<device>.<user>.<domain>`.
+    pub device: String,
+    /// Challenge value for the bare `<user>.<domain>` alias, when the order also covers it. A CA
+    /// raises one authorization per name in the certificate, so a primary device covering both names
+    /// has two distinct values. Ignored unless this device is the owner's primary.
+    #[serde(default)]
+    pub primary: Option<String>,
+}
+
+/// The names the coordinator actually published, so a client can check they match the order it
+/// created rather than discovering a mismatch as an opaque CA validation failure.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AcmeChallengeResp {
+    pub names: Vec<String>,
 }
 
 /// `POST /devices/manage`: an owner-scoped device operation, authenticated by a device token.

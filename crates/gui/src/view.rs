@@ -807,10 +807,56 @@ impl App {
         if let Some(e) = port_err {
             col = col.push(text(e).size(13).color(RED));
         }
-        col.push(muted(
+        col = col.push(muted(
             "Exposed ports are reachable only over the mesh, and only by the scopes you pick.",
-        ))
-        .into()
+        ));
+        if let Some(certs) = self.certs_section() {
+            col = col.push(certs);
+        }
+        col.into()
+    }
+
+    /// The HTTPS-certificate opt-in, shown under the exposed ports because that is the only place it
+    /// makes sense: a certificate is for serving something.
+    ///
+    /// Hidden unless the deployment issues certificates at all **and** either a port is exposed or
+    /// the pref is already on. That second arm matters — without it, closing your last port would
+    /// hide the control and strand the pref on with no way to turn it off.
+    fn certs_section(&self) -> Option<Element<'_, Message>> {
+        let cert = &self.status.as_ref()?.cert;
+        cert.domain.as_ref()?;
+        if self.exposed.is_empty() && !cert.enabled {
+            return None;
+        }
+
+        let toggle = checkbox("Get an HTTPS certificate for this device", cert.enabled)
+            .on_toggle(Message::SetCertsEnabled)
+            .size(16)
+            .text_size(14);
+        let mut col = column![toggle].spacing(6);
+        // The warning sits at the decision, not in the docs: this is the moment the choice is made,
+        // and it cannot be walked back.
+        col = col.push(
+            text(
+                "Publishes this device's name to public certificate logs, permanently. \
+                 Turning this off later does not remove it.",
+            )
+            .size(12)
+            .color(AMBER),
+        );
+        if cert.enabled {
+            if let Some(path) = &cert.cert_path {
+                col = col.push(muted(format!("Certificate: {path}")));
+                if let Some(key) = &cert.key_path {
+                    col = col.push(muted(format!("Private key: {key}")));
+                }
+            } else if let Some(why) = &cert.blocked {
+                col = col.push(text(why.clone()).size(12).color(AMBER));
+            } else {
+                col = col.push(muted("Requesting…"));
+            }
+        }
+        Some(column![header("https certificate"), col].spacing(8).into())
     }
 
     /// The exposed (proto, port) pairs in first-seen order — the rows, each of which may carry

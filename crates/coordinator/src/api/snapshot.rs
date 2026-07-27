@@ -247,6 +247,7 @@ pub(super) async fn build_snapshot(
             version,
             networks: membership.status,
             stun_port: st.stun_port,
+            dns_domain: st.dns.as_ref().map(|d| d.domain.clone()),
             // The version we *selected* for this client, not our ceiling. `register` already
             // rejected a non-overlapping range, so the fallback here is unreachable.
             proto: negotiate(req).unwrap_or(common::PROTOCOL_VERSION),
@@ -363,6 +364,8 @@ async fn resolve_membership(
         username: format!("user-{user_id}"), // fallback until a role source gives a handle
         personal: false,                     // decided below, once we know whether any role landed
     };
+    // Whether the per-user label has been allocated yet on this walk (see the loop below).
+    let mut label_resolved = false;
 
     for net in networks {
         let member = match member_cache.get(&net.guild_id) {
@@ -426,7 +429,14 @@ async fn resolve_membership(
         // network that is auto-disabled on discovery (secure default) would yield no grant, the
         // engine would treat us as holding no networks, and the toggle needed to *enable* it would
         // never appear: a chicken-and-egg lockout.
-        m.username = sanitize_label(&member.nick);
+        //
+        // The label is allocated per *user*, not per network, so resolve it on the first role that
+        // lands and reuse it for the rest of the walk. The username only seeds it — see
+        // `Store::user_label` for why the label is allocated once rather than recomputed.
+        if !label_resolved {
+            m.username = st.user_label(user_id, &member.username).await?;
+            label_resolved = true;
+        }
 
         // A disabled network is listed (above) but contributes no presence / grant-network / seeds
         // (so it doesn't peer, in either direction) until the user enables it.
@@ -466,13 +476,10 @@ async fn resolve_membership(
     // `resolve_device` already ran, so this costs no extra role-source lookups and the two agree.
     m.personal = m.status.is_empty() && wants_personal_scope(req);
     if m.personal {
-        // No role means no member lookup ever supplies a nick, so the handle captured at login is
+        // No role means no member lookup ever supplies a username, so the handle captured at login is
         // the only name this user has. A local read, and only for personal callers.
         if let Some(h) = st.store.user_handle(user_id).await.map_err(internal)? {
-            let label = sanitize_label(&h);
-            if !label.is_empty() {
-                m.username = label;
-            }
+            m.username = st.user_label(user_id, &h).await?;
         }
     }
 
@@ -937,12 +944,12 @@ mod tests {
                 members: vec![
                     FakeMember {
                         user_id: 7,
-                        nick: "holder".into(),
+                        username: "holder".into(),
                         role_ids: vec![10],
                     },
                     FakeMember {
                         user_id: 8,
-                        nick: "other".into(),
+                        username: "other".into(),
                         role_ids: vec![99],
                     },
                 ],

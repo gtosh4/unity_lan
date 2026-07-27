@@ -308,6 +308,10 @@ enum Message {
     SetOwnDevicePeering(bool),
     /// Own-device peering was set → the daemon returns the updated status.
     OwnDevicePeeringSet(Result<StatusReport, String>),
+    /// Opt this device in or out of holding a publicly-trusted TLS certificate for its mesh name.
+    SetCertsEnabled(bool),
+    /// Certificate opt-in was set → the daemon returns the updated status.
+    CertsEnabledSet(Result<StatusReport, String>),
     /// Locally block a peer's owner (all their devices) by Discord `user_id`.
     BlockPeer {
         user_id: u64,
@@ -631,6 +635,17 @@ impl App {
                 self.error = None;
             }
             Message::OwnDevicePeeringSet(Err(e)) => self.error = Some(e),
+            Message::SetCertsEnabled(enabled) => {
+                return Task::perform(
+                    ctl::set_certs_enabled(self.socket.clone(), enabled),
+                    Message::CertsEnabledSet,
+                )
+            }
+            Message::CertsEnabledSet(Ok(s)) => {
+                self.status = Some(s);
+                self.error = None;
+            }
+            Message::CertsEnabledSet(Err(e)) => self.error = Some(e),
             Message::BlockPeer { user_id, username } => {
                 self.confirm = None; // consume the armed confirmation
                 return Task::perform(

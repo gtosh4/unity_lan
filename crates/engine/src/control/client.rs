@@ -118,6 +118,18 @@ pub async fn client_set_network(
 
 /// Client: toggle whether this device always peers with the owner's own other devices. Returns the
 /// updated status.
+/// Opt this device in or out of holding a publicly-trusted TLS certificate.
+pub async fn client_set_certs_enabled(
+    endpoint: &str,
+    enabled: bool,
+) -> anyhow::Result<StatusReport> {
+    expect_resp!(
+        request(endpoint, &ControlRequest::SetCertsEnabled { enabled }).await?,
+        ControlResponse::Status
+    )
+    .map(|s| *s)
+}
+
 pub async fn client_set_own_device_peering(
     endpoint: &str,
     enabled: bool,

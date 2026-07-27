@@ -393,6 +393,17 @@ pub(super) async fn admin_metrics(
         "Enrollments admitted without a proof (observe-only mode).",
         st.enroll_unproven.load(Ordering::Relaxed),
     );
+    // Certificate budget, when the deployment issues certificates at all. Worth surfacing because
+    // exhausting the CA's per-domain weekly cap locks the whole deployment out until the window
+    // rolls — an operator wants to watch it approach, not learn of it from a failed renewal.
+    if let Some(dns) = st.dns.as_ref() {
+        gauge(
+            &mut body,
+            "unitylan_certs_issued_week",
+            "Certificate issuances admitted in the last 7 days.",
+            dns.challenges.issued_this_week(),
+        );
+    }
     Ok((
         [(
             axum::http::header::CONTENT_TYPE,

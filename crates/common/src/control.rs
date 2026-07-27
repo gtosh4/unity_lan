@@ -73,6 +73,16 @@ pub enum ControlRequest {
     SetNewNetworkDefault {
         disable: bool,
     },
+    /// Opt this device in or out of holding a publicly-trusted TLS certificate for its mesh name.
+    /// Handled locally (persisted, source of truth); the daemon reconciles on its next tick. Returns
+    /// the updated [`StatusReport`].
+    ///
+    /// Off by default, and deliberately an explicit choice rather than something exposing a port
+    /// implies: issuing publishes this device's name to public Certificate Transparency logs
+    /// permanently, and turning it back off does not unpublish it.
+    SetCertsEnabled {
+        enabled: bool,
+    },
     /// Set whether this device always peers with the owner's own other devices (same Discord user),
     /// even when they share no enabled network. Handled locally (persisted, source of truth); rides
     /// to the coordinator on the next register/refresh. Returns the updated [`StatusReport`].
@@ -151,6 +161,34 @@ pub struct NetworkResp {
     pub networks: Vec<NetworkStatus>,
 }
 
+/// This device's TLS certificate state, for the GUI and `ctl cert`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertStatus {
+    /// Whether the owner opted this device in ([`ControlRequest::SetCertsEnabled`]). Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The deployment's certificate domain, when it issues certificates at all. `None` means the
+    /// feature does not exist here and the toggle should not be offered.
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// The names the live certificate covers. Empty until one is issued.
+    #[serde(default)]
+    pub names: Vec<String>,
+    /// Where the certificate and its key are on disk — what a headless server needs for its own
+    /// config. Empty until one is issued.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    #[serde(default)]
+    pub key_path: Option<String>,
+    /// `notAfter` of the live certificate (unix secs); `0` when there is none.
+    #[serde(default)]
+    pub expires_at: u64,
+    /// Why there is no certificate yet, when there isn't one — "no port is exposed", the last error,
+    /// or that a retry is backing off. `None` once one is held.
+    #[serde(default)]
+    pub blocked: Option<String>,
+}
+
 /// A snapshot of the daemon's live mesh state: this device plus the peers it has meshed with.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StatusReport {
@@ -180,6 +218,10 @@ pub struct StatusReport {
     /// The Discord identity this device is enrolled as (the owner's handle). `None` before login.
     #[serde(default)]
     pub identity: Option<String>,
+    /// This device's TLS certificate: whether it is opted in, and what it currently holds. Absent
+    /// from an older daemon, which reads as the feature being off.
+    #[serde(default)]
+    pub cert: CertStatus,
     /// Whether the last coordinator refresh succeeded — the mesh keeps running from cache when the
     /// coordinator is unreachable, so this is a health signal, distinct from `connected`. Defaults
     /// to `true` (an older daemon with no field reads as reachable).
@@ -288,6 +330,9 @@ impl Default for StatusReport {
             disable_new_networks: true,
             peer_own_devices: true,
             identity: None,
+            // Off, matching the serde default: certificates are opt-in because issuing one is a
+            // permanent, public disclosure of this device's name.
+            cert: CertStatus::default(),
             coordinator_online: true,
             blocked: Vec::new(),
             engine_version: String::new(),

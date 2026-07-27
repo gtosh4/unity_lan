@@ -37,15 +37,17 @@ unitylan/
 │   │   │   ├── mod.rs     # register/manage/OAuth handlers, auth, snapshot construction + delta
 │   │   │   ├── admin.rs   # token-gated dashboard, graph, stats, Prometheus metrics
 │   │   │   ├── ratelimit.rs # trusted-proxy client IP + per-IP/global request limits
+│   │   │   ├── acme.rs    # POST /acme-challenge: publish a device's DNS-01 values (names derived, never supplied)
 │   │   │   └── wake.rs    # per-device targeted wakes and herd jitter
 │   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
-│   │   ├── discord.rs     # twilight: bot-token role/nick reads + per-guild role-name TTL cache
+│   │   ├── discord.rs     # twilight: bot-token role/username reads + per-guild role-name TTL cache
 │   │   ├── commands.rs    # /unitylan network add|remove|list slash handler + gateway-event eviction
 │   │   ├── oauth.rs       # Discord OAuth2 PKCE config + token verify (binds pubkey→user)
 │   │   ├── presence.rs    # in-memory presence table + reaper (PRESENCE_TTL_SECS)
 │   │   ├── signer.rs      # per-guild Ed25519 attestation signing, configurable TTL, SignCache
 │   │   ├── rotate.rs      # offline `rotate-key` subcommand (mints prev→new cert)
 │   │   ├── stun.rs        # STUN Binding responder (UDP; server-reflexive for ICE)
+│   │   ├── zone.rs        # authoritative DNS for [dns] domain: _acme-challenge TXT (DNS-01)
 │   │   └── store.rs       # SQLite: per-guild signing keys, network registry, device allocations…
 │   ├── engine/           # PRIVILEGED daemon (binary) — the data plane / mesh
 │   │   ├── main.rs · service.rs · shutdown.rs   # systemd/Windows-Service/launchd lifecycle
@@ -54,6 +56,7 @@ unitylan/
 │   │   │   ├── server.rs  # secured listener + privileged request handlers
 │   │   │   ├── client.rs  # CLI/client request transport
 │   │   │   └── status.rs  # shared status context and reporting helpers
+│   │   ├── cert.rs        # ACME DNS-01 client: order → coordinator TXT → finalize → cert.pem/key.pem
 │   │   ├── coord.rs       # coordinator client: register/refresh long-poll, verify + pin anchors
 │   │   ├── oauth.rs · keys.rs   # OAuth loopback PKCE; WG + token/anchor key storage
 │   │   ├── wg/{mod,userspace,windows}.rs   # WgBackend: boringtun userspace · Windows wg-nt kernel
@@ -88,7 +91,7 @@ Actual crates in use (workspace + per-crate). ⭐ = load-bearing.
 | async runtime | `tokio` ⭐ | everywhere (`features = ["full"]`) |
 | HTTP server (coord API) | `axum` ⭐ | client-facing long-poll API |
 | HTTP client | `reqwest` ⭐ | engine → coordinator; OAuth token exchange |
-| Discord bot + gateway | `twilight-{http,gateway,model,util}` ⭐ | bot-token role/nick reads; role-revocation gateway events. **GUILD_MEMBERS** privileged intent |
+| Discord bot + gateway | `twilight-{http,gateway,model,util}` ⭐ | bot-token role/username reads; role-revocation gateway events. **GUILD_MEMBERS** privileged intent |
 | signing / keys | `ed25519-dalek` ⭐ · `x25519-dalek` (via defguard) | attestations + rotation certs + release manifest; WG keys |
 | WireGuard control | `defguard_wireguard_rs` ⭐ | userspace (boringtun, Linux) + Windows wg-nt kernel. Userspace path is unix-only today (§7.3) |
 | NAT traversal | `webrtc-ice` · `turn` · `webrtc-util` ⭐ · `stun` (coord) · `igd-next` (UPnP) · `surge-ping` | userspace ICE agent + embedded TURN relay + STUN responder |
@@ -96,7 +99,8 @@ Actual crates in use (workspace + per-crate). ⭐ = load-bearing.
 | engine↔GUI IPC | `interprocess` ⭐ | one API over Unix sockets + Windows named pipes |
 | serialization | `postcard` ⭐ (signed) · `serde_json` (API/control envelopes) | postcard = deterministic bytes → stable signatures; **never sign over JSON** |
 | persistence (coord) | `sqlx` (SQLite) ⭐ | per-guild signing keys, network registry, device allocations, enrollment keys, rotation certs |
-| DNS | `hickory-proto` (engine) | build/serve `.internal`; per-OS hookup in `resolver/` |
+| DNS | `hickory-proto` (engine + coord) | engine builds/serves `.internal` (per-OS hookup in `resolver/`); coordinator serves the `_acme-challenge` zone (`zone.rs`) |
+| ACME | `instant-acme` (engine) | DNS-01 issuance on `ring`, not the default `aws-lc-rs` (C deps the Windows cross-build avoids). Its `rcgen` feature mints the keypair + CSR locally |
 | self-update | `self-replace` · `sha2` · `semver` | verify + swap engine binary from signed manifest |
 | logging | `tracing` ⭐ | all binaries |
 
@@ -348,6 +352,7 @@ enrollment_keys(key PK, user_id, expires_at?, used_by?)      -- one-time, race-f
 communities(guild_id PK, slug)                  -- community slug (tags shared networks; not in hostname)
 primary_device(user_id PK, pubkey)              -- backs the bare <user>.unity.internal alias
 oauth_authorized(pubkey PK, user_id)            -- interactive-login pubkey→user binding
+user_labels(user_id PK, label UNIQUE)           -- the <user> DNS label: allocated once, never derived live
 guild_rotation_certs(idx PK AUTOINCREMENT, guild_id, cert)   -- prev→new chain, oldest→newest
 ```
 Snowflakes stored as `i64` (bit-preserving; SQLite has no u64). The DB file is chmod `0600` on open
