@@ -194,7 +194,7 @@ done
 A_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a.log" | head -1 | awk '{print $1}')
 B_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b.log" | head -1 | awk '{print $1}')
 C_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/c.log" | head -1 | awk '{print $1}')
-[ -n "$B_IP" ] && [ -n "$C_IP" ] || { echo "FAIL: NAT'd nodes did not register"; tail -20 "$TMP/b.log" "$TMP/c.log"; exit 1; }
+[ -n "$B_IP" ] && [ -n "$C_IP" ] || { echo "FAIL: NAT'd nodes did not register"; tail -n 20 "$TMP/b.log" "$TMP/c.log"; exit 1; }
 echo "A=$A_IP (reachable)  B=$B_IP  C=$C_IP (both behind NAT)"
 
 # B and C are behind different NATs with no advertised endpoint. The coordinator must discover

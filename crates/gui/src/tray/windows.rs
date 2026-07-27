@@ -101,6 +101,8 @@ fn ui_thread(socket: PathBuf, to_app: UnboundedSender<TrayMsg>) {
     let (show_id, toggle_id, quit_id) = (show.id().clone(), toggle.id().clone(), quit.id().clone());
     let mut rendered = true; // matches the initial icon/label we built above
 
+    // SAFETY: MSG is a plain POD struct; an all-zero value is a valid initial state, and
+    // GetMessageW fills it before anything reads it.
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
         // Blocking wait for the next message; the 500ms timer guarantees we wake to repaint even
@@ -110,6 +112,7 @@ fn ui_thread(socket: PathBuf, to_app: UnboundedSender<TrayMsg>) {
         if ret <= 0 {
             break; // 0 = WM_QUIT, -1 = error
         }
+        // SAFETY: standard Win32 dispatch of a message GetMessageW just filled in for us.
         unsafe {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

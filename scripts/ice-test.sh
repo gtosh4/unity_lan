@@ -200,7 +200,7 @@ for _ in $(seq 1 60); do
 done
 B_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b.log" | head -1 | awk '{print $1}')
 C_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/c.log" | head -1 | awk '{print $1}')
-[ -n "$B_IP" ] && [ -n "$C_IP" ] || { echo "FAIL: NAT'd nodes did not register"; tail -20 "$TMP/b.log" "$TMP/c.log"; exit 1; }
+[ -n "$B_IP" ] && [ -n "$C_IP" ] || { echo "FAIL: NAT'd nodes did not register"; tail -n 20 "$TMP/b.log" "$TMP/c.log"; exit 1; }
 echo "A=10.0.0.1 (relay)  B=$B_IP  C=$C_IP (behind isolated NATs)"
 
 # B and C punch, fail (isolated), go Unreachable, then each starts a side-socket ICE agent for the

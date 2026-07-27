@@ -100,15 +100,21 @@ A1_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a1.log" | head -1 | awk 
 A2_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a2.log" | head -1 | awk '{print $1}')
 [ -n "$A1_IP" ] && [ -n "$A2_IP" ] || {
   echo "FAIL: a roleless user's devices got no identity (personal scope should carry them)"
-  tail -20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
+  tail -n 20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
 }
 echo "A1=$A1_IP  A2=$A2_IP  (no role anywhere, meshed → personal scope ✓)"
 
 echo "=== ping across the personal mesh ($A1_IP -> $A2_IP) ==="
+# "peer set" means the peer is *configured*, not that the handshake finished — on a slow runner the
+# first packet can beat it. Give the tunnel a bounded window to come up before the real check.
+for _ in $(seq 1 20); do
+  ping -c1 -W1 -I "$A1_IP" "$A2_IP" >/dev/null 2>&1 && break
+  sleep 0.5
+done
 if ping -c3 -W2 -I "$A1_IP" "$A2_IP"; then
   echo "personal ping ✓  a user with no role at all meshes their own devices"
 else
-  echo "RESULT: FAIL ✗"; tail -20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
+  echo "RESULT: FAIL ✗"; tail -n 20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
 fi
 
 # The personal scope is per owner. User 2 is equally roleless — that must not make them peers.

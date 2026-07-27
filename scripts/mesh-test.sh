@@ -142,7 +142,7 @@ echo "=== ping across mesh ($A_IP -> $B_IP) ==="
 if ping -c3 -W2 -I "$A_IP" "$B_IP"; then
   echo "mesh ping ✓  membership -> coordinator seeds -> WG mesh -> traffic"
 else
-  echo "RESULT: FAIL ✗"; tail -15 "$TMP/a.log" "$TMP/b.log"; exit 1
+  echo "RESULT: FAIL ✗"; tail -n 15 "$TMP/a.log" "$TMP/b.log"; exit 1
 fi
 
 # Firewall: default-deny inbound on the wg iface; only ports the owner exposes are reachable.

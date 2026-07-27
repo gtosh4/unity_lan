@@ -152,7 +152,7 @@ for _ in $(seq 1 60); do
   [ "$(grep -c 'peer set' "$TMP/a.log" 2>/dev/null)" -ge 3 ] && break
   sleep 0.5
 done
-[ "$(grep -c 'peer set' "$TMP/a.log" 2>/dev/null)" -ge 3 ] || { echo "FAIL: A did not peer with B, C and D"; tail -20 "$TMP"/*.log; exit 1; }
+[ "$(grep -c 'peer set' "$TMP/a.log" 2>/dev/null)" -ge 3 ] || { echo "FAIL: A did not peer with B, C and D"; tail -n 20 "$TMP"/*.log; exit 1; }
 
 wg_ip() { grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/$1.log" | head -1 | awk '{print $1}'; }
 A_IP=$(wg_ip a); B_IP=$(wg_ip b); C_IP=$(wg_ip c); D_IP=$(wg_ip d)

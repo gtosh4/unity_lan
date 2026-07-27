@@ -96,7 +96,7 @@ A1_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a1.log" | head -1 | awk 
 A2_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/a2.log" | head -1 | awk '{print $1}')
 [ -n "$A1_IP" ] && [ -n "$A2_IP" ] || {
   echo "FAIL: own devices did not mesh (no enabled network → own-device peering should carry them)"
-  tail -20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
+  tail -n 20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
 }
 echo "A1=$A1_IP  A2=$A2_IP  (same user, meshed with NO enabled network → own-device peering ✓)"
 
@@ -104,7 +104,7 @@ echo "=== ping across own-device mesh ($A1_IP -> $A2_IP) ==="
 if ping -c3 -W2 -I "$A1_IP" "$A2_IP"; then
   echo "own-device ping ✓  same user peers despite the shared network being disabled"
 else
-  echo "RESULT: FAIL ✗"; tail -20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
+  echo "RESULT: FAIL ✗"; tail -n 20 "$TMP/a1.log" "$TMP/a2.log"; exit 1
 fi
 
 # Per-user scoping: user 2's device (b1) shares only the SAME disabled network and is a different
