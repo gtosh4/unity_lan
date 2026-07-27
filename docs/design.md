@@ -71,7 +71,7 @@ operator-owned, `0600`, never logged or backed up; end-state is **encrypted at r
 Responsibilities:
 - Let guild admins **register networks** (`/unitylan network add|remove|list`, Manage-Guild gated).
 - Authenticate a client to a Discord identity (OAuth).
-- Read the user's **roles** and **nick** via the bot token (guild members).
+- Read the user's **roles** and **username** via the bot token (guild members).
 - **Allocate** each device one stable IP in the deployment mesh range, reused across roles (§6).
 - **Sign attestations** (§4) for the roles the user holds; **re-sign** periodically (TTL).
 - Keep a **soft endpoint cache** (`pubkey → ip:port`, self-reported on refresh) to build bootstrap
@@ -368,13 +368,51 @@ change.
 Local resolver serves `*.unity.internal` from the client's verified attestations (own + co-device
 seeds); you only resolve devices you can reach (share a network with). Per-OS hookup:
 resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); hosts-file MVP.
-- **Label sanitization:** `nick`/`username` come from Discord (attacker-influenced), so DNS labels
-  are sanitized to `[a-z0-9-]`, length-bounded, and **confusable/homograph-folded** — a member
-  can't craft a nick that injects a label or visually impersonates another member. Names are
-  convenience only; **authorization is always the pubkey in the signed attestation**, never the name.
+- **Label allocation:** the `username` comes from Discord (attacker-influenced), so DNS labels are
+  sanitized to `[a-z0-9-]` and length-bounded — a member can't craft a name that injects a label.
+  Sanitization alone is **not** enough for uniqueness: it folds both `_` and `.` onto `-`, so the
+  distinct accounts `alice.smith` and `alice_smith` sanitize to one label, as do `_alice` and
+  `alice`. The coordinator therefore **allocates** each user's label once, on first sight, unique
+  deployment-wide (`user_labels`, suffixed `-2`, `-3`, … on collision); the Discord username only
+  *seeds* it. Without that, the coordinator would sign two users attestations asserting the same
+  hostname — both verifying cleanly against the pinned anchor — and whichever resolved last would
+  silently own the name. Allocation also makes the label **stable under a Discord rename**, which
+  matters because a TLS certificate issued against it is bound to that name for its whole life.
+  Names remain convenience only; **authorization is always the pubkey in the signed
+  attestation**, never the name.
 - **Why `.internal`, not `.local`:** `.local` is RFC 6762 mDNS (OS hijacks to multicast);
   `.internal` is ICANN-reserved (2024) for private use — no public delegation, no clash. All
   UnityLAN names live under a `unity.internal` zone to namespace them within that reserved space.
+
+### 6.5 Publicly-trusted TLS certificates
+That same reservation is why `.internal` can never carry a certificate: no public CA may issue for a
+reserved suffix. A deployment that wants HTTPS on mesh services therefore configures a **real domain
+it owns** (`[dns] domain`), under which every device gains an alias — `<device>.<user>.<domain>`
+**alongside** its `unity.internal` name, never replacing it. Absent that config the feature does not
+exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) so they never try.
+
+- **DNS-01 is forced.** A mesh name resolves to a `100.64.0.0/10` address reachable only inside the
+  mesh, so a CA can never connect to it — HTTP-01 and TLS-ALPN-01 are both impossible. DNS-01
+  validates *control of the name*, not reachability of the host, which is exactly the property we
+  have. The coordinator runs an authoritative responder for the delegated domain (one `NS` record in
+  the parent zone) serving `_acme-challenge` TXT and nothing else. **No `A` records**: mesh addresses
+  are never published, and clients keep resolving them locally as they always have.
+- **The device runs ACME, not the coordinator.** It generates its own key, talks to the CA itself and
+  keeps the private key; the coordinator only holds a TXT string for a few minutes. This is the same
+  division as everywhere else — the coordinator brokers, and never holds peer key material.
+- **Names are derived, never supplied.** The `/acme-challenge` request carries values only; the
+  coordinator builds the names from the calling device's own allocation. A client-supplied name would
+  let any enrolled device obtain a publicly-trusted certificate for another member's hostname, which
+  is also why the `<user>` label is allocated rather than derived live (§6.4).
+- **Two costs, both accepted deliberately.** Issuance publishes the device and user name to public
+  **Certificate Transparency** logs, permanently and irreversibly — so it is opt-in per device, off by
+  default, and offered only where a port is actually exposed. And CAs cap certificates per registered
+  domain per week; the coordinator meters issuance (`max_certs_per_week`) so a burst is refused early
+  rather than exhausting a budget the whole deployment shares.
+- **Not a private CA.** Issuing from a coordinator-held CA would avoid all of the above, but requires
+  installing a root into every member's system trust store — which would let a compromised
+  coordinator MITM TLS on every member's machine, an escalation from today, where it cannot read peer
+  traffic at all. Deferred, and `nameConstraints`-limited if ever taken up.
 
 ## 7. Networking
 
@@ -538,7 +576,7 @@ engine via its control socket (no privilege in the front-ends):
 flowchart TB
     D["Discord guild<br/>(roles = networks)"]
     B["Coordinator (self-hosted bot)<br/>reads roles · allocates IPs · signs attestations<br/>NO traffic · NO keys"]
-    D -->|bot reads roles/nicks| B
+    D -->|bot reads roles/usernames| B
     subgraph MESH["Network @minecraft — direct WG mesh"]
         A["Alice"]
         Bo["Bob"]
@@ -554,7 +592,7 @@ flowchart TB
 
 ## 11. Rough Milestones
 
-1. **M1** — Coordinator: Discord OAuth + bot-token role/nick read; **per-guild** Ed25519
+1. **M1** — Coordinator: Discord OAuth + bot-token role/username read; **per-guild** Ed25519
    attestation signing; IP allocation; device **enrollment** (interactive OAuth + one-time
    headless **enrollment key**, §3.3). Engine (headless): enroll, fetch + verify an attestation
    (signature + `guild_id` match).

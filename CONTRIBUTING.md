@@ -201,6 +201,7 @@ Linux (or WSL2):
 | `ice-test.sh` / `relay-test.sh` | ICE negotiation and the ciphertext TURN relay fallback |
 | `own-device-test.sh` | a user's own devices peering with no shared network |
 | `personal-mesh-test.sh` | a user who holds no role at all meshing their own devices |
+| `cert-test.sh` | certificates end to end: challenge published, served to a resolver, zone hardening, and (with `pebble` installed) a real ACME issuance |
 | `update-test.sh` | the signed auto-update path, manifest → verify → swap → restart |
 | `resolver-hook-test.sh` | live systemd-resolved hookup (needs root + real resolved) |
 

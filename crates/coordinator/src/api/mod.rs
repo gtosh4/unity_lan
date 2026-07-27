@@ -29,6 +29,7 @@ use axum::Router;
 use common::api::IceParams;
 use common::update::ReleaseManifest;
 
+mod acme;
 mod admin;
 mod auth;
 mod devices;
@@ -93,6 +94,15 @@ pub struct AppState {
     /// is only accepted if its IP matches `source_ip[V]` — a co-member can't then redirect `V`'s
     /// punch target to an arbitrary address it invents (§7.2). Last write wins; lost on restart.
     pub source_ip: Arc<Mutex<HashMap<[u8; 32], std::net::IpAddr>>>,
+    /// Memo of each user's allocated `<user>` DNS label. A label is allocated once and never changes
+    /// (see [`crate::store::Store::user_label`]), so this needs no invalidation — it exists to keep
+    /// `build_snapshot` off the database on a path that runs per client per renewal *and* on every
+    /// herd wake. Bounded by the number of users the deployment has ever served.
+    pub user_labels: Arc<Mutex<HashMap<u64, String>>>,
+    /// The certificate domain and its live DNS-01 challenges, when `[dns]` is configured. `None`
+    /// disables certificate issuance for the deployment: `/acme-challenge` refuses, and clients are
+    /// told so via [`common::api::RegisterResp::dns_domain`] so they never try.
+    pub dns: Option<Arc<crate::zone::DnsState>>,
     /// Peer-observed reflexive endpoints: device pubkey → the `ip:port` a peer last saw it send
     /// from. Populated from `RegisterReq.observed`; read when handing a punch target to a NAT'd
     /// co-member (§7.2). Last observation wins; lost on restart (repopulated as peers refresh).
@@ -167,6 +177,25 @@ pub struct RelayReg {
     pub secret: String,
 }
 
+impl AppState {
+    /// This user's `<user>` DNS label, from the memo or (once) from the store.
+    pub async fn user_label(&self, user_id: u64, seed: &str) -> Result<String, ApiError> {
+        if let Some(label) = self.user_labels.lock().unwrap().get(&user_id) {
+            return Ok(label.clone());
+        }
+        let label = self
+            .store
+            .user_label(user_id, seed)
+            .await
+            .map_err(internal)?;
+        self.user_labels
+            .lock()
+            .unwrap()
+            .insert(user_id, label.clone());
+        Ok(label)
+    }
+}
+
 /// Drop per-device NAT side-table entries for devices no longer present, so these maps track live
 /// membership instead of growing with every pubkey ever seen (they are otherwise only overwritten or
 /// cleared on restart). Pair-keyed tables (`ice`, `relay_allocs`) drop an entry if *either* endpoint
@@ -210,6 +239,7 @@ pub fn router(state: AppState) -> Router {
         .route("/register", post(register::register))
         .route("/refresh", post(register::register))
         .route("/devices/manage", post(devices::manage))
+        .route("/acme-challenge", post(acme::acme_challenge))
         // interactive login (engine-owned PKCE): pkce-config hands the engine the public client_id;
         // complete verifies the engine's access token and binds pubkey → user.
         .route("/oauth/pkce-config", get(login::oauth_pkce_config))

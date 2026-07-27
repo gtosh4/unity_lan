@@ -658,6 +658,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             zone: &zone,
             status: &status,
             localnet: &localnet,
+            cert: CertCtx {
+                state_dir: cfg.state_dir.clone(),
+                coordinator: cfg.coordinator.clone(),
+                token: token.clone(),
+                cfg: Arc::new(cfg.cert.clone()),
+                running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
         };
         apply_state(
             &ctx,
@@ -1488,6 +1495,62 @@ struct MeshCtx<'a> {
     zone: &'a dns::Zone,
     status: &'a control::Shared,
     localnet: &'a LocalNet,
+    /// What the certificate reconcile needs but the mesh loop otherwise doesn't.
+    cert: CertCtx,
+}
+
+/// Certificate inputs, cloned so the reconcile can outlive one loop iteration.
+#[derive(Clone)]
+struct CertCtx {
+    state_dir: std::path::PathBuf,
+    coordinator: String,
+    token: Arc<tokio::sync::RwLock<Option<String>>>,
+    cfg: Arc<crate::config::CertConfig>,
+    /// Held while a reconcile is running, so back-to-back refreshes cannot start two ACME orders for
+    /// the same certificate — which would spend the CA's duplicate-certificate allowance twice.
+    running: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Kick off a certificate reconcile in the background.
+///
+/// Detached because ACME is several network round trips: doing it inline would stall the mesh loop
+/// behind a CA. It re-reads its own persisted state each run, so a missed cycle costs nothing.
+fn spawn_cert_reconcile(ctx: &MeshCtx<'_>, device: &SelfDevice) {
+    use std::sync::atomic::Ordering;
+
+    let cert = ctx.cert.clone();
+    // Cheap exits first, so the common case (no certificate domain, or not opted in) never spawns.
+    if device.dns_domain.is_none() && !ctx.localnet.certs_enabled() {
+        return;
+    }
+    if cert.running.swap(true, Ordering::AcqRel) {
+        return; // one already in flight
+    }
+    let status = ctx.status.clone();
+    let enabled = ctx.localnet.certs_enabled();
+    let exposed = ctx.fw.as_ref().is_some_and(|fw| !fw.list().is_empty());
+    let hostname = device.hostname.clone();
+    let primary_alias = device.primary_alias.clone();
+    let dns_domain = device.dns_domain.clone();
+    tokio::spawn(async move {
+        let token = cert.token.read().await.clone();
+        if let Some(token) = token {
+            let report = crate::cert::reconcile(crate::cert::Reconcile {
+                state_dir: &cert.state_dir,
+                coordinator: &cert.coordinator,
+                token,
+                cfg: &cert.cfg,
+                hostname: &hostname,
+                primary_alias: primary_alias.as_deref(),
+                dns_domain: dns_domain.as_deref(),
+                enabled,
+                exposed,
+            })
+            .await;
+            control::set_cert_status(&status, report);
+        }
+        cert.running.store(false, Ordering::Release);
+    });
 }
 
 /// The three per-peer endpoint overlays resolved each loop iteration — relay shim, ICE shim, LAN
@@ -1556,6 +1619,7 @@ async fn apply_state(
             ctx.localnet.peer_own_devices(),
             coord_online,
         );
+        spawn_cert_reconcile(ctx, dev);
     }
     if let Some(fw) = ctx.fw {
         changed |= fw.update_peers(peer_sets(&active, device.as_ref().map(|d| d.user_id)))?;

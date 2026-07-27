@@ -7,6 +7,23 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
+- Mesh services can now serve **real HTTPS**, with a certificate browsers already trust — no warning
+  page, no root certificate to install on every machine. Tick "Get an HTTPS certificate" beside your
+  exposed ports (or run `unitylan-engine ctl cert on`), and the device obtains and renews one by
+  itself; `ctl cert` prints the certificate and key paths for your web server's config. The private
+  key is generated on your machine and never sent anywhere — the coordinator only publishes the DNS
+  record the certificate authority checks.
+
+  Two things to know. Your coordinator's operator has to configure a domain for this first (`[dns]`
+  in the coordinator config); until they do, the option doesn't appear. And issuing a certificate
+  publishes that device's name to public certificate-transparency logs **permanently** — that is how
+  every publicly-trusted certificate works, not something UnityLAN chose — so it's off by default,
+  offered only once you've exposed a port, and turning it back off later does not unpublish the name.
+
+  For headless servers, `[cert] group` hands the key to a group your web server can read, and
+  `[cert] reload_command` runs after each renewal so it picks the new certificate up instead of
+  quietly serving an expired one two months later.
+
 - You can now use UnityLAN for just your own machines, without joining or running a Discord server.
   Log in, install it on a second device, and the two find each other — no server to set up, no role
   for an admin to grant, nothing to configure. Previously an account that held no role anywhere got
@@ -18,6 +35,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- Your mesh hostname is now built from your **global Discord username**, not your nickname in
+  whichever server you share. It is also assigned once and then kept, so changing your Discord name
+  later leaves your hostname — and anything pointing at it — alone. Previously the name tracked your
+  per-server nickname, so the same person could answer to different names in different communities,
+  and a nickname edit silently moved their address. If your nickname and username differ, expect your
+  hostname to change once, on your next connection; device names (`laptop.you.unity.internal`) are
+  unaffected.
+
 - Coordinators now **reject** an enrolling device that doesn't prove it holds the WireGuard private
   key it's registering. The check shipped in v0.4.1 in observe-only mode so coordinators could
   upgrade ahead of their clients; every client has sent a proof since that release, so the gate is
@@ -27,6 +52,20 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   it logs and counts those enrollments in `unitylan_enrollments_unproven_total` instead.
 
 ### Fixed
+
+- Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
+  allows, and that folded distinct Discord accounts together — `alice.smith` and `alice_smith` both
+  became `alice-smith`, as did `_alice` and `alice`, and anyone whose name survived sanitising with no
+  letters or digits left landed on a shared fallback. Whoever connected last quietly took the name, so
+  traffic meant for one person's machine could reach another's. Names are now assigned uniquely, with
+  a numeric suffix when two would collide.
+
+- `unitylan-engine login` no longer wedges the install it just logged in to. Like the bare one-shot
+  run fixed above, it enrolled the device and then discarded the credential the coordinator issues on
+  enrolment, so the daemon's own connection afterwards was refused with "device token missing or
+  invalid" and retried forever — the only way out being to delete the device's key and start over.
+  The graphical login was never affected. `login` now stores the credential the same way the daemon
+  does.
 
 - Peers behind strict NATs now connect through a relay instead of appearing stuck. When a hole punch
   failed, both sides reserved a slot on a relay but only one of them was told where to send, so no

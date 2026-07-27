@@ -26,7 +26,7 @@ CFG="$TMP/coordinator.toml"
   for ((i=1; i<=N; i++)); do
     echo '[[fake.guild.member]]'
     echo "user_id = $i"
-    echo "nick = \"user-$i\""
+    echo "username = \"user-$i\""
     echo 'role_ids = [10]'
   done
   echo '[[network]]'

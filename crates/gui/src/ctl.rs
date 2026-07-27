@@ -154,6 +154,11 @@ pub async fn set_own_device_peering(path: PathBuf, enabled: bool) -> Result<Stat
     expect_status!(path, ControlRequest::SetOwnDevicePeering { enabled })
 }
 
+/// Opt this device in or out of a publicly-trusted TLS certificate. Returns updated status.
+pub async fn set_certs_enabled(path: PathBuf, enabled: bool) -> Result<StatusReport, String> {
+    expect_status!(path, ControlRequest::SetCertsEnabled { enabled })
+}
+
 /// Locally block a user (by Discord `user_id`) — drop all their peers from the mesh. Returns the
 /// updated status.
 pub async fn block_peer(

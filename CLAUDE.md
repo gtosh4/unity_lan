@@ -82,7 +82,7 @@ scripts/dev-run.sh                                           # engine (via sudo)
 
 `scripts/*.sh` = Linux-only end-to-end tests over network namespaces (fake Discord/OAuth
 coordinator + `nft`/`veth`). `mesh-test.sh`, `nat-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`,
-`rotation-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh` exercise coordinator↔engine path; prefer running the
+`rotation-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh`, `cert-test.sh` exercise coordinator↔engine path; prefer running the
 relevant one to verify behavior change end-to-end. `update-test.sh` covers signed auto-update path
 (manifest → verify → download → swap → restart onto new version); temporarily patches workspace
 version to build fake-old client, then restores.
@@ -94,6 +94,7 @@ session, impossible (no password).
 | Script | How to run |
 | --- | --- |
 | `mesh-test.sh`, `nat-test.sh`, `gui-login-test.sh`, `gossip-test.sh`, `ice-test.sh`, `relay-test.sh`, `expose-net-test.sh`, `net-toggle-test.sh`, `own-device-test.sh`, `personal-mesh-test.sh`, `wg-tunnel-test.sh` | directly, self-unshares — `timeout 150 scripts/<name>.sh` |
+| `cert-test.sh` | directly, self-unshares — `timeout 300 scripts/cert-test.sh`. Needs `dig`; the ACME leg needs `pebble` on PATH (release binary, no Go) and is **skipped with a loud notice** without it |
 | `oauth-test.sh`, `rotation-test.sh` | directly, unprivileged (HTTP + key files only, no netns/WG) |
 | `update-test.sh` | directly, self-unshares — `timeout 420 scripts/update-test.sh` (builds twice; needs `openssl` + `python3`) |
 | `resolver-hook-test.sh` | **real host root** — needs live `systemd-resolved`, a userns won't do |

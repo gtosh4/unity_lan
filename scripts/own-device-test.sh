@@ -34,11 +34,11 @@ id = 1
 name = "Test"
 [[fake.guild.member]]
 user_id = 1
-nick = "alice"
+username = "alice"
 role_ids = [10]
 [[fake.guild.member]]
 user_id = 2
-nick = "bob"
+username = "bob"
 role_ids = [10]
 [[network]]
 guild_id = 1

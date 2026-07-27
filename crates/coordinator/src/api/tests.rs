@@ -63,6 +63,8 @@ struct TestCoordinator {
     /// presented on every later register. Without this the harness would 401 itself, since a
     /// public WG key is not authentication.
     tokens: Mutex<std::collections::HashMap<[u8; 32], String>>,
+    /// Uniquifier for minted enrollment keys (they are one-time).
+    keys_minted: AtomicU64,
 }
 
 impl TestCoordinator {
@@ -84,7 +86,7 @@ impl TestCoordinator {
                         .iter()
                         .map(|&(user_id, holds)| FakeMember {
                             user_id,
-                            nick: format!("user{user_id}"),
+                            username: format!("user{user_id}"),
                             role_ids: if holds { vec![ROLE] } else { vec![99] },
                         })
                         .collect(),
@@ -111,6 +113,8 @@ impl TestCoordinator {
                 oauth: None,
                 trusted_proxies: Arc::new(Vec::new()),
                 source_ip: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                user_labels: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                dns: None,
                 reflexive: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 relays: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 relay_allocs: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -125,13 +129,19 @@ impl TestCoordinator {
                 enroll_unproven: Arc::new(AtomicU64::new(0)),
             },
             tokens: Mutex::new(std::collections::HashMap::new()),
+            keys_minted: AtomicU64::new(0),
             member_calls,
         }
     }
 
     /// Mint a one-time enrollment key for `user_id`, as `/unitylan enroll` does.
     async fn enrollment_key(&self, user_id: u64) -> String {
-        let key = format!("enroll-key-{user_id}");
+        // Unique per call: a key is one-time, so an owner enrolling a second device needs a second
+        // key rather than a 401 on the reused one.
+        let nth = self
+            .keys_minted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let key = format!("enroll-key-{user_id}-{nth}");
         self.state
             .store
             .create_enrollment_key(&key, user_id, Some(common::now_unix() + 3600))
@@ -193,6 +203,38 @@ impl TestCoordinator {
         r.enrollment_key = Some(self.enrollment_key(user_id).await);
         self.register(&r).await.expect("enrol the device")
     }
+
+    /// Turn on certificate issuance, as a `[dns]` block would.
+    fn with_dns(mut self, domain: &str, max_certs_per_week: u32) -> Self {
+        self.state.dns = Some(Arc::new(crate::zone::DnsState {
+            domain: domain.into(),
+            challenges: Arc::new(crate::zone::ChallengeStore::new(max_certs_per_week)),
+        }));
+        self
+    }
+
+    /// This device's persisted bearer token.
+    fn token(&self, pubkey: u8) -> String {
+        self.tokens
+            .lock()
+            .unwrap()
+            .get(&[pubkey; 32])
+            .cloned()
+            .expect("device was issued a token")
+    }
+
+    /// `POST /acme-challenge` for a device.
+    async fn acme(&self, pubkey: u8, primary: Option<&str>) -> (StatusCode, String) {
+        self.send(
+            "/acme-challenge",
+            serde_json::json!({
+                "token": self.token(pubkey),
+                "device": "device-challenge-value",
+                "primary": primary,
+            }),
+        )
+        .await
+    }
 }
 
 /// A register request for a device, built from the JSON a current client would actually send —
@@ -207,6 +249,108 @@ fn req(pubkey: u8, device_name: &str) -> RegisterReq {
         "proto_min": common::MIN_PROTOCOL_VERSION,
     }))
     .expect("a current client's register body")
+}
+
+#[tokio::test]
+async fn a_challenge_name_is_derived_from_the_caller_never_supplied_by_it() {
+    // The security property the whole route rests on. The request carries values only; a device
+    // cannot name the hostname it wants validated, so it cannot obtain a certificate for anyone
+    // else's name. Two owners register here and each gets only its own name back.
+    let c = TestCoordinator::new(&[(7, true), (8, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+    c.enrol(2, 8, "laptop").await;
+
+    let (status, body) = c.acme(1, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let names: Vec<String> = serde_json::from_str::<serde_json::Value>(&body).unwrap()["names"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["_acme-challenge.laptop.user7.mesh.example.com".to_string()]
+    );
+
+    // The second owner's identically-named device lands on its own name, not the first's.
+    let (status, body) = c.acme(2, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("_acme-challenge.laptop.user8.mesh.example.com"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn the_bare_user_alias_is_only_published_for_the_primary_device() {
+    // `<user>.<domain>` names one machine. Honouring it for any of an owner's devices would let a
+    // second device hold a publicly-trusted certificate for the name meant to identify the first.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await; // first enrolled → auto-primary
+    c.enrol(2, 7, "desktop").await;
+
+    let (_, body) = c.acme(1, Some("alias-challenge-value")).await;
+    assert!(
+        body.contains("_acme-challenge.user7.mesh.example.com"),
+        "{body}"
+    );
+
+    // Same request from the non-primary device: its own name only, the alias silently dropped.
+    let (_, body) = c.acme(2, Some("alias-challenge-value")).await;
+    assert!(
+        body.contains("_acme-challenge.desktop.user7.mesh.example.com"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("_acme-challenge.user7.mesh.example.com"),
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn issuance_is_refused_when_the_deployment_configured_no_domain() {
+    // No `[dns]` → the feature does not exist here, and the client is told so rather than left to
+    // fail against the CA.
+    let c = TestCoordinator::new(&[(7, true)]).await;
+    c.enrol(1, 7, "laptop").await;
+    let (status, _) = c.acme(1, None).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+}
+
+#[tokio::test]
+async fn a_bad_device_token_cannot_publish_a_challenge() {
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+    let (status, _) = c
+        .send(
+            "/acme-challenge",
+            serde_json::json!({ "token": "not-a-real-token", "device": "v" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_weekly_budget_refuses_rather_than_spending_the_last_of_it() {
+    // Exhausting the CA's per-domain cap locks the whole deployment out for the rest of the week,
+    // which is worse than declining early — so the coordinator meters and says no.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 1);
+    c.enrol(1, 7, "laptop").await;
+    c.enrol(2, 7, "desktop").await;
+
+    assert_eq!(c.acme(1, None).await.0, StatusCode::OK);
+    let (status, body) = c.acme(2, None).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert!(body.contains("budget"), "{body}");
 }
 
 #[tokio::test]

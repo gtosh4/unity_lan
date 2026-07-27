@@ -26,7 +26,7 @@ id = 1
 name = "Test"
 [[fake.guild.member]]
 user_id = 1
-nick = "nodea"
+username = "nodea"
 role_ids = [10]
 [[network]]
 guild_id = 1

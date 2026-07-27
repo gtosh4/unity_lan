@@ -49,7 +49,7 @@ id = 111
 name = "My Community"
 [[fake.guild.member]]
 user_id = 333
-nick = "Alice"
+username = "Alice"
 role_ids = [222, 223]
 
 [[network]]
@@ -83,3 +83,38 @@ name = "Minecraft SMP"
 # url = "https://github.com/gtosh4/unity_lan/releases/download/v0.2.0/unitylan-0.2.0-x64.msi"
 # sha256 = "<64-hex from SHA256SUMS-windows.txt>"
 # size = 23456789
+
+# --- TLS certificates for mesh names (optional) ------------------------------------------------
+# Absent, this deployment issues no certificates: peers are reachable as
+# `<device>.<user>.unity.internal` only, and clients are told so and never try.
+#
+# `.internal` is ICANN-reserved, so no public CA will ever certify a name under it. To get
+# publicly-trusted HTTPS on mesh services you need a domain you own. Devices then gain an alias
+# `<device>.<user>.<domain>` *alongside* their unity.internal name — nothing is renamed.
+#
+# A mesh name resolves to a CGNAT address no CA can reach, so DNS-01 is the only usable challenge.
+# It needs a `_acme-challenge` TXT record in public DNS, which is what the coordinator serves here.
+# Delegate the subdomain with ONE record in the parent zone, then open UDP *and* TCP 53:
+#
+#     mesh   NS   coordinator.example.com.
+#
+# Bind an unprivileged port and publish it as 53 rather than granting CAP_NET_BIND_SERVICE; in
+# Docker that is `53:5353/udp` plus `53:5353/tcp`. TCP is not optional — a resolver that gets a
+# truncated UDP answer retries over TCP.
+#
+# The zone carries challenge records and nothing else. No A records are ever published, so mesh
+# addresses stay private; clients resolve those locally as they always have.
+#
+# `max_certs_per_week` meters issuance across the whole deployment. CAs cap certificates per
+# registered domain per week (Let's Encrypt: 50), and exhausting it locks everyone out until the
+# window rolls — worse than declining early. Keep this under the CA's real cap. Watch
+# `unitylan_certs_issued_week` in /metrics.
+#
+# Note: issuing publishes the device and user name to public Certificate Transparency logs,
+# permanently. That is inherent to any publicly-trusted certificate, so issuance is opt-in per
+# device and off by default.
+#
+# [dns]
+# domain = "mesh.example.com"
+# bind = "0.0.0.0:5353"
+# max_certs_per_week = 40

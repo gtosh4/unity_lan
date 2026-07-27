@@ -77,6 +77,25 @@ pub fn set_peer_own(shared: &Shared, enabled: bool) {
     shared.send_if_modified(|s| std::mem::replace(&mut s.peer_own_devices, enabled) != enabled);
 }
 
+/// Overlay this device's certificate opt-in without rebuilding the snapshot.
+pub fn set_certs_enabled(shared: &Shared, enabled: bool) {
+    shared.send_if_modified(|s| std::mem::replace(&mut s.cert.enabled, enabled) != enabled);
+}
+
+/// Overlay the certificate state the reconcile loop produced — what is held, where it is on disk, or
+/// why nothing was issued. Kept off the snapshot rebuild path because it changes on its own cadence
+/// (issuance, renewal, a failed attempt), not with membership.
+pub fn set_cert_status(shared: &Shared, cert: common::control::CertStatus) {
+    shared.send_if_modified(|s| {
+        if s.cert == cert {
+            false
+        } else {
+            s.cert = cert;
+            true
+        }
+    });
+}
+
 /// Overlay coordinator reachability without rebuilding the snapshot — the mesh runs from cache when
 /// a refresh fails, so this flags the health of the last coordinator contact.
 pub fn set_coord_online(shared: &Shared, online: bool) {
@@ -147,6 +166,7 @@ pub fn update(
         prev_update_ready,
         prev_lan_overlap,
         prev_proto_mismatch,
+        prev_cert,
         prev_live,
     ) = {
         let prev = shared.borrow();
@@ -157,6 +177,7 @@ pub fn update(
             prev.update_ready,
             prev.lan_overlap.clone(),
             prev.proto_mismatch.clone(),
+            prev.cert.clone(),
             prev_live,
         )
     };
@@ -204,6 +225,13 @@ pub fn update(
         disable_new_networks,
         peer_own_devices,
         identity: Some(device.username.clone()),
+        // Certificate state rides its own cadence (issuance, renewal, a failed attempt), not
+        // membership, so carry it across the rebuild rather than recomputing it here. The domain is
+        // the exception: it comes from the coordinator with this very snapshot.
+        cert: common::control::CertStatus {
+            domain: device.dns_domain.clone(),
+            ..prev_cert
+        },
         coordinator_online,
         blocked: blocked_list(blocked),
         engine_version: common::VERSION.to_string(),
