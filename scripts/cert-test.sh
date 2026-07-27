@@ -218,9 +218,13 @@ EOF
   for _ in $(seq 1 60); do [ -S "$TMP/a/control.sock" ] && break; sleep 0.5; done
   [ -S "$TMP/a/control.sock" ] || { bad "the daemon never opened its control socket"; tail -15 "$TMP/engine.log"; }
 
-  # Expose a port and opt in — both gates the daemon requires before it will issue.
+  # Expose a port and opt in — both gates the daemon requires before it will issue. The web service
+  # is named *before* the opt-in so it is in the first order rather than forcing a reissue: the
+  # settle window batches changes to a *held* certificate, and there is none yet.
   "$ENG" -c "$TMP/a.toml" ctl expose 8443 >>"$TMP/ctl.log" 2>&1 \
     || bad "ctl expose failed: $(tail -2 "$TMP/ctl.log")"
+  "$ENG" -c "$TMP/a.toml" ctl service add jellyfin 8096 --web >>"$TMP/ctl.log" 2>&1 \
+    || bad "ctl service add --web failed: $(tail -2 "$TMP/ctl.log")"
   "$ENG" -c "$TMP/a.toml" ctl cert on >>"$TMP/ctl.log" 2>&1 \
     || bad "ctl cert on failed: $(tail -2 "$TMP/ctl.log")"
   for _ in $(seq 1 90); do [ -s "$TMP/a/certs/cert.pem" ] && break; sleep 1; done
@@ -235,6 +239,12 @@ EOF
     echo "$SANS" | grep -q "DNS:\*\.$DEVICE_NAME.$DOMAIN" \
       && ok "it names everything one label below this device" \
       || bad "the certificate has no *.$DEVICE_NAME.$DOMAIN name: $SANS"
+    # A web service is named under the *user*, beside the device — `jellyfin.nodea`, not
+    # `jellyfin.host-a.nodea`. Its whole point is that a browser reaches it without a warning page,
+    # which only works if the name the person types is in the certificate.
+    echo "$SANS" | grep -q "DNS:jellyfin.nodea.$DOMAIN" \
+      && ok "it names this device's web service" \
+      || bad "the certificate has no jellyfin.nodea.$DOMAIN name: $SANS"
     # The key is the one secret here. Only the last digit matters: any "other" bit set means every
     # local account can read it. 600 (default) and 640 (`[cert] group`) both pass; 644 must not.
     MODE=$(stat -c '%a' "$TMP/a/certs/key.pem")

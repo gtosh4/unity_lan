@@ -50,7 +50,32 @@ pub fn label_error(label: &str) -> String {
     )
 }
 
-/// A service as announced to peers: the label, and where it listens.
+/// What a service is, which decides whether its name needs a certificate.
+///
+/// Only two, and the split is not cosmetic: a `Web` name goes into a publicly-trusted certificate,
+/// which means it is registered with the coordinator (the only party that may publish an ACME
+/// challenge for it) and published to Certificate Transparency logs **permanently**. A `Port`
+/// service is announced peer-to-peer and nowhere else. So this is the field that decides whether a
+/// name leaves the mesh at all.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServiceKind {
+    /// A plain port — a game server, SSH, anything spoken over the mesh by name and port.
+    #[default]
+    Port,
+    /// Something a browser opens. Its name is certified, so it must be registered.
+    Web,
+}
+
+impl ServiceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Port => "port",
+            Self::Web => "web",
+        }
+    }
+}
+
+/// A service as announced to peers: the label, what it is, and where it listens.
 ///
 /// The scope is deliberately absent. A device answers [`crate::p2p::ReqBody::GetServices`] only to
 /// peers that may reach the service, so who-can-see-it is enforced where the data lives rather than
@@ -60,6 +85,10 @@ pub struct MeshService {
     pub name: String,
     pub proto: Proto,
     pub port: u16,
+    /// Absent from an older peer's announcement, which read as a plain port because that is all
+    /// there was.
+    #[serde(default)]
+    pub kind: ServiceKind,
 }
 
 #[cfg(test)]

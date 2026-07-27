@@ -114,6 +114,7 @@ impl State {
                     },
                     label: "Engineering @ acme".into(),
                     name: Some("wiki".into()),
+                    kind: common::service::ServiceKind::Web,
                     active: true,
                 },
                 ExposedPort {
@@ -125,6 +126,7 @@ impl State {
                     },
                     label: "Gaming @ playhouse".into(),
                     name: Some("wiki".into()),
+                    kind: common::service::ServiceKind::Web,
                     active: true,
                 },
                 ExposedPort {
@@ -133,6 +135,7 @@ impl State {
                     scope: ExposeScope::OwnDevices,
                     label: common::control::OWN_DEVICES_LABEL.into(),
                     name: None,
+                    kind: common::service::ServiceKind::Port,
                     active: true,
                 },
             ],
@@ -432,6 +435,7 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                     port,
                     scope,
                     name,
+                    kind,
                 } => {
                     s.exposed
                         .retain(|e| !(e.proto == proto && e.port == port && e.scope == scope));
@@ -459,6 +463,7 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                         scope,
                         label,
                         name,
+                        kind,
                         active: true,
                     });
                     format!("exposed {what}")

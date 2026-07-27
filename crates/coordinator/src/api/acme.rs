@@ -73,6 +73,20 @@ pub(super) async fn acme_challenge(
         .map(|value| (device_challenge.clone(), value.clone()))
         .collect();
 
+    // Web service names, from this device's own registrations — same rule as everything else here:
+    // the caller sends values, the names come from our rows. `req.services` is keyed by label so a
+    // device can only supply a value *for a name it already holds*; a label it does not hold has
+    // nowhere to land.
+    let held = st.store.device_services(&pubkey).await.map_err(internal)?;
+    for (label, value) in &req.services {
+        if held.iter().any(|h| h == label) {
+            records.push((
+                challenge_name(&format!("{label}.{username}"), &dns.domain),
+                value.clone(),
+            ));
+        }
+    }
+
     // The bare `<user>` alias is the primary device's alone, so a non-primary device asking for it
     // is ignored rather than honoured — otherwise any of an owner's devices could hold a certificate
     // for the name that is supposed to identify one of them.
@@ -101,6 +115,54 @@ pub(super) async fn acme_challenge(
         }
     }
     Ok(Json(AcmeChallengeResp { names }))
+}
+
+/// `POST /services`: record which **web** service names this device serves, so its certificate can
+/// name them.
+///
+/// The only service state the coordinator holds, and it exists for one reason: a CA validates a name
+/// by reading a TXT record that only this process can publish, so a name that wants a certificate
+/// has to be known here. Plain port services never reach this route — they are announced device to
+/// device and the coordinator never learns they exist.
+///
+/// Refusals are reported, not errors. A label another of the owner's devices already holds still
+/// runs and still resolves peer-to-peer; it just will not be certified, and saying so is more useful
+/// than failing the whole request.
+pub(super) async fn register_services(
+    State(st): State<AppState>,
+    Json(req): Json<common::api::ServiceRegisterReq>,
+) -> Result<Json<common::api::ServiceRegisterResp>, ApiError> {
+    if st.dns.is_none() {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "this deployment issues no certificates ([dns] is not configured)",
+        ));
+    }
+    if req.names.len() > common::api::MAX_WEB_SERVICES_PER_DEVICE {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a device may certify at most {} service names",
+                common::api::MAX_WEB_SERVICES_PER_DEVICE
+            ),
+        ));
+    }
+    let (user_id, pubkey) = st
+        .store
+        .device_by_token(&req.token)
+        .await
+        .map_err(internal)?
+        .ok_or_else(|| ApiError::new(StatusCode::UNAUTHORIZED, "invalid device token"))?;
+
+    let (registered, refused) = st
+        .store
+        .set_device_services(user_id, &pubkey, &req.names)
+        .await
+        .map_err(internal)?;
+    Ok(Json(common::api::ServiceRegisterResp {
+        registered,
+        refused,
+    }))
 }
 
 /// `_acme-challenge.<name>.<domain>`, lower-case and without a trailing dot — the key form

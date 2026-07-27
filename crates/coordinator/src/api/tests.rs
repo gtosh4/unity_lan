@@ -223,6 +223,15 @@ impl TestCoordinator {
             .expect("device was issued a token")
     }
 
+    /// `POST /services` — register this device's web service labels.
+    async fn services(&self, pubkey: u8, names: &[&str]) -> (StatusCode, String) {
+        self.send(
+            "/services",
+            serde_json::json!({ "token": self.token(pubkey), "names": names }),
+        )
+        .await
+    }
+
     /// `POST /acme-challenge` for a device.
     async fn acme(&self, pubkey: u8, primary: Option<&str>) -> (StatusCode, String) {
         self.send(
@@ -311,6 +320,94 @@ async fn the_bare_user_alias_is_only_published_for_the_primary_device() {
     assert!(
         !body.contains("_acme-challenge.user7.mesh.example.com"),
         "{body}"
+    );
+}
+
+#[tokio::test]
+async fn a_service_name_is_one_owners_to_give_and_the_device_name_wins() {
+    // The registry exists so the coordinator knows which names a device's certificate may cover.
+    // Two rules make that safe, and both are refusals rather than reassignments: a name another of
+    // the owner's devices holds is not taken from it, and a service can never take a *device* name,
+    // which is allocated here and carried in signed attestations.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+    c.enrol(2, 7, "desktop").await;
+
+    let (status, body) = c.services(1, &["jellyfin", "git"]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.contains("jellyfin") && body.contains("git"), "{body}");
+
+    // The owner's *other* device asks for one of the same names, plus a device name.
+    let (status, body) = c.services(2, &["jellyfin", "laptop", "media"]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let registered: Vec<&str> = v["registered"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s.as_str().unwrap())
+        .collect();
+    assert_eq!(registered, vec!["media"], "{body}");
+    let refused: Vec<&str> = v["refused"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(refused, vec!["jellyfin", "laptop"], "{body}");
+}
+
+#[tokio::test]
+async fn registering_replaces_the_set_so_a_withdrawn_service_stops_being_certifiable() {
+    // Replacement rather than merge: a device that stops serving something simply stops listing it,
+    // and the name becomes available to its siblings again.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+    c.enrol(2, 7, "desktop").await;
+
+    c.services(1, &["jellyfin"]).await;
+    c.services(1, &[]).await; // withdrawn
+
+    let (_, body) = c.services(2, &["jellyfin"]).await;
+    assert!(
+        body.contains("\"registered\":[\"jellyfin\"]"),
+        "the sibling can take a withdrawn name: {body}"
+    );
+}
+
+#[tokio::test]
+async fn a_challenge_is_published_only_for_a_service_the_device_registered() {
+    // The security property the registry is for: the request carries a *value* keyed by label, and
+    // a label this device does not hold has nowhere to land — so it cannot obtain a certificate for
+    // a name that is not its own.
+    let c = TestCoordinator::new(&[(7, true)])
+        .await
+        .with_dns("mesh.example.com", 40);
+    c.enrol(1, 7, "laptop").await;
+    c.services(1, &["jellyfin"]).await;
+
+    let (status, body) = c
+        .send(
+            "/acme-challenge",
+            serde_json::json!({
+                "token": c.token(1),
+                "device": ["device-value"],
+                "services": { "jellyfin": "held-value", "notmine": "stolen-value" },
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(
+        body.contains("_acme-challenge.jellyfin.user7.mesh.example.com"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("notmine"),
+        "a label this device never registered must not be published: {body}"
     );
 }
 

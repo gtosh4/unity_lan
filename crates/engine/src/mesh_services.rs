@@ -246,6 +246,7 @@ mod tests {
             name: "mc".into(),
             proto: common::control::Proto::Tcp,
             port: 25565,
+            kind: Default::default(),
         };
         assert!(book.set([1u8; 32], vec![svc.clone()], now), "first sight");
         assert!(!book.set([1u8; 32], vec![svc.clone()], now), "identical");

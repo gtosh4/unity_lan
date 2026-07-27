@@ -28,6 +28,7 @@ use common::control::{
     ConnectedResp, ExposeOp, ExposeResp, ExposeScope, ExposedPort, LoginResp, NetworkResp, Proto,
     RemoveScope, StatusReport,
 };
+use common::service::ServiceKind;
 use iced::window;
 use iced::{Subscription, Task, Theme};
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -166,6 +167,9 @@ struct App {
     expose_scopes: Vec<ExposeScope>,
     /// Whether the scope picker is expanded.
     expose_scope_open: bool,
+    /// Whether the service being composed is a web service — its name goes into this device's
+    /// certificate, and so into public Certificate Transparency logs, permanently.
+    service_web: bool,
     /// Draft name for the service being composed. Shares the port/proto/scope drafts with the
     /// exposure form: a service *is* an exposure with a name, and two parallel drafts of the same
     /// thing would only be two things to keep in step.
@@ -273,6 +277,7 @@ enum Message {
     ExposeScopeToggle(ExposeScope, bool),
     ExposeSubmit,
     ServiceNameInput(String),
+    ServiceWeb(bool),
     ServiceSubmit,
     RemoveService(String),
     Unexpose {
@@ -368,6 +373,7 @@ impl App {
             expose_proto: Proto::Tcp,
             expose_scopes: Vec::new(),
             service_name_input: String::new(),
+            service_web: false,
             expose_scope_open: false,
             login_url: None,
             connect_busy: false,
@@ -539,6 +545,7 @@ impl App {
                                     port,
                                     scope,
                                     name: None,
+                                    kind: ServiceKind::Port,
                                 },
                             ),
                             Message::ExposesFetched,
@@ -550,6 +557,7 @@ impl App {
                 return Task::batch(ops);
             }
             Message::ServiceNameInput(s) => self.service_name_input = s,
+            Message::ServiceWeb(v) => self.service_web = v,
             Message::ServiceSubmit => {
                 let name = self.service_name_input.trim().to_string();
                 if !common::service::valid_label(&name) {
@@ -569,6 +577,11 @@ impl App {
                 }
                 let proto = self.expose_proto;
                 let socket = self.socket.clone();
+                let kind = if self.service_web {
+                    ServiceKind::Web
+                } else {
+                    ServiceKind::Port
+                };
                 let ops: Vec<Task<Message>> = self
                     .expose_scopes
                     .drain(..)
@@ -581,6 +594,7 @@ impl App {
                                     port,
                                     scope,
                                     name: Some(name.clone()),
+                                    kind,
                                 },
                             ),
                             Message::ExposesFetched,
@@ -589,6 +603,7 @@ impl App {
                     .collect();
                 self.expose_port_input.clear();
                 self.service_name_input.clear();
+                self.service_web = false;
                 self.expose_scope_open = false;
                 return Task::batch(ops);
             }
@@ -1067,6 +1082,7 @@ mod tests {
             message: "ok".into(),
             exposed: vec![ExposedPort {
                 name: None,
+                kind: ServiceKind::Port,
                 proto: Proto::Tcp,
                 port: 25565,
                 scope: ExposeScope::Net {

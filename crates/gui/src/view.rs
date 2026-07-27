@@ -918,6 +918,30 @@ impl App {
         for e in [name_err, port_err].into_iter().flatten() {
             col = col.push(text(e).size(13).color(RED));
         }
+        // The web toggle only appears where it can do anything: it puts the name in this device's
+        // certificate, so it needs a deployment that issues them and the opt-in already on.
+        if self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.cert.domain.is_some() && s.cert.enabled)
+        {
+            col = col.push(
+                checkbox(
+                    "It's a website — put this name in my HTTPS certificate",
+                    self.service_web,
+                )
+                .on_toggle(Message::ServiceWeb)
+                .size(16)
+                .text_size(13),
+            );
+            if self.service_web {
+                col = col.push(
+                    text("Publishes this service's name to public certificate logs, permanently.")
+                        .size(12)
+                        .color(AMBER),
+                );
+            }
+        }
         col.into()
     }
 

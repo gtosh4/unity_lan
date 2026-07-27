@@ -399,6 +399,16 @@ resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); ho
     depending on who asked. Lowest public key wins: arbitrary, total, identically computed
     everywhere, and stable as peers come and go. The loser is shown as shadowed rather than hidden.
   - **The cost is latency, not trust.** With no push, a peer learns a new name on its next poll.
+  - **A `web` service is the one exception, and only for certificates.** A name a browser opens needs
+    a publicly-trusted certificate, and a CA validates it by reading a TXT record only the
+    coordinator can publish — so a web service *is* registered (`POST /services`, `device_services`),
+    and its label is the whole of what the coordinator stores. The same derivation rule holds: the
+    `/acme-challenge` request carries a **value keyed by label**, and a label the coordinator's rows
+    do not assign to that device has nowhere to land. Registration refuses rather than reassigns
+    (another of the owner's devices holds it, or it collides with a device name), so a name never
+    moves out from under whatever was answering to it. Reissue is **batched** (`cert::SETTLE`): the
+    CA's per-registered-domain cap is shared by the whole deployment, so naming three services in a
+    row must cost one certificate, not three.
 - **One label below a device name resolves to that device**, under both suffixes — so
   `plex.<device>.<user>` reaches the machine and a reverse proxy on it can route by name. Scoped to
   exactly what the certificate wildcard covers (§6.5), and to *device* names only: the bare `<user>`

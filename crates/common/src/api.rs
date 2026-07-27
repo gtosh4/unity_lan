@@ -383,7 +383,56 @@ pub struct AcmeChallengeReq {
     /// has two distinct values. Ignored unless this device is the owner's primary.
     #[serde(default)]
     pub primary: Option<String>,
+    /// Challenge values for this device's registered **web** services, keyed by label
+    /// (`{"jellyfin": "<value>"}`). Keyed rather than positional so a value can only ever be
+    /// published for a name the coordinator already knows this device holds — a label it has not
+    /// registered has nowhere to land, and is ignored rather than trusted.
+    #[serde(default)]
+    pub services: std::collections::BTreeMap<String, String>,
 }
+
+/// `POST /services`: register the **web** service names this device serves, so the coordinator will
+/// publish an ACME challenge for each when the device orders a certificate.
+///
+/// Only web services appear here. A plain port service is announced peer-to-peer and the coordinator
+/// never learns it exists — this route is the narrow exception that certificates force, since a CA
+/// checks a TXT record only the coordinator can publish.
+///
+/// The request **replaces** this device's set rather than adding to it, so withdrawing a service is
+/// the same operation as adding one and there is no way to leak a registration the device no longer
+/// serves.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceRegisterReq {
+    /// The requesting device's bearer token (identifies the owner + device, and authenticates).
+    pub token: String,
+    /// The bare labels — `["jellyfin", "git"]`. The coordinator composes the names itself, from this
+    /// device's own allocation, exactly as it does for hostnames.
+    pub names: Vec<String>,
+}
+
+/// Which labels the device now holds, and which it was refused.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ServiceRegisterResp {
+    /// Labels now registered to this device.
+    pub registered: Vec<String>,
+    /// Labels refused, each with why — another of the owner's devices holds it, or it collides with
+    /// one of their device names. Reported rather than silently dropped: the service still runs and
+    /// resolves peer-to-peer, it just will not be in the certificate, and only its owner can fix
+    /// that.
+    #[serde(default)]
+    pub refused: Vec<RefusedService>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefusedService {
+    pub name: String,
+    pub reason: String,
+}
+
+/// How many web services one device may register. Each one is a name in a certificate and a
+/// permanent Certificate Transparency entry, so the bound is deliberately tighter than the
+/// peer-to-peer [`crate::service::MAX_SERVICES_PER_DEVICE`].
+pub const MAX_WEB_SERVICES_PER_DEVICE: usize = 8;
 
 /// How many values one request may publish at the device's challenge name. Two is what an order for
 /// `<device>.<user>.<domain>` plus its wildcard raises; the cap is here so a client cannot grow the

@@ -384,6 +384,11 @@ fn build_firewall(cfg: &Config) -> anyhow::Result<Option<Arc<Firewall>>> {
                     }
                     other => other.clone(),
                 },
+                kind: if e.web {
+                    common::service::ServiceKind::Web
+                } else {
+                    common::service::ServiceKind::Port
+                },
             })
         })
         .collect::<anyhow::Result<_>>()
@@ -1646,9 +1651,38 @@ fn spawn_cert_reconcile(ctx: &MeshCtx<'_>, device: &SelfDevice) {
     let hostname = device.hostname.clone();
     let primary_alias = device.primary_alias.clone();
     let dns_domain = device.dns_domain.clone();
+    let web = ctx
+        .fw
+        .as_ref()
+        .map(|fw| fw.web_service_labels())
+        .unwrap_or_default();
     tokio::spawn(async move {
         let token = cert.token.read().await.clone();
         if let Some(token) = token {
+            // Register the web labels before ordering: the certificate may only name what the
+            // coordinator agrees is ours, since it will not publish a challenge for anything else —
+            // and an unregistered name would fail the *whole* order, not just itself. A registration
+            // that fails (coordinator down) leaves those names out of this round's certificate; the
+            // services keep working and resolving, they are simply not certified yet.
+            let mut services = Vec::new();
+            if !web.is_empty() {
+                match crate::coord::register_services(&cert.coordinator, token.clone(), web).await {
+                    Ok(resp) => {
+                        for r in &resp.refused {
+                            tracing::warn!(
+                                service = %r.name,
+                                "this service will not be in the certificate: {}",
+                                r.reason
+                            );
+                        }
+                        services = resp.registered;
+                    }
+                    Err(e) => tracing::warn!(
+                        "could not register web services with the coordinator ({e:#}); \
+                         they stay uncertified until it is reachable"
+                    ),
+                }
+            }
             let report = crate::cert::reconcile(crate::cert::Reconcile {
                 state_dir: &cert.state_dir,
                 coordinator: &cert.coordinator,
@@ -1659,6 +1693,7 @@ fn spawn_cert_reconcile(ctx: &MeshCtx<'_>, device: &SelfDevice) {
                 dns_domain: dns_domain.as_deref(),
                 enabled,
                 exposed,
+                services,
             })
             .await;
             control::set_cert_status(&status, report);

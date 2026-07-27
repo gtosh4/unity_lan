@@ -259,6 +259,13 @@ enum ServiceCmd {
         /// Restrict it to the owner's own other devices instead of a network.
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
+        /// This is something a browser opens, so put its name in this device's HTTPS certificate.
+        ///
+        /// Requires `ctl cert on`. Publishes the name to public Certificate Transparency logs
+        /// **permanently** — that is how every publicly-trusted certificate works — so it is asked
+        /// for rather than assumed.
+        #[arg(long)]
+        web: bool,
     },
     /// Stop serving a name, closing every port it was opened on.
     Rm {
@@ -839,6 +846,7 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
                         port,
                         scope,
                         name,
+                        kind: common::service::ServiceKind::Port,
                     },
                 )
                 .await?,
@@ -850,6 +858,7 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             net,
             guild,
             own_devices,
+            web,
         }) => {
             // Refused here as well as in the daemon so a typo costs a round trip and a clear
             // message, not an error the socket has to phrase.
@@ -866,6 +875,11 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
                         port,
                         scope,
                         name: Some(name),
+                        kind: if web {
+                            common::service::ServiceKind::Web
+                        } else {
+                            common::service::ServiceKind::Port
+                        },
                     },
                 )
                 .await?,

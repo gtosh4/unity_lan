@@ -43,16 +43,35 @@ pub struct CertNames {
     pub device: String,
     #[serde(default)]
     pub primary: Option<String>,
+    /// Full names for this device's **web** services — `jellyfin.alice.<domain>`. Only labels the
+    /// coordinator confirmed are ours appear here: it will not publish a challenge for anything
+    /// else, so ordering one would fail the whole certificate rather than just that name.
+    #[serde(default)]
+    pub services: Vec<String>,
 }
 
 impl CertNames {
     /// Build the names for this device under `domain`, from the mesh names it already answers to.
     /// `hostname` and `primary_alias` are the `unity.internal` names; the certificate covers the same
-    /// stems under the deployment's public domain.
-    pub fn new(hostname: &str, primary_alias: Option<&str>, domain: &str) -> Option<Self> {
+    /// stems under the deployment's public domain. `services` are bare labels the coordinator has
+    /// confirmed this device holds.
+    pub fn new(
+        hostname: &str,
+        primary_alias: Option<&str>,
+        domain: &str,
+        services: &[String],
+    ) -> Option<Self> {
+        let device = swap_suffix(hostname, domain)?;
+        // A service name sits under the *user*, not the device — `jellyfin.alice`, beside
+        // `laptop.alice` — so it is built from the user part of our own hostname.
+        let user = device.split_once('.').map(|(_, rest)| rest.to_string())?;
         Some(Self {
-            device: swap_suffix(hostname, domain)?,
+            device,
             primary: primary_alias.and_then(|a| swap_suffix(a, domain)),
+            services: services
+                .iter()
+                .map(|label| format!("{label}.{user}").to_ascii_lowercase())
+                .collect(),
         })
     }
 
@@ -67,14 +86,16 @@ impl CertNames {
     }
 
     fn identifiers(&self) -> Vec<Identifier> {
-        let mut ids = vec![
-            Identifier::Dns(self.device.clone()),
-            Identifier::Dns(self.wildcard()),
-        ];
-        if let Some(primary) = &self.primary {
-            ids.push(Identifier::Dns(primary.clone()));
-        }
-        ids
+        self.all().into_iter().map(Identifier::Dns).collect()
+    }
+
+    /// The bare label for one of our service names, or `None` if we did not order it.
+    fn service_label(&self, name: &str) -> Option<String> {
+        self.services
+            .iter()
+            .find(|s| *s == name)
+            .and_then(|s| s.split_once('.'))
+            .map(|(label, _)| label.to_string())
     }
 
     /// Every name the certificate covers, in the order it names them.
@@ -82,6 +103,7 @@ impl CertNames {
         std::iter::once(self.device.clone())
             .chain(std::iter::once(self.wildcard()))
             .chain(self.primary.clone())
+            .chain(self.services.iter().cloned())
             .collect()
     }
 }
@@ -113,6 +135,11 @@ pub struct IssuedState {
     pub last_failure: u64,
     #[serde(default)]
     pub failures: u32,
+    /// When the wanted name set first stopped matching the held certificate (unix secs); `0` when
+    /// they agree. Drives the [`SETTLE`] wait, and is persisted so a restart mid-setup does not
+    /// forget it and start the batching window over.
+    #[serde(default)]
+    pub pending_since: u64,
 }
 
 impl IssuedState {
@@ -226,6 +253,7 @@ pub async fn issue(
     // per authorization would spend two units on a single certificate.
     let mut device_values = Vec::new();
     let mut primary_value = None;
+    let mut service_values = std::collections::BTreeMap::new();
     let mut authorizations = order.authorizations();
     while let Some(result) = authorizations.next().await {
         let mut authz = result.context("reading an ACME authorization")?;
@@ -251,11 +279,15 @@ pub async fn issue(
             device_values.push(value);
         } else if Some(&identifier) == names.primary.as_ref() {
             primary_value = Some(value);
+        } else if let Some(label) = names.service_label(&identifier) {
+            // Keyed by label: the coordinator publishes this only if its own rows say we hold the
+            // name, so a value can never land on somebody else's.
+            service_values.insert(label, value);
         } else {
             anyhow::bail!("the CA asked us to validate {identifier:?}, which we did not order");
         }
     }
-    if device_values.is_empty() {
+    if device_values.is_empty() && service_values.is_empty() {
         // Every authorization was already valid — the CA is reusing a recent one, so nothing to
         // publish and the order is ready to finalize.
         return finalize(state_dir, &mut order).await;
@@ -268,9 +300,15 @@ pub async fn issue(
         );
     }
 
-    crate::coord::acme_challenge(coordinator, token, device_values, primary_value)
-        .await
-        .context("asking the coordinator to publish the challenge")?;
+    crate::coord::acme_challenge(
+        coordinator,
+        token,
+        device_values,
+        primary_value,
+        service_values,
+    )
+    .await
+    .context("asking the coordinator to publish the challenge")?;
 
     // Pass two: tell the CA to check, now that the records are live.
     let mut authorizations = order.authorizations();
@@ -393,7 +431,17 @@ pub struct Reconcile<'a> {
     /// Whether the owner opted in, and whether anything is actually listening.
     pub enabled: bool,
     pub exposed: bool,
+    /// Web service labels the coordinator confirmed are ours, to be named in the certificate.
+    pub services: Vec<String>,
 }
+
+/// How long a changed name set must hold still before it is worth a certificate.
+///
+/// Naming three services in a row is one intent, but each change makes the previous certificate
+/// wrong — issuing per change would spend three of the CA's weekly allowance on the first two
+/// minutes of setup, and that allowance is shared by every device on the deployment. Waiting a few
+/// minutes costs nothing a person notices and turns a burst into one order.
+pub const SETTLE: Duration = Duration::from_secs(10 * 60);
 
 /// Decide what to do, and say why when the answer is "nothing".
 ///
@@ -407,6 +455,27 @@ pub enum Action {
     Issue(CertNames),
 }
 
+/// Stamp (or clear) when the wanted names stopped matching the held certificate, so [`decide`] can
+/// tell a set that just changed from one that has settled. Returns whether the stamp moved, which is
+/// the caller's cue to persist.
+///
+/// Split out rather than folded into `decide` so that stays a pure function of state — every gate in
+/// it is a rate limit, and a policy you cannot evaluate twice for the same answer is one you cannot
+/// test.
+pub fn note_pending(r: &Reconcile<'_>, state: &mut IssuedState, now: u64) -> bool {
+    let wanted = r
+        .dns_domain
+        .and_then(|d| CertNames::new(r.hostname, r.primary_alias, d, &r.services));
+    let matches = wanted.is_some() && wanted.as_ref() == state.names.as_ref();
+    let before = state.pending_since;
+    if matches || state.names.is_none() {
+        state.pending_since = 0;
+    } else if state.pending_since == 0 {
+        state.pending_since = now;
+    }
+    state.pending_since != before
+}
+
 pub fn decide(r: &Reconcile<'_>, state: &IssuedState, now: u64) -> Action {
     let Some(domain) = r.dns_domain else {
         return Action::Idle(None); // the feature does not exist on this deployment
@@ -414,7 +483,7 @@ pub fn decide(r: &Reconcile<'_>, state: &IssuedState, now: u64) -> Action {
     if !r.enabled {
         return Action::Idle(None); // not opted in; nothing to explain
     }
-    let Some(names) = CertNames::new(r.hostname, r.primary_alias, domain) else {
+    let Some(names) = CertNames::new(r.hostname, r.primary_alias, domain, &r.services) else {
         return Action::Idle(Some("this device has no mesh name yet".into()));
     };
 
@@ -433,6 +502,19 @@ pub fn decide(r: &Reconcile<'_>, state: &IssuedState, now: u64) -> Action {
     }
     if held && !renew_due {
         return Action::Idle(None);
+    }
+    // A name set that changed under a *live* certificate waits for the churn to stop. Renewal and
+    // first issuance are exempt: there is nothing to protect in the first case (the certificate is
+    // expiring anyway) and nothing to wait for in the second.
+    if !held && state.expires_at > now && !renew_due {
+        let waited = now.saturating_sub(state.pending_since);
+        if waited < SETTLE.as_secs() {
+            let mins = (SETTLE.as_secs().saturating_sub(waited) / 60).max(1);
+            return Action::Idle(Some(format!(
+                "the services this certificate covers changed; reissuing in about {mins} minutes \
+                 (batched, so naming a few in a row costs one certificate)"
+            )));
+        }
     }
     // Back off after a failure. A CA caps duplicate certificates at roughly five a week, so a tight
     // retry loop locks this device out for days — far worse than waiting.
@@ -465,6 +547,10 @@ pub async fn reconcile(r: Reconcile<'_>) -> common::control::CertStatus {
         }
     }
 
+    if note_pending(&r, &mut state, common::now_unix()) {
+        // Persisted so the batching window survives a restart mid-setup rather than starting over.
+        let _ = save_state(r.state_dir, &state);
+    }
     let names = match decide(&r, &state, common::now_unix()) {
         Action::Idle(why) => {
             status.blocked = why;
@@ -491,6 +577,7 @@ pub async fn reconcile(r: Reconcile<'_>) -> common::control::CertStatus {
                 expires_at,
                 last_failure: 0,
                 failures: 0,
+                pending_since: 0,
             };
             if let Err(e) = save_state(r.state_dir, &state) {
                 tracing::warn!("certificate: could not record issuance: {e:#}");
@@ -534,6 +621,7 @@ mod tests {
             "laptop.gordon.unity.internal",
             Some("gordon.unity.internal"),
             "mesh.example.com",
+            &[],
         )
         .unwrap();
         assert_eq!(names.device, "laptop.gordon.mesh.example.com");
@@ -542,8 +630,13 @@ mod tests {
 
     #[test]
     fn a_non_primary_device_orders_its_own_name_and_its_wildcard() {
-        let names =
-            CertNames::new("desktop.gordon.unity.internal", None, "mesh.example.com").unwrap();
+        let names = CertNames::new(
+            "desktop.gordon.unity.internal",
+            None,
+            "mesh.example.com",
+            &[],
+        )
+        .unwrap();
         assert_eq!(names.identifiers().len(), 2);
         assert!(names.primary.is_none());
         assert_eq!(
@@ -564,6 +657,7 @@ mod tests {
             "laptop.gordon.unity.internal",
             Some("gordon.unity.internal"),
             "mesh.example.com",
+            &[],
         )
         .unwrap();
         assert_eq!(names.wildcard(), "*.laptop.gordon.mesh.example.com");
@@ -585,6 +679,7 @@ mod tests {
             dns_domain: domain,
             enabled,
             exposed,
+            services: Vec::new(),
         }
     }
 
@@ -597,7 +692,95 @@ mod tests {
     }
 
     fn names() -> CertNames {
-        CertNames::new("laptop.gordon.unity.internal", None, "mesh.example.com").unwrap()
+        CertNames::new(
+            "laptop.gordon.unity.internal",
+            None,
+            "mesh.example.com",
+            &[],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_web_service_is_named_under_the_user_not_the_device() {
+        // `jellyfin.gordon`, beside `laptop.gordon` — not `jellyfin.laptop.gordon`. The service
+        // belongs to the owner and may move between their devices; the name should not have to
+        // change when it does.
+        let names = CertNames::new(
+            "laptop.gordon.unity.internal",
+            None,
+            "mesh.example.com",
+            &["jellyfin".to_string(), "git".to_string()],
+        )
+        .unwrap();
+        assert_eq!(
+            names.services,
+            vec![
+                "jellyfin.gordon.mesh.example.com".to_string(),
+                "git.gordon.mesh.example.com".to_string(),
+            ]
+        );
+        assert!(names
+            .all()
+            .contains(&"jellyfin.gordon.mesh.example.com".to_string()));
+    }
+
+    /// Naming three services in a row is one intent; issuing per change would spend three of the
+    /// CA's weekly allowance — shared by the whole deployment — on the first minutes of setup.
+    #[test]
+    fn a_changed_service_set_batches_instead_of_reissuing_per_change() {
+        let mut r = recon(true, true, Some("mesh.example.com"));
+        let mut state = held(names(), 60 * 24 * 3600); // a live certificate, nowhere near renewal
+        assert!(
+            matches!(decide(&r, &state, NOW), Action::Idle(None)),
+            "settled"
+        );
+
+        // The owner names a web service: the held certificate no longer covers what we want.
+        r.services = vec!["jellyfin".to_string()];
+        assert!(note_pending(&r, &mut state, NOW), "stamped when it changed");
+        assert_eq!(state.pending_since, NOW);
+        assert!(
+            matches!(decide(&r, &state, NOW + 60), Action::Idle(Some(_))),
+            "still inside the settle window"
+        );
+
+        // A second service a minute later does not restart the clock — the window is about the
+        // burst, not the latest change.
+        r.services = vec!["jellyfin".to_string(), "git".to_string()];
+        assert!(!note_pending(&r, &mut state, NOW + 60), "stamp unchanged");
+        assert_eq!(state.pending_since, NOW);
+
+        // Once it settles, one order covers both.
+        match decide(&r, &state, NOW + SETTLE.as_secs()) {
+            Action::Issue(names) => assert_eq!(names.services.len(), 2),
+            other => panic!(
+                "expected an issue after the settle window, got {:?}",
+                matches!(other, Action::Idle(_))
+            ),
+        }
+    }
+
+    /// First issuance has nothing to batch and nothing to protect, so it must not wait.
+    #[test]
+    fn a_device_with_no_certificate_yet_does_not_wait_out_the_settle_window() {
+        let mut r = recon(true, true, Some("mesh.example.com"));
+        r.services = vec!["jellyfin".to_string()];
+        let mut state = IssuedState::default();
+        note_pending(&r, &mut state, NOW);
+        assert_eq!(state.pending_since, 0, "nothing held, nothing pending");
+        assert!(matches!(decide(&r, &state, NOW), Action::Issue(_)));
+    }
+
+    /// ...and neither does a renewal: that certificate is expiring regardless, so waiting only eats
+    /// into the margin.
+    #[test]
+    fn a_renewal_is_not_held_up_by_a_changed_service_set() {
+        let mut r = recon(true, true, Some("mesh.example.com"));
+        r.services = vec!["jellyfin".to_string()];
+        let mut state = held(names(), RENEW_BEFORE.as_secs() - 3600);
+        note_pending(&r, &mut state, NOW);
+        assert!(matches!(decide(&r, &state, NOW), Action::Issue(_)));
     }
 
     #[test]
@@ -658,7 +841,13 @@ mod tests {
         // weekly budget on cosmetics.
         let r = recon(true, true, Some("mesh.example.com"));
         let stale = held(
-            CertNames::new("laptop.oldname.unity.internal", None, "mesh.example.com").unwrap(),
+            CertNames::new(
+                "laptop.oldname.unity.internal",
+                None,
+                "mesh.example.com",
+                &[],
+            )
+            .unwrap(),
             60 * 86_400,
         );
         // The device's *own* name changed, so this one does reissue — that is the deliberate case.

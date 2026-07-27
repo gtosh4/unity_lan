@@ -120,6 +120,11 @@ pub enum ExposeOp {
         /// before names existed and what one stays until it is named.
         #[serde(default)]
         name: Option<String>,
+        /// Whether this is something a browser opens. A `web` service is registered with the
+        /// coordinator and named in this device's certificate, which puts it in public
+        /// Certificate Transparency logs permanently — so it is asked for explicitly.
+        #[serde(default)]
+        kind: crate::service::ServiceKind,
     },
     Remove {
         proto: Proto,
@@ -157,6 +162,9 @@ pub struct ExposedPort {
     /// The service name, when this port has one.
     #[serde(default)]
     pub name: Option<String>,
+    /// What kind of service it is — a `web` one is named in the device's certificate.
+    #[serde(default)]
+    pub kind: crate::service::ServiceKind,
     /// False when a scoped exposure currently has no eligible source peers.
     pub active: bool,
 }

@@ -23,6 +23,17 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   front door, and ports you exposed before this release keep running exactly as they were until you
   choose to name them.
 
+  **A service that's a website can be in your HTTPS certificate.** Add `--web` (or tick the box in
+  the Services tab) and `jellyfin.alice.mesh.unitylan.com` gets a real, publicly-trusted certificate
+  — no warning page. This is the one part of services the coordinator has to know about, since only
+  it can publish the DNS record a certificate authority checks, and it holds nothing beyond the name
+  itself. Off unless you ask: a certified name goes into public certificate logs permanently, the
+  same trade the per-device certificate already made.
+
+  Naming several web services in a row costs **one** certificate, not one each — the engine waits
+  about ten minutes for you to finish before reissuing, because certificate authorities cap how many
+  a domain may have per week and that cap is shared by everyone on your coordinator.
+
 - Mesh services can now serve **real HTTPS**, with a certificate browsers already trust — no warning
   page, no root certificate to install on every machine. Tick "Get an HTTPS certificate" beside your
   exposed ports (or run `unitylan-engine ctl cert on`), and the device obtains and renews one by

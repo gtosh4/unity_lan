@@ -568,6 +568,7 @@ mod tests {
                 port: 8080,
                 scope,
                 name: None,
+                kind: crate::service::ServiceKind::Port,
             };
             // Reach past the `ExposeOp` enum tag to the payload the old struct would see.
             let v = serde_json::to_value(&op).expect("encodes");

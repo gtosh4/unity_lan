@@ -105,6 +105,25 @@ Names travel peer to peer rather than through the coordinator, so allow up to 30
 reach other people, and expect an offline device to advertise nothing. A device name always wins over
 a service label — you cannot take a machine's own hostname by naming a service after it.
 
+**A service a browser opens wants `--web`:**
+
+```sh
+sudo unitylan-engine ctl cert on                                 # once per device
+sudo unitylan-engine ctl service add jellyfin 8096 --web         # jellyfin.<you>.<domain>
+```
+
+That puts the service's name in this device's certificate, so a browser reaches
+`https://jellyfin.alice.mesh.unitylan.com` with no warning page. It is the one part of services the
+coordinator is told about — only it can publish the DNS record the certificate authority checks — and
+it stores nothing beyond the label. Everything in the certificate section below applies: it is opt-in,
+and the name is published to public Certificate Transparency logs permanently.
+
+Two behaviours to expect. Naming several web services in a row reissues **once**, about ten minutes
+after you stop — CAs cap certificates per domain per week and that cap is shared by every device on
+your coordinator, so a burst is batched rather than spent one at a time. And a label another of your
+devices already registered is refused rather than moved: the service still runs and still resolves,
+it just is not certified, and `ctl services` says so.
+
 These commands find `/etc/unitylan/engine.toml` on their own. An `engine.toml` in the working
 directory wins if there is one, and `-c <path>` overrides both — worth remembering when a command
 seems to be talking to the wrong daemon.

@@ -221,6 +221,11 @@ pub struct ExposeSeed {
     /// (`name = "mc"` → `mc.alice.unity.internal`). Absent leaves it a bare port.
     #[serde(default)]
     pub name: Option<String>,
+    /// Whether this service is something a browser opens, so its name belongs in this device's
+    /// certificate. Off by default and deliberately explicit: a certified name is registered with
+    /// the coordinator and published to public Certificate Transparency logs permanently.
+    #[serde(default)]
+    pub web: bool,
 }
 
 impl ExposeSeed {

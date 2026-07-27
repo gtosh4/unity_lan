@@ -561,9 +561,10 @@ fn apply_expose(
             port,
             scope,
             name,
+            kind,
         } => {
             let scope = resolve_scope(scope, held_nets)?;
-            let exposed = fw.expose(proto, port, scope.clone(), name.clone())?;
+            let exposed = fw.expose(proto, port, scope.clone(), name.clone(), kind)?;
             // Report it the way the caller will recognize it, not as the ids we stored.
             let label = exposed
                 .iter()

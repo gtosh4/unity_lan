@@ -439,6 +439,7 @@ mod tests {
             port,
             scope,
             name: None,
+            kind: common::service::ServiceKind::Port,
         }
     }
 

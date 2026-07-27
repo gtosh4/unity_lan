@@ -240,6 +240,7 @@ pub fn router(state: AppState) -> Router {
         .route("/refresh", post(register::register))
         .route("/devices/manage", post(devices::manage))
         .route("/acme-challenge", post(acme::acme_challenge))
+        .route("/services", post(acme::register_services))
         // interactive login (engine-owned PKCE): pkce-config hands the engine the public client_id;
         // complete verifies the engine's access token and binds pubkey → user.
         .route("/oauth/pkce-config", get(login::oauth_pkce_config))

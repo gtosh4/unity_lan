@@ -255,6 +255,7 @@ mod tests {
                         name: "mc".into(),
                         proto: common::control::Proto::Tcp,
                         port: 25565,
+                        kind: Default::default(),
                     }]
                 } else {
                     Vec::new()
@@ -287,16 +288,19 @@ mod tests {
                     name: "../etc/passwd".into(), // not a label at all
                     proto: common::control::Proto::Tcp,
                     port: 1,
+                    kind: Default::default(),
                 }];
                 out.push(MeshService {
                     name: "good".into(),
                     proto: common::control::Proto::Tcp,
                     port: 2,
+                    kind: Default::default(),
                 });
                 out.extend((0..64).map(|i| MeshService {
                     name: format!("flood{i}"),
                     proto: common::control::Proto::Tcp,
                     port: 3,
+                    kind: Default::default(),
                 }));
                 out
             }
