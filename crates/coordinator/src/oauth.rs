@@ -16,8 +16,17 @@
 
 use anyhow::{anyhow, Context};
 
-/// Verifies a Discord access token into the authenticated user id, and exposes the public
-/// `client_id` the engine needs to run the PKCE flow.
+/// The authenticated identity behind an access token.
+pub struct LoggedIn {
+    pub user_id: u64,
+    /// The account's display handle. Only a login sees this — a personal-scope user is in no guild,
+    /// so no role-source member lookup will ever supply one, and without it their devices would
+    /// answer to `<device>.user-83457612.unity.internal`.
+    pub handle: String,
+}
+
+/// Verifies a Discord access token into the authenticated user, and exposes the public `client_id`
+/// the engine needs to run the PKCE flow.
 #[async_trait::async_trait]
 pub trait OauthProvider: Send + Sync {
     fn client_id(&self) -> &str;
@@ -26,7 +35,7 @@ pub trait OauthProvider: Send + Sync {
     fn is_fake(&self) -> bool {
         false
     }
-    async fn verify(&self, access_token: &str) -> anyhow::Result<u64>;
+    async fn verify(&self, access_token: &str) -> anyhow::Result<LoggedIn>;
 }
 
 /// Live Discord OAuth2 public client (verify-only; no secret).
@@ -47,6 +56,13 @@ impl DiscordOauth {
 #[derive(serde::Deserialize)]
 struct DiscordUser {
     id: String,
+    /// Unique account name (`@name`). Always present.
+    #[serde(default)]
+    username: String,
+    /// The newer display name, absent for accounts that never set one — preferred when it is there,
+    /// since it is what the person calls themselves.
+    #[serde(default)]
+    global_name: Option<String>,
 }
 
 /// `GET /oauth2/@me` response: the authorization info for the bearer token. Unlike `/users/@me`,
@@ -70,7 +86,7 @@ impl OauthProvider for DiscordOauth {
         &self.client_id
     }
 
-    async fn verify(&self, access_token: &str) -> anyhow::Result<u64> {
+    async fn verify(&self, access_token: &str) -> anyhow::Result<LoggedIn> {
         // `/oauth2/@me` returns the token's audience + scopes (and 401s an expired/invalid token,
         // caught by `error_for_status`).
         let info: AuthInfo = self
@@ -98,10 +114,17 @@ impl OauthProvider for DiscordOauth {
             return Err(anyhow!("access token is missing the `identify` scope"));
         }
 
-        info.user
+        let user_id = info
+            .user
             .id
             .parse()
-            .context("Discord user id was not numeric")
+            .context("Discord user id was not numeric")?;
+        let handle = info
+            .user
+            .global_name
+            .filter(|g| !g.is_empty())
+            .unwrap_or(info.user.username);
+        Ok(LoggedIn { user_id, handle })
     }
 }
 
@@ -119,11 +142,15 @@ impl OauthProvider for FakeOauth {
         true
     }
 
-    async fn verify(&self, access_token: &str) -> anyhow::Result<u64> {
-        access_token
+    async fn verify(&self, access_token: &str) -> anyhow::Result<LoggedIn> {
+        let user_id: u64 = access_token
             .strip_prefix("user:")
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| anyhow!("fake oauth expects token 'user:<id>', got '{access_token}'"))
+            .ok_or_else(|| anyhow!("fake oauth expects token 'user:<id>', got '{access_token}'"))?;
+        Ok(LoggedIn {
+            user_id,
+            handle: format!("user{user_id}"),
+        })
     }
 }
 
@@ -134,7 +161,7 @@ mod tests {
     #[tokio::test]
     async fn fake_oauth_parses_user_id() {
         let o = FakeOauth;
-        assert_eq!(o.verify("user:42").await.unwrap(), 42);
+        assert_eq!(o.verify("user:42").await.unwrap().user_id, 42);
         assert!(o.verify("nope").await.is_err());
         assert_eq!(o.client_id(), "fake");
         assert!(o.is_fake());

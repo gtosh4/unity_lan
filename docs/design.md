@@ -150,6 +150,15 @@ Attestation  (Ed25519-signed by the guild coordinator)
   the pinned guild key**, its **`guild_id` == the pinned guild**, **and** it is **unexpired**. The
   `guild_id` check is load-bearing even with per-guild keys (§3.1) — defence in depth against a
   cross-tenant signing bug.
+- **Personal scope (`guild_id = 0`).** A user who holds no network role anywhere still gets an
+  identity, attested under a reserved scope, so someone with nothing but a Discord account can mesh
+  their own devices (own-device peering needs an identity, and an identity needs a signer). `0` can
+  never collide with a real guild — a snowflake carries a timestamp in its high bits and is never
+  zero. Unlike a guild key this is one key per deployment; that is not a weaker boundary in practice,
+  since the coordinator already holds every guild key, and a personal attestation is only ever shown
+  to another device of the same owner. It is issued only to a device that asked for own-device
+  peering: a roleless account with nothing to mesh allocates no address at all (TM-2), and a personal
+  allocation left idle for 30 days is reclaimed.
 - The signed fields are **stable** (identity ↔ pubkey ↔ ip). The coordinator need not know
   a member's live endpoint.
 

@@ -31,6 +31,19 @@ use crate::DNS_SUFFIX;
 pub const ATTESTATION_SCHEMA_V1: u32 = 0;
 pub const ATTESTATION_SCHEMA_V2: u32 = 1;
 
+/// The [`Attestation::guild_id`] a **personal** attestation carries: the scope a user's own devices
+/// are attested under when the user holds no network role anywhere, so someone with nothing but a
+/// Discord account can still mesh their own machines (own-device peering needs an identity, and an
+/// identity needs a scope to be signed under).
+///
+/// `0` is safe to reserve: a Discord snowflake encodes a millisecond timestamp in its high bits and
+/// is never zero, so this can never collide with a real guild. It is one key per *deployment* rather
+/// than one per user — a personal attestation is only ever shown to another device of the same
+/// owner, and the coordinator already holds every guild key, so the per-guild split (which bounds a
+/// leaked *guild* key, not a coordinator compromise) buys nothing here. Scoping it per user instead
+/// would need the `guild_id` slot to carry a namespace tag, i.e. a new attestation schema.
+pub const PERSONAL_SCOPE: u64 = 0;
+
 /// V2 wire form: identical to [`Attestation`] with a leading schema tag. Private to this module —
 /// callers work with `Attestation` and pass a layout, so the tag never leaks into domain code.
 #[derive(Serialize, Deserialize)]

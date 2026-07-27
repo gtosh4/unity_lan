@@ -31,9 +31,34 @@ const GUILD: u64 = 1;
 const ROLE: u64 = 10;
 const TTL: u64 = 600;
 
+/// Counts the role-source lookups a snapshot makes, so a test can assert on the *cost* of a code
+/// path and not only its answer. Membership lookups are the coordinator's per-client Discord traffic
+/// — the thing that multiplies under a herd — and nothing else would notice them growing.
+struct CountingRoles {
+    inner: FakeRoleSource,
+    member_calls: Arc<AtomicU64>,
+}
+
+#[async_trait::async_trait]
+impl crate::roles::RoleSource for CountingRoles {
+    async fn guild_name(&self, guild_id: u64) -> Option<String> {
+        self.inner.guild_name(guild_id).await
+    }
+    async fn member(&self, guild_id: u64, user_id: u64) -> Option<crate::roles::MemberRoles> {
+        self.member_calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.inner.member(guild_id, user_id).await
+    }
+    async fn role_name(&self, guild_id: u64, role_id: u64) -> Option<String> {
+        self.inner.role_name(guild_id, role_id).await
+    }
+}
+
 /// A coordinator wired exactly as `main` wires it, minus the socket.
 struct TestCoordinator {
     state: AppState,
+    /// How many member lookups the role source has served.
+    member_calls: Arc<AtomicU64>,
     /// Device bearer tokens as a client would persist them: issued once at enrollment, then
     /// presented on every later register. Without this the harness would 401 itself, since a
     /// public WG key is not authentication.
@@ -48,20 +73,24 @@ impl TestCoordinator {
             .upsert_network(GUILD, ROLE, "mesh")
             .await
             .expect("register the test network");
-        let roles = Arc::new(FakeRoleSource::new(FakeConfig {
-            guilds: vec![FakeGuild {
-                id: GUILD,
-                name: "acme".into(),
-                members: members
-                    .iter()
-                    .map(|&(user_id, holds)| FakeMember {
-                        user_id,
-                        nick: format!("user{user_id}"),
-                        role_ids: if holds { vec![ROLE] } else { vec![99] },
-                    })
-                    .collect(),
-            }],
-        }));
+        let member_calls = Arc::new(AtomicU64::new(0));
+        let roles = Arc::new(CountingRoles {
+            member_calls: member_calls.clone(),
+            inner: FakeRoleSource::new(FakeConfig {
+                guilds: vec![FakeGuild {
+                    id: GUILD,
+                    name: "acme".into(),
+                    members: members
+                        .iter()
+                        .map(|&(user_id, holds)| FakeMember {
+                            user_id,
+                            nick: format!("user{user_id}"),
+                            role_ids: if holds { vec![ROLE] } else { vec![99] },
+                        })
+                        .collect(),
+                }],
+            }),
+        });
         let guild_keys = Arc::new(GuildKeys::new(
             store.clone(),
             "100.72.0.0/16".parse().unwrap(),
@@ -78,6 +107,7 @@ impl TestCoordinator {
                 store,
                 presence: Arc::new(Presence::default()),
                 versions: Arc::new(Versions::default()),
+                roleless: Arc::new(crate::roleless::RolelessMemo::default()),
                 oauth: None,
                 trusted_proxies: Arc::new(Vec::new()),
                 source_ip: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -95,6 +125,7 @@ impl TestCoordinator {
                 enroll_unproven: Arc::new(AtomicU64::new(0)),
             },
             tokens: Mutex::new(std::collections::HashMap::new()),
+            member_calls,
         }
     }
 
@@ -301,16 +332,144 @@ async fn an_enrolled_device_without_its_token_is_refused() {
 }
 
 #[tokio::test]
-async fn a_member_without_the_role_gets_no_address() {
+async fn a_member_without_the_role_gets_a_personal_identity() {
     let c = TestCoordinator::new(&[(8, false)]).await;
     let mut r = req(2, "desktop");
     r.enrollment_key = Some(c.enrollment_key(8).await);
 
     let resp = c.register(&r).await.expect("register is admitted");
-    // Admitted, but allocation-gated: no grant, no networks, and so no mesh IP consumed (TM-2).
-    assert!(resp.grant.is_none(), "no role → no grant");
+    // No role anywhere, but the client asked to peer its own devices: it is attested under the
+    // personal scope so a user with nothing but a Discord account can still mesh their own machines.
+    let grant = resp.grant.expect("own-device peering → a personal grant");
+    assert_eq!(grant.attestations.len(), 1);
+    assert!(
+        grant.networks.is_empty(),
+        "a personal grant carries no networks — it is not an ACL group"
+    );
+    assert!(resp.networks.is_empty(), "no role → no toggle rows");
+    assert!(resp.seeds.is_empty(), "no networks and no siblings online");
+    assert_eq!(
+        resp.anchors.len(),
+        1,
+        "one anchor: the personal scope's own key"
+    );
+    assert_eq!(
+        resp.anchors[0].guild_id,
+        common::attestation::PERSONAL_SCOPE
+    );
+}
+
+#[tokio::test]
+async fn a_personal_users_renewals_stop_probing_discord_for_membership() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let c = TestCoordinator::new(&[(8, false)]).await;
+    let mut r = req(2, "laptop");
+    r.enrollment_key = Some(c.enrollment_key(8).await);
+    c.register(&r).await.expect("enrol");
+    let after_first = c.member_calls.load(Relaxed);
+    assert!(after_first > 0, "the first snapshot has to actually look");
+
+    // Every later renewal is free. This is the whole reason the memo exists: a user in no guild has
+    // no member row to cache, so without it each renewal — and each herd wake — would re-ask Discord
+    // once per registered guild, forever, to be told "no" every time.
+    for _ in 0..3 {
+        c.register(&req(2, "laptop")).await.expect("renew");
+    }
+    assert_eq!(
+        c.member_calls.load(Relaxed),
+        after_first,
+        "a remembered roleless user costs no further lookups"
+    );
+
+    // A role change invalidates it — the gateway's `MemberUpdate` path — so the walk resumes.
+    c.state.roleless.forget(8);
+    c.register(&req(2, "laptop")).await.expect("renew");
+    assert!(
+        c.member_calls.load(Relaxed) > after_first,
+        "forgetting the memo must make the next snapshot look again"
+    );
+}
+
+#[tokio::test]
+async fn a_personal_hostname_uses_the_handle_captured_at_login() {
+    let c = TestCoordinator::new(&[(8, false)]).await;
+    // What `/oauth/complete` records. Without it the only name a guild-less user has is their
+    // snowflake, and their machines would answer to `laptop.user-8.unity.internal`.
+    c.state
+        .store
+        .set_user_handle(8, "Ada Lovelace")
+        .await
+        .expect("record the handle");
+
+    let mut r = req(2, "laptop");
+    r.enrollment_key = Some(c.enrollment_key(8).await);
+    let resp = c.register(&r).await.expect("register");
+
+    let grant = resp.grant.expect("a personal grant");
+    let ga = &grant.attestations[0];
+    let signed = common::wire::Signed::from_base64(&ga.attestation).expect("decode");
+    let anchor = common::crypto::anchor_from_bytes(&resp.anchors[0].pubkey).expect("anchor");
+    let att = common::attestation::verify_attestation(
+        &signed,
+        &anchor,
+        common::now_unix(),
+        common::attestation::PERSONAL_SCOPE,
+        ga.att_schema,
+    )
+    .expect("the personal attestation verifies against the personal anchor");
+    assert_eq!(att.username, "ada-lovelace", "sanitized to a DNS label");
+    assert_eq!(att.hostname(), "laptop.ada-lovelace.unity.internal");
+}
+
+#[tokio::test]
+async fn a_roleless_device_declining_own_device_peering_gets_no_address() {
+    let c = TestCoordinator::new(&[(8, false)]).await;
+    let mut r = req(2, "desktop");
+    r.enrollment_key = Some(c.enrollment_key(8).await);
+    r.peer_own_devices = false;
+
+    let resp = c.register(&r).await.expect("register is admitted");
+    // Admitted, but allocation-gated: an account with no access and nothing to mesh must not consume
+    // a mesh IP or leave a device row behind (TM-2). The personal scope is opt-in, and this is the
+    // opt-out.
+    assert!(
+        resp.grant.is_none(),
+        "no role, no own-device peering → nothing"
+    );
     assert!(resp.networks.is_empty());
     assert!(resp.seeds.is_empty());
+}
+
+#[tokio::test]
+async fn two_devices_of_a_roleless_user_mesh_with_each_other() {
+    let c = TestCoordinator::new(&[(8, false), (9, false)]).await;
+    c.enrol(2, 8, "laptop").await;
+    // Second device of the *same* owner — its own enrollment key, since each is one-time.
+    let key = "enroll-key-8-second";
+    c.state
+        .store
+        .create_enrollment_key(key, 8, Some(common::now_unix() + 3600))
+        .await
+        .expect("mint the second key");
+    let mut second = req(3, "desktop");
+    second.enrollment_key = Some(key.into());
+    let resp = c.register(&second).await.expect("enrol the second device");
+
+    assert_eq!(resp.seeds.len(), 1, "the owner's other device, and only it");
+    let seed = &resp.seeds[0];
+    assert!(
+        seed.networks.is_empty(),
+        "siblings share no network — that is the whole point"
+    );
+    assert_eq!(seed.attestations.len(), 1);
+
+    // A different roleless user is not pulled in: the personal scope is per owner, not a lobby of
+    // everyone the deployment failed to give a role to.
+    let stranger = c.enrol(4, 9, "theirs").await;
+    assert!(stranger.seeds.is_empty(), "another user's devices stay out");
+    let again = c.register(&req(2, "laptop")).await.expect("re-register");
+    assert_eq!(again.seeds.len(), 1, "…and don't appear to ours either");
 }
 
 #[tokio::test]
@@ -318,9 +477,8 @@ async fn co_members_see_each_other_and_a_stranger_sees_neither() {
     let c = TestCoordinator::new(&[(7, true), (8, true), (9, false)]).await;
     c.enrol(1, 7, "a").await;
     c.enrol(2, 8, "b").await;
-    // The role-less user sees nobody on the register that would have enrolled it — and, being
-    // allocation-gated, leaves no device row behind, so it can't refresh at all without a fresh
-    // enrollment key. That is the intended shape: no role, no footprint.
+    // The role-less user sees nobody: it holds no network, and it is the only device its owner has,
+    // so its personal scope seeds nothing either.
     let stranger = c.enrol(3, 9, "c").await;
     assert!(stranger.seeds.is_empty(), "a non-member sees no peers");
 

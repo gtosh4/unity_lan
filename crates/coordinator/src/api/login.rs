@@ -41,12 +41,18 @@ pub(super) async fn oauth_complete(
             "interactive login not configured",
         )
     })?;
-    let user_id = oauth
+    let who = oauth
         .verify(&req.access_token)
         .await
         .map_err(|e| ApiError::new(StatusCode::UNAUTHORIZED, format!("login failed: {e:#}")))?;
     st.store
-        .bind_oauth(&req.wg_pubkey, user_id)
+        .bind_oauth(&req.wg_pubkey, who.user_id)
+        .await
+        .map_err(internal)?;
+    // Remember the handle: for a user in no guild this is the only place one is ever observed, and
+    // it is the `<user>` label their devices' hostnames are built from.
+    st.store
+        .set_user_handle(who.user_id, &who.handle)
         .await
         .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)

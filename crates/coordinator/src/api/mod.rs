@@ -47,6 +47,7 @@ pub use wake::{ParkSlots, Wakers};
 
 use crate::oauth::OauthProvider;
 use crate::presence::Presence;
+use crate::roleless::RolelessMemo;
 use crate::roles::RoleSource;
 use crate::signer::{GuildKeys, SignCache};
 use crate::store::Store;
@@ -77,6 +78,9 @@ pub struct AppState {
     /// its own scopes — so a membership change in one guild leaves clients of every other guild
     /// parked. `watch` has no lost wakeups.
     pub versions: Arc<Versions>,
+    /// Users recently established to hold no network role anywhere, so a snapshot for one skips the
+    /// per-guild membership walk instead of re-proving it (see [`crate::roleless`]).
+    pub roleless: Arc<RolelessMemo>,
     /// Interactive-login provider (Discord OAuth, or a fake in tests); `None` disables login.
     pub oauth: Option<Arc<dyn OauthProvider>>,
     /// Proxy hops whose `X-Forwarded-For` we trust, so `client_ip` can recover a caller's real
