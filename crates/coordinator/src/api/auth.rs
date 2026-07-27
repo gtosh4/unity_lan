@@ -98,9 +98,9 @@ async fn authenticate_enrolled(st: &AppState, req: &RegisterReq) -> Result<(), A
 /// already-enrolled registers authenticate by `device_token` (see [`authenticate_enrolled`]) instead.
 ///
 /// A **present** proof is always verified — a malformed one is a `401` in both modes (a wrong proof is
-/// never merely an old client). A **missing** proof depends on policy: rejected when `require_proof`,
-/// else admitted (observe-only) with a warning and a counter bump, so an operator can watch the
-/// unproven count fall to zero before flipping the gate closed.
+/// never merely an old client). A **missing** proof depends on policy: rejected under `require_proof`
+/// (the default since the fleet passed the release that started sending one), else admitted with a
+/// warning and a counter bump, for a deployment still enrolling from pre-v0.4.1 engines.
 fn verify_possession(st: &AppState, req: &RegisterReq) -> Result<(), ApiError> {
     use std::sync::atomic::Ordering;
     let valid = req
@@ -116,7 +116,7 @@ fn verify_possession(st: &AppState, req: &RegisterReq) -> Result<(), ApiError> {
             let pubkey: String = req.wg_pubkey.iter().map(|b| format!("{b:02x}")).collect();
             tracing::warn!(
                 %pubkey,
-                "enrolling device without a possession proof (observe-only; set [enrollment] require_proof to reject)"
+                "enrolling device without a possession proof (admitted: [enrollment] require_proof is off)"
             );
             Ok(())
         }

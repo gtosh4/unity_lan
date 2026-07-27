@@ -145,18 +145,32 @@ pub struct Config {
 /// The `[enrollment]` block: policy for the DH possession proof a device presents when it first
 /// binds its WireGuard pubkey (proving it holds the matching private key, so a party who only learned
 /// the pubkey can't squat it).
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct EnrollmentConfig {
-    /// Require a valid possession proof on every enrolling register. Default `false` (observe-only):
-    /// the coordinator rejects a *malformed* proof but still admits an enrollment that sends none,
-    /// logging a warning and counting it (`unitylan_enrollments_unproven_total`) so an operator can
-    /// see when the fleet is proof-clean. A *present* proof is always verified regardless.
+    /// Require a valid possession proof on every enrolling register. Default `true`: an enrollment
+    /// that sends no proof is refused, so a party who only learned an unbound WireGuard pubkey can't
+    /// claim it under their own account.
     ///
-    // TODO(phase2): flip this default to `true` once `MIN_PROTOCOL_VERSION` is past the first release
-    // that shipped the client-side proof — by then no enrolling client omits it, so fail-closed costs
-    // nothing. Until then a mixed fleet with older engines still needs to enroll new devices.
-    #[serde(default)]
+    /// This shipped observe-only in v0.4.1 (verify a proof when sent, admit and count enrollments
+    /// without one) so a coordinator could upgrade ahead of its clients. Every client that enrolls
+    /// sends one from that release on, and the fleet is now well past it, so the gate is closed by
+    /// default. `require_proof = false` restores observe-only for a deployment that still has
+    /// pre-v0.4.1 engines enrolling new devices — it counts them in
+    /// `unitylan_enrollments_unproven_total` rather than refusing them.
+    #[serde(default = "default_require_proof")]
     pub require_proof: bool,
+}
+
+impl Default for EnrollmentConfig {
+    fn default() -> Self {
+        Self {
+            require_proof: default_require_proof(),
+        }
+    }
+}
+
+fn default_require_proof() -> bool {
+    true
 }
 
 fn default_attestation_ttl() -> u64 {
@@ -527,6 +541,20 @@ mod tests {
         assert!(load_text("attestation_ttl_secs = 0\n").is_err());
         assert!(load_text("[admin]\ntoken = ''\n").is_err());
         assert!(load_text("[admin]\ntoken = 'short'\n").is_err());
+    }
+
+    #[test]
+    fn enrollment_proof_is_required_unless_a_deployment_opts_out() {
+        // Both spellings of "not configured" — no block at all, and a block that omits the key —
+        // must land on the fail-closed side; a default that only holds in one of them is how a
+        // security gate silently reverts.
+        let cfg = load_text("").expect("a minimal config");
+        assert!(cfg.enrollment.require_proof, "absent [enrollment] block");
+        let cfg = load_text("[enrollment]\n").expect("empty block");
+        assert!(cfg.enrollment.require_proof, "block without the key");
+        // Explicit opt-out for a deployment still enrolling pre-v0.4.1 engines.
+        let cfg = load_text("[enrollment]\nrequire_proof = false\n").expect("opt-out");
+        assert!(!cfg.enrollment.require_proof);
     }
 
     #[test]

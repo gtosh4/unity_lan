@@ -16,6 +16,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   completely; a personal address that goes unused for 30 days is released, and comes back on the next
   login.
 
+### Changed
+
+- Coordinators now **reject** an enrolling device that doesn't prove it holds the WireGuard private
+  key it's registering. The check shipped in v0.4.1 in observe-only mode so coordinators could
+  upgrade ahead of their clients; every client has sent a proof since that release, so the gate is
+  closed by default and someone who merely learned your not-yet-enrolled public key can no longer
+  bind it to their account. If you run a coordinator that still enrolls devices from engines older
+  than v0.4.1, set `require_proof = false` under `[enrollment]` to keep the previous behavior —
+  it logs and counts those enrollments in `unitylan_enrollments_unproven_total` instead.
+
 ### Fixed
 
 - Peers behind strict NATs now connect through a relay instead of appearing stuck. When a hole punch

@@ -315,7 +315,8 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("enrollment possession proof: REQUIRED (proof-less enrollment rejected)");
     } else {
         tracing::info!(
-            "enrollment possession proof: observe-only (proof-less enrollment allowed, logged)"
+            "enrollment possession proof: observe-only (proof-less enrollment allowed, logged) — \
+             [enrollment] require_proof was turned off; the default is to require it"
         );
     }
 

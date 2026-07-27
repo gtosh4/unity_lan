@@ -4,6 +4,13 @@
 
 <p align="center"><strong>Turn your Discord roles into a private, encrypted network.</strong></p>
 
+<p align="center">
+  <a href="https://github.com/gtosh4/unity_lan/releases/latest"><img src="https://img.shields.io/github/v/release/gtosh4/unity_lan?label=release" alt="Latest release"></a>
+  <a href="https://github.com/gtosh4/unity_lan/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/gtosh4/unity_lan/ci.yml?branch=main&amp;label=CI" alt="CI"></a>
+  <a href="https://github.com/gtosh4/unity_lan/actions/workflows/e2e.yml"><img src="https://img.shields.io/github/actions/workflow/status/gtosh4/unity_lan/e2e.yml?branch=main&amp;label=e2e" alt="E2E"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="AGPL-3.0"></a>
+</p>
+
 You already have a group of people organized in Discord — a gaming community, a homelab crew, a
 project team. UnityLAN turns those Discord roles into a private, encrypted LAN. Give a role a
 network, and everyone who holds that role can reach each other's machines directly, as if they were
@@ -31,7 +38,8 @@ bob@nas       ~ $
   relay. There is no exit server, and the coordinator never carries your traffic.
 - **Membership = Discord roles.** An admin registers a Discord role as a *network* with a slash
   command (`/unitylan network add`). Holding the role gets you in; a role change in Discord takes
-  effect on the mesh within seconds.
+  effect on the mesh within seconds. For **just your own machines** you need none of that — log in
+  and they find each other, no server to join or run (see [below](#just-your-own-devices)).
 - **A lightweight control plane.** A **coordinator** authenticates people against Discord, hands out
   addresses, and helps peers find each other — then gets out of the way. Use the **hosted canonical
   instance** (just invite its bot to your server) or **self-host** your own (one Docker container).
@@ -54,6 +62,9 @@ Use the project's hosted coordinator, or run your own if you'd rather hold the t
   with exactly the people who hold a role — no VPN accounts to provision or revoke by hand.
 - **You want a private LAN for a team** but don't want to stand up an identity provider. You already
   have one: Discord.
+- **You just want your own machines to reach each other.** Laptop to desktop, phone-tethered to home
+  NAS, work box to media server — no server to create, no role to grant, no config file. Log in on
+  each device and they mesh. See [Just your own devices](#just-your-own-devices).
 
 ## Why you might *not* (yet)
 
@@ -132,6 +143,29 @@ full install steps live in [`packaging/README.md`](packaging/README.md).
   wizard page) opens the app so you can log in. Re-open it any time from the Start-menu shortcut.
 - **Headless game server:** install the `unitylan` package (engine + CLI, no graphics libs) and
   enroll with a one-time key — no Discord client needed on the box.
+
+## Just your own devices
+
+You don't need a Discord server — your own or anyone else's — to use UnityLAN for the machines you
+own. Install it, log in with Discord on each device, and they find each other:
+
+1. Install on the first device and log in — the desktop app, or `unitylan-engine login` on a headless
+   box. Packaged installs already point at `https://coordinator.unitylan.com`; nothing to configure.
+2. Do the same on the second. That's it — no `/unitylan network add`, no role, nothing for an admin
+   to grant.
+
+Your devices get the usual names (`laptop.you.unity.internal`, and `you.unity.internal` for whichever
+you make primary), reachable from each other and **nobody else** — a stranger who signs in the same
+way sees nothing of yours, and you see nothing of theirs. The usual firewall rules still apply: a
+peer can ping you and nothing more until you `expose` a port.
+
+This is the **My devices** toggle in the app's Networks tab, on by default. Turning it off opts out
+completely — with no role to fall back on, the device holds no mesh address at all.
+
+Join a community later and nothing about your own devices changes: same address, same names, same
+tunnels. The community's networks simply appear alongside them, each with its own toggle. (If you go
+a month without connecting, a personal address is released and you get a new one next time you log
+in — devices in a community keep theirs indefinitely.)
 
 ## Get a coordinator
 

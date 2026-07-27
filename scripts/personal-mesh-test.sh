@@ -116,7 +116,13 @@ echo "=== per-user scoping: another roleless user must stay out ==="
 B1_IP=$(grep -oE '100\.[0-9]+\.[0-9]+\.[0-9]+ ->' "$TMP/b1.log" | head -1 | awk '{print $1}')
 echo "b1 (user 2) self IP = ${B1_IP:-<none>}"
 [ -n "$B1_IP" ] || { echo "FAIL: user 2 got no personal identity either"; tail -20 "$TMP/b1.log"; exit 1; }
-CTL=$("$ENG" -c "$TMP/a1.toml" ctl status 2>&1)
+# Poll rather than sample once: a status snapshot caught mid-rebuild can report an empty peer list
+# for an instant, which is a display artifact and not a dropped tunnel (docs/technical.md §5.7).
+for _ in $(seq 1 20); do
+  CTL=$("$ENG" -c "$TMP/a1.toml" ctl status 2>&1)
+  echo "$CTL" | grep -q "$A2_IP" && break
+  sleep 0.5
+done
 echo "$CTL" | grep -q "$A2_IP" || { echo "FAIL: a1 does not list its own sibling a2"; echo "$CTL"; exit 1; }
 if echo "$CTL" | grep -q "$B1_IP"; then
   echo "FAIL: another roleless user's device leaked into user 1's personal mesh"; echo "$CTL"; exit 1
