@@ -380,6 +380,25 @@ resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); ho
   matters because a TLS certificate issued against it is bound to that name for its whole life.
   Names remain convenience only; **authorization is always the pubkey in the signed
   attestation**, never the name.
+- **Named services live beside device names, and are peer-asserted rather than allocated.** A device
+  may name any port it exposes; the name resolves as `<label>.<user>` — `mc.alice.unity.internal`.
+  Unlike a device name, no coordinator allocates it: a device announces its own list over the tunnel
+  (`p2p::ReqBody::GetServices`) and the coordinator holds no service state at all. That is safe
+  because of where the name is *composed* — the receiver builds it from the announcing peer's own
+  **verified** user label, so a peer cannot express a name outside its owner's namespace. The
+  coordinator enforces the same property for hostnames by derivation; here it holds structurally.
+  Three consequences follow, and each is a deliberate choice:
+  - **Scope is enforced at the announcer.** A device answers `GetServices` only for services the
+    asker's address could reach, so a peer outside a service's scope is never told the name exists.
+    A name and its port cannot disagree about who may see them, because one decision makes both.
+  - **A device name always outranks a service label**, since the former is coordinator-allocated and
+    attested and the latter is self-asserted. Otherwise a device could make a *sibling* unreachable
+    by name.
+  - **Two of one owner's devices may claim one label.** Not an attack — no observer can arbitrate it
+    remotely, so every observer must reach the *same* answer or a name would resolve differently
+    depending on who asked. Lowest public key wins: arbitrary, total, identically computed
+    everywhere, and stable as peers come and go. The loser is shown as shadowed rather than hidden.
+  - **The cost is latency, not trust.** With no push, a peer learns a new name on its next poll.
 - **One label below a device name resolves to that device**, under both suffixes — so
   `plex.<device>.<user>` reaches the machine and a reverse proxy on it can route by name. Scoped to
   exactly what the certificate wildcard covers (§6.5), and to *device* names only: the bare `<user>`

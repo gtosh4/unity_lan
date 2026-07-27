@@ -556,18 +556,24 @@ fn apply_expose(
 ) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
-        ExposeOp::Add { proto, port, scope } => {
+        ExposeOp::Add {
+            proto,
+            port,
+            scope,
+            name,
+        } => {
             let scope = resolve_scope(scope, held_nets)?;
-            let exposed = fw.expose(proto, port, scope.clone())?;
+            let exposed = fw.expose(proto, port, scope.clone(), name.clone())?;
             // Report it the way the caller will recognize it, not as the ids we stored.
             let label = exposed
                 .iter()
                 .find(|e| e.proto == proto && e.port == port && e.scope == scope)
                 .map_or_else(|| scope.fallback_label(), |e| e.label.clone());
-            (
-                format!("exposed {}/{port} ({label})", proto.as_str()),
-                exposed,
-            )
+            let what = match &name {
+                Some(name) => format!("{name} ({}/{port})", proto.as_str()),
+                None => format!("{}/{port}", proto.as_str()),
+            };
+            (format!("exposed {what} ({label})"), exposed)
         }
         ExposeOp::Remove { proto, port, scope } => {
             let label = match &scope {
@@ -578,6 +584,15 @@ fn apply_expose(
                 format!("closed {}/{port}{label}", proto.as_str()),
                 fw.unexpose(proto, port, scope)?,
             )
+        }
+        ExposeOp::RemoveNamed { name } => {
+            let (removed, exposed) = fw.unexpose_named(&name)?;
+            let message = if removed == 0 {
+                format!("no service named {name:?} is running here")
+            } else {
+                format!("closed {name} ({removed} port(s))")
+            };
+            (message, exposed)
         }
     };
     Ok(ExposeResp { message, exposed })

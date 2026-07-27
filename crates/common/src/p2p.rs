@@ -39,6 +39,9 @@ pub enum ReqBody {
     /// "Give me your own current coordinator-minted attestation(s)." The asker verifies the reply
     /// against its pinned anchor exactly as if the coordinator had served it.
     GetAttestations,
+    /// "What services do you serve that I may reach?" The responder filters by the asker's own
+    /// address, so scope is enforced where the service is rather than shipped to every peer.
+    GetServices,
     /// A request type this build doesn't understand (a newer peer). Answered with `Unsupported`.
     #[serde(other)]
     Unknown,
@@ -62,6 +65,12 @@ pub struct P2pResponse {
 pub enum RespBody {
     /// The responder's own current attestations (one per guild it participates in).
     Attestations { attestations: Vec<GuildAttestation> },
+    /// The services the responder serves and the asker may reach. The asker composes each name
+    /// under the *responder's* verified user label, so this carries labels only — a peer has no way
+    /// to name something outside its owner's namespace.
+    Services {
+        services: Vec<crate::service::MeshService>,
+    },
     /// The responder doesn't support the requested type — the caller falls back to the coordinator.
     Unsupported,
     /// A response type this build doesn't understand (a newer peer). Treated as `Unsupported`.

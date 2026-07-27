@@ -83,6 +83,28 @@ Two shapes worth knowing:
 - **A media or file host** often wants `--own-devices` for admin access (SSH, the web UI) plus a
   network scope for the service itself, so your friends can watch but not administer.
 
+## 6. Name it
+
+A port that people have to remember by number is a port they will ask you about. Name it instead:
+
+```sh
+sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
+sudo unitylan-engine ctl service add jellyfin 8096              # to every peer you mesh with
+sudo unitylan-engine ctl services                               # names, ports and who can reach them
+sudo unitylan-engine ctl service rm mc                          # stop serving it, closing its ports
+```
+
+`service add` is `expose` plus a name, so everything above about scopes applies unchanged — including
+that a name is only announced to peers who could reach the port anyway. Run it twice with the same
+name to put one service on two ports (a game wanting TCP and UDP), and `service rm` closes both.
+
+One machine can carry as many names as it runs things: `mc`, `jellyfin`, `git`. They all resolve to
+this device, from any meshed machine, with nothing to configure on the other end.
+
+Names travel peer to peer rather than through the coordinator, so allow up to 30 seconds for one to
+reach other people, and expect an offline device to advertise nothing. A device name always wins over
+a service label — you cannot take a machine's own hostname by naming a service after it.
+
 These commands find `/etc/unitylan/engine.toml` on their own. An `engine.toml` in the working
 directory wins if there is one, and `-c <path>` overrides both — worth remembering when a command
 seems to be talking to the wrong daemon.
@@ -200,6 +222,9 @@ Then remove the package. Un-enrolling is what returns the mesh address to the po
 | `ctl expose <port> [net]` | Open a port — `--own-devices` or `--guild` to scope it |
 | `ctl unexpose <port>` | Close a port, or one scope with `--net` / `--own-devices` |
 | `ctl exposes` | List open ports and who can reach them |
+| `ctl service add <name> <port>` | Name a port — same scope flags as `expose` |
+| `ctl service rm <name>` | Stop serving a name, closing every port it was on |
+| `ctl services` | List this device's named services and the names they answer to |
 | `ctl net <enable\|disable> <network>` | Peer with a network, or stop |
 | `ctl own-devices <on\|off>` | Peer with your own devices, or stop |
 | `ctl cert [on\|off]` | Show the TLS certificate and its paths, or opt in and out of issuance |

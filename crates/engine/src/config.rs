@@ -217,6 +217,10 @@ pub struct ExposeSeed {
     pub guild: Option<String>,
     #[serde(default)]
     pub own_devices: bool,
+    /// Service name for this port — what it answers to under the owner's user label
+    /// (`name = "mc"` → `mc.alice.unity.internal`). Absent leaves it a bare port.
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 impl ExposeSeed {

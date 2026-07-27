@@ -434,7 +434,12 @@ mod tests {
     use std::net::Ipv4Addr;
 
     fn exp(proto: Proto, port: u16, scope: ExposeScope) -> Exposed {
-        Exposed { proto, port, scope }
+        Exposed {
+            proto,
+            port,
+            scope,
+            name: None,
+        }
     }
 
     const MESH: ExposeScope = ExposeScope::Net {

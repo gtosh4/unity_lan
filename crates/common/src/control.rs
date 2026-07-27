@@ -392,6 +392,28 @@ pub struct PeerStatus {
     /// grouped by community, on hover over the peer's name.
     #[serde(default)]
     pub networks: Vec<crate::api::SharedNetwork>,
+    /// The named services this peer announced to us over the tunnel, each already resolved to the
+    /// name it answers to (`mc.alice.unity.internal`). Empty for a peer that announces none, that
+    /// is offline, or that predates services.
+    #[serde(default)]
+    pub services: Vec<PeerService>,
+}
+
+/// One of a peer's services, as the frontend needs to show it: the full name it answers to, and
+/// where to reach it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerService {
+    /// The bare label the peer announced (`mc`).
+    pub name: String,
+    /// The name this resolves as — `<label>.<user>.unity.internal`, composed by *us* from the
+    /// peer's verified user label, never taken from the peer.
+    pub hostname: String,
+    pub proto: Proto,
+    pub port: u16,
+    /// False when another of the same owner's devices won this label — the service is announced but
+    /// its name points elsewhere, which is worth showing rather than silently hiding.
+    #[serde(default)]
+    pub shadowed: bool,
 }
 
 /// A peer's data-plane reachability, for status display (§7.2 diagnostics).
@@ -545,6 +567,7 @@ mod tests {
                 proto: Proto::Tcp,
                 port: 8080,
                 scope,
+                name: None,
             };
             // Reach past the `ExposeOp` enum tag to the payload the old struct would see.
             let v = serde_json::to_value(&op).expect("encodes");

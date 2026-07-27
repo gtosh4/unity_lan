@@ -101,7 +101,9 @@ impl State {
             networks: fixture_networks(),
             devices: fixture_devices(),
             // Three scopes across two ports, so the stills show what the chips are for: a port
-            // shared with two networks at once, and one kept to the owner's own devices.
+            // shared with two networks at once, and one kept to the owner's own devices. The first
+            // two are named, so the Services tab has something to show — a service is one name over
+            // however many ports and scopes it took.
             exposed: vec![
                 ExposedPort {
                     proto: Proto::Tcp,
@@ -111,6 +113,7 @@ impl State {
                         role_id: 7001,
                     },
                     label: "Engineering @ acme".into(),
+                    name: Some("wiki".into()),
                     active: true,
                 },
                 ExposedPort {
@@ -121,6 +124,7 @@ impl State {
                         role_id: 7002,
                     },
                     label: "Gaming @ playhouse".into(),
+                    name: Some("wiki".into()),
                     active: true,
                 },
                 ExposedPort {
@@ -128,6 +132,7 @@ impl State {
                     port: 51820,
                     scope: ExposeScope::OwnDevices,
                     label: common::control::OWN_DEVICES_LABEL.into(),
+                    name: None,
                     active: true,
                 },
             ],
@@ -247,7 +252,29 @@ fn peer(
                 role_id: 2,
             })
             .collect(),
+        services: Vec::new(),
     }
+}
+
+/// Attach named services to a peer. Separate from [`peer`] so only the fixtures that need them
+/// carry them, and so the Services tab has something representative to show in the stills.
+fn serving(mut p: PeerStatus, services: &[(&str, Proto, u16)]) -> PeerStatus {
+    let user = p
+        .hostname
+        .split_once('.')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_default();
+    p.services = services
+        .iter()
+        .map(|(name, proto, port)| common::control::PeerService {
+            name: (*name).into(),
+            hostname: format!("{name}.{user}"),
+            proto: *proto,
+            port: *port,
+            shadowed: false,
+        })
+        .collect();
+    p
 }
 
 fn fixture_peers() -> Vec<PeerStatus> {
@@ -288,15 +315,24 @@ fn fixture_peers() -> Vec<PeerStatus> {
             "bob#1180",
             &[("Gaming", "playhouse")],
         ),
-        peer(
-            "server.carol.unity.internal",
-            20,
-            PeerReach::Relayed,
-            true,
-            Some(73),
-            3044,
-            "carol#7788",
-            &[("Engineering", "acme")],
+        // The home server: one machine, several named things on it — the case the Services tab
+        // exists for.
+        serving(
+            peer(
+                "server.carol.unity.internal",
+                20,
+                PeerReach::Relayed,
+                true,
+                Some(73),
+                3044,
+                "carol#7788",
+                &[("Engineering", "acme")],
+            ),
+            &[
+                ("jellyfin", Proto::Tcp, 8096),
+                ("git", Proto::Tcp, 3000),
+                ("factorio", Proto::Udp, 34197),
+            ],
         ),
         peer(
             "laptop.dave.unity.internal",
@@ -391,7 +427,12 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
         ControlRequest::Expose(op) => {
             let message = match op {
                 ExposeOp::List => "exposed".into(),
-                ExposeOp::Add { proto, port, scope } => {
+                ExposeOp::Add {
+                    proto,
+                    port,
+                    scope,
+                    name,
+                } => {
                     s.exposed
                         .retain(|e| !(e.proto == proto && e.port == port && e.scope == scope));
                     // The real engine resolves the scope's ids against its network list; the demo
@@ -409,14 +450,18 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                             || scope.fallback_label(),
                             |n| format!("{} @ {}", n.name, n.guild_name),
                         );
+                    let what = name
+                        .clone()
+                        .unwrap_or_else(|| format!("{}/{port}", proto.as_str()));
                     s.exposed.push(ExposedPort {
                         proto,
                         port,
                         scope,
                         label,
+                        name,
                         active: true,
                     });
-                    format!("exposed {}/{port}", proto.as_str())
+                    format!("exposed {what}")
                 }
                 ExposeOp::Remove { proto, port, scope } => {
                     s.exposed.retain(|e| {
@@ -428,6 +473,11 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                             })
                     });
                     format!("unexposed {}/{port}", proto.as_str())
+                }
+                ExposeOp::RemoveNamed { name } => {
+                    s.exposed
+                        .retain(|e| e.name.as_deref() != Some(name.as_str()));
+                    format!("closed {name}")
                 }
             };
             ControlResponse::Expose(ExposeResp {

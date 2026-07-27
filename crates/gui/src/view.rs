@@ -145,6 +145,7 @@ impl App {
         row![
             tab("Networks", Tab::Networks),
             tab("Peers", Tab::Peers),
+            tab("Services", Tab::Services),
             tab("Manage", Tab::Manage),
         ]
         .spacing(2)
@@ -160,6 +161,9 @@ impl App {
             Tab::Peers => Column::new()
                 .push(self.device_section())
                 .push(self.peers_section()),
+            Tab::Services => Column::new()
+                .push(self.my_services_section())
+                .push(self.mesh_services_section()),
             Tab::Manage => Column::new()
                 .push(self.account_section())
                 .push(self.devices_section())
@@ -814,6 +818,160 @@ impl App {
             col = col.push(certs);
         }
         col.into()
+    }
+
+    /// This device's own named services, plus the form that adds one.
+    ///
+    /// A service is an exposed port with a name, so this reads the same `exposed` list the Manage
+    /// tab does — grouped by name rather than by port, because the name is what a person uses.
+    fn my_services_section(&self) -> Element<'_, Message> {
+        let user = self
+            .status
+            .as_ref()
+            .and_then(|s| s.identity.as_deref())
+            .unwrap_or("");
+        let mut names: Vec<&str> = self
+            .exposed
+            .iter()
+            .filter_map(|e| e.name.as_deref())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+
+        let inner: Element<'_, Message> = if names.is_empty() {
+            muted("Nothing named yet. A name makes a port memorable: `mc`, `jellyfin`.").into()
+        } else {
+            let mut list = Column::new().spacing(10);
+            for name in names {
+                let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
+                for e in self
+                    .exposed
+                    .iter()
+                    .filter(|e| e.name.as_deref() == Some(name))
+                {
+                    chips = chips.push(scope_chip(e));
+                }
+                let ports: Vec<String> = self
+                    .exposed
+                    .iter()
+                    .filter(|e| e.name.as_deref() == Some(name))
+                    .map(|e| format!("{}/{}", e.proto.as_str(), e.port))
+                    .collect();
+                let head = row![
+                    column![
+                        text(if user.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{name}.{user}.{}", common::DNS_SUFFIX)
+                        })
+                        .size(14),
+                        muted(ports.join(", ")),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    button(text("remove").size(13))
+                        .style(button::secondary)
+                        .on_press(Message::RemoveService(name.to_string())),
+                ]
+                .spacing(8)
+                .align_y(Vertical::Center);
+                list = list.push(column![head, chips].spacing(4));
+            }
+            list.into()
+        };
+
+        let name_err = (!self.service_name_input.trim().is_empty()
+            && !common::service::valid_label(self.service_name_input.trim()))
+        .then(|| common::service::label_error(self.service_name_input.trim()));
+        let port_err = (!self.expose_port_input.trim().is_empty())
+            .then(|| parse_port(self.expose_port_input.trim()).err())
+            .flatten();
+        let ready = name_err.is_none()
+            && port_err.is_none()
+            && common::service::valid_label(self.service_name_input.trim())
+            && !self.expose_port_input.trim().is_empty()
+            && !self.expose_scopes.is_empty();
+        let add = row![
+            text_input("name", &self.service_name_input)
+                .on_input(Message::ServiceNameInput)
+                .on_submit(Message::ServiceSubmit)
+                .width(Length::Fixed(90.0)),
+            text_input("port", &self.expose_port_input)
+                .on_input(Message::ExposePortInput)
+                .on_submit(Message::ServiceSubmit)
+                .width(Length::Fixed(64.0)),
+            proto_toggle(self.expose_proto),
+            self.scope_picker(),
+            {
+                let b = button(text("add").size(13)).style(button::secondary);
+                if ready {
+                    b.on_press(Message::ServiceSubmit)
+                } else {
+                    b
+                }
+            },
+        ]
+        .spacing(6)
+        .align_y(Vertical::Center);
+
+        let mut col = column![header("my services"), inner, add].spacing(8);
+        for e in [name_err, port_err].into_iter().flatten() {
+            col = col.push(text(e).size(13).color(RED));
+        }
+        col.into()
+    }
+
+    /// What everyone else is serving, grouped by owner — the "what's on this mesh" view.
+    ///
+    /// Peers announce these directly over the tunnel, so a peer that is offline simply isn't here.
+    fn mesh_services_section(&self) -> Element<'_, Message> {
+        let peers: Vec<&common::control::PeerStatus> = self
+            .status
+            .as_ref()
+            .map(|s| s.peers.iter().filter(|p| !p.services.is_empty()).collect())
+            .unwrap_or_default();
+
+        let inner: Element<'_, Message> = if peers.is_empty() {
+            muted("No one else is serving a named service right now.").into()
+        } else {
+            let mut list = Column::new().spacing(12);
+            for peer in peers {
+                let mut rows = Column::new().spacing(4);
+                for svc in &peer.services {
+                    // A shadowed service is running but its name points at another of the owner's
+                    // devices — worth saying, since the fix is theirs to make and invisible
+                    // otherwise.
+                    let line = row![
+                        dot(if svc.shadowed {
+                            AMBER
+                        } else if peer.up {
+                            GREEN
+                        } else {
+                            RED
+                        }),
+                        column![
+                            text(svc.hostname.clone()).size(14),
+                            muted(if svc.shadowed {
+                                format!(
+                                    "{}/{} — name taken by another of their devices",
+                                    svc.proto.as_str(),
+                                    svc.port
+                                )
+                            } else {
+                                format!("{}/{}", svc.proto.as_str(), svc.port)
+                            }),
+                        ]
+                        .spacing(2),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center);
+                    rows = rows.push(line);
+                }
+                list = list.push(column![muted(peer.username.clone()), rows].spacing(4));
+            }
+            list.into()
+        };
+        column![header("on the mesh"), inner].spacing(8).into()
     }
 
     /// The HTTPS-certificate opt-in, shown under the exposed ports because that is the only place it

@@ -217,6 +217,13 @@ pub fn update(
                 // group like a network in the peer view — matching the special networks-list row.
                 // Display-only: `SeedPeer.networks` stays empty, so firewall/DNS/expose are untouched.
                 networks: own_device_networks(s, device.user_id),
+                // Services are learned peer-direct on their own cadence, not from the seed, so they
+                // ride across a membership rebuild exactly like the live telemetry above. Without
+                // this every refresh would blank the Services tab until the next poll.
+                services: prev_live
+                    .get(&s.ip)
+                    .map(|p| p.services.clone())
+                    .unwrap_or_default(),
             })
             .collect(),
         networks: effective_networks(&device.networks_status, disabled),
@@ -354,6 +361,23 @@ pub fn set_live(shared: &Shared, live: &std::collections::HashMap<std::net::Ipv4
                 p.rx_bytes = l.rx_bytes;
                 p.tx_bytes = l.tx_bytes;
                 p.last_handshake_secs = l.last_handshake_secs;
+            }
+        }
+    });
+}
+
+/// Overlay each peer's announced services, keyed by mesh address.
+///
+/// Separate from the membership rebuild because services arrive peer-direct on their own cadence: a
+/// peer that has not answered yet keeps whatever it last announced rather than flickering empty.
+pub fn set_services(
+    shared: &Shared,
+    services: &std::collections::HashMap<std::net::Ipv4Addr, Vec<common::control::PeerService>>,
+) {
+    shared.send_modify(|report| {
+        for p in &mut report.peers {
+            if let Some(s) = services.get(&p.wg_ip) {
+                p.services = s.clone();
             }
         }
     });

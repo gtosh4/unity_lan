@@ -59,6 +59,10 @@ pub struct Exposed {
     pub port: u16,
     #[serde(rename = "net")]
     pub scope: ExposeScope,
+    /// The service name this port answers to, if the owner named it. Absent on every exposure
+    /// written before names existed, which is exactly right: those stay bare ports until named.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// The networks currently visible to this device and who is in them, plus the owner's own devices.
@@ -280,14 +284,45 @@ impl Firewall {
         proto: Proto,
         port: u16,
         scope: ExposeScope,
+        name: Option<String>,
     ) -> anyhow::Result<Vec<ExposedPort>> {
+        if let Some(name) = &name {
+            if !common::service::valid_label(name) {
+                anyhow::bail!("{}", common::service::label_error(name));
+            }
+            let distinct = {
+                let set = self.exposed.lock().unwrap();
+                let mut names: Vec<&str> = set.iter().filter_map(|e| e.name.as_deref()).collect();
+                names.push(name);
+                names.sort_unstable();
+                names.dedup();
+                names.len()
+            };
+            // Bounded because every peer holds our list in memory and answers DNS from it. The cap
+            // counts *names*, not exposures: one service on tcp and udp is one name.
+            if distinct > common::service::MAX_SERVICES_PER_DEVICE {
+                anyhow::bail!(
+                    "this device already serves {} named services, the most one device may announce",
+                    common::service::MAX_SERVICES_PER_DEVICE
+                );
+            }
+        }
         {
             let mut set = self.exposed.lock().unwrap();
-            if !set
-                .iter()
-                .any(|e| e.proto == proto && e.port == port && e.scope == scope)
+            match set
+                .iter_mut()
+                .find(|e| e.proto == proto && e.port == port && e.scope == scope)
             {
-                set.push(Exposed { proto, port, scope });
+                // Re-exposing the same port with a name is how a bare port gets named, and how a
+                // name is changed — not a no-op, or an existing port could never be labelled.
+                Some(existing) if name.is_some() => existing.name = name,
+                Some(_) => {}
+                None => set.push(Exposed {
+                    proto,
+                    port,
+                    scope,
+                    name,
+                }),
             }
         }
         self.persist()?;
@@ -317,6 +352,22 @@ impl Firewall {
         Ok(self.list())
     }
 
+    /// Close every port carrying `name`. Returns the exposed set and how many were closed, so the
+    /// caller can tell "deleted" from "no such service" rather than reporting success either way.
+    pub fn unexpose_named(&self, name: &str) -> anyhow::Result<(usize, Vec<ExposedPort>)> {
+        let before = self.exposed.lock().unwrap().len();
+        self.exposed
+            .lock()
+            .unwrap()
+            .retain(|e| e.name.as_deref() != Some(name));
+        let removed = before - self.exposed.lock().unwrap().len();
+        if removed > 0 {
+            self.persist()?;
+            self.reconcile()?;
+        }
+        Ok((removed, self.list()))
+    }
+
     /// The exposed set, each entry tagged with whether it's currently reachable — a scope with no
     /// online peers installs an empty source set, so the port is exposed but unreachable.
     pub fn list(&self) -> Vec<ExposedPort> {
@@ -330,10 +381,61 @@ impl Firewall {
                 port: e.port,
                 scope: e.scope.clone(),
                 label: peers.label(&e.scope),
+                name: e.name.clone(),
                 // Unscoped is always reachable; a scope is reachable only while it has peers.
                 active: peers.sources(&e.scope).is_none_or(|ips| !ips.is_empty()),
             })
             .collect()
+    }
+
+    /// The named services `peer` may reach, deduplicated — what we answer a peer's
+    /// [`common::p2p::ReqBody::GetServices`] with.
+    ///
+    /// Scope is enforced *here*, against the same source sets the firewall installs, rather than
+    /// announced to every peer to filter for itself: a peer that cannot reach the port must not
+    /// learn the name either, and the two decisions must not be able to disagree.
+    pub fn services_for(&self, peer: Ipv4Addr) -> Vec<common::service::MeshService> {
+        let peers = self.peers.lock().unwrap();
+        let mut out: Vec<common::service::MeshService> = Vec::new();
+        for e in self.exposed.lock().unwrap().iter() {
+            let Some(name) = &e.name else { continue };
+            // `None` sources means the scope restricts nobody — every peer, which is anyone who can
+            // deliver to the wg interface at all.
+            if !peers
+                .sources(&e.scope)
+                .is_none_or(|ips| ips.contains(&peer))
+            {
+                continue;
+            }
+            let svc = common::service::MeshService {
+                name: name.clone(),
+                proto: e.proto,
+                port: e.port,
+            };
+            if !out.contains(&svc) {
+                out.push(svc);
+            }
+        }
+        out.truncate(common::service::MAX_SERVICES_PER_DEVICE);
+        out
+    }
+
+    /// Our own services, whoever is asking — for local display and for the names we resolve
+    /// ourselves. Unlike [`Self::services_for`] this is not scoped: it is our own list.
+    pub fn own_services(&self) -> Vec<common::service::MeshService> {
+        let mut out: Vec<common::service::MeshService> = Vec::new();
+        for e in self.exposed.lock().unwrap().iter() {
+            let Some(name) = &e.name else { continue };
+            let svc = common::service::MeshService {
+                name: name.clone(),
+                proto: e.proto,
+                port: e.port,
+            };
+            if !out.contains(&svc) {
+                out.push(svc);
+            }
+        }
+        out
     }
 
     /// Write the exposed set through to `exposed.json`. Errors propagate to the caller: a rule we
@@ -380,6 +482,14 @@ impl Firewall {
     }
 }
 
+/// The firewall is what the p2p listener announces services from — the same object that decides who
+/// may *reach* a port decides who may learn its name, so the two cannot drift apart.
+impl crate::p2p::ServiceSource for Firewall {
+    fn services_for(&self, peer: Ipv4Addr) -> Vec<common::service::MeshService> {
+        Firewall::services_for(self, peer)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +523,148 @@ mod tests {
             proto: Proto::Tcp,
             port,
             scope: ExposeScope::AllPeers,
+            name: None,
         }
+    }
+
+    /// A peer set where `minecraft` has one member and `own_devices` another, so a scoped service
+    /// can be asked about from inside and outside its scope.
+    fn peers_with(minecraft: &[Ipv4Addr], own: &[Ipv4Addr]) -> PeerSets {
+        let (guild_id, role_id) = crate::testutil::network_ids("minecraft");
+        PeerSets {
+            nets: vec![NetInfo {
+                guild_id,
+                role_id,
+                guild: "g".into(),
+                name: "minecraft".into(),
+                ips: minecraft.to_vec(),
+            }],
+            own_devices: own.to_vec(),
+        }
+    }
+
+    /// The name is scoped exactly like the port. A peer that cannot reach a service must not learn
+    /// it exists — otherwise the announcement leaks what the firewall is there to withhold.
+    #[test]
+    fn a_peer_outside_a_services_scope_is_not_told_the_name() {
+        let d = TempDir::new("svc-scope");
+        let f = fw(&d, vec![]);
+        let inside = Ipv4Addr::new(100, 64, 0, 5);
+        let outside = Ipv4Addr::new(100, 64, 0, 6);
+        f.update_peers(peers_with(&[inside], &[])).unwrap();
+        f.expose(Proto::Tcp, 25565, net("minecraft"), Some("mc".into()))
+            .unwrap();
+
+        assert_eq!(f.services_for(inside).len(), 1);
+        assert_eq!(f.services_for(inside)[0].name, "mc");
+        assert!(
+            f.services_for(outside).is_empty(),
+            "a peer outside the scope learns nothing"
+        );
+        // Our own list is not scoped — it is what *we* serve, for our own display and resolver.
+        assert_eq!(f.own_services().len(), 1);
+    }
+
+    /// An unscoped service is announced to every peer, matching a port that is open to every peer.
+    #[test]
+    fn an_unscoped_service_is_announced_to_anyone() {
+        let d = TempDir::new("svc-unscoped");
+        let f = fw(&d, vec![]);
+        f.update_peers(peers_with(&[], &[])).unwrap();
+        f.expose(
+            Proto::Tcp,
+            8096,
+            ExposeScope::AllPeers,
+            Some("jellyfin".into()),
+        )
+        .unwrap();
+        assert_eq!(f.services_for(Ipv4Addr::new(100, 64, 0, 9)).len(), 1);
+    }
+
+    /// One service on two ports is one name, and closing it by name closes both — otherwise
+    /// deleting a service would mean recalling which ports it was assembled from.
+    #[test]
+    fn a_service_spanning_two_ports_is_named_once_and_closed_once() {
+        let d = TempDir::new("svc-two-ports");
+        let f = fw(&d, vec![]);
+        f.expose(Proto::Tcp, 25565, ExposeScope::AllPeers, Some("mc".into()))
+            .unwrap();
+        f.expose(Proto::Udp, 25565, ExposeScope::AllPeers, Some("mc".into()))
+            .unwrap();
+        assert_eq!(f.own_services().len(), 2, "two ports");
+        assert_eq!(f.services_for(Ipv4Addr::new(100, 64, 0, 9)).len(), 2);
+
+        let (removed, left) = f.unexpose_named("mc").unwrap();
+        assert_eq!(removed, 2);
+        assert!(left.is_empty());
+        assert_eq!(f.unexpose_named("mc").unwrap().0, 0, "already gone");
+    }
+
+    /// Naming an already-open port is how an existing exposure gets a name — the alternative is
+    /// closing and reopening it, which drops traffic for no reason.
+    #[test]
+    fn re_exposing_a_port_with_a_name_names_it_in_place() {
+        let d = TempDir::new("svc-rename");
+        let f = fw(&d, vec![]);
+        f.expose(Proto::Tcp, 8096, ExposeScope::AllPeers, None)
+            .unwrap();
+        assert!(f.own_services().is_empty());
+        let listed = f
+            .expose(
+                Proto::Tcp,
+                8096,
+                ExposeScope::AllPeers,
+                Some("jellyfin".into()),
+            )
+            .unwrap();
+        assert_eq!(listed.len(), 1, "still one exposure, now named");
+        assert_eq!(listed[0].name.as_deref(), Some("jellyfin"));
+    }
+
+    #[test]
+    fn a_bad_label_is_refused_and_the_count_is_capped() {
+        let d = TempDir::new("svc-cap");
+        let f = fw(&d, vec![]);
+        assert!(f
+            .expose(Proto::Tcp, 1, ExposeScope::AllPeers, Some("NOPE".into()))
+            .is_err());
+        for i in 0..common::service::MAX_SERVICES_PER_DEVICE {
+            f.expose(
+                Proto::Tcp,
+                1000 + i as u16,
+                ExposeScope::AllPeers,
+                Some(format!("s{i}")),
+            )
+            .unwrap();
+        }
+        assert!(
+            f.expose(
+                Proto::Tcp,
+                2000,
+                ExposeScope::AllPeers,
+                Some("extra".into())
+            )
+            .is_err(),
+            "the cap counts names, and this would be one too many"
+        );
+        // ...but re-naming an existing one is not a new name, so it still goes through.
+        f.expose(Proto::Tcp, 3000, ExposeScope::AllPeers, Some("s0".into()))
+            .unwrap();
+    }
+
+    /// A state file written before names existed must still load, with its ports unnamed.
+    #[test]
+    fn an_exposure_written_before_names_loads_as_an_unnamed_port() {
+        let d = TempDir::new("svc-legacy");
+        std::fs::write(
+            d.join("exposed.json"),
+            br#"[{"proto":"Tcp","port":8080,"net":null}]"#,
+        )
+        .unwrap();
+        let f = fw(&d, vec![]);
+        assert_eq!(f.list().len(), 1);
+        assert_eq!(f.list()[0].name, None);
+        assert!(f.own_services().is_empty());
     }
 
     /// A resolved network scope, addressed by the shared fixture ids so a scope built here matches
@@ -447,7 +698,8 @@ mod tests {
 
         // First run: config seeds 25565, the owner opens 8082 at runtime.
         let f = fw(&dir, vec![seed(25565)]);
-        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers).unwrap();
+        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers, None)
+            .unwrap();
 
         // A restart reloads both from disk — not just the config seed.
         let reloaded = fw(&dir, vec![seed(25565)]);
@@ -470,9 +722,11 @@ mod tests {
     fn exact_scope_removal_leaves_siblings() {
         let dir = TempDir::new("fw-scope");
         let f = fw(&dir, Vec::new());
-        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers).unwrap();
-        f.expose(Proto::Tcp, 8082, net("minecraft")).unwrap();
-        f.expose(Proto::Tcp, 8082, ExposeScope::OwnDevices).unwrap();
+        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers, None)
+            .unwrap();
+        f.expose(Proto::Tcp, 8082, net("minecraft"), None).unwrap();
+        f.expose(Proto::Tcp, 8082, ExposeScope::OwnDevices, None)
+            .unwrap();
 
         // Closing one scope leaves the other exposures of the same port alone.
         let left = f
@@ -485,7 +739,7 @@ mod tests {
         );
 
         // `All` still closes every scope at once.
-        f.expose(Proto::Tcp, 8082, net("minecraft")).unwrap();
+        f.expose(Proto::Tcp, 8082, net("minecraft"), None).unwrap();
         assert!(f
             .unexpose(Proto::Tcp, 8082, RemoveScope::All)
             .unwrap()
@@ -496,8 +750,9 @@ mod tests {
     fn scoped_expose_reports_inactive_without_peers() {
         let dir = TempDir::new("fw-active");
         let f = fw(&dir, Vec::new());
-        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers).unwrap();
-        f.expose(Proto::Tcp, 25565, net("minecraft")).unwrap();
+        f.expose(Proto::Tcp, 8082, ExposeScope::AllPeers, None)
+            .unwrap();
+        f.expose(Proto::Tcp, 25565, net("minecraft"), None).unwrap();
 
         // No peers yet: the scoped port is exposed but unreachable; the unscoped one is fine.
         let listed = f.list();
@@ -526,7 +781,8 @@ mod tests {
     fn own_device_scope_tracks_the_owners_devices_not_a_network() {
         let dir = TempDir::new("fw-own");
         let f = fw(&dir, Vec::new());
-        f.expose(Proto::Tcp, 8082, ExposeScope::OwnDevices).unwrap();
+        f.expose(Proto::Tcp, 8082, ExposeScope::OwnDevices, None)
+            .unwrap();
 
         assert!(!f.list()[0].active, "sole device -> nobody to reach it");
 

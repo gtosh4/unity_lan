@@ -115,11 +115,21 @@ pub enum ExposeOp {
         port: u16,
         #[serde(rename = "net")]
         scope: ExposeScope,
+        /// Service name for this port, if the owner gave one — the label that resolves under their
+        /// user (`mc.alice.unity.internal`). `None` is a bare port, which is what every exposure was
+        /// before names existed and what one stays until it is named.
+        #[serde(default)]
+        name: Option<String>,
     },
     Remove {
         proto: Proto,
         port: u16,
         scope: RemoveScope,
+    },
+    /// Close every port carrying this service name — deleting a service by the name it is known by,
+    /// rather than making the owner recall which ports and scopes it was assembled from.
+    RemoveNamed {
+        name: String,
     },
 }
 
@@ -141,8 +151,12 @@ pub struct ExposedPort {
     pub port: u16,
     #[serde(rename = "net")]
     pub scope: ExposeScope,
+    /// The scope's display label (which network this is open to), *not* the service name below.
     #[serde(default)]
     pub label: String,
+    /// The service name, when this port has one.
+    #[serde(default)]
+    pub name: Option<String>,
     /// False when a scoped exposure currently has no eligible source peers.
     pub active: bool,
 }

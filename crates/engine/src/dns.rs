@@ -74,7 +74,15 @@ pub fn empty_zone() -> Zone {
 /// Rebuild the zone from our device + peers. Returns whether the contents actually changed — a
 /// no-delta refresh (the common case: the coordinator re-sends the same membership every hold) skips
 /// the write and the log rather than churning an identical map every couple of seconds.
-pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) -> bool {
+/// `services` is name → address for every service claim that won its name
+/// ([`crate::mesh_services::resolve`]). Applied *before* device names, which therefore overwrite it:
+/// a coordinator-allocated, attested device name outranks a self-asserted service label.
+pub async fn update(
+    zone: &Zone,
+    me: &SelfDevice,
+    seeds: &[SeedPeer],
+    services: &HashMap<String, Ipv4Addr>,
+) -> bool {
     let mut map = HashMap::new();
     let mut wildcard = HashMap::new();
     let domain = me.dns_domain.as_deref();
@@ -93,6 +101,11 @@ pub async fn update(zone: &Zone, me: &SelfDevice, seeds: &[SeedPeer]) -> bool {
         }
         map.insert(name, ip);
     };
+    // Services first, so the device names below win any collision. `sub = false`: a service name is
+    // a leaf, and nothing certifies `*.mc.alice.<domain>`.
+    for (name, ip) in services {
+        add(name, *ip, false);
+    }
     add(&me.hostname, me.wg_ip, true);
     if let Some(alias) = &me.primary_alias {
         add(alias, me.wg_ip, false);
@@ -301,9 +314,8 @@ mod tests {
         }
     }
 
-    /// A zone built the way the daemon builds it: our own primary device plus one peer.
-    async fn built_zone(domain: Option<&str>) -> Zone {
-        let me = SelfDevice {
+    fn self_device(domain: Option<&str>) -> SelfDevice {
+        SelfDevice {
             community_name: "c".into(),
             user_id: 1,
             username: "gordon".into(),
@@ -316,7 +328,12 @@ mod tests {
             primary_alias: Some("gordon.unity.internal".into()),
             networks_status: Vec::new(),
             dns_domain: domain.map(str::to_string),
-        };
+        }
+    }
+
+    /// A zone built the way the daemon builds it: our own primary device plus one peer.
+    async fn built_zone(domain: Option<&str>) -> Zone {
+        let me = self_device(domain);
         let peer = SeedPeer {
             ip: Ipv4Addr::new(100, 73, 61, 9),
             hostname: "server.alice.unity.internal".into(),
@@ -324,7 +341,7 @@ mod tests {
             ..crate::testutil::seed_peer()
         };
         let zone = empty_zone();
-        update(&zone, &me, &[peer]).await;
+        update(&zone, &me, &[peer], &HashMap::new()).await;
         zone
     }
 
@@ -356,6 +373,51 @@ mod tests {
         assert_eq!(
             resolved(&zone, "a.b.server.alice.mesh.example.com.").await,
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_service_name_resolves_but_never_takes_a_device_name() {
+        // Two properties in one zone build: a service name reaches the device serving it, and a
+        // service claiming a name a *device* already answers to loses — the device name is
+        // coordinator-allocated and attested, the service label is self-asserted.
+        let me = self_device(Some("mesh.example.com"));
+        let peer = SeedPeer {
+            ip: Ipv4Addr::new(100, 73, 61, 9),
+            hostname: "server.alice.unity.internal".into(),
+            primary_alias: None,
+            ..crate::testutil::seed_peer()
+        };
+        let services = HashMap::from([
+            (
+                "mc.alice.unity.internal".to_string(),
+                Ipv4Addr::new(100, 73, 61, 9),
+            ),
+            // A service that collides with the peer's own device name. `update` applies services
+            // first so the device name overwrites it.
+            (
+                "server.alice.unity.internal".to_string(),
+                Ipv4Addr::new(100, 73, 61, 77),
+            ),
+        ]);
+        let zone = empty_zone();
+        update(&zone, &me, &[peer], &services).await;
+
+        assert_eq!(
+            resolved(&zone, "mc.alice.unity.internal.").await,
+            Some(Ipv4Addr::new(100, 73, 61, 9))
+        );
+        assert_eq!(
+            resolved(&zone, "server.alice.unity.internal.").await,
+            Some(Ipv4Addr::new(100, 73, 61, 9)),
+            "the device keeps its own name"
+        );
+        // A service name is a leaf: nothing certifies `*.mc.alice.…`, so nothing resolves below it.
+        assert_eq!(resolved(&zone, "sub.mc.alice.unity.internal.").await, None);
+        // ...and it answers under the certificate domain too, like every other mesh name.
+        assert_eq!(
+            resolved(&zone, "mc.alice.mesh.example.com.").await,
+            Some(Ipv4Addr::new(100, 73, 61, 9))
         );
     }
 
