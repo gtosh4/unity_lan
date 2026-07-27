@@ -10,7 +10,42 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 const MIN_ADMIN_TOKEN_BYTES: usize = 32;
+
+/// Floor on `attestation_ttl_secs`, **relaxed in debug builds**.
+///
+/// The bound guards coordinator load, not security: the long-poll hold is TTL/2, so a short TTL
+/// multiplies how often every parked client wakes and rebuilds a snapshot. That is a concern for a
+/// *deployment*, and every shipped artifact is built `--release` (`packaging/build.sh`,
+/// `windows/build.ps1`, `docker/coordinator.Dockerfile`) — so `debug_assertions` is a reliable
+/// "not production" signal here.
+///
+/// A debug build lowers it because the end-to-end scripts time their phases in multiples of the
+/// TTL, and waiting out a 60-second attestation lifetime three times over costs minutes per run for
+/// no extra coverage. `scripts/gossip-test.sh` goes from ~3m10s to ~1m10s.
+///
+/// The divergence only ever *removes* a restriction in debug — release is strictly stricter, the
+/// same direction as `StatusReport::directive`, which only a debug-build GUI honors. A config below
+/// the release floor fails at startup with the message below, loudly and immediately, which is the
+/// benign end of dev/prod divergence. `MAX` is not relaxed: nothing needs it and a huge TTL is a
+/// real hazard in either profile.
+#[cfg(not(debug_assertions))]
 const MIN_ATTESTATION_TTL_SECS: u64 = 60;
+#[cfg(debug_assertions)]
+const MIN_ATTESTATION_TTL_SECS: u64 = 5;
+/// The floor a *release* coordinator enforces, named separately so the error message can say so
+/// even when a debug build accepted the same value.
+const RELEASE_MIN_ATTESTATION_TTL_SECS: u64 = 60;
+
+// The relaxation must only ever loosen, never tighten. Checked at compile time in both profiles, so
+// swapping the two constants is a build error rather than a surprise at deploy time.
+const _: () = assert!(MIN_ATTESTATION_TTL_SECS <= RELEASE_MIN_ATTESTATION_TTL_SECS);
+// ...and in a release build the two must be the same number: the shipped coordinator enforces the
+// release floor and nothing weaker. The behavioural test for this can only run under
+// `cargo test --release`, which CI doesn't do — this fires during the release build itself, which
+// is the moment that actually matters.
+#[cfg(not(debug_assertions))]
+const _: () = assert!(MIN_ATTESTATION_TTL_SECS == RELEASE_MIN_ATTESTATION_TTL_SECS);
+
 const MAX_ATTESTATION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_RELEASE_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -306,6 +341,16 @@ impl Config {
                 "attestation_ttl_secs must be between {MIN_ATTESTATION_TTL_SECS} and {MAX_ATTESTATION_TTL_SECS}"
             );
         }
+        // Say so explicitly rather than letting a value that loaded in a debug build fail at deploy
+        // time against a floor whose number appears nowhere the operator looked.
+        if cfg.attestation_ttl_secs < RELEASE_MIN_ATTESTATION_TTL_SECS {
+            tracing::warn!(
+                ttl = cfg.attestation_ttl_secs,
+                "attestation_ttl_secs is below {RELEASE_MIN_ATTESTATION_TTL_SECS}: accepted by this \
+                 debug build for the end-to-end scripts, but a release coordinator will refuse to \
+                 start on this config"
+            );
+        }
         if let Some(admin) = &cfg.admin {
             if admin.token.len() < MIN_ADMIN_TOKEN_BYTES {
                 anyhow::bail!(
@@ -451,6 +496,31 @@ mod tests {
         let result = Config::load(&path);
         let _ = std::fs::remove_file(path);
         result
+    }
+
+    /// The TTL floor is deliberately lower in debug builds so the end-to-end scripts don't spend
+    /// minutes waiting out attestation lifetimes — `scripts/gossip-test.sh` runs at 20. Asserted
+    /// through `load`, not against the constants, so it's the actual accept/reject behaviour that's
+    /// pinned. Relaxed, never removed: absurd values and the ceiling are refused either way.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn a_debug_build_accepts_the_short_ttls_the_scripts_need() {
+        assert!(load_text("attestation_ttl_secs = 20\n").is_ok());
+        assert!(load_text("attestation_ttl_secs = 1\n").is_err());
+        assert!(load_text("attestation_ttl_secs = 604801\n").is_err());
+    }
+
+    /// The counterpart, and the reason the relaxation above is safe rather than merely convenient:
+    /// a shipped coordinator still refuses anything under 60. Only runs under
+    /// `cargo test --release`; the `const _` assertions beside the constants are what enforce the
+    /// same property during an ordinary release build.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_enforces_the_full_ttl_floor() {
+        assert!(load_text("attestation_ttl_secs = 20\n").is_err());
+        assert!(load_text("attestation_ttl_secs = 59\n").is_err());
+        assert!(load_text("attestation_ttl_secs = 60\n").is_ok());
+        assert!(load_text("attestation_ttl_secs = 604801\n").is_err());
     }
 
     #[test]

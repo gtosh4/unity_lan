@@ -16,12 +16,11 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
 COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
-# Attestation lifetime (s). The whole test is timed in multiples of this, so it wants to be as short
-# as possible — but `MIN_ATTESTATION_TTL_SECS` in the coordinator's config validation is the floor,
-# and a config below it makes the coordinator refuse to start. Keep them in step: this used to be 20,
-# which stopped being loadable when that validation landed, and the test then failed several phases
-# later with "nodes did not mesh" rather than saying so.
-TTL=60
+# Attestation lifetime (s). Every phase below is a multiple of it, so the run time is roughly three
+# of these — keep it short. Below the *release* floor (`RELEASE_MIN_ATTESTATION_TTL_SECS`) on
+# purpose: the debug coordinator these scripts run accepts it, a shipped one would not. If this ever
+# starts failing at the readiness check, that constant is the first thing to look at.
+TTL=20
 
 if [ "${UNL_INNS:-}" != "1" ]; then
   [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
