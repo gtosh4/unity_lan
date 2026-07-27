@@ -35,14 +35,17 @@ pub(super) async fn register(
     // device can be checked against where the device itself actually connects from.
     let caller_ip = ratelimit::client_ip(peer.ip(), &headers, &st.trusted_proxies);
     // Subscribe to our targeted-wake channel *before* building, so a pair-specific update that
-    // targets us while we build (or decide to park) isn't lost.
-    let mut personal = st.wakers.subscribe(req.wg_pubkey);
+    // targets us while we build (or decide to park) isn't lost. `woken_while_away` covers the much
+    // larger window either side of that: a wake fired while this device had no request in flight,
+    // which the snapshot below therefore already reflects.
+    let (mut personal, woken_while_away) = st.wakers.subscribe(req.wg_pubkey);
     let built = build_snapshot(&st, &req, caller_ip).await?;
-    // Park only when the client is up to date *and* its own request changed nothing. A request that
-    // reports data (reflexive/relay/ICE) returns immediately so the client can continue its report
-    // loop — exactly as the old global bump made it — but now without waking the herd; the affected
-    // peer is woken by a targeted wake instead.
-    if !built.caller_changed && req.since == Some(built.resp.version) {
+    // Park only when the client is up to date, its own request changed nothing, and nothing was
+    // published *about* it while it was away. A request that reports data (reflexive/relay/ICE)
+    // returns immediately so the client can continue its report loop — exactly as the old global
+    // bump made it — but now without waking the herd; the affected peer is woken by a targeted wake
+    // instead, and picks it up here whether or not it happened to be parked when that fired.
+    if !built.caller_changed && !woken_while_away && req.since == Some(built.resp.version) {
         // Displaces this device's own earlier park, if any — a client that abandoned a held request
         // (report to send, restart, crash) must not have to wait out the old one. Only the
         // deployment-wide ceiling refuses.

@@ -7,6 +7,14 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- Peers behind strict NATs now connect through a relay instead of appearing stuck. When a hole punch
+  failed, both sides reserved a slot on a relay but only one of them was told where to send, so no
+  traffic crossed and the pair sat unreachable — often for the ~15 minutes until the next scheduled
+  check-in. The coordinator was discarding a notification whenever the peer it was meant for happened
+  to be between check-ins, which is most of the time. Notifications are now kept and delivered on the
+  peer's next contact. The same fix makes ordinary NAT traversal converge faster, since the address
+  and candidate exchanges it depends on were losing notifications the same way.
+
 - Running `unitylan-engine` bare once — the one-shot "register and print my address" check — no longer
   wedges that install. It enrolled the device but discarded the credential the coordinator issues on
   enrolment, so every later run, including the daemon's, was refused with "device token missing or

@@ -16,6 +16,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::util::hex8;
+
 use anyhow::Context;
 use async_trait::async_trait;
 use common::api::{RelayAllocation, RelayInfo};
@@ -283,6 +285,19 @@ impl RelayManager {
             }
         }
         let s = &self.sessions[&peer];
+        // Log the moment the destination arrives: until the coordinator has handed us the peer's own
+        // relayed address we allocate and listen but cannot forward, so a converge that stalls here
+        // looks exactly like a working relay from every other signal (`is_relaying`, `Relayed`).
+        if *s.peer_relayed_tx.borrow() != info.peer_relayed {
+            match info.peer_relayed {
+                Some(dst) => {
+                    tracing::info!(peer = %hex8(&peer), %dst, "relay: learned the peer's relayed address")
+                }
+                None => {
+                    tracing::debug!(peer = %hex8(&peer), "relay: peer's relayed address withdrawn")
+                }
+            }
+        }
         // Ignore send errors: a closed receiver means the pump died and the session will be pruned.
         let _ = s.peer_relayed_tx.send(info.peer_relayed);
         Some(s.shim_addr)

@@ -65,17 +65,12 @@ jobs:
       #   readme-demo.sh         needs a Wayland desktop + screencast portal
       #   coordinator-scale-test.sh  a metrics probe, no pass/fail assertion
       #   update-test.sh         nightly (see below) — builds the workspace twice
-      #   relay-test.sh          KNOWN BROKEN on main — see the roadmap's "TURN relay converge"
-      #                          entry. Both ends allocate on the relay and report `Relayed`, but
-      #                          neither is handed the other's relayed address, so no packet ever
-      #                          crosses. Excluded so this workflow lands green; put it back in
-      #                          this list as part of the fix, not before.
       - name: run the e2e suite
         run: |
           set -u
           failed=()
           for s in wg-tunnel mesh own-device net-toggle expose-net gui-login oauth rotation \
-                   nat ice gossip; do
+                   nat ice relay gossip; do
             echo "::group::$s-test.sh"
             start=$SECONDS
             if timeout 600 "scripts/$s-test.sh"; then

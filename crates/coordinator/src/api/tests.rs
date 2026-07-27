@@ -179,6 +179,85 @@ fn req(pubkey: u8, device_name: &str) -> RegisterReq {
 }
 
 #[tokio::test]
+async fn a_stuck_pair_is_handed_the_relay_and_each_others_relayed_addresses() {
+    // A is relay-capable and dialable; B and C are stuck behind NATs and ask for a relay. This is
+    // the coordinator half of `scripts/relay-test.sh`: the ~2-round converge where each stuck peer
+    // publishes the address it allocated and is handed the other's.
+    let c = TestCoordinator::new(&[(7, true), (8, true), (9, true)]).await;
+    c.enrol(1, 7, "relay").await;
+    c.enrol(2, 8, "b").await;
+    c.enrol(3, 9, "c").await;
+
+    // A advertises its embedded TURN server.
+    let mut relay = req(1, "relay");
+    relay.relay_capable = true;
+    relay.relay_addr = Some("10.0.0.1:3478".parse().unwrap());
+    relay.relay_secret = Some("sekret".into());
+    relay.endpoint = Some("10.0.0.1:51820".parse().unwrap());
+    c.register(&relay).await.expect("relay registers");
+
+    // Round 1: B and C each report the punch to the other as stuck. Both get relay credentials for
+    // A, but neither has allocated yet, so neither is handed a `peer_relayed`.
+    let mut b = req(2, "b");
+    b.need_relay = vec![[3; 32]];
+    let mut cc = req(3, "c");
+    cc.need_relay = vec![[2; 32]];
+    let rb = c.register(&b).await.expect("B asks for a relay");
+    let seed_c = rb
+        .seeds
+        .iter()
+        .find(|s| s.networks.iter().any(|_| true) && s.relay.is_some())
+        .expect("B is offered a relay for C");
+    assert_eq!(
+        seed_c.relay.as_ref().unwrap().turn_addr,
+        "10.0.0.1:3478".parse::<SocketAddr>().unwrap()
+    );
+    assert!(
+        seed_c.relay.as_ref().unwrap().peer_relayed.is_none(),
+        "nothing to send to before the peer has allocated"
+    );
+    c.register(&cc).await.expect("C asks for a relay");
+
+    // Round 2: each reports the relayed address it allocated on A.
+    b.relay_allocated = vec![common::api::RelayAllocation {
+        peer: [3; 32],
+        relayed: "10.0.0.1:40002".parse().unwrap(),
+    }];
+    cc.relay_allocated = vec![common::api::RelayAllocation {
+        peer: [2; 32],
+        relayed: "10.0.0.1:40003".parse().unwrap(),
+    }];
+    c.register(&b).await.expect("B reports its allocation");
+    c.register(&cc).await.expect("C reports its allocation");
+
+    // Round 3: each must now be handed the *other's* relayed address — without it the relay shim
+    // has no destination and no packet ever crosses.
+    let rb = c.register(&b).await.expect("B refreshes");
+    let relay_for_c = rb
+        .seeds
+        .iter()
+        .find_map(|s| s.relay.as_ref())
+        .expect("B still offered a relay for C");
+    assert_eq!(
+        relay_for_c.peer_relayed,
+        Some("10.0.0.1:40003".parse().unwrap()),
+        "B must learn where to send to reach C"
+    );
+
+    let rc = c.register(&cc).await.expect("C refreshes");
+    let relay_for_b = rc
+        .seeds
+        .iter()
+        .find_map(|s| s.relay.as_ref())
+        .expect("C still offered a relay for B");
+    assert_eq!(
+        relay_for_b.peer_relayed,
+        Some("10.0.0.1:40002".parse().unwrap()),
+        "C must learn where to send to reach B"
+    );
+}
+
+#[tokio::test]
 async fn enrolling_register_issues_a_grant_and_a_one_time_token() {
     let c = TestCoordinator::new(&[(7, true)]).await;
     let mut r = req(1, "laptop");

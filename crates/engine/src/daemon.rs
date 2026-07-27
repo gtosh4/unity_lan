@@ -1347,6 +1347,12 @@ async fn poll_peer_health(
                         endpoint,
                     })
                 })
+                // A relayed or ICE-routed peer's WG endpoint is our own loopback shim, not anything
+                // that peer sends from — reporting it would tell the coordinator a co-member's NAT
+                // mapping is `127.0.0.1:<our shim>`. It survives today only because the coordinator
+                // discards a reflexive that disagrees with the peer's own source IP, which is a
+                // second line of defence, not a reason to publish nonsense.
+                .filter(|o| !o.endpoint.ip().is_loopback())
                 .collect();
             v.sort_by_key(|o| o.pubkey);
             v

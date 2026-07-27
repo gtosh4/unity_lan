@@ -98,8 +98,13 @@ impl ParkSlots {
 
 /// Per-client targeted-wake registry (see [`AppState::wakers`]). A parked `/register` subscribes to
 /// its own pubkey; a pair-specific report *about* that pubkey bumps only its channel, waking that one
-/// client instead of the whole long-poll herd. Entries live only while a client is parked — the
-/// sender-only leftovers are swept periodically — so the map stays bounded to in-flight parks.
+/// client instead of the whole long-poll herd.
+///
+/// An entry lives while a client is parked, plus however long it owes that client a wake it wasn't
+/// there to receive. Sender-only leftovers are swept periodically ([`Wakers::subscribe`]); an entry
+/// still owing a wake survives that sweep and is instead dropped when its device leaves the mesh
+/// ([`Wakers::retain`], from the presence reaper) — so the map stays bounded by live devices rather
+/// than growing with every pubkey ever reported about.
 #[derive(Default)]
 pub struct Wakers {
     inner: Mutex<WakersInner>,
@@ -107,10 +112,28 @@ pub struct Wakers {
 
 #[derive(Default)]
 struct WakersInner {
-    #[allow(clippy::type_complexity)]
-    map: HashMap<[u8; 32], tokio::sync::watch::Sender<u64>>,
+    map: HashMap<[u8; 32], Waker>,
     /// Subscribe counter gating the amortized sweep (see [`Wakers::subscribe`]).
     subs: u32,
+}
+
+/// One device's wake channel, plus whether a wake landed while it had no request in flight.
+struct Waker {
+    tx: tokio::sync::watch::Sender<u64>,
+    /// A wake fired for this device while nothing was parked on it. A `watch` bump reaches only a
+    /// live receiver, and a fresh `subscribe` marks the current value as already seen — so without
+    /// this flag the wake is dropped, and the device sleeps out a whole hold before it learns the
+    /// thing it was woken for. Consumed by that device's next [`Wakers::subscribe`].
+    pending: bool,
+}
+
+impl Default for Waker {
+    fn default() -> Self {
+        Self {
+            tx: tokio::sync::watch::channel(0u64).0,
+            pending: false,
+        }
+    }
 }
 
 /// Sweep stale (sender-only) entries once per this many subscribes. Amortizes the `O(map)` sweep so a
@@ -119,29 +142,59 @@ struct WakersInner {
 const WAKERS_GC_EVERY: u32 = 64;
 
 impl Wakers {
-    /// Register interest for `pk`, returning a receiver that fires on each [`Wakers::wake`].
-    pub fn subscribe(&self, pk: [u8; 32]) -> tokio::sync::watch::Receiver<u64> {
+    /// Register interest for `pk`, returning a receiver that fires on each [`Wakers::wake`] plus
+    /// whether a wake already landed while this device had nothing in flight.
+    ///
+    /// A `true` second element means the caller must **not** park this request: the thing it would
+    /// have been woken for is already in the snapshot it is about to build, and parking would sit on
+    /// it for a whole hold.
+    pub fn subscribe(&self, pk: [u8; 32]) -> (tokio::sync::watch::Receiver<u64>, bool) {
         let mut inner = self.inner.lock().unwrap();
         inner.subs = inner.subs.wrapping_add(1);
         // Amortized GC: don't scan the whole map on every subscribe (that would be O(N²) under a
-        // herd — the exact cost this registry exists to avoid). Sweep sender-only leftovers of
-        // clients whose parks have ended only once per WAKERS_GC_EVERY subscribes.
+        // herd — the exact cost this registry exists to avoid). Sweep leftovers of clients whose
+        // parks have ended only once per WAKERS_GC_EVERY subscribes, keeping any entry that still
+        // owes its device a wake. Those are bounded by device count (a wake target is always a
+        // co-member the reporter meshes with), so they can't grow with traffic.
         if inner.subs.is_multiple_of(WAKERS_GC_EVERY) {
-            inner.map.retain(|_, tx| tx.receiver_count() > 0);
+            inner
+                .map
+                .retain(|_, w| w.tx.receiver_count() > 0 || w.pending);
         }
-        inner
-            .map
-            .entry(pk)
-            .or_insert_with(|| tokio::sync::watch::channel(0u64).0)
-            .subscribe()
+        let waker = inner.map.entry(pk).or_default();
+        let woken_while_away = std::mem::take(&mut waker.pending);
+        (waker.tx.subscribe(), woken_while_away)
     }
 
-    /// Wake the client currently parked on `pk`, if any (no-op otherwise). Edge-triggered via a
-    /// version bump, so a wake that races a subscribe is still delivered on the next `changed()`.
+    /// Wake the client parked on `pk`. Edge-triggered via a version bump, so a wake that races a
+    /// subscribe is still delivered on the next `changed()`.
+    ///
+    /// If nothing is parked, the wake is **recorded** rather than dropped. A device is only inside a
+    /// register call for the moment it takes to build a snapshot, so most wakes land in the gap
+    /// between its requests — and a dropped one costs that device a full `longpoll_hold_secs` before
+    /// it sees what it was woken for. That is what stalled the relayed-address exchange: of two
+    /// stuck peers reporting their allocations, whichever reported first was woken while away, lost
+    /// it, and parked without ever learning where to send.
     pub fn wake(&self, pk: &[u8; 32]) {
-        if let Some(tx) = self.inner.lock().unwrap().map.get(pk) {
-            tx.send_modify(|v| *v = v.wrapping_add(1));
+        let mut inner = self.inner.lock().unwrap();
+        let waker = inner.map.entry(*pk).or_default();
+        waker.tx.send_modify(|v| *v = v.wrapping_add(1));
+        // Only worth remembering when nobody is listening; a live receiver has taken the bump above.
+        if waker.tx.receiver_count() == 0 {
+            waker.pending = true;
         }
+    }
+
+    /// Drop entries for devices no longer present, so a wake recorded for a device that never comes
+    /// back doesn't pin its entry indefinitely (the `subscribe` sweep deliberately keeps those). A
+    /// device that is merely between requests is still present, so this never discards a wake it is
+    /// about to collect. Called from the presence reaper alongside [`super::prune_nat_tables`].
+    pub fn retain(&self, present: &std::collections::HashSet<[u8; 32]>) {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .retain(|pk, w| present.contains(pk) || w.tx.receiver_count() > 0);
     }
 }
 
@@ -252,9 +305,10 @@ mod tests {
     #[tokio::test]
     async fn wakers_fire_only_the_target() {
         let w = super::Wakers::default();
-        let rx = w.subscribe([1u8; 32]);
+        let (rx, pending) = w.subscribe([1u8; 32]);
+        assert!(!pending, "nothing was published about us before we arrived");
         assert!(!rx.has_changed().unwrap(), "no wake yet");
-        // A pubkey nobody parked on is a silent no-op — and doesn't touch our channel.
+        // Another pubkey's wake must not touch our channel.
         w.wake(&[2u8; 32]);
         assert!(
             !rx.has_changed().unwrap(),
@@ -269,6 +323,64 @@ mod tests {
         // Dropping the receiver lets the next subscribe sweep the sender-only entry (no leak).
         drop(rx);
         let _rx2 = w.subscribe([1u8; 32]);
+    }
+
+    #[tokio::test]
+    async fn a_wake_that_lands_between_requests_is_kept_for_the_next_one() {
+        let w = super::Wakers::default();
+        // A device's first request comes and goes: it subscribes, builds, and drops its receiver.
+        let (rx, _) = w.subscribe([1u8; 32]);
+        drop(rx);
+
+        // A co-member now publishes something about it — the reflexive/relay/ICE case. Nothing is
+        // parked, so there is no receiver to take the bump.
+        w.wake(&[1u8; 32]);
+
+        // Its next request must be told, or it parks on a snapshot it has already outgrown and
+        // sleeps out a full hold. This is the relayed-address exchange stall.
+        let (_rx, pending) = w.subscribe([1u8; 32]);
+        assert!(
+            pending,
+            "a wake fired while away must survive to the next request"
+        );
+
+        // …and is consumed exactly once: a later request with nothing new must be free to park.
+        let (_rx, pending) = w.subscribe([1u8; 32]);
+        assert!(!pending, "a kept wake is delivered once, not forever");
+    }
+
+    #[tokio::test]
+    async fn a_kept_wake_is_dropped_once_its_device_leaves() {
+        let w = super::Wakers::default();
+        w.wake(&[1u8; 32]);
+        // Still a member: the wake it hasn't collected yet survives the reaper.
+        w.retain(&std::collections::HashSet::from([[1u8; 32]]));
+        let (_rx, pending) = w.subscribe([1u8; 32]);
+        assert!(pending, "a present device keeps the wake it is owed");
+
+        // Gone from the mesh: nothing will ever collect it, so the entry goes.
+        w.wake(&[2u8; 32]);
+        w.retain(&std::collections::HashSet::new());
+        let (_rx, pending) = w.subscribe([2u8; 32]);
+        assert!(
+            !pending,
+            "a departed device's wake is reaped, not held forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_wake_delivered_to_a_parked_client_is_not_also_kept() {
+        let w = super::Wakers::default();
+        let (rx, _) = w.subscribe([1u8; 32]);
+        // Parked: the receiver takes the bump, so there is nothing left owing.
+        w.wake(&[1u8; 32]);
+        assert!(rx.has_changed().unwrap());
+        drop(rx);
+        let (_rx, pending) = w.subscribe([1u8; 32]);
+        assert!(
+            !pending,
+            "a wake the parked client already got must not fire its next request too"
+        );
     }
 
     #[test]

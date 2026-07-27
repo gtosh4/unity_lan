@@ -206,9 +206,7 @@ Linux (or WSL2):
 **CI runs these** (`.github/workflows/e2e.yml`) on every PR, so a break here fails the build just
 like a failing unit test. Excluded there, and why: `resolver-hook-test.sh` needs real host root and a
 live `systemd-resolved`; `readme-demo.sh` needs a desktop; `coordinator-scale-test.sh` is a metrics
-probe with no assertion; `update-test.sh` builds the workspace twice, so it runs nightly instead; and
-`relay-test.sh` is known-broken on `main` (the relayed-address exchange never completes — see the
-roadmap). Re-add that one to the workflow's list as part of fixing it.
+probe with no assertion; and `update-test.sh` builds the workspace twice, so it runs nightly instead.
 
 The NAT-traversal three (`nat`, `ice`, `relay`) gate on a punch failing before the fallback engages,
 so their wait windows are sized for a loaded CI runner rather than a fast desktop — a pass takes well

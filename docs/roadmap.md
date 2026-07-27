@@ -330,17 +330,16 @@ old "no relay in v1" stance (`docs/prior-art.md` §6.3, design §7.2).
       traverses netns NAT reliably, unlike the punch). `ctl status` shows `[relayed]`. Relay carries WG
       ciphertext by construction (boringtun frames; the relay holds no keys). `mesh-test.sh` +
       `nat-test.sh` still green. **Remaining:** the consent/DoS rate-caps item above (not GA-blocking).
-- [ ] **REGRESSED — the relayed-address exchange no longer completes.** Found 2026-07-26 when the
-      scripts were first wired into CI (`.github/workflows/e2e.yml`), and reproduced on older commits,
-      so it has been broken for some time with nothing watching. Both stuck peers allocate on the relay
-      and report `Relayed`, each publishes its relayed address as `relay_allocated`, but neither is ever
-      handed the other's as `RelayInfo::peer_relayed` — so `relay.rs`'s shim has no destination and the
-      data-plane ping fails. The ~2-round converge appears to stop after the first: the second exchange
-      round never fires. Suspect the targeted wake or the report/apply loop rather than the shim, which
-      looks correct. Whether this matters in practice depends on M5.5: ICE supersedes the relay as the
-      primary fallback on the userspace path (which is every shipped build), and `ice-test.sh` passes —
-      so the exposed surface is the kernel-backend path and any pair ICE also can't connect. `relay-test.sh`
-      is left out of the CI list until this is fixed; **put it back as part of the fix**.
+- [x] **Fixed 2026-07-26: the relayed-address exchange stalled on a lost targeted wake.** Found when
+      the scripts were first wired into CI, and reproduced on older commits — it had been broken for
+      some time with nothing watching. Both stuck peers allocated and reported `Relayed`, but only one
+      was ever handed the other's `RelayInfo::peer_relayed`, so its shim had no destination. The cause
+      was in the coordinator, not the relay: `Wakers::wake` bumped a `watch` channel that exists only
+      while a device is parked, so a wake landing between that device's requests was dropped — and of
+      two peers reporting their allocations, whichever reported *first* was woken while away, lost it,
+      and parked for a full `longpoll_hold_secs` (900s at the default TTL). A wake with no listener is
+      now recorded and delivered to that device's next request, which also refuses to park on it. The
+      same loss hit reflexive sightings and ICE offers, so NAT traversal converges faster generally.
 
 ### M5.5 — Side-socket ICE (userspace) — STUN bootstrap + ICE + TURN via crates
 **Goal:** on the userspace path, replace the ad-hoc peer-observed punch with a real ICE agent,

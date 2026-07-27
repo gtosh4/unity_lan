@@ -189,6 +189,10 @@ pub fn prune_nat_tables(st: &AppState, present: &std::collections::HashSet<[u8; 
         .lock()
         .unwrap()
         .retain(|(owner, peer), _| present.contains(owner) && present.contains(peer));
+    // Same reasoning for the targeted-wake registry: an entry holding a wake for a device that never
+    // returns would otherwise outlive it (that wake is deliberately kept across the gaps between a
+    // live device's requests, so the ordinary sweep can't drop it).
+    st.wakers.retain(present);
 }
 
 pub fn router(state: AppState) -> Router {

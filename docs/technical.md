@@ -295,6 +295,12 @@ coordinator's own window), `caps`, `server_version`, `release?`. All version/rel
 5. **Targeted wakeups.** Pair-specific reports (reflexive/relay/ICE — *for* one peer) don't bump any
    membership scope; they wake **only the target** via a per-pubkey `Wakers` registry. The reporter
    still returns immediately (`build_snapshot` reports `caller_changed`) to keep its report loop.
+   A wake fired while the target has **no request in flight** is *recorded*, not dropped, and consumed
+   by that device's next `subscribe` — which also refuses to park it. Most wakes land in exactly that
+   gap (a device is inside a register call only long enough to build one snapshot), and dropping one
+   costs the target a whole `longpoll_hold_secs` before it sees what it was woken for. That is what
+   stalled the M5.4 relayed-address exchange: of two stuck peers reporting their allocations, the one
+   that reported first was woken while away, lost it, and parked with no destination to send to.
 5. Presence is tracked in-memory (`presence.rs`) with a reaper at `PRESENCE_TTL_SECS`
    (`2×hold + 60s`); `paused`/`Logout`/`supersede` withdraw a device explicitly.
 
