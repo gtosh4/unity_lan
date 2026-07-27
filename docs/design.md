@@ -380,6 +380,11 @@ resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); ho
   matters because a TLS certificate issued against it is bound to that name for its whole life.
   Names remain convenience only; **authorization is always the pubkey in the signed
   attestation**, never the name.
+- **One label below a device name resolves to that device**, under both suffixes — so
+  `plex.<device>.<user>` reaches the machine and a reverse proxy on it can route by name. Scoped to
+  exactly what the certificate wildcard covers (§6.5), and to *device* names only: the bare `<user>`
+  alias sits one label above every one of that owner's devices, so treating it as a base would answer
+  a mistyped device name with the owner's primary device instead of `NXDOMAIN`.
 - **Why `.internal`, not `.local`:** `.local` is RFC 6762 mDNS (OS hijacks to multicast);
   `.internal` is ICANN-reserved (2024) for private use — no public delegation, no clash. All
   UnityLAN names live under a `unity.internal` zone to namespace them within that reserved space.
@@ -404,6 +409,15 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   coordinator builds the names from the calling device's own allocation. A client-supplied name would
   let any enrolled device obtain a publicly-trusted certificate for another member's hostname, which
   is also why the `<user>` label is allocated rather than derived live (§6.4).
+- **The wildcard is anchored under the device, not the user.** A certificate covers
+  `<device>.<user>.<domain>` *and* `*.<device>.<user>.<domain>`, and the resolver answers one label
+  below a device name accordingly (§6.4) — so a device running a reverse proxy serves any number of
+  vhosts from one certificate, and adding a service costs no issuance. `*.<user>.<domain>` is
+  deliberately never issued: that glob also matches sibling *devices'* own names, so it would hand
+  whichever machine held it TLS authority over the rest of that owner's devices, where the current
+  blast radius is one device. It would be the cheaper option on rate limits and on CT exposure (one
+  certificate per user, one name in the logs) — those are the arguments for revisiting it, and they
+  do not outweigh the isolation today.
 - **Two costs, both accepted deliberately.** Issuance publishes the device and user name to public
   **Certificate Transparency** logs, permanently and irreversibly — so it is opt-in per device, off by
   default, and offered only where a port is actually exposed. And CAs cap certificates per registered

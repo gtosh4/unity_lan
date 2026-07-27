@@ -498,7 +498,7 @@ pub async fn manage(
 pub async fn acme_challenge(
     base_url: &str,
     token: String,
-    device: String,
+    device: Vec<String>,
     primary: Option<String>,
 ) -> anyhow::Result<common::api::AcmeChallengeResp> {
     let client = reqwest::Client::new();

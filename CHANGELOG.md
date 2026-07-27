@@ -14,6 +14,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   key is generated on your machine and never sent anywhere — the coordinator only publishes the DNS
   record the certificate authority checks.
 
+  The certificate covers every name one level below the device, not just the device itself — a
+  machine called `server` gets `server.alice.<domain>` and anything like `plex.server.alice.<domain>`
+  or `git.server.alice.<domain>`, all of which resolve to it already. So a reverse proxy can serve a
+  different site per name from one certificate, and adding a service needs no new one. It stops
+  there deliberately: a certificate for `*.alice.<domain>` would also cover your other devices'
+  names.
+
   Two things to know. Your coordinator's operator has to configure a domain for this first (`[dns]`
   in the coordinator config); until they do, the option doesn't appear. And issuing a certificate
   publishes that device's name to public certificate-transparency logs **permanently** — that is how

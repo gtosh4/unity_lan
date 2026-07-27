@@ -32,8 +32,12 @@ pub const DEFAULT_DIRECTORY: &str = "https://acme-v02.api.letsencrypt.org/direct
 /// that is offline for a few weeks still wakes with time to renew before anything breaks.
 pub const RENEW_BEFORE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
-/// The names one certificate covers: this device, plus the bare `<user>` alias when it is the
-/// owner's primary. Pinned at issuance — see [`IssuedState`].
+/// The names one certificate covers: this device and everything one label below it
+/// ([`CertNames::wildcard`]), plus the bare `<user>` alias when it is the owner's primary. Pinned at
+/// issuance — see [`IssuedState`].
+///
+/// The wildcard is derived rather than stored: it is always ordered, so a field would only be a
+/// second place for the same fact to live.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CertNames {
     pub device: String,
@@ -52,12 +56,33 @@ impl CertNames {
         })
     }
 
+    /// `*.<device>.<user>.<domain>` — every name one label below this device.
+    ///
+    /// So a device running a reverse proxy can serve `plex.server.alice.<domain>`,
+    /// `git.server.alice.<domain>` and the rest from one certificate. The glob stops at this
+    /// device: deliberately *not* `*.<user>.<domain>`, which would match a sibling device's own
+    /// name and hand this machine TLS authority over the owner's other devices.
+    pub fn wildcard(&self) -> String {
+        format!("*.{}", self.device)
+    }
+
     fn identifiers(&self) -> Vec<Identifier> {
-        let mut ids = vec![Identifier::Dns(self.device.clone())];
+        let mut ids = vec![
+            Identifier::Dns(self.device.clone()),
+            Identifier::Dns(self.wildcard()),
+        ];
         if let Some(primary) = &self.primary {
             ids.push(Identifier::Dns(primary.clone()));
         }
         ids
+    }
+
+    /// Every name the certificate covers, in the order it names them.
+    pub fn all(&self) -> Vec<String> {
+        std::iter::once(self.device.clone())
+            .chain(std::iter::once(self.wildcard()))
+            .chain(self.primary.clone())
+            .collect()
     }
 }
 
@@ -199,7 +224,7 @@ pub async fn issue(
     // Pass one: collect every challenge value. They must all be published *before* any is marked
     // ready, and in one request — the coordinator charges its weekly budget per request, so posting
     // per authorization would spend two units on a single certificate.
-    let mut device_value = None;
+    let mut device_values = Vec::new();
     let mut primary_value = None;
     let mut authorizations = order.authorizations();
     while let Some(result) = authorizations.next().await {
@@ -214,21 +239,36 @@ pub async fn issue(
             .context("the CA offered no dns-01 challenge")?;
         let identifier = challenge.identifier().to_string();
         let value = challenge.key_authorization().dns_value();
-        if identifier == names.device {
-            device_value = Some(value);
+        // The device name and its wildcard are two authorizations with two distinct values, both
+        // of which the CA looks for at the *one* `_acme-challenge.<device>.<user>.<domain>` name —
+        // dns-01 validates a wildcard at its base. So both are collected here and published
+        // together, rather than the second silently replacing the first.
+        //
+        // `identifier()` reports what we ordered, `*.` and all. (The authorization object itself
+        // carries the base name plus a `wildcard` flag — RFC 8555 §7.1.4 — but that is not the
+        // string this returns, and assuming otherwise cost a debugging round.)
+        if identifier == names.device || identifier == names.wildcard() {
+            device_values.push(value);
         } else if Some(&identifier) == names.primary.as_ref() {
             primary_value = Some(value);
         } else {
             anyhow::bail!("the CA asked us to validate {identifier:?}, which we did not order");
         }
     }
-    let Some(device_value) = device_value else {
+    if device_values.is_empty() {
         // Every authorization was already valid — the CA is reusing a recent one, so nothing to
         // publish and the order is ready to finalize.
         return finalize(state_dir, &mut order).await;
-    };
+    }
+    if device_values.len() > common::api::MAX_DEVICE_CHALLENGES {
+        anyhow::bail!(
+            "the CA raised {} challenges for this device's name; expected at most {}",
+            device_values.len(),
+            common::api::MAX_DEVICE_CHALLENGES
+        );
+    }
 
-    crate::coord::acme_challenge(coordinator, token, device_value, primary_value)
+    crate::coord::acme_challenge(coordinator, token, device_values, primary_value)
         .await
         .context("asking the coordinator to publish the challenge")?;
 
@@ -418,9 +458,7 @@ pub async fn reconcile(r: Reconcile<'_>) -> common::control::CertStatus {
     };
     if let Some(names) = &state.names {
         if state.expires_at > common::now_unix() {
-            status.names = std::iter::once(names.device.clone())
-                .chain(names.primary.clone())
-                .collect();
+            status.names = names.all();
             status.cert_path = Some(cert_path(r.state_dir).display().to_string());
             status.key_path = Some(key_path(r.state_dir).display().to_string());
             status.expires_at = state.expires_at;
@@ -469,9 +507,7 @@ pub async fn reconcile(r: Reconcile<'_>) -> common::control::CertStatus {
                 tracing::error!("certificate: {e:#}");
             }
             tracing::info!(name = %names.device, "certificate: issued");
-            status.names = std::iter::once(names.device.clone())
-                .chain(names.primary.clone())
-                .collect();
+            status.names = names.all();
             status.cert_path = Some(cert_path(r.state_dir).display().to_string());
             status.key_path = Some(key_path(r.state_dir).display().to_string());
             status.expires_at = expires_at;
@@ -505,11 +541,35 @@ mod tests {
     }
 
     #[test]
-    fn a_non_primary_device_orders_one_name() {
+    fn a_non_primary_device_orders_its_own_name_and_its_wildcard() {
         let names =
             CertNames::new("desktop.gordon.unity.internal", None, "mesh.example.com").unwrap();
-        assert_eq!(names.identifiers().len(), 1);
+        assert_eq!(names.identifiers().len(), 2);
         assert!(names.primary.is_none());
+        assert_eq!(
+            names.all(),
+            vec![
+                "desktop.gordon.mesh.example.com".to_string(),
+                "*.desktop.gordon.mesh.example.com".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_wildcard_stops_at_this_device() {
+        // `*.<user>.<domain>` would match a sibling device's own name — `laptop.gordon.…` — and so
+        // hand whichever machine held it a publicly-trusted certificate for the owner's others.
+        // The glob is anchored one level lower, under this device.
+        let names = CertNames::new(
+            "laptop.gordon.unity.internal",
+            Some("gordon.unity.internal"),
+            "mesh.example.com",
+        )
+        .unwrap();
+        assert_eq!(names.wildcard(), "*.laptop.gordon.mesh.example.com");
+        assert!(!names
+            .all()
+            .contains(&"*.gordon.mesh.example.com".to_string()));
     }
 
     const NOW: u64 = 1_800_000_000;

@@ -110,12 +110,23 @@ With a certificate held, `ctl cert` prints what a TLS server's config needs:
 certificates: on (domain mesh.unitylan.com)
   certificate  /var/lib/unitylan/certs/cert.pem
   private key  /var/lib/unitylan/certs/key.pem
-  covers       mediabox.alice.mesh.unitylan.com
+  covers       mediabox.alice.mesh.unitylan.com, *.mediabox.alice.mesh.unitylan.com
   expires      in 74 days
 ```
 
 Point nginx, Caddy, Jellyfin, or whatever you're running at those two paths. Renewal is automatic;
 the paths don't change.
+
+**The wildcard is what makes this useful behind a reverse proxy.** One certificate covers every name
+one label below the device — `jellyfin.mediabox.alice.mesh.unitylan.com`,
+`grafana.mediabox.alice.mesh.unitylan.com`, as many as you run — and each of those resolves to this
+machine already, so nothing needs adding on the client side or at the coordinator. Give Caddy or
+nginx one TLS block reading the two paths above, and route by `Host` from there; a new service is a
+new vhost, not a new certificate.
+
+It is deliberately anchored under *this device* rather than under your account. `*.alice.mesh.unitylan.com`
+would match your other devices' own names, so any one machine holding it could serve TLS for the
+rest of them.
 
 **Read this before turning it on.** Issuing a certificate publishes this device's name to public
 **Certificate Transparency logs, permanently** — that's how CT works, and it applies to every
