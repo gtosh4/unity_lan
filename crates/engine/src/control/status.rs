@@ -354,14 +354,8 @@ mod tests {
 
     fn seed(user_id: u64, nets: &[(&str, &str)]) -> SeedPeer {
         SeedPeer {
-            pubkey: [0; 32],
             user_id,
-            username: "u".into(),
             ip: Ipv4Addr::new(100, 64, 0, 2),
-            endpoint: None,
-            punch: None,
-            hostname: "d.u.unity.internal".into(),
-            primary_alias: None,
             networks: nets
                 .iter()
                 .map(|(n, c)| common::api::SharedNetwork {
@@ -371,10 +365,7 @@ mod tests {
                     community: (*c).into(),
                 })
                 .collect(),
-            relay: None,
-            ice: None,
-            rev: 0,
-            expires_at: 0,
+            ..crate::testutil::seed_peer()
         }
     }
 

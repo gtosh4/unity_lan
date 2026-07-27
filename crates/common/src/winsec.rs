@@ -96,8 +96,7 @@ mod tests {
     /// mistakes — `std::process::Command` passes `/inheritance:r` verbatim (no shell mangling).
     #[test]
     fn restrict_strips_inheritance_and_broad_access() {
-        let dir = std::env::temp_dir().join(format!("unitylan-winsec-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::TempDir::new("winsec");
         let path = dir.join("secret.key");
         std::fs::write(&path, b"topsecret").unwrap();
 
@@ -116,8 +115,6 @@ mod tests {
         }
         // SYSTEM must retain access (the service identity).
         assert!(acl.contains("SYSTEM"), "SYSTEM lost access:\n{acl}");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // A LocalSystem service on a non-domain box reports USERNAME="<HOST>$", USERDOMAIN="WORKGROUP".

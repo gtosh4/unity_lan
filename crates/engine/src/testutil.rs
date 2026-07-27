@@ -1,38 +1,45 @@
 //! Test-only helpers shared by the engine's unit tests.
+//!
+//! The generic ones live in [`common::testutil`] — every crate writes files and feeds parsers in
+//! tests — and are re-exported here so the engine's tests have one place to import from. What stays
+//! is engine-specific: fixtures for the engine's own types.
 
-use std::path::{Path, PathBuf};
+use std::net::Ipv4Addr;
+
+use crate::coord::SeedPeer;
 
 /// Deterministic pseudo-random bytes for the parser sweeps — see [`common::testutil::seeded_bytes`],
 /// which the coordinator's STUN tests share.
 pub use common::testutil::seeded_bytes;
 
-/// A scratch directory that deletes itself on drop.
+/// A scratch directory that deletes itself on drop — see [`common::testutil::TempDir`].
+pub use common::testutil::TempDir;
+
+/// A peer as the coordinator would have handed it to us, with every field a test doesn't care about
+/// deliberately inert: no endpoint, no punch target, no relay or ICE overlay, in no networks. A test
+/// that sets one of those is then visibly exercising it.
 ///
-/// Replaces the hand-rolled "make a temp dir, `remove_dir_all` on the last line" pattern: that
-/// leaks the directory whenever a test panics before reaching the cleanup line, and a leaked dir
-/// makes the *next* run start from stale state.
-pub struct TempDir(PathBuf);
-
-impl TempDir {
-    /// A fresh, empty `unitylan-<tag>-<pid>` under the system temp dir. `tag` must be unique
-    /// among the tests that can run concurrently in one process.
-    pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("unitylan-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir); // clear residue from an earlier crashed run
-        std::fs::create_dir_all(&dir).unwrap();
-        Self(dir)
-    }
-}
-
-impl std::ops::Deref for TempDir {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+/// Meant for struct-update syntax, which keeps the varying fields at the call site and means a new
+/// `SeedPeer` field costs nothing here — `rev` and `expires_at` were each added to three separate
+/// copies of this fixture that had no interest in them:
+///
+/// ```ignore
+/// let s = SeedPeer { user_id: 3, ip: Ipv4Addr::new(100, 64, 0, 7), ..seed_peer() };
+/// ```
+pub fn seed_peer() -> SeedPeer {
+    SeedPeer {
+        pubkey: [0; 32],
+        user_id: 1,
+        username: "u".into(),
+        ip: Ipv4Addr::new(100, 64, 0, 1),
+        endpoint: None,
+        punch: None,
+        hostname: "d.u.unity.internal".into(),
+        primary_alias: None,
+        networks: Vec::new(),
+        relay: None,
+        ice: None,
+        rev: 0,
+        expires_at: 0,
     }
 }

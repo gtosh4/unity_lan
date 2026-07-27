@@ -826,12 +826,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn database_is_created_private_and_symlinks_are_rejected() {
-        let dir = std::env::temp_dir().join(format!(
-            "unitylan-db-security-{}-{}",
-            std::process::id(),
-            common::crypto::gen_enrollment_key()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = common::testutil::TempDir::new("db-security");
         let db = dir.join("coordinator.db");
         let store = Store::open(&db).await.unwrap();
         drop(store);
@@ -846,7 +841,6 @@ mod security_tests {
         symlink(&target, &link).unwrap();
         assert!(Store::open(&link).await.is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

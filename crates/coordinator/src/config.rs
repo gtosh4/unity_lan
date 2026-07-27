@@ -446,13 +446,10 @@ mod tests {
         let cfg: Config = toml::from_str(base).unwrap();
         assert_eq!(cfg.max_longpolls, 4096);
 
-        let path = std::env::temp_dir().join(format!(
-            "unitylan-zero-longpolls-{}.toml",
-            std::process::id()
-        ));
+        let dir = common::testutil::TempDir::new("zero-longpolls");
+        let path = dir.join("coordinator.toml");
         std::fs::write(&path, format!("{base}max_longpolls = 0\n")).unwrap();
         let err = Config::load(&path).unwrap_err();
-        let _ = std::fs::remove_file(path);
         assert!(err.to_string().contains("max_longpolls must be at least 1"));
     }
 
@@ -484,18 +481,20 @@ mod tests {
     }
 
     fn load_text(extra: &str) -> anyhow::Result<Config> {
-        let path = std::env::temp_dir().join(format!(
-            "unitylan-config-{}-{}.toml",
-            std::process::id(),
-            common::crypto::gen_enrollment_key()
+        // A counter rather than the process id: tests run concurrently and several call this more
+        // than once, so the scratch dir has to be unique per *call*, not per process. The `TempDir`
+        // then cleans up on the way out of this function, including the `?` above.
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = common::testutil::TempDir::new(&format!(
+            "config-{}",
+            N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
+        let path = dir.join("coordinator.toml");
         std::fs::write(
             &path,
             format!("bind = '127.0.0.1:8080'\ndatabase = 'test.db'\n{extra}"),
         )?;
-        let result = Config::load(&path);
-        let _ = std::fs::remove_file(path);
-        result
+        Config::load(&path)
     }
 
     /// The TTL floor is deliberately lower in debug builds so the end-to-end scripts don't spend

@@ -291,11 +291,10 @@ mod security_tests {
     #[test]
     fn private_dir_tightens_but_keeps_the_control_traversal_bit() {
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!(
-            "unitylan-private-dir-{}-{}",
-            std::process::id(),
-            common::crypto::gen_enrollment_key()
-        ));
+        // The subject is a path that does *not* exist yet — the scratch dir is only its parent, so
+        // "a fresh dir is owner-only" below still tests creation rather than tightening.
+        let tmp = crate::testutil::TempDir::new("private-dir");
+        let dir = tmp.join("state");
         let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
 
         // A fresh dir is owner-only.
@@ -316,19 +315,12 @@ mod security_tests {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710)).unwrap();
         create_private_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o710);
-
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn private_write_is_owner_only_and_replaces_symlink() {
         use std::os::unix::fs::{symlink, PermissionsExt};
-        let dir = std::env::temp_dir().join(format!(
-            "unitylan-secret-write-{}-{}",
-            std::process::id(),
-            common::crypto::gen_enrollment_key()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::testutil::TempDir::new("secret-write");
         let victim = dir.join("victim");
         std::fs::write(&victim, b"unchanged").unwrap();
         let secret = dir.join("token");
@@ -342,6 +334,5 @@ mod security_tests {
             std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

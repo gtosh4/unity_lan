@@ -809,18 +809,9 @@ mod tests {
     fn sp(pubkey: [u8; 32], rev: u64, expires_at: u64) -> SeedPeer {
         SeedPeer {
             pubkey,
-            user_id: 1,
-            username: "u".into(),
-            ip: Ipv4Addr::new(100, 64, 0, 1),
-            endpoint: None,
-            punch: None,
-            hostname: "h".into(),
-            primary_alias: None,
-            networks: vec![],
-            relay: None,
-            ice: None,
             rev,
             expires_at,
+            ..crate::testutil::seed_peer()
         }
     }
 
