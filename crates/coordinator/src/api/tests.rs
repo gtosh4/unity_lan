@@ -1,0 +1,334 @@
+//! End-to-end tests over the real [`router`] — request in, response out.
+//!
+//! The other modules' tests cover their decision functions in isolation. These cover what only the
+//! assembled thing can be wrong about: whether a route is wired at all, whether the extractors
+//! accept what a client actually sends, whether the layers (rate limit, connect-info) let a request
+//! through, and whether a change to one phase of a snapshot silently breaks another. Every one of
+//! those has a status code as its symptom and no unit test as its witness.
+//!
+//! Everything runs against an in-memory store and a config-seeded role source, so there is no
+//! network, no Discord and no disk — the same constraints as the unit tests, one layer up.
+
+use std::net::SocketAddr;
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
+
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
+use common::api::{RegisterReq, RegisterResp};
+use tower::ServiceExt;
+
+use super::{router, AppState};
+use crate::config::{FakeConfig, FakeGuild, FakeMember};
+use crate::presence::Presence;
+use crate::roles::FakeRoleSource;
+use crate::signer::{GuildKeys, SignCache};
+use crate::store::Store;
+use crate::versions::Versions;
+
+const GUILD: u64 = 1;
+const ROLE: u64 = 10;
+const TTL: u64 = 600;
+
+/// A coordinator wired exactly as `main` wires it, minus the socket.
+struct TestCoordinator {
+    state: AppState,
+    /// Device bearer tokens as a client would persist them: issued once at enrollment, then
+    /// presented on every later register. Without this the harness would 401 itself, since a
+    /// public WG key is not authentication.
+    tokens: Mutex<std::collections::HashMap<[u8; 32], String>>,
+}
+
+impl TestCoordinator {
+    /// One guild, one registered network on `ROLE`, and one member per `(user_id, holds_role)`.
+    async fn new(members: &[(u64, bool)]) -> Self {
+        let store = Arc::new(Store::memory().await);
+        store
+            .upsert_network(GUILD, ROLE, "mesh")
+            .await
+            .expect("register the test network");
+        let roles = Arc::new(FakeRoleSource::new(FakeConfig {
+            guilds: vec![FakeGuild {
+                id: GUILD,
+                name: "acme".into(),
+                members: members
+                    .iter()
+                    .map(|&(user_id, holds)| FakeMember {
+                        user_id,
+                        nick: format!("user{user_id}"),
+                        role_ids: if holds { vec![ROLE] } else { vec![99] },
+                    })
+                    .collect(),
+            }],
+        }));
+        let guild_keys = Arc::new(GuildKeys::new(
+            store.clone(),
+            "100.72.0.0/16".parse().unwrap(),
+            TTL,
+        ));
+        Self {
+            state: AppState {
+                guild_keys,
+                sign_cache: Arc::new(SignCache::new(TTL)),
+                wakers: Arc::new(super::Wakers::default()),
+                longpoll_hold_secs: TTL / 2,
+                park_slots: Arc::new(super::ParkSlots::new(64)),
+                roles,
+                store,
+                presence: Arc::new(Presence::default()),
+                versions: Arc::new(Versions::default()),
+                oauth: None,
+                trusted_proxies: Arc::new(Vec::new()),
+                source_ip: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                reflexive: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                relays: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                relay_allocs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                ice: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                stun_port: None,
+                release: Arc::new(std::sync::RwLock::new(None)),
+                release_signed: Arc::new(std::sync::RwLock::new(None)),
+                admin_token: None,
+                enroll_secret: [7u8; 32],
+                require_enroll_proof: false,
+                enroll_proven: Arc::new(AtomicU64::new(0)),
+                enroll_unproven: Arc::new(AtomicU64::new(0)),
+            },
+            tokens: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Mint a one-time enrollment key for `user_id`, as `/unitylan enroll` does.
+    async fn enrollment_key(&self, user_id: u64) -> String {
+        let key = format!("enroll-key-{user_id}");
+        self.state
+            .store
+            .create_enrollment_key(&key, user_id, Some(common::now_unix() + 3600))
+            .await
+            .expect("mint an enrollment key");
+        key
+    }
+
+    /// Drive one request through the assembled router, including its layers. `ConnectInfo` is
+    /// inserted directly because there is no accept loop here to supply it.
+    async fn send(&self, path: &str, body: serde_json::Value) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("build the request");
+        req.extensions_mut().insert(ConnectInfo(
+            "203.0.113.9:40000".parse::<SocketAddr>().unwrap(),
+        ));
+        let resp = router(self.state.clone())
+            .oneshot(req)
+            .await
+            .expect("router responded");
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .expect("read the response body");
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    /// `POST /register`, behaving like a real client: any bearer token this device was issued is
+    /// presented on every later request, and a newly-issued one is remembered. Tests that want to
+    /// see the unauthenticated behavior call [`Self::send`] directly.
+    async fn register(&self, req: &RegisterReq) -> Result<RegisterResp, (StatusCode, String)> {
+        let mut req = req.clone();
+        if req.device_token.is_none() {
+            req.device_token = self.tokens.lock().unwrap().get(&req.wg_pubkey).cloned();
+        }
+        let (status, body) = self
+            .send("/register", serde_json::to_value(&req).unwrap())
+            .await;
+        if status != StatusCode::OK {
+            return Err((status, body));
+        }
+        let resp: RegisterResp = serde_json::from_str(&body).expect("decode RegisterResp");
+        if let Some(tok) = &resp.device_token {
+            self.tokens
+                .lock()
+                .unwrap()
+                .insert(req.wg_pubkey, tok.clone());
+        }
+        Ok(resp)
+    }
+
+    /// Enrol one device: mint its owner a key, register with it, and keep the token that comes back.
+    async fn enrol(&self, pubkey: u8, user_id: u64, device_name: &str) -> RegisterResp {
+        let mut r = req(pubkey, device_name);
+        r.enrollment_key = Some(self.enrollment_key(user_id).await);
+        self.register(&r).await.expect("enrol the device")
+    }
+}
+
+/// A register request for a device, built from the JSON a current client would actually send —
+/// every other field takes its wire default, which is the point: a `serde(default)` chosen wrongly
+/// shows up here as a behavior change, not as a compile error nobody writes.
+fn req(pubkey: u8, device_name: &str) -> RegisterReq {
+    serde_json::from_value(serde_json::json!({
+        "wg_pubkey": vec![pubkey; 32],
+        "device_name": device_name,
+        "peer_own_devices": true,
+        "proto": common::PROTOCOL_VERSION,
+        "proto_min": common::MIN_PROTOCOL_VERSION,
+    }))
+    .expect("a current client's register body")
+}
+
+#[tokio::test]
+async fn enrolling_register_issues_a_grant_and_a_one_time_token() {
+    let c = TestCoordinator::new(&[(7, true)]).await;
+    let mut r = req(1, "laptop");
+    r.enrollment_key = Some(c.enrollment_key(7).await);
+
+    let resp = c.register(&r).await.expect("a role holder registers");
+    let grant = resp.grant.expect("a role holder gets a grant");
+    assert_eq!(grant.networks, vec!["mesh".to_string()]);
+    assert_eq!(resp.anchors.len(), 1, "one anchor per guild held");
+    assert_eq!(resp.anchors[0].guild_id, GUILD);
+
+    // The bearer token is delivered exactly once — on the register that enrolls the device.
+    let token = resp.device_token.expect("token on first enrollment");
+    let mut again = req(1, "laptop");
+    again.device_token = Some(token.clone());
+    let resp = c
+        .register(&again)
+        .await
+        .expect("re-register with the token");
+    assert!(
+        resp.device_token.is_none(),
+        "the token must not be re-issued to anyone who names a known pubkey"
+    );
+}
+
+#[tokio::test]
+async fn an_enrolled_device_without_its_token_is_refused() {
+    let c = TestCoordinator::new(&[(7, true)]).await;
+    let mut r = req(1, "laptop");
+    r.enrollment_key = Some(c.enrollment_key(7).await);
+    c.register(&r).await.expect("enrol");
+
+    // A WG public key rides in every co-member's seed, so knowing one must not be enough to pull
+    // that device's snapshot or forge its state. This is the regression `rotation-test.sh` caught
+    // end to end when the one-shot CLI path dropped the token it was handed.
+    let (status, body) = c
+        .send("/register", serde_json::to_value(req(1, "laptop")).unwrap())
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    assert!(body.contains("device token"), "{body}");
+}
+
+#[tokio::test]
+async fn a_member_without_the_role_gets_no_address() {
+    let c = TestCoordinator::new(&[(8, false)]).await;
+    let mut r = req(2, "desktop");
+    r.enrollment_key = Some(c.enrollment_key(8).await);
+
+    let resp = c.register(&r).await.expect("register is admitted");
+    // Admitted, but allocation-gated: no grant, no networks, and so no mesh IP consumed (TM-2).
+    assert!(resp.grant.is_none(), "no role → no grant");
+    assert!(resp.networks.is_empty());
+    assert!(resp.seeds.is_empty());
+}
+
+#[tokio::test]
+async fn co_members_see_each_other_and_a_stranger_sees_neither() {
+    let c = TestCoordinator::new(&[(7, true), (8, true), (9, false)]).await;
+    c.enrol(1, 7, "a").await;
+    c.enrol(2, 8, "b").await;
+    // The role-less user sees nobody on the register that would have enrolled it — and, being
+    // allocation-gated, leaves no device row behind, so it can't refresh at all without a fresh
+    // enrollment key. That is the intended shape: no role, no footprint.
+    let stranger = c.enrol(3, 9, "c").await;
+    assert!(stranger.seeds.is_empty(), "a non-member sees no peers");
+
+    // Two holders of the same role are co-members: each sees exactly the other.
+    let a = req(1, "a"); // no `held` → the full set, not a delta
+    let resp = c.register(&a).await.expect("re-register A");
+    assert_eq!(resp.seeds.len(), 1, "A sees exactly B");
+    assert_eq!(resp.seeds[0].networks[0].guild_id, GUILD);
+    assert!(!resp.seeds[0].attestations.is_empty());
+
+    // …and the stranger is in neither of their snapshots.
+    let resp = c.register(&req(2, "b")).await.expect("re-register B");
+    assert_eq!(
+        resp.seeds.len(),
+        1,
+        "B sees exactly A, never the non-member"
+    );
+}
+
+#[tokio::test]
+async fn delta_sync_returns_only_what_changed() {
+    let c = TestCoordinator::new(&[(7, true), (8, true)]).await;
+    for (pk, user, name) in [(1u8, 7u64, "a"), (2, 8, "b")] {
+        c.enrol(pk, user, name).await;
+    }
+
+    let full = c.register(&req(1, "a")).await.expect("full snapshot");
+    assert_eq!(full.seeds.len(), 1);
+    assert!(!full.partial);
+
+    // Echo back what we hold at the rev we were given → nothing to resend.
+    let mut held = req(1, "a");
+    held.held = vec![common::api::HeldPeer {
+        pubkey: [2; 32],
+        rev: full.seeds[0].rev,
+    }];
+    let delta = c.register(&held).await.expect("delta snapshot");
+    assert!(delta.partial, "a client that sent `held` gets a delta");
+    assert!(delta.seeds.is_empty(), "unchanged peer is not resent");
+    assert!(delta.removed.is_empty());
+
+    // A peer we hold that is no longer a co-member comes back as a removal.
+    let mut stale = req(1, "a");
+    stale.held = vec![common::api::HeldPeer {
+        pubkey: [99; 32],
+        rev: 1,
+    }];
+    let delta = c.register(&stale).await.expect("delta snapshot");
+    assert_eq!(
+        delta.removed,
+        vec![[99u8; 32]],
+        "drop what we no longer see"
+    );
+}
+
+#[tokio::test]
+async fn an_unspeakable_protocol_is_refused_before_any_work() {
+    let c = TestCoordinator::new(&[(7, true)]).await;
+    let mut r = req(1, "laptop");
+    r.proto = 2;
+    r.proto_min = 1;
+    let (status, body) = c.send("/register", serde_json::to_value(&r).unwrap()).await;
+    assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+    assert!(body.contains("client is too old"), "{body}");
+    // Refused on the range alone: no enrollment key was sent, yet this is a 426 and not a 401.
+}
+
+#[tokio::test]
+async fn login_routes_report_unavailable_when_oauth_is_unconfigured() {
+    let c = TestCoordinator::new(&[]).await;
+    let body = serde_json::json!({
+        "wg_pubkey": vec![0u8; 32],
+        "access_token": "t",
+    });
+    let (status, _) = c.send("/oauth/complete", body).await;
+    // A deployment with no `[oauth]` must say so rather than 500 or silently bind a device.
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[tokio::test]
+async fn the_admin_surface_is_absent_until_an_operator_opts_in() {
+    let c = TestCoordinator::new(&[]).await;
+    let req = Request::builder()
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+    let resp = router(c.state.clone()).oneshot(req).await.unwrap();
+    // No `[admin] token` → the route exists but reveals nothing, not even that it is gated.
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
