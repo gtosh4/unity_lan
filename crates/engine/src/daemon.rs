@@ -1606,6 +1606,17 @@ fn sync_proxy(
         tracing::warn!("the TLS proxy exited; restarting it");
         *held = None;
     }
+    let bind = device
+        .as_ref()
+        .map(|dev| SocketAddr::from((dev.wg_ip, common::control::HTTPS_PORT)));
+    // It was handed a socket, not the right to make one, so a device that changed mesh address
+    // needs a fresh listener — which means a fresh process.
+    if let (Some(proxy), Some(bind)) = (held.as_ref(), bind) {
+        if proxy.bound_to != bind {
+            tracing::info!(%bind, "mesh address changed; restarting the TLS proxy on it");
+            *held = None;
+        }
+    }
     let has_services = cfg.proxy.enabled
         && device.as_ref().is_some_and(|dev| {
             ctx.fw.as_ref().is_some_and(|fw| {
@@ -1626,11 +1637,13 @@ fn sync_proxy(
             let euid = unsafe { libc::geteuid() };
             #[cfg(not(unix))]
             let euid = 1;
+            let Some(bind) = bind else { return };
             let started = crate::proxy::run_as(cfg.proxy.user.as_deref(), euid).and_then(|user| {
                 let binary = crate::proxy::binary(cfg.proxy.binary.as_deref());
                 crate::proxy::spawn(
                     &binary,
                     std::path::Path::new(&cfg.control_name()),
+                    bind,
                     user.as_deref(),
                 )
                 .map_err(|e| format!("{e:#}"))

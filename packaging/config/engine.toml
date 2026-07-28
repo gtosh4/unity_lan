@@ -34,3 +34,20 @@ control_group = "unitylan"
 # --- firewall (default-deny inbound on the wg iface; secure by default) ---
 # firewall = true
 # expose = [ { port = 25565, proto = "tcp" } ]
+# A named service is an exposed port people can remember — `mc.<you>.unity.internal`. Add `web = true`
+# for something a browser opens, and it goes into this device's HTTPS certificate too.
+# expose = [ { port = 25565, proto = "tcp", name = "mc" }, { port = 8096, name = "jellyfin", web = true } ]
+
+# --- HTTPS for web services ---
+# The proxy terminates TLS for `web` services and forwards to them over plain HTTP on loopback, so
+# the app itself needs no certificate configuration. It runs as its own unprivileged account, which
+# the package creates; the engine refuses to start it as root, so leave `user` set.
+[proxy]
+user = "unitylan-proxy"
+# enabled = false   # ...or turn it off and serve TLS yourself (nginx, Caddy) from the paths below.
+
+[cert]
+# The group that may read the certificate's private key. The proxy's own group, so it can serve it;
+# change this if something else terminates TLS instead.
+group = "unitylan-proxy"
+# reload_command = ["systemctl", "reload", "nginx"]   # run after each renewal, if you serve it yourself

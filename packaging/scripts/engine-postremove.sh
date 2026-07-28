@@ -12,4 +12,9 @@ fi
 # expires on presence timeout. Use `unitylan uninstall --purge` before removal to un-enroll actively.
 if [ "$1" = "purge" ]; then
     rm -rf /var/lib/unitylan
+    # The proxy's service account goes with the state it existed to read. Only on purge: a plain
+    # remove keeps this device's identity for a reinstall, and deleting the account would orphan the
+    # group that owns the certificate key.
+    userdel unitylan-proxy >/dev/null 2>&1 || true
+    groupdel unitylan-proxy >/dev/null 2>&1 || true
 fi

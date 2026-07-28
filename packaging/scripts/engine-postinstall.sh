@@ -7,6 +7,25 @@ set -e
 # starts. Idempotent (-f) across upgrades.
 groupadd -f unitylan >/dev/null 2>&1 || true
 
+# The TLS proxy runs as its own unprivileged account, because parsing HTTP from mesh peers has no
+# business happening in the root daemon. Two group memberships are what make that workable:
+#
+#   * its own group `unitylan-proxy` owns the certificate **private key** (engine.toml's
+#     `[cert] group`), which the engine chmods to 0640 root:unitylan-proxy after each issuance;
+#   * membership of `unitylan` lets it read the control socket (root:unitylan 0660), which is where
+#     it gets its whole configuration.
+#
+# A system account with no login shell and no home: it never needs either, and both are attack
+# surface on a machine that just serves web pages to a handful of mesh peers.
+if ! getent passwd unitylan-proxy >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin \
+        --comment "UnityLAN TLS proxy" unitylan-proxy >/dev/null 2>&1 \
+      || useradd --system --user-group --no-create-home --shell /sbin/nologin \
+        --comment "UnityLAN TLS proxy" unitylan-proxy >/dev/null 2>&1 || true
+fi
+# Idempotent across upgrades, and re-applied in case an earlier install predates it.
+usermod -aG unitylan unitylan-proxy >/dev/null 2>&1 || true
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     # Pick up the new binary on an upgrade. `try-restart` restarts the service only if it is already

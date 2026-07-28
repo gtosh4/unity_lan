@@ -464,7 +464,12 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   exposure per scope, `Firewall::effective_exposed`), and the proxy narrows that to the one service
   asked for — the distinction a packet filter cannot make once they share a port. Forwarding is
   loopback-only by construction: the address is built from a port the engine supplied, never from
-  anything in the request.
+  anything in the request. **The engine binds `:443` and hands the socket over** (`dup2` onto a fixed
+  descriptor, named by `PROXY_LISTEN_FD_VAR`): the port is privileged, a child that drops to another
+  uid loses its capabilities, and `NoNewPrivileges` in the unit rules out file capabilities too — so
+  handing over an already-bound listener is both the way it can work and the better one, leaving the
+  proxy with no capability at all. The consequence is that a changed mesh address needs a restarted
+  proxy, since it was given a socket rather than the right to make one.
 - **Not a private CA.** Issuing from a coordinator-held CA would avoid all of the above, but requires
   installing a root into every member's system trust store — which would let a compromised
   coordinator MITM TLS on every member's machine, an escalation from today, where it cannot read peer

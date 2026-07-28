@@ -404,6 +404,13 @@ pub struct PeerStatus {
     pub services: Vec<PeerService>,
 }
 
+/// The environment variable naming a listener descriptor the engine bound and handed to the proxy.
+///
+/// 443 is privileged and the proxy runs unprivileged — deliberately, since it is the process that
+/// parses HTTP from mesh peers — so it cannot take the port itself. The engine binds it while it
+/// still can and passes the socket, leaving the proxy with no capability at all.
+pub const PROXY_LISTEN_FD_VAR: &str = "UNITYLAN_PROXY_LISTEN_FD";
+
 /// The port mesh peers reach web services on.
 ///
 /// Fixed rather than configurable: it is what a browser assumes when someone types a bare name,

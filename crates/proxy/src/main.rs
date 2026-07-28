@@ -184,13 +184,21 @@ fn to_name(path: PathBuf) -> std::io::Result<Name<'static>> {
     }
 }
 
-/// Hold a listener for as long as the current configuration says to, and rebuild it when that
-/// changes — a new address, a renewed certificate, a different set of routes.
+/// What a connection is served with right now. Swapped as the engine's word changes; `None` means
+/// there is nothing to serve, and connections are closed rather than answered.
+type Serving = Option<(TlsAcceptor, Routes)>;
+
+/// Follow the configuration, republishing what each connection should be served with.
+///
+/// The **listener is taken once and kept**, not rebuilt per change: it is usually a socket the
+/// engine bound and handed over — 443 is privileged and this process deliberately cannot take it —
+/// so dropping it would mean never getting it back. Only what is served on it changes.
 async fn serve_loop(mut rx: watch::Receiver<Live>) {
-    let mut current: Option<(SocketAddr, tokio::task::JoinHandle<()>)> = None;
+    let (serving_tx, serving_rx) = watch::channel(Serving::None);
+    let mut listener: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         let live = rx.borrow_and_update().clone();
-        let wanted = match live.servable() {
+        let next = match live.servable() {
             Some((bind, cert, key)) => match load_tls(cert, key) {
                 Ok(acceptor) => Some((
                     SocketAddr::from((bind, common::control::HTTPS_PORT)),
@@ -198,32 +206,36 @@ async fn serve_loop(mut rx: watch::Receiver<Live>) {
                 )),
                 Err(e) => {
                     // Not fatal: the engine may be mid-renewal, or the key's group may not have
-                    // reached us yet. Keep whatever is already serving rather than dropping it.
-                    tracing::warn!("certificate not usable ({e:#}); not (re)starting the listener");
+                    // reached us yet. Keep serving what we already were rather than dropping it.
+                    tracing::warn!("certificate not usable ({e:#}); keeping the previous one");
                     None
                 }
             },
             None => None,
         };
 
-        // Always tear the old listener down first: the address may be the same, and two tasks
-        // holding one port would serve requests from two different configurations.
-        if let Some((_, task)) = current.take() {
-            task.abort();
-        }
-        if let Some((addr, acceptor)) = wanted {
-            let routes = Routes::new(live.routes.clone());
-            current = Some((
-                addr,
-                tokio::spawn(async move {
-                    if let Err(e) = listen(addr, acceptor, routes).await {
-                        tracing::error!("listener on {addr} stopped: {e:#}");
-                    }
-                }),
-            ));
-            tracing::info!(%addr, services = live.routes.len(), "serving web services");
-        } else {
-            tracing::info!("nothing to serve; holding no port");
+        match next {
+            Some((addr, acceptor)) => {
+                let count = live.routes.len();
+                serving_tx.send_replace(Some((acceptor, Routes::new(live.routes))));
+                if listener.is_none() {
+                    let rx = serving_rx.clone();
+                    listener = Some(tokio::spawn(async move {
+                        if let Err(e) = listen(addr, rx).await {
+                            tracing::error!("listener on {addr} stopped: {e:#}");
+                        }
+                    }));
+                    tracing::info!(%addr, services = count, "serving web services");
+                } else {
+                    tracing::info!(services = count, "configuration updated");
+                }
+            }
+            // The listener stays up holding its port; with nothing to serve it closes what arrives.
+            // The engine stops us outright when there is nothing left, so this is a brief state.
+            None => {
+                serving_tx.send_replace(None);
+                tracing::info!("nothing to serve");
+            }
         }
 
         if rx.changed().await.is_err() {
@@ -254,10 +266,33 @@ fn load_tls(cert_path: &str, key_path: &str) -> anyhow::Result<TlsAcceptor> {
     Ok(TlsAcceptor::from(Arc::new(cfg)))
 }
 
-async fn listen(addr: SocketAddr, acceptor: TlsAcceptor, routes: Routes) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("binding {addr}"))?;
+/// The listener to serve on: the one the engine handed over, or a freshly bound one.
+///
+/// The engine binds 443 because it can and we deliberately cannot — a process that dropped to an
+/// unprivileged user has no capability to take a privileged port, which is exactly the property
+/// worth having. Binding ourselves is the standalone path (a developer, a test) where we were
+/// started with enough privilege to do it.
+fn listener_for(addr: SocketAddr) -> anyhow::Result<std::net::TcpListener> {
+    match std::env::var(common::control::PROXY_LISTEN_FD_VAR) {
+        Ok(fd) => {
+            let fd: i32 = fd
+                .parse()
+                .context("the handed-over listener is not a descriptor")?;
+            // SAFETY: the engine `dup2`'d a bound, listening TCP socket onto exactly this
+            // descriptor before exec'ing us, and nothing in this process has touched it since — we
+            // are the only owner, so taking it is sound.
+            Ok(unsafe { <std::net::TcpListener as std::os::fd::FromRawFd>::from_raw_fd(fd) })
+        }
+        Err(_) => std::net::TcpListener::bind(addr).with_context(|| format!("binding {addr}")),
+    }
+}
+
+async fn listen(addr: SocketAddr, serving: watch::Receiver<Serving>) -> anyhow::Result<()> {
+    let std_listener = listener_for(addr)?;
+    std_listener
+        .set_nonblocking(true)
+        .context("making the listener non-blocking")?;
+    let listener = TcpListener::from_std(std_listener).context("adopting the listener")?;
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(x) => x,
@@ -268,8 +303,11 @@ async fn listen(addr: SocketAddr, acceptor: TlsAcceptor, routes: Routes) -> anyh
                 continue;
             }
         };
-        let acceptor = acceptor.clone();
-        let routes = routes.clone();
+        // Read the configuration per connection, so a renewal or a changed service set applies to
+        // the next request without the port ever being let go.
+        let Some((acceptor, routes)) = serving.borrow().clone() else {
+            continue; // nothing to serve right now
+        };
         tokio::spawn(async move {
             let SocketAddr::V4(peer_v4) = peer else {
                 return; // we bind an IPv4 mesh address; anything else is not a mesh peer

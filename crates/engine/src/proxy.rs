@@ -74,12 +74,26 @@ fn proxy_file_name() -> &'static str {
     }
 }
 
+/// The descriptor the pre-bound listener is handed over on; the variable naming it is
+/// [`common::control::PROXY_LISTEN_FD_VAR`], shared with the proxy.
+///
+/// **Why the engine binds it.** 443 is privileged, and an unprivileged proxy cannot take it: a child
+/// that drops to another uid loses its capabilities, and `NoNewPrivileges` in the systemd unit means
+/// file capabilities on the binary would not help either. Handing over an already-bound socket is
+/// the standard way out and the better one — the proxy then runs with *no* capability at all, rather
+/// than one it has to be trusted with.
+const LISTEN_FD: i32 = 3;
+
 /// A running proxy, killed when this is dropped.
 ///
 /// Dropping is the shutdown path: the engine going away must take the proxy with it rather than
 /// leaving a process holding 443 and serving whatever it last heard.
 pub struct Proxy {
     child: tokio::process::Child,
+    /// The address whose listener we handed over. The proxy cannot rebind — it was given a socket,
+    /// not the right to make one — so a device that changes mesh address needs a restart, and this
+    /// is what notices.
+    pub bound_to: std::net::SocketAddr,
 }
 
 impl Drop for Proxy {
@@ -96,22 +110,50 @@ impl Proxy {
     }
 }
 
-/// Start the proxy, pointed at the control socket it should read its configuration from.
+/// Start the proxy on an already-bound listener for `bind`, pointed at the control socket it reads
+/// its configuration from.
 ///
 /// Errors are returned rather than logged here so the caller can report them once and not on every
 /// reconcile: a missing binary or an unusable user does not get better by retrying in two seconds.
-pub fn spawn(binary: &Path, socket: &Path, run_as: Option<&str>) -> anyhow::Result<Proxy> {
+pub fn spawn(
+    binary: &Path,
+    socket: &Path,
+    bind: std::net::SocketAddr,
+    run_as: Option<&str>,
+) -> anyhow::Result<Proxy> {
+    // Bound here, while we still have the capability to take a privileged port, and handed over.
+    let listener = std::net::TcpListener::bind(bind)
+        .with_context(|| format!("binding {bind} for the TLS proxy"))?;
+
     let mut cmd = tokio::process::Command::new(binary);
     cmd.arg(socket)
+        .env(common::control::PROXY_LISTEN_FD_VAR, LISTEN_FD.to_string())
         .stdin(Stdio::null())
         // Inherit stdout/stderr so the proxy's log lands wherever the engine's does — one place to
         // look, which for a service failing to serve is the difference between a diagnosis and a
         // mystery.
         .kill_on_drop(true);
     #[cfg(unix)]
-    if let Some(user) = run_as {
-        let (uid, gid) = unix_ids(user)?;
-        cmd.uid(uid).gid(gid);
+    {
+        if let Some(user) = run_as {
+            let (uid, gid) = unix_ids(user)?;
+            cmd.uid(uid).gid(gid);
+        }
+        // Rust marks every socket it opens close-on-exec, so the child would otherwise inherit
+        // nothing. `dup2` both duplicates it onto the agreed descriptor and clears that flag.
+        let raw = std::os::fd::AsRawFd::as_raw_fd(&listener);
+        // SAFETY: runs in the forked child between `fork` and `exec`, where only async-signal-safe
+        // calls are allowed — `dup2` is one. `raw` is the listener's descriptor, still open in the
+        // child because nothing has closed it, and `LISTEN_FD` is not otherwise in use (stdio has
+        // 0..=2, and stdin is replaced above).
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::dup2(raw, LISTEN_FD) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     #[cfg(not(unix))]
     if run_as.is_some() {
@@ -122,7 +164,12 @@ pub fn spawn(binary: &Path, socket: &Path, run_as: Option<&str>) -> anyhow::Resu
     let child = cmd
         .spawn()
         .with_context(|| format!("starting {}", binary.display()))?;
-    Ok(Proxy { child })
+    // Ours is closed on return; the child holds the only copy from here.
+    drop(listener);
+    Ok(Proxy {
+        child,
+        bound_to: bind,
+    })
 }
 
 /// Resolve a user name to its uid and primary gid.
