@@ -55,6 +55,20 @@ The **⋮** button on a peer offers **copy hostname**, **copy IP**, and **block 
 local to your machine and covers every device that person owns — you'll be asked to confirm, and you
 can undo it later with **unblock**.
 
+### Services
+
+Named things, on your machine and everyone else's.
+
+- **My services** — what this machine serves under a name, each showing the full name people type
+  and the ports behind it. The form below adds one; **remove** stops serving a name and closes every
+  port it was on.
+- **On the mesh** — what other members are running, grouped by owner. This is the easiest way to
+  find out what's there: a green dot means the machine is up, amber means the owner has two devices
+  claiming that name and this one lost (they can rename it), red means offline.
+
+Only services you're allowed to reach appear here — someone else's service scoped to a network
+you're not in is invisible rather than listed-and-refused.
+
 ### Manage
 
 Your account, your devices, and what this machine shares.
@@ -63,7 +77,8 @@ Your account, your devices, and what this machine shares.
 - **Devices** — every machine you've enrolled. **set primary** picks which one answers to your bare
   `<you>.unity.internal` name; **remove** un-enrolls one you no longer have; the text box plus
   **rename** changes this machine's name.
-- **Exposed ports** — see below.
+- **Exposed ports** — the raw list of open ports. Naming them is the friendlier way in; see
+  **Services** below.
 
 When an update is ready, an **update** button appears here; after it installs, **restart now**
 finishes the job.

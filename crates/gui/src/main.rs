@@ -407,6 +407,7 @@ impl App {
                 self.tab = match t {
                     UiTab::Networks => Tab::Networks,
                     UiTab::Peers => Tab::Peers,
+                    UiTab::Services => Tab::Services,
                     UiTab::Manage => Tab::Manage,
                 }
             }

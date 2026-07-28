@@ -40,7 +40,7 @@ jobs:
       - name: install test tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends nftables wireguard-tools socat
+          sudo apt-get install -y --no-install-recommends nftables wireguard-tools socat dnsutils
 
       # Every netns script re-execs itself under `unshare -Urnm --map-root-user`, which Ubuntu 24.04
       # restricts by default via an AppArmor policy. Lift it for the runner (a throwaway VM) rather
@@ -65,12 +65,14 @@ jobs:
       #   readme-demo.sh         needs a Wayland desktop + screencast portal
       #   coordinator-scale-test.sh  a metrics probe, no pass/fail assertion
       #   update-test.sh         nightly (see below) — builds the workspace twice
+      #   cert-test.sh           its ACME + proxy legs need `pebble` on PATH and self-skip without
+      #                          it, so running it here would pass while testing neither
       - name: run the e2e suite
         run: |
           set -u
           failed=()
-          for s in wg-tunnel mesh own-device personal-mesh net-toggle expose-net gui-login oauth \
-                   rotation nat ice relay gossip; do
+          for s in wg-tunnel mesh own-device personal-mesh net-toggle expose-net service gui-login \
+                   oauth rotation nat ice relay gossip; do
             echo "::group::$s-test.sh"
             start=$SECONDS
             if timeout 600 "scripts/$s-test.sh"; then

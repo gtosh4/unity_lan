@@ -28,7 +28,7 @@ bob@nas       ~ $
 ```
 
 <p align="center">
-  <img src="assets/demo.gif" alt="UnityLAN desktop app: live mesh status, peers, per-network peering, and exposed ports" width="400">
+  <img src="assets/demo.gif" alt="UnityLAN desktop app: live mesh status, peers, per-network peering, and named services" width="400">
 </p>
 
 ---
@@ -49,10 +49,13 @@ bob@nas       ~ $
   Either way it **carries no traffic and holds no one's private keys.**
 - **Human-readable names.** Machines get DNS names like
   `laptop.alice.unity.internal` (or just `alice.unity.internal` for a member's primary device)
-  instead of raw IPs. A deployment can also configure a domain it owns, giving every device a
-  matching public name (`laptop.alice.mesh.unitylan.com` on the hosted coordinator) that it can get
-  a **real HTTPS certificate** for — so a browser opening a service on the mesh doesn't hit a
-  warning page. Opt-in per device; see [`docs/headless.md`](docs/headless.md#serving-https-without-a-warning-page-optional).
+  instead of raw IPs. What you *serve* gets a name too — `mc.alice.unity.internal` for a game server,
+  `jellyfin.alice.unity.internal` for a media library — so nobody has to remember an address and a
+  port number. A deployment can also configure a domain it owns, giving every device and service a
+  matching public name (`jellyfin.alice.mesh.unitylan.com` on the hosted coordinator) that it can get
+  a **real HTTPS certificate** for, served for it, so a browser opening a service on the mesh doesn't
+  hit a warning page and the app behind it needs no TLS setup at all. Opt-in per device; see
+  [`docs/headless.md`](docs/headless.md#serving-https-without-a-warning-page-optional).
 
 If you know Tailscale: it's the same *shape* (control plane + P2P WireGuard data plane), but the
 identity source is **your own Discord server** — no third-party account, no company in the middle.
@@ -169,8 +172,9 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
   TTL.
 - **Nothing on your machine is exposed by default.** Joining a network does *not* open your box up.
   The engine installs a host firewall that, on the mesh interface, **drops all inbound** except what
-  you explicitly share — a peer can ping you and nothing else. To let peers reach a service you run
-  `expose` a specific port, and you can scope it to a single network's members. Your regular LAN and
+  you explicitly share — a peer can ping you and nothing else. To let peers reach a service you name
+  it (or `expose` a bare port), and you can scope it to a single network's members — a peer outside
+  that scope isn't even told the name exists. Your regular LAN and
   localhost traffic is never touched. So a random role-holder can be *on the mesh* without being able
   to open a single connection to your machine.
 
@@ -294,21 +298,28 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
    from then on the box is known by its pubkey and the key no longer matters (you can delete it from
    the config). The box joins as `gameserver.<you>.unity.internal`.
 
-4. **Check it's on the mesh and share a port.** The mesh firewall drops all inbound by default, so
-   expose the service's port — to every peer, to one network's members, or to just your own devices:
+4. **Check it's on the mesh, then name what it serves.** The mesh firewall drops all inbound by
+   default, so open the service's port — to every peer, to one network's members, or to just your own
+   devices — and give it a name people can type:
 
    ```sh
    sudo unitylan-engine ctl status
-   sudo unitylan-engine ctl expose 25565 minecraft
-   sudo unitylan-engine ctl expose 22 --own-devices
+   sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
+   sudo unitylan-engine ctl service add jellyfin 8096 --web        # + a real HTTPS certificate
+   sudo unitylan-engine ctl expose 22 --own-devices                # a bare port, unnamed
    ```
 
    These find `/etc/unitylan/engine.toml` on their own (an `engine.toml` in the working directory
    wins if there is one, and `-c <path>` overrides both).
 
-   Repeat the command with a different network to open one port to several at once; each scope can
-   then be closed on its own with `ctl unexpose … --net <name>`. The desktop app shows the same
-   thing — every exposed port with a chip per scope that can reach it:
+   A service is an exposed port with a name, so it inherits the scoping: repeat the command with a
+   different network to offer it to several at once, and `ctl service rm <name>` closes every port it
+   was on. `--web` additionally puts the name in this device's certificate and serves it over TLS, so
+   a browser opens `https://jellyfin.<you>.mesh.unitylan.com` with no warning page and the app behind
+   it needs no certificate configuration of its own.
+
+   The desktop app's **Services** tab shows the same thing, plus what everyone else on your mesh is
+   running:
 
    <p align="center">
      <img src="assets/exposed.png" alt="The Manage tab: exposed ports, each with a chip per scope that can reach it" width="360">
@@ -316,7 +327,7 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
 
 ## Building from source
 
-It's a Rust workspace (four crates). To build and run a full offline mesh with a fake Discord — no
+It's a Rust workspace (five crates). To build and run a full offline mesh with a fake Discord — no
 real bot or network needed — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ```sh

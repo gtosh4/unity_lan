@@ -315,6 +315,7 @@ pub enum UiAction {
 pub enum UiTab {
     Networks,
     Peers,
+    Services,
     Manage,
 }
 

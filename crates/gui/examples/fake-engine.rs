@@ -74,7 +74,11 @@ struct State {
 
 /// The demo timeline: at each `at_secs` mark the GUI is told to do one UI action, once. The peer
 /// menu is keyed by device IP — Bob's desktop is 100.64.0.10 (see [`fixture_peers`]) — while a block
-/// acts on the owner (`user_id` 2001) and opens the user-scoped modal. Tuned to loop-record in ~30s.
+/// acts on the owner (`user_id` 2001) and opens the user-scoped modal. Tuned to loop-record in ~40s.
+///
+/// The still marks in `scripts/readme-demo.sh` are cut from the *middle* of each dwell here, so
+/// moving a step means moving them too — a shifted tour silently produces screenshots of a tab in
+/// mid-transition.
 fn demo_script() -> Vec<(u64, UiAction)> {
     vec![
         (3, UiAction::SelectTab(UiTab::Peers)),
@@ -82,10 +86,14 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         (12, UiAction::ArmBlockPeer(2001)),
         (16, UiAction::Cancel),
         (18, UiAction::CloseMenu),
-        // Manage holds the exposed-ports UI, so it dwells long enough to read the scope chips and
-        // to cut the `exposed.png` still from the middle of the pause.
-        (22, UiAction::SelectTab(UiTab::Manage)),
-        (31, UiAction::SelectTab(UiTab::Networks)),
+        // Services dwells longest: it is both halves of the feature in one view — this device's own
+        // named ports, and what everyone else on the mesh is serving — and it is what `services.png`
+        // is cut from.
+        (21, UiAction::SelectTab(UiTab::Services)),
+        // Manage still holds the raw exposed-ports UI, so it dwells long enough to read the scope
+        // chips and to cut `exposed.png` from the middle of the pause.
+        (30, UiAction::SelectTab(UiTab::Manage)),
+        (37, UiAction::SelectTab(UiTab::Networks)),
     ]
 }
 

@@ -10,8 +10,10 @@ file tracks the code. When the two disagree, the code wins — flag the drift.
 
 ## 1. Workspace Layout
 
-Cargo workspace, **four crates**, two planes. The client is **two processes** (privileged engine +
-unprivileged iced GUI) — the Tailscale/WireGuard-GUI split (design §3.2). All crates ship from one
+Cargo workspace, **five crates**, two planes. The client is **two processes** in the common case
+(privileged engine + unprivileged iced GUI) — the Tailscale/WireGuard-GUI split (design §3.2) — plus a
+third, `unitylan-proxy`, on devices that serve web services: TLS termination is unprivileged work and
+so does not live in the root daemon. All crates ship from one
 monorepo tag (`common::VERSION`), so the coordinator can advertise its own version as "the release
 the mesh should run".
 
@@ -71,10 +73,13 @@ unitylan/
 │   │   ├── ping.rs      # peer reachability probing (surge-ping)
 │   │   ├── netcfg.rs · util.rs
 │   │   └── selfupdate.rs # apply signed ReleaseManifest (self-replace + restart; Windows MSI fallback)
-│   └── gui/              # UNPRIVILEGED desktop app (binary) — iced
-│       ├── main.rs       # iced app (Elm) + tray; connects to engine control socket
-│       ├── ctl.rs        # control-socket client + event Subscription
-│       └── tray/         # tray-icon integration
+│   ├── gui/              # UNPRIVILEGED desktop app (binary) — iced
+│   │   ├── main.rs       # iced app (Elm) + tray; connects to engine control socket
+│   │   ├── ctl.rs        # control-socket client + event Subscription
+│   │   └── tray/         # tray-icon integration
+│   └── proxy/            # UNPRIVILEGED TLS terminator for web services (binary)
+│       ├── main.rs       # follows the engine's Watch push; TLS on the mesh /32, :443
+│       └── route.rs      # host → loopback backend, and who may reach it (pure, tested)
 ```
 
 There is **no separate CLI crate** yet; the CLI surface is folded into the engine binary's

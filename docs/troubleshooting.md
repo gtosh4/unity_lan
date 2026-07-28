@@ -48,8 +48,12 @@ mesh interface (`tailscale_compat`, on by default), rechecking after each Tailsc
 the explanation if mesh traffic vanishes while peers show as connected.
 
 **Otherwise:** check the port is actually shared. Nothing on a machine is reachable until it's
-exposed — **Manage → exposed ports** in the app, `ctl exposes` on a server. A peer can always ping
-you; anything else needs an entry there.
+exposed — the **Services** tab in the app, `ctl services` (or `ctl exposes` for unnamed ports) on a
+server. A peer can always ping you; anything else needs an entry there.
+
+**If you're reaching it by name and it doesn't resolve**, that's the next section — but note a
+service's name is only announced to peers its scope admits, so someone outside it sees nothing at
+all rather than a refusal. That is deliberate; check the scope before assuming it's broken.
 
 ## Names don't resolve
 

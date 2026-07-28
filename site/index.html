@@ -210,7 +210,9 @@
         <h3>Human-readable names</h3>
         <p>Machines get names like <code>laptop.alice.unity.internal</code>, or just
         <code>alice.unity.internal</code> for a member's primary device — instead of raw IPs you
-        have to remember.</p>
+        have to remember. So does what you serve: <code>mc.alice.unity.internal</code> for the game
+        server, <code>jellyfin.alice.unity.internal</code> for the media library. No port numbers to
+        pass around.</p>
       </article>
     </div>
     <p class="aside">If you know Tailscale: same <em>shape</em> — control plane plus P2P WireGuard
@@ -323,8 +325,8 @@
     </div>
     <figure class="shot wide">
       <img src="assets/exposed.png" alt="The Manage tab: each exposed port listed with a chip per scope allowed to reach it" width="448" height="674" loading="lazy">
-      <figcaption>Sharing a port is explicit, and can be scoped to one network's members — or to
-      just your own devices.</figcaption>
+      <figcaption>Sharing is explicit, and scoped to one network's members — or to just your own
+      devices. Someone outside that scope isn't told the service exists.</figcaption>
     </figure>
   </div>
 </section>
@@ -599,7 +601,9 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         <summary>What names do my machines get?</summary>
         <p><code>&lt;device&gt;.&lt;you&gt;.unity.internal</code> — so
         <code>laptop.alice.unity.internal</code>. Whichever device you mark primary also answers to
-        the bare <code>alice.unity.internal</code>.</p>
+        the bare <code>alice.unity.internal</code>. Anything you serve can be named too:
+        <code>mc.alice.unity.internal</code> points at whichever of your machines runs it, so moving
+        the service later doesn't change the name people type.</p>
       </details>
       <details>
         <summary>Can I serve a website or media library over the mesh?</summary>
@@ -608,7 +612,10 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         deployment can also configure a domain it owns, under which every device gets a matching
         public name (<code>laptop.alice.mesh.unitylan.com</code> on the hosted coordinator) and can
         obtain a publicly-trusted certificate for it. Your device runs the whole exchange and keeps
-        its own key; the coordinator never sees key material.</p>
+        its own key; the coordinator never sees key material. A small proxy alongside the engine then
+        serves it, so Jellyfin (or whatever you run) stays on plain HTTP and needs no certificate
+        configuration of its own — and several services can share one machine under different
+        names.</p>
         <p>It's off by default and opt-in per device, for a reason worth knowing: every
         publicly-trusted certificate publishes its names to public transparency logs,
         <strong>permanently</strong>, where anyone can search them. Turning it back off stops
@@ -646,7 +653,7 @@ sudo systemctl enable --now unitylan-engine</code></pre>
     <h2>Documentation</h2>
     <p class="kicker">Using it</p>
     <ul class="docs">
-      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/user-guide.md"><strong>User guide</strong><span>The desktop app: logging in, sharing a port, managing devices</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/user-guide.md"><strong>User guide</strong><span>The desktop app: logging in, naming what you share, managing devices</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/headless.md"><strong>Headless servers</strong><span>Game servers and media boxes: enrolling with a key, the full CLI</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md"><strong>Troubleshooting</strong><span>Unreachable peers, names not resolving, the Tailscale collision</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/coordinator-setup.md"><strong>Coordinator setup</strong><span>Discord app and bot, config, admin dashboard</span></a></li>

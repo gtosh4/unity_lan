@@ -521,6 +521,32 @@ elevated box. macOS `/etc/resolver` still deferred.
       policy. `fw::default_backend()` selects nft (unix) vs this (Windows). 3 arg-construction unit
       tests. macOS pf still a future backend.
 
+### M7e — named services + TLS proxy ✅
+- [x] **Named services** — an exposure with a name, resolving as `<label>.<user>.unity.internal`.
+      Announced **peer-direct** (`p2p::ReqBody::GetServices`); the coordinator holds no service state
+      and gained no request path. Safe because the receiver composes the name under the *announcer's*
+      verified user label, so a peer cannot express a name outside its owner's namespace. Scope is
+      enforced at the announcer (`Firewall::services_for`), so a peer outside a service's scope is
+      never told the name exists. Conflicts resolve identically everywhere: a coordinator-allocated
+      device name outranks a service label, and among service claims the lowest pubkey wins.
+      **Verify:** ✅ `scripts/service-test.sh` (resolution, scope enforcement, withdrawal) + unit
+      tests in `mesh_services.rs`, `fw`, `p2p`.
+- [x] **`--web` services in the certificate** — the one part the coordinator must know, since only it
+      can publish the ACME challenge. `device_services` table + `POST /services`; challenge values are
+      keyed by label and published only for labels its own rows assign to that device. Registration
+      refuses rather than reassigns. Reissue batches (`cert::SETTLE`) so naming several in a row costs
+      one certificate against a cap the whole deployment shares.
+- [x] **`unitylan-proxy`** — unprivileged TLS terminator: backends stay on plain HTTP, several
+      services share :443 under different names. Config arrives on the engine's existing `Watch`
+      push. Two fail-closed gates (firewall union, then per-service in the proxy). The engine
+      supervises it and **refuses to run it as root**; on unix it hands over a pre-bound listener
+      (443 is privileged and the proxy deliberately has no capability to take it), on Windows it is a
+      second SCM service under `LocalService`. **Verify:** ✅ `cert-test.sh`'s proxy leg — a real
+      pebble-issued certificate, a plain-HTTP backend, and a 404 for an unserved name.
+- [ ] **Windows proxy path unverified** — the `#[cfg(windows)]` half has never been compiled
+      (cross-checking `x86_64-pc-windows-msvc` from Linux stops in ring's build script). Build and
+      run it on real Windows before a release ships it.
+
 ### M7d — status polish ✅
 - [x] GUI surfaces the firewall: an **exposed ports** section (proto/port + `→ net:` scope) with
       per-row **unexpose** buttons and an **expose** row (port `25565` or `udp/34197`, optional

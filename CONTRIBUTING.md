@@ -6,7 +6,7 @@ userspace-only and best-effort).
 
 ## Workspace layout
 
-A Cargo workspace with four crates (`Cargo.toml`):
+A Cargo workspace with five crates (`Cargo.toml`):
 
 | Crate | Binary | What it is |
 | --- | --- | --- |
@@ -14,6 +14,7 @@ A Cargo workspace with four crates (`Cargo.toml`):
 | `crates/coordinator` | `unitylan-coordinator` | the server: Discord auth, network membership, signed attestations |
 | `crates/engine` | `unitylan-engine` | the privileged node daemon: WireGuard, firewall, DNS, control socket |
 | `crates/gui` | `unitylan-gui` | unprivileged iced desktop app driving the engine over its control socket |
+| `crates/proxy` | `unitylan-proxy` | unprivileged TLS terminator for web services; reads its config off the engine's control socket, forwards to loopback |
 
 Platform-specific engine code is split by module: `wg/{userspace,windows}.rs`,
 `fw/{nftables,windows}.rs`, `resolver/{linux,windows}.rs`, selected at runtime.

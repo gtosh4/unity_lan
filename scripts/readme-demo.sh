@@ -15,8 +15,8 @@
 # Deps:  cargo, ffmpeg, and the flatpak com.dec05eba.gpu_screen_recorder
 #        (flatpak install flathub com.dec05eba.gpu_screen_recorder)
 # Usage: scripts/readme-demo.sh            # writes assets/demo.gif (README), assets/demo-peers.{webm,mp4}
-#                                          # (site hero), assets/peers.png, assets/exposed.png,
-#                                          # assets/networks.png
+#                                          # (site hero), assets/peers.png, assets/services.png,
+#                                          # assets/exposed.png, assets/networks.png
 #        SECS=30 FPS=15 WIDTH=400 scripts/readme-demo.sh
 set -uo pipefail
 
@@ -29,7 +29,7 @@ WORK="$(mktemp -d)"
 # Overridable so a capture can be staged and reviewed before it lands in the repo.
 OUT="${OUT:-$ROOT/assets}"
 
-SECS="${SECS:-36}"   # recording length; the scripted tour runs ~34s
+SECS="${SECS:-42}"   # recording length; the scripted tour runs ~40s
 FPS="${FPS:-15}"     # GIF frame rate
 WIDTH="${WIDTH:-400}" # GIF width (height auto)
 
@@ -101,13 +101,16 @@ ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
 ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
   -c:v libx264 -crf 26 -preset slow -movflags +faststart -an "$OUT/demo-peers.mp4"
 # Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
-# list in the menu-closed window (tour ~18-22s), the Manage tab mid-dwell for the exposed ports
-# (tour 22-31s), and Networks from the tour's end (it returns to the Networks tab at tour t=31 and
-# dwells there — the initial Networks view is gone before the recording starts).
+# list in the menu-closed window (tour ~18-21s), Services mid-dwell (tour 21-30s), the Manage tab
+# mid-dwell for the exposed ports (tour 30-37s), and Networks from the tour's end (it returns to the
+# Networks tab at tour t=37 and dwells there — the initial Networks view is gone before the
+# recording starts). Each mark sits in the *middle* of its dwell, so a tour timing change in
+# `fake-engine.rs` means moving these too.
 ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/peers.png"
-ffmpeg -y -v error -ss 27 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
-ffmpeg -y -v error -ss 32 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
+ffmpeg -y -v error -ss 25 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/services.png"
+ffmpeg -y -v error -ss 34 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
+ffmpeg -y -v error -ss 39 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
 ls -la "$OUT/demo.gif" "$OUT/demo-peers.webm" "$OUT/demo-peers.mp4" \
-  "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"
+  "$OUT/peers.png" "$OUT/services.png" "$OUT/exposed.png" "$OUT/networks.png"
