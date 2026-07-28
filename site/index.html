@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UnityLAN — turn your Discord roles into a private, encrypted network</title>
-<meta name="description" content="UnityLAN is a WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, and no accounts to invite. Free and open source.">
+<meta name="description" content="UnityLAN is a WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, and no separate UnityLAN accounts. Free and open source.">
 <link rel="canonical" href="https://unitylan.com/">
 <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
@@ -14,7 +14,7 @@
 <meta property="og:url" content="https://unitylan.com/">
 <meta property="og:site_name" content="UnityLAN">
 <meta property="og:title" content="UnityLAN — turn your Discord roles into a private, encrypted network">
-<meta property="og:description" content="A WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, no accounts to invite.">
+<meta property="og:description" content="A WireGuard mesh VPN where membership is defined by Discord roles. Direct peer-to-peer tunnels, a control plane that carries no traffic, and no separate UnityLAN accounts.">
 <meta property="og:image" content="https://unitylan.com/assets/app-icon-1024.png">
 <meta name="twitter:card" content="summary_large_image">
 </head>
@@ -33,7 +33,7 @@
       <a href="https://discord.gg/QAmz2j54kS">Discord</a>
       <a href="https://github.com/gtosh4/unity_lan">GitHub</a>
     </nav>
-    <a class="btn btn-primary btn-sm" href="https://github.com/gtosh4/unity_lan/releases/latest">Download</a>
+    <a class="btn btn-primary btn-sm" href="#install">Download</a>
   </div>
 </header>
 
@@ -51,7 +51,7 @@
       switch. Lose the role, lose access — automatically.
     </p>
     <div class="cta">
-      <a class="btn btn-primary" href="#start">Get started</a>
+      <a class="btn btn-primary" href="#start">Choose your path</a>
       <a class="btn btn-ghost" href="https://github.com/gtosh4/unity_lan">
         <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
         View source
@@ -73,7 +73,28 @@
     </figure>
 
     <figure class="shot hero-shot">
-      <img src="assets/demo-peers.gif" alt="The UnityLAN desktop app showing the live peer list: each machine's name, whether the path is direct, and its traffic counters" width="400" height="602" fetchpriority="high" decoding="async">
+      <video width="400" height="602" poster="assets/peers.png" autoplay loop muted playsinline
+             role="img" aria-label="The UnityLAN desktop app showing the live peer list: each machine's name, whether the path is direct, and its traffic counters">
+        <source src="assets/demo-peers.webm" type="video/webm">
+        <source src="assets/demo-peers.mp4" type="video/mp4">
+      </video>
+      <script>
+        // A looping hero is motion the visitor may have asked not to see, and <video> has no
+        // declarative equivalent of <source media>. Pausing here leaves the poster frame up — the
+        // same still the animation used to fall back to. Inline, right after the element, so it
+        // runs before playback gets going rather than after a visible flash.
+        (() => {
+          const v = document.currentScript.previousElementSibling;
+          if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+            v.removeAttribute('autoplay');
+            v.pause();
+          } else {
+            // Muted autoplay is permitted everywhere, but data-saver and low-power modes still
+            // refuse it. Ask once; if it's refused the poster stays up, which is a fine still.
+            v.play().catch(() => {});
+          }
+        })();
+      </script>
       <figcaption>And the app shows who's on, how each one is reached, and what's moving.</figcaption>
     </figure>
     </div>
@@ -83,9 +104,54 @@
 <section class="strip" aria-label="At a glance">
   <div class="wrap strip-grid">
     <div><strong>Direct P2P</strong><span>WireGuard tunnels peer&#8209;to&#8209;peer</span></div>
-    <div><strong>No traffic relay</strong><span>Control plane never carries data</span></div>
-    <div><strong>Free, no accounts</strong><span>Discord login, no seats or plans</span></div>
+    <div><strong>No hosted traffic relay</strong><span>Control plane never carries data</span></div>
+    <div><strong>Free, no separate account</strong><span>Use your existing Discord identity</span></div>
     <div><strong>Linux &amp; Windows</strong><span>macOS and mobile planned</span></div>
+  </div>
+</section>
+
+<section class="sec alt" id="start">
+  <div class="wrap">
+    <h2>Start with what you're trying to do</h2>
+    <p class="sub">Pick a path now. The architecture and security details are here when you want
+    them.</p>
+    <div class="path-grid">
+      <article class="card path">
+        <p class="kicker">I was invited</p>
+        <h3>Join friends or a community</h3>
+        <ol class="steps compact">
+          <li>Install UnityLAN.</li>
+          <li>Log in with Discord.</li>
+          <li>Your shared networks and peers appear automatically.</li>
+        </ol>
+        <p class="cta"><a class="btn btn-primary" href="#install">Install the app</a></p>
+      </article>
+      <article class="card path">
+        <p class="kicker">I run a Discord server</p>
+        <h3>Turn a role into a network</h3>
+        <ol class="steps compact">
+          <li>Invite the hosted bot.</li>
+          <li>Run <code>/unitylan network add &lt;role&gt;</code>.</li>
+          <li>Send members to the app download.</li>
+        </ol>
+        <p class="permission-note">The bot reads roles and membership — <a href="#bot">not
+        messages</a>.</p>
+        <p class="cta">
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1525265707821170818">Add to Discord</a>
+          <a class="btn btn-ghost" href="#coordinator">Or self-host</a>
+        </p>
+      </article>
+      <article class="card path">
+        <p class="kicker">Just my devices</p>
+        <h3>Connect machines you own</h3>
+        <ol class="steps compact">
+          <li>Install and log in on the first device.</li>
+          <li>Do the same on the second.</li>
+          <li>They find each other — no server or role required.</li>
+        </ol>
+        <p class="cta"><a class="btn btn-primary" href="#install">Connect my devices</a></p>
+      </article>
+    </div>
   </div>
 </section>
 
@@ -108,7 +174,7 @@
         in the middle slowing traffic down.</p>
       </article>
       <article class="card">
-        <h3>A team without an identity provider</h3>
+        <h3>A small Discord-native project team</h3>
         <p>You want a private LAN but don't want to stand up an IdP. You already have one: the
         Discord server everyone's already in. Roles you already maintain become the access
         control.</p>
@@ -148,8 +214,8 @@
       </article>
     </div>
     <p class="aside">If you know Tailscale: same <em>shape</em> — control plane plus P2P WireGuard
-    data plane — but the identity source is <strong>your own Discord server</strong>. No third-party
-    account, no company in the middle.</p>
+    data plane — but the identity source is <strong>your own Discord server</strong>. No separate
+    UnityLAN account and no proprietary control plane in the middle.</p>
   </div>
 </section>
 
@@ -223,6 +289,12 @@
 <section class="sec" id="security">
   <div class="wrap">
     <h2>Security model, briefly</h2>
+    <div class="status-panel" aria-label="Project and security status">
+      <div><strong>Pre-1.0</strong><span>Young software; evaluate accordingly</span></div>
+      <div><strong>Not independently audited</strong><span>Source and design are public</span></div>
+      <div><strong>Signed releases</strong><span>Checksums and a separate offline release key</span></div>
+      <div><strong>Responsible disclosure</strong><span><a href="https://github.com/gtosh4/unity_lan/blob/main/SECURITY.md">Report privately</a></span></div>
+    </div>
     <div class="cards">
       <article class="card">
         <h3>Your keys never leave your machine</h3>
@@ -315,10 +387,9 @@
     UnityLAN is pre-1.0, Linux and Windows only, and maintained by one person. If you need something
     that just works on every device your group owns, pick one of those — genuinely.</p>
     <p class="aside"><strong>Where UnityLAN differs.</strong> Membership comes from a Discord server
-    you already run, so there's no separate directory to maintain and no third-party account for
-    anyone to create. The trust anchor can be yours — self-host and the signing key never leaves your
-    box. And the control plane is open source end to end, so the hosted instance is a convenience,
-    not a lock-in.</p>
+    you already run, so there's no separate directory or UnityLAN account to maintain. The trust
+    anchor can be yours — self-host and the signing key never leaves your box. And the control plane
+    is open source end to end, so the hosted instance is a convenience, not a lock-in.</p>
     <p class="fineprint">Compared July 2026 from each project's public documentation, on
     architecture rather than pricing or limits, which change. Spot something wrong or out of date?
     <a href="https://github.com/gtosh4/unity_lan/issues">Tell us</a> and we'll correct it.</p>
@@ -339,6 +410,12 @@
       and a ciphertext-only relay fallback carries the hardest CGNAT and symmetric-NAT pairs. A pair
       can still fail to connect when no suitable relay is online. Most home connections are
       fine.</dd>
+      <dt>Tailscale on the same machine collides — and on Windows that's unsolved.</dt>
+      <dd>Both products use the <code>100.64.0.0/10</code> range, and Tailscale's firewall rule drops
+      it on interfaces that aren't Tailscale's own — blackholing mesh traffic while peers still look
+      connected. On Linux, the engine detects that rule and narrowly exempts the mesh interface; this
+      compatibility behavior is enabled by default. On Windows there's no workaround yet.
+      <a href="https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md">More</a>.</dd>
       <dt>Everyone needs a Discord account.</dt>
       <dd>Identity comes from Discord, so every member — and every machine you enroll — signs in with
       a Discord account. There's no email-and-password path and no plan for one. If that's a
@@ -358,51 +435,13 @@
   </div>
 </section>
 
-<section class="sec alt" id="start">
-  <div class="wrap">
-    <h2>Get started</h2>
-    <p class="sub">Two ways in, depending on which end you're at.</p>
-    <div class="lanes">
-      <article class="card lane">
-        <p class="kicker">You were invited — or it's just your devices</p>
-        <h3>Install the app</h3>
-        <p>Someone else already registered the network, or you're meshing machines you own. Either
-        way there's nothing to set up and no account to create.</p>
-        <ol class="steps compact">
-          <li>Install UnityLAN and start the engine.</li>
-          <li>Log in with Discord.</li>
-          <li>Peers you share a network with appear. Your own devices find each other with no
-          network at all.</li>
-        </ol>
-        <p class="cta">
-          <a class="btn btn-primary" href="#install">Get the app</a>
-        </p>
-      </article>
-      <article class="card lane">
-        <p class="kicker">You run the Discord server</p>
-        <h3>Add the bot</h3>
-        <p>Registering a role as a network takes one slash command. Members do nothing but install
-        and log in — you don't provision anyone.</p>
-        <ol class="steps compact">
-          <li>Invite the bot to your server.</li>
-          <li>Run <code>/unitylan network add &lt;role&gt;</code>.</li>
-          <li>Tell your members to install the app.</li>
-        </ol>
-        <p class="cta">
-          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1525265707821170818">Invite the bot</a>
-          <a class="btn btn-ghost" href="#coordinator">Or self-host</a>
-        </p>
-      </article>
-    </div>
-  </div>
-</section>
-
-<section class="sec" id="install">
+<section class="sec alt" id="install">
   <div class="wrap">
     <h2>Install</h2>
     <p class="sub">Free, and packaged installs already point at the hosted coordinator — there's
-    nothing to configure. Linux and Windows, x86-64. After installing, log in with Discord from the
-    app (or <code>unitylan-engine login</code> on a headless box).</p>
+    nothing to configure. <strong>Linux and Windows on x86-64 only</strong> — no ARM builds yet, so a
+    Raspberry Pi means building from source. After installing, log in with Discord from the app (or
+    <code>unitylan-engine login</code> on a headless box).</p>
     <div class="cards install">
       <article class="card">
         <h3>Linux desktop</h3>
@@ -410,8 +449,8 @@
         <pre><code>sudo apt install ./unitylan-desktop_*.deb
 sudo systemctl enable --now unitylan-engine</code></pre>
         <p class="dl">
-          <a class="btn btn-primary btn-sm" data-dl="deb-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">.deb</a>
-          <a class="btn btn-ghost btn-sm" data-dl="rpm-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">.rpm</a>
+          <a class="btn btn-primary btn-sm" data-dl="deb-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">Ubuntu / Debian <span class="ext">.deb</span></a>
+          <a class="btn btn-ghost btn-sm" data-dl="rpm-desktop" href="https://github.com/gtosh4/unity_lan/releases/latest">Fedora / RHEL <span class="ext">.rpm</span></a>
         </p>
       </article>
       <article class="card">
@@ -419,7 +458,7 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         <p>Run the <code>.msi</code>. The wizard installs the engine and app, bundles the WireGuard
         driver, registers and starts the service, and offers to open the app when it finishes.</p>
         <p class="dl">
-          <a class="btn btn-primary btn-sm" data-dl="msi" href="https://github.com/gtosh4/unity_lan/releases/latest">.msi</a>
+          <a class="btn btn-primary btn-sm" data-dl="msi" href="https://github.com/gtosh4/unity_lan/releases/latest">Windows installer <span class="ext">.msi</span></a>
         </p>
       </article>
       <article class="card">
@@ -428,9 +467,9 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         <code>/unitylan enroll</code>, then hand it to the engine — no browser on the box.</p>
         <pre><code>sudo unitylan-engine --token unl_… run</code></pre>
         <p class="dl">
-          <a class="btn btn-ghost btn-sm" data-dl="deb" href="https://github.com/gtosh4/unity_lan/releases/latest">.deb</a>
-          <a class="btn btn-ghost btn-sm" data-dl="rpm" href="https://github.com/gtosh4/unity_lan/releases/latest">.rpm</a>
-          <a class="btn btn-ghost btn-sm" data-dl="tar" href="https://github.com/gtosh4/unity_lan/releases/latest">.tar.gz</a>
+          <a class="btn btn-ghost btn-sm" data-dl="deb" href="https://github.com/gtosh4/unity_lan/releases/latest">Ubuntu / Debian <span class="ext">.deb</span></a>
+          <a class="btn btn-ghost btn-sm" data-dl="rpm" href="https://github.com/gtosh4/unity_lan/releases/latest">Fedora / RHEL <span class="ext">.rpm</span></a>
+          <a class="btn btn-ghost btn-sm" data-dl="tar" href="https://github.com/gtosh4/unity_lan/releases/latest">Other Linux <span class="ext">.tar.gz</span></a>
         </p>
       </article>
     </div>
@@ -439,6 +478,30 @@ sudo systemctl enable --now unitylan-engine</code></pre>
     membership, so neither can stand in for the other. Prefer to build it yourself? It's a Rust
     workspace —
     <a href="https://github.com/gtosh4/unity_lan/blob/main/CONTRIBUTING.md"><code>cargo build --release</code></a>.</p>
+  </div>
+</section>
+
+<section class="sec" id="bot">
+  <div class="wrap two-col">
+    <div>
+      <p class="kicker">Before you click invite</p>
+      <h2>What the bot asks for</h2>
+      <p>Two scopes and <strong>zero permissions requested</strong>: join the server, register the
+      <code>/unitylan</code> slash commands. It asks for nothing to post, moderate, kick, or manage —
+      in Discord's permission system, it has no more server permissions than <code>@everyone</code>
+      does.</p>
+      <p>The running bot subscribes to Discord's server and member events, plus the interactions that
+      carry slash commands. Member events are how a role change reaches the mesh within seconds. It
+      does <strong>not</strong> request message-content access, so Discord does not deliver message
+      text to it.</p>
+      <p>Inviting it takes <strong>Manage Server</strong>, and so does registering a role as a
+      network — a member who merely holds the role can't hand it out to others.</p>
+    </div>
+    <figure class="shot">
+      <img src="assets/invite-bot.png" alt="Discord's authorization prompt for the UnityLAN bot, listing only two abilities: add a bot to a server and create commands" width="429" height="396" loading="lazy">
+      <figcaption>The whole consent screen — the third line is Discord's own joke about what it
+      <em>can't</em> do.</figcaption>
+    </figure>
   </div>
 </section>
 
@@ -459,6 +522,7 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1525265707821170818">Invite the bot</a>
         <a class="btn btn-ghost" href="https://github.com/gtosh4/unity_lan/blob/main/docs/coordinator-setup.md">Self-host guide</a>
       </p>
+      <p class="cta-note"><a href="#bot">What permissions does the bot request?</a></p>
     </div>
     <figure class="shot">
       <img src="assets/coordinator-admin.png" alt="The coordinator's admin dashboard, showing registered networks and live member counts" width="1280" height="720" loading="lazy">

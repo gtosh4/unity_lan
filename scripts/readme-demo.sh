@@ -4,7 +4,8 @@
 # Runs the `fake-engine` example (canned mesh fixtures + a scripted UI tour — see
 # crates/gui/examples/fake-engine.rs), which launches the GUI and drives it over the control
 # socket: switch to Peers, open a peer menu, arm/cancel a block, back to Networks. A screencast of
-# that window is captured and encoded to a small, looping GIF plus two stills.
+# that window is captured and encoded to a looping GIF for the README, a short looping video for
+# the site's hero, and three stills.
 #
 # Capture uses GPU Screen Recorder (Flatpak) via the desktop screencast portal — the sandbox-
 # friendly path on Wayland (KMS/monitor capture is blocked in the flatpak). The FIRST run pops a
@@ -13,8 +14,9 @@
 #
 # Deps:  cargo, ffmpeg, and the flatpak com.dec05eba.gpu_screen_recorder
 #        (flatpak install flathub com.dec05eba.gpu_screen_recorder)
-# Usage: scripts/readme-demo.sh            # writes assets/demo.gif, assets/demo-peers.gif (site hero),
-#                                          # assets/peers.png, assets/exposed.png, assets/networks.png
+# Usage: scripts/readme-demo.sh            # writes assets/demo.gif (README), assets/demo-peers.{webm,mp4}
+#                                          # (site hero), assets/peers.png, assets/exposed.png,
+#                                          # assets/networks.png
 #        SECS=30 FPS=15 WIDTH=400 scripts/readme-demo.sh
 set -uo pipefail
 
@@ -87,9 +89,17 @@ ffmpeg -y -v error -i "$WORK/tour.mkv" -i "$WORK/palette.png" \
 # ending before the peer menu opens (tour t=8, i.e. ~6s into the recording). The full tour is the
 # right thing in the README, where there's room to explain it, but a landing page wants one idea.
 # Keep the end below that menu mark if the tour timings in `fake-engine.rs` ever move.
-ffmpeg -y -v error -ss 1.3 -t 3.5 -i "$WORK/tour.mkv" -vf "$VF,palettegen=max_colors=128" "$WORK/palette-peers.png"
-ffmpeg -y -v error -ss 1.3 -t 3.5 -i "$WORK/tour.mkv" -i "$WORK/palette-peers.png" \
-  -lavfi "$VF[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=3" -loop 0 "$OUT/demo-peers.gif"
+#
+# Video, not GIF: the same clip costs ~4x less as VP9 and skips the 128-colour palette and bayer
+# dither a GIF needs. The README above stays a GIF because GitHub's markdown won't play a
+# repo-relative <video>; the site has no such limit. WebM is the small one, MP4 the one every
+# browser can decode, so the page offers both and takes the first that fits.
+CUT=(-ss 1.3 -t 3.5 -i "$WORK/tour.mkv")
+CUT_VF="fps=30,scale=$WIDTH:-2:flags=lanczos,format=yuv420p"
+ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
+  -c:v libvpx-vp9 -crf 34 -b:v 0 -row-mt 1 -an "$OUT/demo-peers.webm"
+ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
+  -c:v libx264 -crf 26 -preset slow -movflags +faststart -an "$OUT/demo-peers.mp4"
 # Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
 # list in the menu-closed window (tour ~18-22s), the Manage tab mid-dwell for the exposed ports
 # (tour 22-31s), and Networks from the tour's end (it returns to the Networks tab at tour t=31 and
@@ -99,4 +109,5 @@ ffmpeg -y -v error -ss 27 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
 ffmpeg -y -v error -ss 32 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
-ls -la "$OUT/demo.gif" "$OUT/demo-peers.gif" "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"
+ls -la "$OUT/demo.gif" "$OUT/demo-peers.webm" "$OUT/demo-peers.mp4" \
+  "$OUT/peers.png" "$OUT/exposed.png" "$OUT/networks.png"
