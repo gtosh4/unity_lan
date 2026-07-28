@@ -84,29 +84,48 @@ fn proxy_file_name() -> &'static str {
 /// than one it has to be trusted with.
 const LISTEN_FD: i32 = 3;
 
-/// A running proxy, killed when this is dropped.
+/// A running proxy, stopped when this is dropped.
 ///
 /// Dropping is the shutdown path: the engine going away must take the proxy with it rather than
 /// leaving a process holding 443 and serving whatever it last heard.
+///
+/// Two shapes, because the platforms differ in who can start a process as another user. On unix the
+/// engine forks a child and drops it to `[proxy] user`; on Windows LocalSystem cannot spawn as a
+/// different account without a logon token it has no way to get, so the proxy is a **second SCM
+/// service** running as `NT AUTHORITY\LocalService` and the engine starts and stops it. Either way
+/// the engine is the supervisor and the proxy is unprivileged — only the mechanism changes.
 pub struct Proxy {
+    #[cfg(unix)]
     child: tokio::process::Child,
-    /// The address whose listener we handed over. The proxy cannot rebind — it was given a socket,
-    /// not the right to make one — so a device that changes mesh address needs a restart, and this
-    /// is what notices.
+    /// The address the proxy serves on. On unix this is the listener we bound and handed over — it
+    /// cannot rebind, having been given a socket rather than the right to make one — so a device
+    /// that changes mesh address needs a restart, and this is what notices.
     pub bound_to: std::net::SocketAddr,
 }
 
 impl Drop for Proxy {
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = self.child.start_kill();
+        #[cfg(windows)]
+        // Best-effort: the engine is usually going down itself here, and a stop that does not land
+        // leaves a proxy the SCM will stop with the machine anyway.
+        let _ = windows_service_control(false);
     }
 }
 
 impl Proxy {
     /// Whether it is still up. A proxy that exited (a crash, a port it could not bind) reports
     /// `false` so the next reconcile starts it again.
+    #[cfg(unix)]
     pub fn alive(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Windows: ask the SCM, which is the only thing that knows.
+    #[cfg(windows)]
+    pub fn alive(&mut self) -> bool {
+        windows_service_running().unwrap_or(false)
     }
 }
 
@@ -115,6 +134,79 @@ impl Proxy {
 ///
 /// Errors are returned rather than logged here so the caller can report them once and not on every
 /// reconcile: a missing binary or an unusable user does not get better by retrying in two seconds.
+#[cfg(windows)]
+pub fn spawn(
+    _binary: &Path,
+    _socket: &Path,
+    bind: std::net::SocketAddr,
+    run_as: Option<&str>,
+) -> anyhow::Result<Proxy> {
+    if run_as.is_some() {
+        // Said rather than ignored: the account is fixed at registration (LocalService), so a
+        // `[proxy] user` here would look like it took effect and never have.
+        anyhow::bail!(
+            "`[proxy] user` has no effect on Windows — the proxy runs as NT AUTHORITY\\LocalService, \
+             set when its service was registered. Remove the setting."
+        );
+    }
+    // Nothing to bind or hand over: Windows has no privileged-port concept, so the service binds
+    // 443 itself as LocalService. Its command line (including the control pipe to read) was fixed
+    // when the installer registered it.
+    windows_service_control(true)?;
+    Ok(Proxy { bound_to: bind })
+}
+
+/// Stop the proxy service, ignoring every failure — used where the caller only needs the binary to
+/// stop being in use (an update overwriting it) and a proxy that is already stopped, or not
+/// registered at all, is the desired state either way.
+#[cfg(windows)]
+pub fn stop_windows_service() {
+    let _ = windows_service_control(false);
+}
+
+/// Start (`true`) or stop (`false`) the proxy service.
+#[cfg(windows)]
+fn windows_service_control(start: bool) -> anyhow::Result<()> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("opening the service manager")?;
+    let service = manager
+        .open_service(
+            common::control::WINDOWS_PROXY_SERVICE_NAME,
+            ServiceAccess::QUERY_STATUS | ServiceAccess::START | ServiceAccess::STOP,
+        )
+        .with_context(|| {
+            format!(
+                "opening the {} service (reinstall to register it)",
+                common::control::WINDOWS_PROXY_SERVICE_NAME
+            )
+        })?;
+    let state = service.query_status().context("querying it")?.current_state;
+    match (start, state) {
+        (true, ServiceState::Running) | (false, ServiceState::Stopped) => Ok(()),
+        (true, _) => service
+            .start::<std::ffi::OsString>(&[])
+            .context("starting it"),
+        (false, _) => service.stop().map(|_| ()).context("stopping it"),
+    }
+}
+
+#[cfg(windows)]
+fn windows_service_running() -> anyhow::Result<bool> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+    let service = manager.open_service(
+        common::control::WINDOWS_PROXY_SERVICE_NAME,
+        ServiceAccess::QUERY_STATUS,
+    )?;
+    Ok(service.query_status()?.current_state == ServiceState::Running)
+}
+
+#[cfg(unix)]
 pub fn spawn(
     binary: &Path,
     socket: &Path,
@@ -154,12 +246,6 @@ pub fn spawn(
                 Ok(())
             });
         }
-    }
-    #[cfg(not(unix))]
-    if run_as.is_some() {
-        anyhow::bail!(
-            "[proxy] user is unix-only; on Windows the proxy runs as its own service account"
-        );
     }
     let child = cmd
         .spawn()

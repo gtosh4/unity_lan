@@ -469,7 +469,11 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   uid loses its capabilities, and `NoNewPrivileges` in the unit rules out file capabilities too — so
   handing over an already-bound listener is both the way it can work and the better one, leaving the
   proxy with no capability at all. The consequence is that a changed mesh address needs a restarted
-  proxy, since it was given a socket rather than the right to make one.
+  proxy, since it was given a socket rather than the right to make one. **Windows differs only in
+  mechanism**: LocalSystem cannot start a process as another account without a logon token it has no
+  way to obtain, so the proxy is a second, demand-start SCM service under `NT AUTHORITY\LocalService`
+  that the engine starts and stops — and since Windows has no privileged-port concept, it binds 443
+  itself and needs nothing handed over.
 - **Not a private CA.** Issuing from a coordinator-held CA would avoid all of the above, but requires
   installing a root into every member's system trust store — which would let a compromised
   coordinator MITM TLS on every member's machine, an escalation from today, where it cannot read peer

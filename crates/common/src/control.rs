@@ -18,6 +18,14 @@ pub use expose::{ExposeOp, ExposeResp, ExposeScope, ExposedPort, Proto, RemoveSc
 /// SCM entry point) and the GUI (status query + start/stop) address the same service.
 pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
 
+/// The Windows SCM service key the **TLS proxy** is registered under.
+///
+/// A second service rather than a child process: the engine runs as LocalSystem, and spawning a
+/// process as a *different* account from there needs a logon token it has no way to obtain. Letting
+/// the SCM own that — the proxy service runs as `NT AUTHORITY\LocalService` — keeps the engine as
+/// the supervisor (it starts and stops it) while the platform does the part only it can.
+pub const WINDOWS_PROXY_SERVICE_NAME: &str = "UnityLANProxy";
+
 /// The Windows named-pipe name for a control socket path — `unitylan-<file stem>`, which
 /// `interprocess` maps to `\\.\pipe\unitylan-<stem>`. The engine derives it from its configured
 /// `control_socket`, each frontend from the path it was pointed at; shared here so the two sides
@@ -406,9 +414,11 @@ pub struct PeerStatus {
 
 /// The environment variable naming a listener descriptor the engine bound and handed to the proxy.
 ///
-/// 443 is privileged and the proxy runs unprivileged — deliberately, since it is the process that
-/// parses HTTP from mesh peers — so it cannot take the port itself. The engine binds it while it
-/// still can and passes the socket, leaving the proxy with no capability at all.
+/// Unix only. There, 443 is privileged and the proxy runs unprivileged — deliberately, since it is
+/// the process that parses HTTP from mesh peers — so it cannot take the port itself; the engine
+/// binds it while it still can and passes the socket, leaving the proxy with no capability at all.
+/// Windows has no privileged-port concept, so the proxy service binds its own listener and this is
+/// never set there.
 pub const PROXY_LISTEN_FD_VAR: &str = "UNITYLAN_PROXY_LISTEN_FD";
 
 /// The port mesh peers reach web services on.

@@ -46,6 +46,11 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   *some* web service of yours, and the proxy then narrows that to the one being asked for. A name
   nothing serves gets nothing — there is no default backend to fall through to.
 
+  On Linux the packages create the account it runs as; on Windows it is installed as a second
+  service under the built-in LocalService account, started and stopped by the engine as you add and
+  remove web services. Either way it updates in lockstep with the engine, and nothing about it needs
+  configuring.
+
 - Mesh services can now serve **real HTTPS**, with a certificate browsers already trust — no warning
   page, no root certificate to install on every machine. Tick "Get an HTTPS certificate" beside your
   exposed ports (or run `unitylan-engine ctl cert on`), and the device obtains and renews one by

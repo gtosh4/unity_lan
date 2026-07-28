@@ -166,9 +166,11 @@ fn control_pipe_sd(
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     // D:P — protected DACL (drops inheritance). FA = full; GRGW = GENERIC_READ|GENERIC_WRITE (write
     // carries FILE_CREATE_PIPE_INSTANCE, which the server needs for each accept). SY=SYSTEM,
-    // BA=Administrators, IU=INTERACTIVE.
-    let sddl = widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)")
-        .expect("static SDDL contains no interior nul");
+    // BA=Administrators, IU=INTERACTIVE, LS=LocalService — the account the TLS proxy service runs
+    // as, which reads its whole configuration from this pipe and can do nothing else with it.
+    let sddl =
+        widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;LS)")
+            .expect("static SDDL contains no interior nul");
     SecurityDescriptor::deserialize(&sddl).context("building control-pipe security descriptor")
 }
 

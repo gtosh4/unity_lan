@@ -535,6 +535,17 @@ fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
             Err(e) => tracing::warn!("could not promote the new GUI: {e:#}"),
         }
     }
+    // The proxy is a service we supervise, so stop it before overwriting its image — Windows
+    // forbids replacing a running one, and unlike the engine we have no reason to rename it aside:
+    // it is restarted from scratch after the engine comes back anyway. Best-effort throughout; a
+    // host that serves no web services has no proxy to replace.
+    if let Some(proxy) = &bundle.proxy {
+        match promote_proxy(proxy) {
+            Ok(Some(at)) => tracing::info!(path = %at.display(), "replaced the proxy binary"),
+            Ok(None) => tracing::info!("no installed TLS proxy beside the engine; leaving it out"),
+            Err(e) => tracing::warn!("could not replace the proxy binary: {e:#}"),
+        }
+    }
     let engine = bundle
         .engine
         .context("update bundle has no unitylan-engine.exe")?;
@@ -544,6 +555,27 @@ fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
         "engine binary swapped; the service will restart onto the new version after teardown"
     );
     Ok(())
+}
+
+/// Stop the proxy service and overwrite its binary beside the engine, returning where it landed —
+/// or `None` if none is installed here.
+///
+/// Stopped first because Windows will not overwrite a running image. That is safe to do abruptly:
+/// the proxy holds no state, and the engine starts it again once it is back on the new binary.
+#[cfg(windows)]
+fn promote_proxy(staged: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let Some(target) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("unitylan-proxy.exe")))
+        .filter(|p| p.exists())
+    else {
+        return Ok(None);
+    };
+    crate::proxy::stop_windows_service();
+    std::fs::copy(staged, &target)
+        .with_context(|| format!("copying the proxy to {}", target.display()))?;
+    let _ = std::fs::remove_file(staged);
+    Ok(Some(target))
 }
 
 /// Promote the freshly-extracted GUI (`staged`) to the installed `unitylan-gui.exe` beside the
