@@ -115,11 +115,26 @@ pub enum ExposeOp {
         port: u16,
         #[serde(rename = "net")]
         scope: ExposeScope,
+        /// Service name for this port, if the owner gave one — the label that resolves under their
+        /// user (`mc.alice.unity.internal`). `None` is a bare port, which is what every exposure was
+        /// before names existed and what one stays until it is named.
+        #[serde(default)]
+        name: Option<String>,
+        /// Whether this is something a browser opens. A `web` service is registered with the
+        /// coordinator and named in this device's certificate, which puts it in public
+        /// Certificate Transparency logs permanently — so it is asked for explicitly.
+        #[serde(default)]
+        kind: crate::service::ServiceKind,
     },
     Remove {
         proto: Proto,
         port: u16,
         scope: RemoveScope,
+    },
+    /// Close every port carrying this service name — deleting a service by the name it is known by,
+    /// rather than making the owner recall which ports and scopes it was assembled from.
+    RemoveNamed {
+        name: String,
     },
 }
 
@@ -141,8 +156,15 @@ pub struct ExposedPort {
     pub port: u16,
     #[serde(rename = "net")]
     pub scope: ExposeScope,
+    /// The scope's display label (which network this is open to), *not* the service name below.
     #[serde(default)]
     pub label: String,
+    /// The service name, when this port has one.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// What kind of service it is — a `web` one is named in the device's certificate.
+    #[serde(default)]
+    pub kind: crate::service::ServiceKind,
     /// False when a scoped exposure currently has no eligible source peers.
     pub active: bool,
 }

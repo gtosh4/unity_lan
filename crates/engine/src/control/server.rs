@@ -166,9 +166,11 @@ fn control_pipe_sd(
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     // D:P — protected DACL (drops inheritance). FA = full; GRGW = GENERIC_READ|GENERIC_WRITE (write
     // carries FILE_CREATE_PIPE_INSTANCE, which the server needs for each accept). SY=SYSTEM,
-    // BA=Administrators, IU=INTERACTIVE.
-    let sddl = widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)")
-        .expect("static SDDL contains no interior nul");
+    // BA=Administrators, IU=INTERACTIVE, LS=LocalService — the account the TLS proxy service runs
+    // as, which reads its whole configuration from this pipe and can do nothing else with it.
+    let sddl =
+        widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;LS)")
+            .expect("static SDDL contains no interior nul");
     SecurityDescriptor::deserialize(&sddl).context("building control-pipe security descriptor")
 }
 
@@ -556,18 +558,25 @@ fn apply_expose(
 ) -> anyhow::Result<ExposeResp> {
     let (message, exposed) = match op {
         ExposeOp::List => ("exposed ports".to_string(), fw.list()),
-        ExposeOp::Add { proto, port, scope } => {
+        ExposeOp::Add {
+            proto,
+            port,
+            scope,
+            name,
+            kind,
+        } => {
             let scope = resolve_scope(scope, held_nets)?;
-            let exposed = fw.expose(proto, port, scope.clone())?;
+            let exposed = fw.expose(proto, port, scope.clone(), name.clone(), kind)?;
             // Report it the way the caller will recognize it, not as the ids we stored.
             let label = exposed
                 .iter()
                 .find(|e| e.proto == proto && e.port == port && e.scope == scope)
                 .map_or_else(|| scope.fallback_label(), |e| e.label.clone());
-            (
-                format!("exposed {}/{port} ({label})", proto.as_str()),
-                exposed,
-            )
+            let what = match &name {
+                Some(name) => format!("{name} ({}/{port})", proto.as_str()),
+                None => format!("{}/{port}", proto.as_str()),
+            };
+            (format!("exposed {what} ({label})"), exposed)
         }
         ExposeOp::Remove { proto, port, scope } => {
             let label = match &scope {
@@ -578,6 +587,15 @@ fn apply_expose(
                 format!("closed {}/{port}{label}", proto.as_str()),
                 fw.unexpose(proto, port, scope)?,
             )
+        }
+        ExposeOp::RemoveNamed { name } => {
+            let (removed, exposed) = fw.unexpose_named(&name)?;
+            let message = if removed == 0 {
+                format!("no service named {name:?} is running here")
+            } else {
+                format!("closed {name} ({removed} port(s))")
+            };
+            (message, exposed)
         }
     };
     Ok(ExposeResp { message, exposed })

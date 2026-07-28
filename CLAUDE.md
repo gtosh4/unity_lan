@@ -62,7 +62,7 @@ socket: the **`debug-engine` skill**. To tag and announce a release: the **`cut-
 
 ## Architecture
 
-Four crates (`crates/*`), two planes. Each of the three binary crates has its own `CLAUDE.md` with the
+Five crates (`crates/*`), two planes. Each of the four binary crates has its own `CLAUDE.md` with the
 rules specific to it — read it before changing that crate.
 
 | Crate | Binary | Role |
@@ -71,6 +71,7 @@ rules specific to it — read it before changing that crate.
 | `coordinator` | `unitylan-coordinator` | **control plane**: Discord auth (OAuth PKCE), role→network registry, signs attestations |
 | `engine` | `unitylan-engine` | **data plane**, privileged daemon: WireGuard, host firewall, DNS resolver, control socket |
 | `gui` | `unitylan-gui` | unprivileged iced desktop app, drives the engine over its control socket |
+| `proxy` | `unitylan-proxy` | unprivileged TLS terminator for **web services**: reads its config off the engine's `Watch` push, forwards to loopback backends |
 
 **Trust model.** A *network* = a Discord role an admin registered (`/unitylan network add`) — an ACL
 group, not a subnet. Networks may overlap; a device has **one IP and one tunnel per co-device**

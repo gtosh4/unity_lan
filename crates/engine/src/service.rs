@@ -160,6 +160,7 @@ fn install(config: Option<String>) -> Result<()> {
         account_password: None,
     };
     create_or_adopt(&manager, &info)?;
+    install_proxy(&manager, &config)?;
 
     // The service keeps the SCM default DACL (control needs elevation). The GUI never drives the
     // SCM — its only on/off is a mesh connect/disconnect over the control socket — so no DACL relax
@@ -344,7 +345,84 @@ fn uninstall() -> Result<()> {
     stop_and_wait(&service)?;
 
     service.delete().context("deleting the service")?;
+    // The proxy service goes with it. Best-effort: an install that predates the proxy has none to
+    // delete, and failing the engine's uninstall over that would leave a half-removed product.
+    if let Ok(proxy) = manager.open_service(
+        common::control::WINDOWS_PROXY_SERVICE_NAME,
+        ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::DELETE,
+    ) {
+        let _ = stop_and_wait(&proxy);
+        let _ = proxy.delete();
+    }
     println!("Uninstalled service '{SERVICE_NAME}'.");
+    Ok(())
+}
+
+/// Register the TLS proxy as a second service, running as `NT AUTHORITY\LocalService`.
+///
+/// A service rather than a child process because LocalSystem cannot start a process as a *different*
+/// account without a logon token it has no way to obtain — so the SCM does the part only it can,
+/// while the engine stays the supervisor (it starts and stops this on demand).
+///
+/// **Demand-start, not auto-start**: it should be up exactly while there are web services to serve,
+/// which only the engine knows. The SCM launching it at boot would leave a process holding 443 on a
+/// device that serves nothing.
+///
+/// LocalService is the lowest-privilege built-in account that can still open a network listener, and
+/// Windows has no privileged-port concept — so unlike unix, it binds 443 itself and needs nothing
+/// handed to it.
+fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<()> {
+    let exe = std::env::current_exe()
+        .context("locating the engine executable")?
+        .parent()
+        .map(|d| d.join("unitylan-proxy.exe"))
+        .context("resolving the proxy executable path")?;
+    if !exe.exists() {
+        // Not fatal: an engine-only install is a valid deployment, and the operator may serve TLS
+        // themselves. Say so rather than failing the whole install.
+        println!("  note: unitylan-proxy.exe not found beside the engine; HTTPS for web services will be unavailable.");
+        return Ok(());
+    }
+    let info = ServiceInfo {
+        name: OsString::from(common::control::WINDOWS_PROXY_SERVICE_NAME),
+        display_name: OsString::from("UnityLAN TLS proxy"),
+        service_type: SERVICE_TYPE,
+        start_type: ServiceStartType::OnDemand,
+        error_control: ServiceErrorControl::Normal,
+        executable_path: exe,
+        // The control pipe it reads its configuration from is derived from the engine's config path,
+        // the same way every other frontend derives it.
+        launch_arguments: vec![config.to_path_buf().into_os_string()],
+        dependencies: vec![],
+        account_name: Some(OsString::from("NT AUTHORITY\\LocalService")),
+        account_password: None,
+    };
+    match manager.create_service(&info, ServiceAccess::CHANGE_CONFIG) {
+        Ok(service) => {
+            let _ = service.set_description(
+                "Serves UnityLAN web services over TLS. Started on demand by the UnityLAN engine.",
+            );
+        }
+        Err(e) if winapi_code(&e) == Some(ERROR_SERVICE_EXISTS) => {
+            let service = manager
+                .open_service(
+                    common::control::WINDOWS_PROXY_SERVICE_NAME,
+                    ServiceAccess::QUERY_STATUS
+                        | ServiceAccess::STOP
+                        | ServiceAccess::CHANGE_CONFIG,
+                )
+                .context("opening the already-registered proxy service")?;
+            stop_and_wait(&service)?;
+            service
+                .change_config(&info)
+                .context("repointing the proxy service at this installation")?;
+        }
+        Err(e) => return Err(e).context("registering the proxy service"),
+    }
+    println!(
+        "  TLS proxy registered as '{}' (LocalService, started on demand).",
+        common::control::WINDOWS_PROXY_SERVICE_NAME
+    );
     Ok(())
 }
 

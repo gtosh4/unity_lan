@@ -196,6 +196,7 @@ Linux (or WSL2):
 | `wg-tunnel-test.sh` | raw boringtun WireGuard connectivity over a veth |
 | `oauth-test.sh` / `gui-login-test.sh` | interactive Discord login (offline fake OAuth) |
 | `expose-net-test.sh` / `net-toggle-test.sh` | per-network expose scoping and peering toggles |
+| `service-test.sh` | named services: peer-direct announcement, name resolution, scope enforcement, withdrawal |
 | `rotation-test.sh` | coordinator trust-anchor rotation |
 | `gossip-test.sh` | peer-direct attestation refresh with the coordinator cut off |
 | `ice-test.sh` / `relay-test.sh` | ICE negotiation and the ciphertext TURN relay fallback |

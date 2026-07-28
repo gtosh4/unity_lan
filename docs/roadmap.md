@@ -670,6 +670,14 @@ distribution docs, and a deliberate version decision — not broken functionalit
   its own handshake crypto).
 
 ## Post-GA
+- [ ] **SRV records for named services** — a game service resolves by name today
+      (`mc.alice.unity.internal`) but the port still has to be typed. Minecraft and friends follow
+      `_minecraft._tcp.<host>` SRV, so the local resolver could answer one and let people type the
+      bare name. Deferred because it needs a per-service **protocol hint** the model doesn't carry:
+      the engine knows a service is TCP on 25565, not that it is Minecraft, and guessing the SRV
+      prefix from a port number is exactly the kind of magic that breaks quietly. Wants an explicit
+      field (`srv = "_minecraft._tcp"`) on the service, which is worth adding once someone actually
+      hits the friction rather than ahead of it.
 - [→] Symmetric-NAT-both relay — **promoted to M5.4** (now the planned next NAT increment, not
       Post-GA): data-plane forward through a common mesh peer, ciphertext-only, backend-agnostic.
       See M5.4 for the task breakdown.

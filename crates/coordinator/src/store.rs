@@ -220,6 +220,16 @@ impl Store {
                 user_id INTEGER PRIMARY KEY,      -- allocated once, on first sight
                 label   TEXT    NOT NULL UNIQUE   -- the <user> DNS label, unique deployment-wide
             );
+            -- Web service labels, the only service state the coordinator holds. A plain port
+            -- service is announced peer-to-peer and never reaches here; a web one must, because
+            -- only this process can publish the ACME challenge its name needs. Unique per owner so
+            -- `<label>.<user>` names exactly one device, for the same reason device names are.
+            CREATE TABLE IF NOT EXISTS device_services (
+                user_id INTEGER NOT NULL,
+                label   TEXT    NOT NULL,
+                pubkey  BLOB    NOT NULL,        -- the device serving it
+                PRIMARY KEY (user_id, label)
+            );
             CREATE TABLE IF NOT EXISTS guild_rotation_certs (
                 idx      INTEGER PRIMARY KEY AUTOINCREMENT,  -- issuance order (oldest→newest)
                 guild_id INTEGER NOT NULL,                   -- the guild whose key was rotated
@@ -865,6 +875,12 @@ impl Store {
             .bind(pubkey.as_slice())
             .execute(&self.pool)
             .await?;
+        // Its service labels go with it, so the owner can give the name to another device instead
+        // of finding it held by a machine that no longer exists.
+        sqlx::query("DELETE FROM device_services WHERE pubkey = ?")
+            .bind(pubkey.as_slice())
+            .execute(&self.pool)
+            .await?;
         // If that was the primary pointer, promote another device (or clear it).
         if self.primary_pubkey(user_id).await? == Some(*pubkey) {
             match self.user_devices(user_id).await?.first() {
@@ -901,6 +917,110 @@ impl Store {
             out.push((pk, r.get::<String, _>("device_name")));
         }
         Ok(out)
+    }
+
+    // ---- web service labels (the only service state the coordinator holds) ----
+
+    /// Replace this device's registered web service labels, refusing any that are not this owner's
+    /// to take. Returns `(registered, refused)`.
+    ///
+    /// Refused rather than reassigned, in two cases and for the same reason both times — the label
+    /// already names something of this owner's, and silently moving a name would break whatever was
+    /// answering to it:
+    ///
+    /// * another of the owner's **devices** registered it first;
+    /// * it collides with one of the owner's **device names**, which are allocated here and carried
+    ///   in signed attestations, so they outrank a self-chosen service label.
+    ///
+    /// Replacement, not merge: a device that stops serving something simply stops listing it, and
+    /// there is no way to leave a registration behind for a service that no longer exists.
+    pub async fn set_device_services(
+        &self,
+        user_id: u64,
+        pubkey: &[u8; 32],
+        labels: &[String],
+    ) -> anyhow::Result<(Vec<String>, Vec<common::api::RefusedService>)> {
+        let mut tx = self.pool.begin().await?;
+
+        // This owner's device names, and the labels their *other* devices hold.
+        let device_names: std::collections::HashSet<String> =
+            sqlx::query("SELECT device_name FROM devices WHERE user_id = ?")
+                .bind(user_id as i64)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(|r| r.get::<String, _>("device_name"))
+                .collect();
+        let held_elsewhere: std::collections::HashSet<String> =
+            sqlx::query("SELECT label, pubkey FROM device_services WHERE user_id = ?")
+                .bind(user_id as i64)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .filter(|r| r.get::<Vec<u8>, _>("pubkey").as_slice() != pubkey.as_slice())
+                .map(|r| r.get::<String, _>("label"))
+                .collect();
+
+        let mut registered = Vec::new();
+        let mut refused = Vec::new();
+        for label in labels {
+            let reason = if !common::service::valid_label(label) {
+                Some("not a usable service name".to_string())
+            } else if device_names.contains(label) {
+                Some(format!(
+                    "you have a device named {label:?}, and a device name wins"
+                ))
+            } else if held_elsewhere.contains(label) {
+                Some(format!("another of your devices already serves {label:?}"))
+            } else if registered.len() >= common::api::MAX_WEB_SERVICES_PER_DEVICE {
+                Some(format!(
+                    "a device may certify at most {} service names",
+                    common::api::MAX_WEB_SERVICES_PER_DEVICE
+                ))
+            } else {
+                None
+            };
+            match reason {
+                Some(reason) => refused.push(common::api::RefusedService {
+                    name: label.clone(),
+                    reason,
+                }),
+                None => registered.push(label.clone()),
+            }
+        }
+
+        // Clear this device's rows before inserting, so the set is replaced rather than accumulated.
+        sqlx::query("DELETE FROM device_services WHERE user_id = ? AND pubkey = ?")
+            .bind(user_id as i64)
+            .bind(pubkey.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        for label in &registered {
+            sqlx::query(
+                "INSERT INTO device_services (user_id, label, pubkey) VALUES (?, ?, ?)
+                 ON CONFLICT (user_id, label) DO UPDATE SET pubkey = excluded.pubkey",
+            )
+            .bind(user_id as i64)
+            .bind(label)
+            .bind(pubkey.as_slice())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok((registered, refused))
+    }
+
+    /// The web service labels registered to this device — what its certificate may name.
+    pub async fn device_services(&self, pubkey: &[u8; 32]) -> anyhow::Result<Vec<String>> {
+        Ok(
+            sqlx::query("SELECT label FROM device_services WHERE pubkey = ? ORDER BY label")
+                .bind(pubkey.as_slice())
+                .fetch_all(&self.pool)
+                .await?
+                .into_iter()
+                .map(|r| r.get::<String, _>("label"))
+                .collect(),
+        )
     }
 
     // ---- primary device (one per user; backs the <user>.<community> alias) ----

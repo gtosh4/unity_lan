@@ -18,6 +18,14 @@ pub use expose::{ExposeOp, ExposeResp, ExposeScope, ExposedPort, Proto, RemoveSc
 /// SCM entry point) and the GUI (status query + start/stop) address the same service.
 pub const WINDOWS_SERVICE_NAME: &str = "UnityLANEngine";
 
+/// The Windows SCM service key the **TLS proxy** is registered under.
+///
+/// A second service rather than a child process: the engine runs as LocalSystem, and spawning a
+/// process as a *different* account from there needs a logon token it has no way to obtain. Letting
+/// the SCM own that — the proxy service runs as `NT AUTHORITY\LocalService` — keeps the engine as
+/// the supervisor (it starts and stops it) while the platform does the part only it can.
+pub const WINDOWS_PROXY_SERVICE_NAME: &str = "UnityLANProxy";
+
 /// The Windows named-pipe name for a control socket path — `unitylan-<file stem>`, which
 /// `interprocess` maps to `\\.\pipe\unitylan-<stem>`. The engine derives it from its configured
 /// `control_socket`, each frontend from the path it was pointed at; shared here so the two sides
@@ -194,6 +202,10 @@ pub struct CertStatus {
 pub struct StatusReport {
     pub device: Option<DeviceStatus>,
     pub peers: Vec<PeerStatus>,
+    /// What the TLS proxy should serve, when this device runs one. Empty means nothing to serve, in
+    /// which case the proxy should not be holding a port at all.
+    #[serde(default)]
+    pub proxy_routes: Vec<ProxyRoute>,
     /// Every network this device's roles grant (role@guild) + per-device enabled state — the
     /// source for the GUI's peering toggle. Empty when not joined.
     #[serde(default)]
@@ -324,6 +336,7 @@ impl Default for StatusReport {
         Self {
             device: None,
             peers: Vec::new(),
+            proxy_routes: Vec::new(),
             networks: Vec::new(),
             needs_login: false,
             connected: true,
@@ -392,6 +405,66 @@ pub struct PeerStatus {
     /// grouped by community, on hover over the peer's name.
     #[serde(default)]
     pub networks: Vec<crate::api::SharedNetwork>,
+    /// The named services this peer announced to us over the tunnel, each already resolved to the
+    /// name it answers to (`mc.alice.unity.internal`). Empty for a peer that announces none, that
+    /// is offline, or that predates services.
+    #[serde(default)]
+    pub services: Vec<PeerService>,
+}
+
+/// The environment variable naming a listener descriptor the engine bound and handed to the proxy.
+///
+/// Unix only. There, 443 is privileged and the proxy runs unprivileged — deliberately, since it is
+/// the process that parses HTTP from mesh peers — so it cannot take the port itself; the engine
+/// binds it while it still can and passes the socket, leaving the proxy with no capability at all.
+/// Windows has no privileged-port concept, so the proxy service binds its own listener and this is
+/// never set there.
+pub const PROXY_LISTEN_FD_VAR: &str = "UNITYLAN_PROXY_LISTEN_FD";
+
+/// The port mesh peers reach web services on.
+///
+/// Fixed rather than configurable: it is what a browser assumes when someone types a bare name,
+/// which is the whole point. Shared so the proxy binds the port the firewall opens.
+pub const HTTPS_PORT: u16 = 443;
+
+/// One web service the TLS proxy should serve: which names reach it, where to forward, and who is
+/// allowed to.
+///
+/// Rides the existing [`StatusReport`] push rather than a channel of its own — the proxy needs
+/// exactly the events the status already fires on (membership changed, a service was added, a
+/// certificate was renewed), and a second subscription would be a second thing to keep in step. The
+/// certificate paths are not repeated here: the proxy reads them from [`StatusReport::cert`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyRoute {
+    /// Every name this route answers to — the certificate-domain name and its `unity.internal`
+    /// alias, because a person may type either. Lower-case, no trailing dot.
+    pub hostnames: Vec<String>,
+    /// The loopback port to forward to. Always loopback: forwarding anywhere else would make this a
+    /// relay for whatever the backend can reach.
+    pub port: u16,
+    /// Who may reach it. `None` means the service's scope restricts nobody, so any mesh peer —
+    /// which is anyone who can deliver to the mesh interface at all. `Some(list)` is exactly those
+    /// addresses, and an **empty** list is nobody: a scope whose peers are all offline must stay
+    /// closed rather than fall open, the same rule the firewall follows.
+    #[serde(default)]
+    pub allow: Option<Vec<Ipv4Addr>>,
+}
+
+/// One of a peer's services, as the frontend needs to show it: the full name it answers to, and
+/// where to reach it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerService {
+    /// The bare label the peer announced (`mc`).
+    pub name: String,
+    /// The name this resolves as — `<label>.<user>.unity.internal`, composed by *us* from the
+    /// peer's verified user label, never taken from the peer.
+    pub hostname: String,
+    pub proto: Proto,
+    pub port: u16,
+    /// False when another of the same owner's devices won this label — the service is announced but
+    /// its name points elsewhere, which is worth showing rather than silently hiding.
+    #[serde(default)]
+    pub shadowed: bool,
 }
 
 /// A peer's data-plane reachability, for status display (§7.2 diagnostics).
@@ -545,6 +618,8 @@ mod tests {
                 proto: Proto::Tcp,
                 port: 8080,
                 scope,
+                name: None,
+                kind: crate::service::ServiceKind::Port,
             };
             // Reach past the `ExposeOp` enum tag to the payload the old struct would see.
             let v = serde_json::to_value(&op).expect("encodes");

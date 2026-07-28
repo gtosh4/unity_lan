@@ -32,6 +32,15 @@ read+execute only under `%ProgramFiles%`.
 candidates over long-poll, pairs a relay peer with a stuck client — and stays **off the traffic path**:
 a relay is another *peer*, never the coordinator.
 
+**Named services.** `mesh_services.rs` (not `service.rs` — that is the Windows SCM/config module) holds
+what peers announce they serve and resolves a contested name. Two rules that must not drift: a
+coordinator-allocated **device name always outranks** a self-asserted service label, and among service
+claims the **lowest public key wins** — arbitrary but total, so every device on the mesh reaches the
+same answer for a name it cannot arbitrate remotely. Announcement is peer-direct (`p2p.rs`), scoped at
+the *announcer* by `fw::Firewall::services_for`, so a peer that cannot reach a port is never told the
+name exists. `proxy.rs` supervises the TLS proxy — see `crates/proxy/CLAUDE.md`; the refusal to run it
+as root lives there and is deliberate.
+
 **Certificates.** `cert.rs` runs the whole ACME DNS-01 conversation on the device: it makes the
 keypair, talks to the CA, keeps the private key. The coordinator only publishes the challenge TXT it
 derives from our own allocation. CA rate limits shape the module more than anything else — the account

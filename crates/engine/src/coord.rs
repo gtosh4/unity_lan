@@ -500,6 +500,7 @@ pub async fn acme_challenge(
     token: String,
     device: Vec<String>,
     primary: Option<String>,
+    services: std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<common::api::AcmeChallengeResp> {
     let client = reqwest::Client::new();
     let resp = client
@@ -508,12 +509,34 @@ pub async fn acme_challenge(
             token,
             device,
             primary,
+            services,
         })
         .send()
         .await
         .context("sending /acme-challenge")?;
     let resp = ensure_ok(resp, "acme-challenge").await?;
     resp.json().await.context("decoding AcmeChallengeResp")
+}
+
+/// Tell the coordinator which **web** service names this device serves, so its certificate may name
+/// them. Replaces the previously-registered set.
+///
+/// The only service state the coordinator holds. A plain port service never reaches this call — it
+/// is announced peer to peer, and the coordinator has no reason to know it exists.
+pub async fn register_services(
+    base_url: &str,
+    token: String,
+    names: Vec<String>,
+) -> anyhow::Result<common::api::ServiceRegisterResp> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base_url}/services"))
+        .json(&common::api::ServiceRegisterReq { token, names })
+        .send()
+        .await
+        .context("sending /services")?;
+    let resp = ensure_ok(resp, "services").await?;
+    resp.json().await.context("decoding ServiceRegisterResp")
 }
 
 /// Verify the seeds in a response against the **pinned** per-guild anchors → the co-members to peer

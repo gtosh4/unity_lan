@@ -380,6 +380,35 @@ resolved/resolv.conf (Linux) · NRPT/netsh (Windows) · resolver dir (macOS); ho
   matters because a TLS certificate issued against it is bound to that name for its whole life.
   Names remain convenience only; **authorization is always the pubkey in the signed
   attestation**, never the name.
+- **Named services live beside device names, and are peer-asserted rather than allocated.** A device
+  may name any port it exposes; the name resolves as `<label>.<user>` — `mc.alice.unity.internal`.
+  Unlike a device name, no coordinator allocates it: a device announces its own list over the tunnel
+  (`p2p::ReqBody::GetServices`) and the coordinator holds no service state at all. That is safe
+  because of where the name is *composed* — the receiver builds it from the announcing peer's own
+  **verified** user label, so a peer cannot express a name outside its owner's namespace. The
+  coordinator enforces the same property for hostnames by derivation; here it holds structurally.
+  Three consequences follow, and each is a deliberate choice:
+  - **Scope is enforced at the announcer.** A device answers `GetServices` only for services the
+    asker's address could reach, so a peer outside a service's scope is never told the name exists.
+    A name and its port cannot disagree about who may see them, because one decision makes both.
+  - **A device name always outranks a service label**, since the former is coordinator-allocated and
+    attested and the latter is self-asserted. Otherwise a device could make a *sibling* unreachable
+    by name.
+  - **Two of one owner's devices may claim one label.** Not an attack — no observer can arbitrate it
+    remotely, so every observer must reach the *same* answer or a name would resolve differently
+    depending on who asked. Lowest public key wins: arbitrary, total, identically computed
+    everywhere, and stable as peers come and go. The loser is shown as shadowed rather than hidden.
+  - **The cost is latency, not trust.** With no push, a peer learns a new name on its next poll.
+  - **A `web` service is the one exception, and only for certificates.** A name a browser opens needs
+    a publicly-trusted certificate, and a CA validates it by reading a TXT record only the
+    coordinator can publish — so a web service *is* registered (`POST /services`, `device_services`),
+    and its label is the whole of what the coordinator stores. The same derivation rule holds: the
+    `/acme-challenge` request carries a **value keyed by label**, and a label the coordinator's rows
+    do not assign to that device has nowhere to land. Registration refuses rather than reassigns
+    (another of the owner's devices holds it, or it collides with a device name), so a name never
+    moves out from under whatever was answering to it. Reissue is **batched** (`cert::SETTLE`): the
+    CA's per-registered-domain cap is shared by the whole deployment, so naming three services in a
+    row must cost one certificate, not three.
 - **One label below a device name resolves to that device**, under both suffixes — so
   `plex.<device>.<user>` reaches the machine and a reverse proxy on it can route by name. Scoped to
   exactly what the certificate wildcard covers (§6.5), and to *device* names only: the bare `<user>`
@@ -423,6 +452,28 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   default, and offered only where a port is actually exposed. And CAs cap certificates per registered
   domain per week; the coordinator meters issuance (`max_certs_per_week`) so a burst is refused early
   rather than exhausting a budget the whole deployment shares.
+- **TLS is terminated by a separate, unprivileged process.** `unitylan-proxy` serves the web services
+  on the mesh address's `:443` and forwards to loopback backends, so an app needs no TLS
+  configuration of its own. It is a distinct binary because the engine is root — it drives WireGuard,
+  the firewall and the resolver — and parsing HTTP sent by mesh peers is the archetypal work that
+  should not happen there. A root engine with no `[proxy] user` **refuses** to start it rather than
+  running it privileged (`proxy::run_as`). Its configuration arrives on the engine's existing `Watch`
+  push, so a renewal or a new service needs no restart and there is no file to drift; when the engine
+  is unreachable it serves nothing, since its last word may already be stale. Two gates, both fail
+  closed: the firewall opens 443 to the union of everyone allowed *some* web service (a synthetic
+  exposure per scope, `Firewall::effective_exposed`), and the proxy narrows that to the one service
+  asked for — the distinction a packet filter cannot make once they share a port. Forwarding is
+  loopback-only by construction: the address is built from a port the engine supplied, never from
+  anything in the request. **The engine binds `:443` and hands the socket over** (`dup2` onto a fixed
+  descriptor, named by `PROXY_LISTEN_FD_VAR`): the port is privileged, a child that drops to another
+  uid loses its capabilities, and `NoNewPrivileges` in the unit rules out file capabilities too — so
+  handing over an already-bound listener is both the way it can work and the better one, leaving the
+  proxy with no capability at all. The consequence is that a changed mesh address needs a restarted
+  proxy, since it was given a socket rather than the right to make one. **Windows differs only in
+  mechanism**: LocalSystem cannot start a process as another account without a logon token it has no
+  way to obtain, so the proxy is a second, demand-start SCM service under `NT AUTHORITY\LocalService`
+  that the engine starts and stops — and since Windows has no privileged-port concept, it binds 443
+  itself and needs nothing handed over.
 - **Not a private CA.** Issuing from a coordinator-held CA would avoid all of the above, but requires
   installing a root into every member's system trust store — which would let a compromised
   coordinator MITM TLS on every member's machine, an escalation from today, where it cannot read peer

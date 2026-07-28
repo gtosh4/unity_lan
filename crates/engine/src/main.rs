@@ -11,11 +11,13 @@ mod dns;
 mod fw;
 mod ice;
 mod keys;
+mod mesh_services;
 mod nat;
 mod netcfg;
 mod oauth;
 mod p2p;
 mod ping;
+mod proxy;
 mod relay;
 mod resolver;
 mod selfupdate;
@@ -163,7 +165,19 @@ enum CtlCmd {
         /// Restrict the port to the owner's own other devices instead of a network.
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
+        /// Name this port, so peers reach it as `<name>.<you>.unity.internal` — the same thing
+        /// `service add` does, for when you are already reaching for `expose`.
+        #[arg(long)]
+        name: Option<String>,
     },
+    /// Give a port a name peers can remember: `mc`, reachable as `mc.<you>.unity.internal`.
+    ///
+    /// A service is an exposed port with a name. The name is announced to peers over the tunnel —
+    /// the coordinator holds none of this — and resolves for everyone who may reach the port.
+    #[command(subcommand)]
+    Service(ServiceCmd),
+    /// List the named services running on this device.
+    Services,
     /// Close a port opened with `expose`.
     Unexpose {
         /// Port to close: `25565` (tcp), or `tcp/25565` / `udp/34197`.
@@ -225,6 +239,39 @@ Certificate Transparency logs, permanently — turning it back off does not unpu
     Unblock {
         /// Discord handle to un-block, as shown in `ctl status`'s blocked list.
         user: String,
+    },
+}
+
+/// `ctl service` actions.
+#[derive(Subcommand)]
+enum ServiceCmd {
+    /// Name a port, opening it if it isn't already open.
+    Add {
+        /// The name peers will use: lower-case letters, digits and dashes.
+        name: String,
+        /// Port to serve it on: `25565` (tcp), or `tcp/25565` / `udp/34197`.
+        port: String,
+        /// Restrict it to this network's peers; omit to offer it to every peer.
+        #[arg(long)]
+        net: Option<String>,
+        /// The guild `--net` belongs to, when two of your guilds share the role name.
+        #[arg(long, requires = "net")]
+        guild: Option<String>,
+        /// Restrict it to the owner's own other devices instead of a network.
+        #[arg(long, conflicts_with = "net")]
+        own_devices: bool,
+        /// This is something a browser opens, so put its name in this device's HTTPS certificate.
+        ///
+        /// Requires `ctl cert on`. Publishes the name to public Certificate Transparency logs
+        /// **permanently** — that is how every publicly-trusted certificate works — so it is asked
+        /// for rather than assumed.
+        #[arg(long)]
+        web: bool,
+    },
+    /// Stop serving a name, closing every port it was opened on.
+    Rm {
+        /// The service name, as shown by `ctl services`.
+        name: String,
     },
 }
 
@@ -788,16 +835,64 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             net,
             guild,
             own_devices,
+            name,
         } => {
             let (proto, port) = parse_port(&port)?;
             let scope = expose_scope(net, guild, own_devices);
             print_exposed(
                 control::client_expose(
                     &socket,
-                    common::control::ExposeOp::Add { proto, port, scope },
+                    common::control::ExposeOp::Add {
+                        proto,
+                        port,
+                        scope,
+                        name,
+                        kind: common::service::ServiceKind::Port,
+                    },
                 )
                 .await?,
             )
+        }
+        CtlCmd::Service(ServiceCmd::Add {
+            name,
+            port,
+            net,
+            guild,
+            own_devices,
+            web,
+        }) => {
+            // Refused here as well as in the daemon so a typo costs a round trip and a clear
+            // message, not an error the socket has to phrase.
+            if !common::service::valid_label(&name) {
+                anyhow::bail!("{}", common::service::label_error(&name));
+            }
+            let (proto, port) = parse_port(&port)?;
+            let scope = expose_scope(net, guild, own_devices);
+            print_exposed(
+                control::client_expose(
+                    &socket,
+                    common::control::ExposeOp::Add {
+                        proto,
+                        port,
+                        scope,
+                        name: Some(name),
+                        kind: if web {
+                            common::service::ServiceKind::Web
+                        } else {
+                            common::service::ServiceKind::Port
+                        },
+                    },
+                )
+                .await?,
+            )
+        }
+        CtlCmd::Service(ServiceCmd::Rm { name }) => print_exposed(
+            control::client_expose(&socket, common::control::ExposeOp::RemoveNamed { name })
+                .await?,
+        ),
+        CtlCmd::Services => {
+            let resp = control::client_expose(&socket, common::control::ExposeOp::List).await?;
+            print_services(&resp, control::client_status(&socket).await?)
         }
         CtlCmd::Unexpose {
             port,
@@ -980,7 +1075,55 @@ fn print_exposed(resp: common::control::ExposeResp) -> anyhow::Result<()> {
     println!("{}", resp.message);
     for e in &resp.exposed {
         let idle = if e.active { "" } else { "  [no peers online]" };
-        println!("  {}/{} ({}){}", e.proto.as_str(), e.port, e.label, idle);
+        let name = match &e.name {
+            Some(name) => format!("{name}  "),
+            None => String::new(),
+        };
+        println!(
+            "  {name}{}/{} ({}){}",
+            e.proto.as_str(),
+            e.port,
+            e.label,
+            idle
+        );
+    }
+    Ok(())
+}
+
+/// This device's named services, grouped by name, each shown as the name a peer would type.
+///
+/// Needs the status report as well as the exposed set: the full name is `<label>.<our user
+/// label>.unity.internal`, and only the daemon knows which user label we were allocated.
+fn print_services(
+    resp: &common::control::ExposeResp,
+    status: common::control::StatusReport,
+) -> anyhow::Result<()> {
+    let user = status.identity.as_deref();
+    let mut names: Vec<&str> = resp
+        .exposed
+        .iter()
+        .filter_map(|e| e.name.as_deref())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        println!("no named services on this device (`ctl service add <name> <port>`)");
+        return Ok(());
+    }
+    for name in names {
+        match user {
+            Some(user) => println!("{name}  ({name}.{user}.{})", common::DNS_SUFFIX),
+            // Not enrolled yet: the ports are real, the name they will answer to is not known.
+            None => println!("{name}  (log in to learn the name this answers to)"),
+        }
+        for e in resp
+            .exposed
+            .iter()
+            .filter(|e| e.name.as_deref() == Some(name))
+        {
+            let idle = if e.active { "" } else { "  [no peers online]" };
+            println!("    {}/{} ({}){}", e.proto.as_str(), e.port, e.label, idle);
+        }
     }
     Ok(())
 }

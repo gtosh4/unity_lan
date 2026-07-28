@@ -378,6 +378,17 @@ fn build_firewall(cfg: &Config) -> anyhow::Result<Option<Arc<Firewall>>> {
                 },
                 port: e.port,
                 scope: e.scope()?,
+                name: match &e.name {
+                    Some(n) if !common::service::valid_label(n) => {
+                        anyhow::bail!("{}", common::service::label_error(n))
+                    }
+                    other => other.clone(),
+                },
+                kind: if e.web {
+                    common::service::ServiceKind::Web
+                } else {
+                    common::service::ServiceKind::Port
+                },
             })
         })
         .collect::<anyhow::Result<_>>()
@@ -498,6 +509,16 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     // *current* key. A logout re-keys the device; the enrollment loop below refreshes this each
     // iteration.
     let pubkey = Arc::new(tokio::sync::RwLock::new([0u8; 32]));
+    // What peers have announced they serve. Outside the enrollment loop so a reconnect keeps the
+    // names resolving rather than blanking them until every peer has been asked again.
+    let service_book = crate::mesh_services::ServiceBook::default();
+    // The TLS proxy, while this device has web services to serve. Dropping it kills it, so it goes
+    // down with the engine rather than outliving it holding 443.
+    let mut tls_proxy: Option<crate::proxy::Proxy> = None;
+    // Whether we have already explained why the proxy is not running. A refusal (no `[proxy] user`
+    // under a root engine, a missing binary) does not get better by retrying, and repeating it every
+    // couple of seconds would bury everything else in the log.
+    let mut proxy_complaint: Option<String> = None;
     // Signalled by a `Logout` control request to break the mesh loop into its teardown + re-key path.
     let logout = Arc::new(tokio::sync::Notify::new());
     // Signalled by `ApplyUpdate` once a file-swap update has swapped the binary: the mesh loop tears
@@ -658,6 +679,8 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             zone: &zone,
             status: &status,
             localnet: &localnet,
+            services: &service_book,
+            my_pubkey: wg_pub,
             cert: CertCtx {
                 state_dir: cfg.state_dir.clone(),
                 coordinator: cfg.coordinator.clone(),
@@ -765,6 +788,58 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
                     .await?;
                 }
             }
+
+            // Ask peers what they serve. Peer-direct and on its own slow cadence: services change
+            // when a person changes them, so this is about eventual accuracy rather than freshness,
+            // and the coordinator is not involved at any point. A peer that does not answer keeps
+            // whatever it last announced — losing a name because one datagram went missing would be
+            // worse than a stale entry.
+            {
+                let now = std::time::Instant::now();
+                for seed in last_seeds.iter() {
+                    if !ctx.services.is_due(&seed.pubkey, now) {
+                        continue;
+                    }
+                    let target = SocketAddr::from((seed.ip, common::p2p::P2P_PORT));
+                    match crate::p2p::pull_services(target, P2P_PULL_TIMEOUT).await {
+                        Ok(services) => {
+                            if ctx.services.set(seed.pubkey, services.clone(), now) {
+                                tracing::info!(
+                                    peer = %seed.hostname,
+                                    names = ?services.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                                    "a peer's services changed"
+                                );
+                            }
+                        }
+                        Err(e) => tracing::debug!(
+                            peer = %seed.hostname,
+                            "could not ask what {} serves ({e:#}); keeping what it last announced",
+                            seed.hostname
+                        ),
+                    }
+                }
+                // Recomputed every tick, not only when a pull changed something: our *own* services
+                // change through the control socket, which does not pass this way, so a name the
+                // owner just added would otherwise not resolve on this device until the next
+                // membership change. `dns::update` compares before it writes, so an unchanged view
+                // costs a rebuild and no more.
+                if let Some(dev) = &last_device {
+                    let resolved = resolve_services(&ctx, dev, &last_seeds);
+                    dns::update(ctx.zone, dev, &last_seeds, &resolved.names).await;
+                    control::set_services(ctx.status, &peer_services(&ctx, &last_seeds, &resolved));
+                }
+            }
+
+            // Keep the TLS proxy matched to what there is to serve. Same tick as everything else:
+            // it is a cheap comparison, and a proxy that died (a port it could not bind, a crash)
+            // comes back on the next one rather than staying down until something else changes.
+            sync_proxy(
+                &cfg,
+                &ctx,
+                &last_device,
+                &mut tls_proxy,
+                &mut proxy_complaint,
+            );
 
             // Read WireGuard's own view of every peer, probe each one, and advance its reachability
             // FSM — see `poll_peer_health`. Purely local, so the held long-poll below keeps waiting.
@@ -1249,16 +1324,27 @@ async fn bring_up_host(
     // credentials fresh without the coordinator fanning them out. Off unless `gossip` is set; the
     // coordinator stays the fallback. Bound to our mesh /32 (now on the interface), torn down with
     // it. `own_atts` is refreshed from the grant on every register below.
+    //
+    // The same socket announces our named services, which is *not* gated on `gossip`: that flag
+    // turns off peer-direct attestation refresh, and a device that opted out of it has not opted
+    // out of telling peers what it serves. With `gossip` off we simply never populate `own_atts`,
+    // so an attestation pull gets an empty list and the asker falls back to the coordinator.
     let own_atts = crate::p2p::OwnAttestations::default();
-    let p2p_task = cfg.gossip.then(|| {
-        own_atts.set(grant_attestations(resp));
+    let p2p_task = {
+        if cfg.gossip {
+            own_atts.set(grant_attestations(resp));
+        }
         let bind = SocketAddr::new(device.wg_ip.into(), common::p2p::P2P_PORT);
         let own = own_atts.clone();
-        tokio::spawn(async move {
+        let services = fw
+            .clone()
+            .map(|fw| crate::p2p::OwnServices::new(fw))
+            .unwrap_or_default();
+        Some(tokio::spawn(async move {
             match tokio::net::UdpSocket::bind(bind).await {
                 Ok(sock) => {
-                    tracing::info!(%bind, "p2p attestation service listening");
-                    if let Err(e) = crate::p2p::serve(sock, own).await {
+                    tracing::info!(%bind, "p2p attestation and service listener up");
+                    if let Err(e) = crate::p2p::serve(sock, own, services).await {
                         tracing::warn!("p2p service ended: {e:#}");
                     }
                 }
@@ -1266,8 +1352,8 @@ async fn bring_up_host(
                     tracing::warn!("p2p bind {bind} failed ({e}); peer-direct refresh off")
                 }
             }
-        })
-    });
+        }))
+    };
 
     // LAN discovery beacon (`beacon.rs`): broadcast our WG pubkey + listen port on the local
     // segment so two peers behind one NAT find a direct LAN path instead of hairpinning through
@@ -1495,8 +1581,137 @@ struct MeshCtx<'a> {
     zone: &'a dns::Zone,
     status: &'a control::Shared,
     localnet: &'a LocalNet,
+    /// What each peer last announced it serves, and this device's own WG public key — the identity
+    /// a contested service name is arbitrated on.
+    services: &'a crate::mesh_services::ServiceBook,
+    my_pubkey: [u8; 32],
     /// What the certificate reconcile needs but the mesh loop otherwise doesn't.
     cert: CertCtx,
+}
+
+/// Start or stop the TLS proxy so it is running exactly while this device has web services.
+///
+/// Also restarts one that died: [`crate::proxy::Proxy::alive`] reports a child that exited, which
+/// makes the next reconcile see "services, nothing running" and start it again.
+fn sync_proxy(
+    cfg: &Config,
+    ctx: &MeshCtx<'_>,
+    device: &Option<SelfDevice>,
+    held: &mut Option<crate::proxy::Proxy>,
+    complaint: &mut Option<String>,
+) {
+    use crate::proxy::Action;
+
+    if held.as_mut().is_some_and(|p| !p.alive()) {
+        tracing::warn!("the TLS proxy exited; restarting it");
+        *held = None;
+    }
+    let bind = device
+        .as_ref()
+        .map(|dev| SocketAddr::from((dev.wg_ip, common::control::HTTPS_PORT)));
+    // It was handed a socket, not the right to make one, so a device that changed mesh address
+    // needs a fresh listener — which means a fresh process.
+    if let (Some(proxy), Some(bind)) = (held.as_ref(), bind) {
+        if proxy.bound_to != bind {
+            tracing::info!(%bind, "mesh address changed; restarting the TLS proxy on it");
+            *held = None;
+        }
+    }
+    let has_services = cfg.proxy.enabled
+        && device.as_ref().is_some_and(|dev| {
+            ctx.fw.as_ref().is_some_and(|fw| {
+                !fw.web_routes(&dev.username, dev.dns_domain.as_deref())
+                    .is_empty()
+            })
+        });
+    match crate::proxy::decide(has_services, held.is_some()) {
+        Action::Leave => {}
+        Action::Stop => {
+            tracing::info!("no web services left; stopping the TLS proxy");
+            *held = None; // dropping kills it
+        }
+        Action::Start => {
+            #[cfg(unix)]
+            // SAFETY: `geteuid` reads the calling process's own effective uid. It takes no
+            // arguments, touches no memory we own, and cannot fail.
+            let euid = unsafe { libc::geteuid() };
+            #[cfg(not(unix))]
+            let euid = 1;
+            let Some(bind) = bind else { return };
+            let started = crate::proxy::run_as(cfg.proxy.user.as_deref(), euid).and_then(|user| {
+                let binary = crate::proxy::binary(cfg.proxy.binary.as_deref());
+                crate::proxy::spawn(
+                    &binary,
+                    std::path::Path::new(&cfg.control_name()),
+                    bind,
+                    user.as_deref(),
+                )
+                .map_err(|e| format!("{e:#}"))
+            });
+            match started {
+                Ok(proxy) => {
+                    tracing::info!("TLS proxy started");
+                    *complaint = None;
+                    *held = Some(proxy);
+                }
+                // Said once, not every couple of seconds: none of these failures resolve themselves,
+                // and repeating would drown the log the operator needs to read to fix it.
+                Err(why) => {
+                    if complaint.as_deref() != Some(why.as_str()) {
+                        tracing::error!("not serving web services over TLS: {why}");
+                        *complaint = Some(why);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve every service claim — ours plus what peers announced — into the names that win.
+fn resolve_services(
+    ctx: &MeshCtx<'_>,
+    device: &SelfDevice,
+    seeds: &[SeedPeer],
+) -> crate::mesh_services::Resolved {
+    let own = ctx
+        .fw
+        .as_ref()
+        .map(|fw| fw.own_services())
+        .unwrap_or_default();
+    let mut claims = crate::mesh_services::own_claims(device, ctx.my_pubkey, &own);
+    claims.extend(crate::mesh_services::peer_claims(seeds, ctx.services));
+    // Every device name currently in play, so a service can never take one.
+    let device_names: HashSet<String> = std::iter::once(device.hostname.clone())
+        .chain(device.primary_alias.clone())
+        .chain(seeds.iter().map(|s| s.hostname.clone()))
+        .chain(seeds.iter().filter_map(|s| s.primary_alias.clone()))
+        .map(|n| n.trim_end_matches('.').to_ascii_lowercase())
+        .collect();
+    crate::mesh_services::resolve(claims, &device_names)
+}
+
+/// Each peer's services in the shape the frontend shows them, keyed by mesh address.
+fn peer_services(
+    ctx: &MeshCtx<'_>,
+    seeds: &[SeedPeer],
+    resolved: &crate::mesh_services::Resolved,
+) -> HashMap<std::net::Ipv4Addr, Vec<common::control::PeerService>> {
+    // Peers only: this device's own services are already reported through the exposed list.
+    let mut out = HashMap::new();
+    for claim in crate::mesh_services::peer_claims(seeds, ctx.services) {
+        out.entry(claim.ip)
+            .or_insert_with(Vec::new)
+            .push(common::control::PeerService {
+                shadowed: resolved
+                    .shadowed
+                    .contains(&(claim.pubkey, claim.name.clone())),
+                name: claim.name,
+                hostname: claim.hostname,
+                proto: claim.proto,
+                port: claim.port,
+            });
+    }
+    out
 }
 
 /// Certificate inputs, cloned so the reconcile can outlive one loop iteration.
@@ -1532,9 +1747,38 @@ fn spawn_cert_reconcile(ctx: &MeshCtx<'_>, device: &SelfDevice) {
     let hostname = device.hostname.clone();
     let primary_alias = device.primary_alias.clone();
     let dns_domain = device.dns_domain.clone();
+    let web = ctx
+        .fw
+        .as_ref()
+        .map(|fw| fw.web_service_labels())
+        .unwrap_or_default();
     tokio::spawn(async move {
         let token = cert.token.read().await.clone();
         if let Some(token) = token {
+            // Register the web labels before ordering: the certificate may only name what the
+            // coordinator agrees is ours, since it will not publish a challenge for anything else —
+            // and an unregistered name would fail the *whole* order, not just itself. A registration
+            // that fails (coordinator down) leaves those names out of this round's certificate; the
+            // services keep working and resolving, they are simply not certified yet.
+            let mut services = Vec::new();
+            if !web.is_empty() {
+                match crate::coord::register_services(&cert.coordinator, token.clone(), web).await {
+                    Ok(resp) => {
+                        for r in &resp.refused {
+                            tracing::warn!(
+                                service = %r.name,
+                                "this service will not be in the certificate: {}",
+                                r.reason
+                            );
+                        }
+                        services = resp.registered;
+                    }
+                    Err(e) => tracing::warn!(
+                        "could not register web services with the coordinator ({e:#}); \
+                         they stay uncertified until it is reachable"
+                    ),
+                }
+            }
             let report = crate::cert::reconcile(crate::cert::Reconcile {
                 state_dir: &cert.state_dir,
                 coordinator: &cert.coordinator,
@@ -1545,6 +1789,7 @@ fn spawn_cert_reconcile(ctx: &MeshCtx<'_>, device: &SelfDevice) {
                 dns_domain: dns_domain.as_deref(),
                 enabled,
                 exposed,
+                services,
             })
             .await;
             control::set_cert_status(&status, report);
@@ -1607,7 +1852,12 @@ async fn apply_state(
     // carries `coord_online`, which can flip with no membership change.
     let mut changed = false;
     if let Some(dev) = device {
-        changed |= dns::update(ctx.zone, dev, &active).await;
+        // A departed peer's announcements go with it, so its service names stop resolving on the
+        // same membership change that dropped the peer.
+        ctx.services
+            .retain_peers(&active.iter().map(|s| s.pubkey).collect());
+        let resolved = resolve_services(ctx, dev, &active);
+        changed |= dns::update(ctx.zone, dev, &active, &resolved.names).await;
         control::update(
             ctx.status,
             dev,
@@ -1618,7 +1868,13 @@ async fn apply_state(
             ctx.localnet.disable_new(),
             ctx.localnet.peer_own_devices(),
             coord_online,
+            ctx.fw
+                .as_ref()
+                .map(|fw| fw.web_routes(&dev.username, dev.dns_domain.as_deref()))
+                .unwrap_or_default(),
         );
+        // After the rebuild, which starts each peer's service list from what it last held.
+        control::set_services(ctx.status, &peer_services(ctx, &active, &resolved));
         spawn_cert_reconcile(ctx, dev);
     }
     if let Some(fw) = ctx.fw {

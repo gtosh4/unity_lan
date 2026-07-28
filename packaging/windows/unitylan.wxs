@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   UnityLAN Windows installer (WiX v4/v5). Builds an .msi that:
-    - installs unitylan-engine.exe + unitylan-gui.exe under Program Files\UnityLAN,
+    - installs unitylan-engine.exe + unitylan-gui.exe + unitylan-proxy.exe under
+      Program Files\UnityLAN,
     - stages the wireguard-nt DLL where defguard loads it (resources-windows\binaries\, relative to
       the engine exe — the service pins its CWD there so the relative load resolves),
     - drops a Start-menu shortcut to the GUI,
@@ -12,7 +13,7 @@
   (created/migrated by `service install`), so upgrades and uninstalls never touch it.
 
   Build (see build.ps1) supplies these preprocessor vars via `wix build -d`:
-    Version, EngineExe, GuiExe, WgDll
+    Version, EngineExe, GuiExe, ProxyExe, WgDll
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="UnityLAN"
@@ -52,6 +53,12 @@
           <Shortcut Id="GuiShortcut" Directory="ProgramMenuFolder" Name="UnityLAN"
                     Description="Mesh status and device management" Advertise="no" />
         </File>
+      </Component>
+      <Component>
+        <!-- The TLS proxy the engine starts on demand for web services. Registered as its own
+             LocalService-account service by `service install` (which is also what removes it), so
+             it needs no service element here — only the file. -->
+        <File Id="ProxyExe" Name="unitylan-proxy.exe" Source="$(ProxyExe)" KeyPath="yes" />
       </Component>
       <!-- No `unitylan-gui.new.exe` staged copy here anymore. It existed so a running GUI could rename
            the new bytes into place itself during a locked MajorUpgrade, but the unprivileged GUI can't

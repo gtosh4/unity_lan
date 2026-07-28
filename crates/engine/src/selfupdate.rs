@@ -341,10 +341,22 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<ExecPlan> {
         // Best-effort: a headless install has no GUI to replace, and failing the engine update over
         // that would be worse than the skew we're preventing.
         if let Some(gui) = bundle.gui {
-            match replace_gui(&gui) {
+            match replace_beside(&gui, "unitylan-gui") {
                 Ok(Some(at)) => tracing::info!(path = %at.display(), "replaced the GUI binary"),
                 Ok(None) => tracing::info!("no installed GUI found; updating the engine only"),
                 Err(e) => tracing::warn!("could not replace the GUI binary: {e:#}"),
+            }
+        }
+        // Same best-effort treatment, for the same reason: the proxy shares wire types with the
+        // engine, so leaving it behind would run two releases against each other — but a device
+        // that does not serve web services has no proxy to replace, and that must not fail the
+        // engine's own update. The engine restarts it after the swap (it is killed with the old
+        // process), so the new binary is what comes back.
+        if let Some(proxy) = bundle.proxy {
+            match replace_beside(&proxy, "unitylan-proxy") {
+                Ok(Some(at)) => tracing::info!(path = %at.display(), "replaced the proxy binary"),
+                Ok(None) => tracing::info!("no installed TLS proxy found; leaving it out"),
+                Err(e) => tracing::warn!("could not replace the proxy binary: {e:#}"),
             }
         }
         bundle
@@ -367,23 +379,32 @@ fn apply_bytes(bytes: &[u8], state_dir: &Path) -> anyhow::Result<ExecPlan> {
     Ok(exec_plan(current_exe, argv))
 }
 
-/// The two binary names the update bundle carries, per platform — Windows entries keep the `.exe`
+/// The binary names the update bundle carries, per platform — Windows entries keep the `.exe`
 /// suffix so the extracted files are directly runnable. Used to match archive entries by exact file
 /// name (never by an archive-supplied path — see [`unpack_bundle`]).
+///
+/// All three ship together for the same reason the engine and GUI do: they share wire types
+/// (`common::control`), so a device that updated one and not the others would be running two halves
+/// of different releases against each other.
 #[cfg(windows)]
 const BUNDLE_ENGINE: &str = "unitylan-engine.exe";
 #[cfg(windows)]
 const BUNDLE_GUI: &str = "unitylan-gui.exe";
+#[cfg(windows)]
+const BUNDLE_PROXY: &str = "unitylan-proxy.exe";
 #[cfg(unix)]
 const BUNDLE_ENGINE: &str = "unitylan-engine";
 #[cfg(unix)]
 const BUNDLE_GUI: &str = "unitylan-gui";
+#[cfg(unix)]
+const BUNDLE_PROXY: &str = "unitylan-proxy";
 
 /// The staged files extracted from an update bundle.
 #[derive(Debug)]
 struct Bundle {
     engine: Option<std::path::PathBuf>,
     gui: Option<std::path::PathBuf>,
+    proxy: Option<std::path::PathBuf>,
 }
 
 /// Extract the two known binaries from the `.tar.gz` into `state_dir`. Entries are matched by file
@@ -399,6 +420,7 @@ fn unpack_bundle_capped(bytes: &[u8], state_dir: &Path, max_entry: u64) -> anyho
     let mut bundle = Bundle {
         engine: None,
         gui: None,
+        proxy: None,
     };
     let mut ar = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
     for entry in ar.entries().context("reading update archive")? {
@@ -410,6 +432,7 @@ fn unpack_bundle_capped(bytes: &[u8], state_dir: &Path, max_entry: u64) -> anyho
         let (name, slot) = match path.file_name().and_then(|n| n.to_str()) {
             Some(n) if n == BUNDLE_ENGINE => (BUNDLE_ENGINE, &mut bundle.engine),
             Some(n) if n == BUNDLE_GUI => (BUNDLE_GUI, &mut bundle.gui),
+            Some(n) if n == BUNDLE_PROXY => (BUNDLE_PROXY, &mut bundle.proxy),
             _ => continue,
         };
         let out = state_dir.join(format!("{name}.update"));
@@ -434,29 +457,30 @@ fn unpack_bundle_capped(bytes: &[u8], state_dir: &Path, max_entry: u64) -> anyho
     Ok(bundle)
 }
 
-/// Overwrite the installed GUI with `staged`, returning where it landed (or `None` if this host has
-/// no GUI installed — a headless server, which is a normal deployment, not an error).
+/// Overwrite an installed companion binary (`name`) with `staged`, returning where it landed — or
+/// `None` if this host has none installed. A headless server has no GUI and may have no proxy; both
+/// are normal deployments, not errors.
 ///
-/// Only ever replaces a path that already holds a GUI: an update must not *install* a component the
-/// operator chose not to have.
+/// Only ever replaces a path that **already holds** that binary: an update must not *install* a
+/// component the operator chose not to have.
 #[cfg(unix)]
-fn replace_gui(staged: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+fn replace_beside(staged: &Path, name: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
     // Alongside the running engine first (a self-contained/dev layout), then the packaged location
-    // — the .deb/.rpm put the engine in /usr/lib/unitylan but the GUI in /usr/bin.
+    // — the .deb/.rpm put the engine in /usr/lib/unitylan but its companions in /usr/bin.
     let beside = std::env::current_exe()
         .ok()
-        .and_then(|e| e.parent().map(|d| d.join("unitylan-gui")));
+        .and_then(|e| e.parent().map(|d| d.join(name)));
     let mut candidates = beside
         .into_iter()
-        .chain([std::path::PathBuf::from("/usr/bin/unitylan-gui")]);
+        .chain([std::path::PathBuf::from("/usr/bin").join(name)]);
     let Some(target) = candidates.find(|p| p.exists()) else {
         return Ok(None);
     };
-    // Replace via rename so a running GUI keeps its open inode and the swap is atomic. Same
+    // Replace via rename so a running process keeps its open inode and the swap is atomic. Same
     // filesystem is not guaranteed, so fall back to a copy.
     if std::fs::rename(staged, &target).is_err() {
         std::fs::copy(staged, &target)
-            .with_context(|| format!("copying the GUI to {}", target.display()))?;
+            .with_context(|| format!("copying {name} to {}", target.display()))?;
         let _ = std::fs::remove_file(staged);
     }
     make_executable(&target)?;
@@ -511,6 +535,17 @@ fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
             Err(e) => tracing::warn!("could not promote the new GUI: {e:#}"),
         }
     }
+    // The proxy is a service we supervise, so stop it before overwriting its image — Windows
+    // forbids replacing a running one, and unlike the engine we have no reason to rename it aside:
+    // it is restarted from scratch after the engine comes back anyway. Best-effort throughout; a
+    // host that serves no web services has no proxy to replace.
+    if let Some(proxy) = &bundle.proxy {
+        match promote_proxy(proxy) {
+            Ok(Some(at)) => tracing::info!(path = %at.display(), "replaced the proxy binary"),
+            Ok(None) => tracing::info!("no installed TLS proxy beside the engine; leaving it out"),
+            Err(e) => tracing::warn!("could not replace the proxy binary: {e:#}"),
+        }
+    }
     let engine = bundle
         .engine
         .context("update bundle has no unitylan-engine.exe")?;
@@ -520,6 +555,27 @@ fn apply_bundle_swap(bytes: &[u8], state_dir: &Path) -> anyhow::Result<()> {
         "engine binary swapped; the service will restart onto the new version after teardown"
     );
     Ok(())
+}
+
+/// Stop the proxy service and overwrite its binary beside the engine, returning where it landed —
+/// or `None` if none is installed here.
+///
+/// Stopped first because Windows will not overwrite a running image. That is safe to do abruptly:
+/// the proxy holds no state, and the engine starts it again once it is back on the new binary.
+#[cfg(windows)]
+fn promote_proxy(staged: &Path) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let Some(target) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("unitylan-proxy.exe")))
+        .filter(|p| p.exists())
+    else {
+        return Ok(None);
+    };
+    crate::proxy::stop_windows_service();
+    std::fs::copy(staged, &target)
+        .with_context(|| format!("copying the proxy to {}", target.display()))?;
+    let _ = std::fs::remove_file(staged);
+    Ok(Some(target))
 }
 
 /// Promote the freshly-extracted GUI (`staged`) to the installed `unitylan-gui.exe` beside the
@@ -710,16 +766,19 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn bundle_extracts_both_binaries() {
+    fn bundle_extracts_every_binary() {
         let dir = crate::testutil::TempDir::new("su-bundle");
         let bytes = targz(&[
             ("unitylan-engine", b"ENGINE" as &[u8]),
             ("unitylan-gui", b"GUI"),
+            ("unitylan-proxy", b"PROXY"),
         ]);
         let b = unpack_bundle(&bytes, &dir).unwrap();
-        // Both must land — replacing only the engine is the skew this bundle exists to prevent.
+        // All three must land — replacing only the engine is the skew this bundle exists to
+        // prevent, and all three share `common::control`'s wire types.
         assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
         assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+        assert_eq!(std::fs::read(b.proxy.unwrap()).unwrap(), b"PROXY");
     }
 
     #[cfg(unix)]
@@ -735,19 +794,22 @@ mod tests {
     }
 
     /// Windows: the bundle carries the `.exe`-suffixed names, and `unpack_bundle` must match those
-    /// (via `BUNDLE_ENGINE`/`BUNDLE_GUI`) and stage both — the file-swap update's engine source and
-    /// GUI stage-source. A name mismatch here would silently make every Windows update a no-op.
+    /// (via `BUNDLE_ENGINE`/`BUNDLE_GUI`/`BUNDLE_PROXY`) and stage all of them — the file-swap
+    /// update's engine source and the GUI/proxy stage-sources. A name mismatch here would silently
+    /// make every Windows update a no-op.
     #[cfg(windows)]
     #[test]
-    fn bundle_extracts_both_windows_binaries() {
+    fn bundle_extracts_every_windows_binary() {
         let dir = crate::testutil::TempDir::new("su-bundle-win");
         let bytes = targz(&[
             ("unitylan-engine.exe", b"ENGINE" as &[u8]),
             ("unitylan-gui.exe", b"GUI"),
+            ("unitylan-proxy.exe", b"PROXY"),
         ]);
         let b = unpack_bundle(&bytes, &dir).unwrap();
         assert_eq!(std::fs::read(b.engine.unwrap()).unwrap(), b"ENGINE");
         assert_eq!(std::fs::read(b.gui.unwrap()).unwrap(), b"GUI");
+        assert_eq!(std::fs::read(b.proxy.unwrap()).unwrap(), b"PROXY");
     }
 
     /// Windows GUI promotion runs in the (LocalSystem) engine because the unprivileged GUI can't write

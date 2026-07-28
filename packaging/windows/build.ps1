@@ -58,7 +58,7 @@ if (-not $Output) {
 Write-Host ">> building release exes (v$Version)" -ForegroundColor Cyan
 Push-Location $Root
 try {
-    cargo build --release -p unitylan-engine -p unitylan-gui
+    cargo build --release -p unitylan-engine -p unitylan-gui -p unitylan-proxy
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 finally { Pop-Location }
@@ -66,6 +66,7 @@ finally { Pop-Location }
 $bin = Join-Path $Root 'target\release'
 $engineExe = Join-Path $bin 'unitylan-engine.exe'
 $guiExe = Join-Path $bin 'unitylan-gui.exe'
+$proxyExe = Join-Path $bin 'unitylan-proxy.exe'
 
 # --- fetch + stage the wireguard-nt DLL ---
 $wgDll = Join-Path $Root 'resources-windows\binaries\wireguard-amd64.dll'
@@ -86,7 +87,7 @@ if (-not (Test-Path $wgDll)) {
 }
 
 # --- WiX ---
-foreach ($f in @($engineExe, $guiExe, $wgDll)) {
+foreach ($f in @($engineExe, $guiExe, $proxyExe, $wgDll)) {
     if (-not (Test-Path $f)) { throw "missing input: $f" }
 }
 
@@ -115,6 +116,7 @@ wix build (Join-Path $Here 'unitylan.wxs') `
     -d "Version=$Version" `
     -d "EngineExe=$engineExe" `
     -d "GuiExe=$guiExe" `
+    -d "ProxyExe=$proxyExe" `
     -d "WgDll=$wgDll" `
     -o $Output
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }
@@ -126,11 +128,12 @@ Write-Host ">> built $Output" -ForegroundColor Green
 # unpacks this, swaps its own binary in place, stages the new GUI beside it, and lets the SCM restart
 # the service - no MSI MajorUpgrade. The MSI above stays for first install and manual/DLL-bump
 # upgrades; routine version bumps ship as this lightweight bundle instead. The entry names must be
-# exactly unitylan-engine.exe / unitylan-gui.exe (the engine matches archive entries on those). `tar`
+# exactly unitylan-engine.exe / unitylan-gui.exe / unitylan-proxy.exe (the engine matches archive
+# entries on those names). `tar`
 # is bsdtar, shipped with Windows 10+. Note: this carries no wireguard-nt DLL, so a release that bumps
 # the DLL must be delivered via the MSI, not a file-swap.
 $bundle = Join-Path $Root 'packaging\dist\unitylan-windows-x64.tar.gz'
 Write-Host ">> bundling auto-update tarball -> $bundle" -ForegroundColor Cyan
-tar -czf $bundle -C $bin 'unitylan-engine.exe' 'unitylan-gui.exe'
+tar -czf $bundle -C $bin 'unitylan-engine.exe' 'unitylan-gui.exe' 'unitylan-proxy.exe'
 if ($LASTEXITCODE -ne 0) { throw "tar failed to build the update bundle" }
 Write-Host ">> built $bundle" -ForegroundColor Green

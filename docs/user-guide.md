@@ -86,6 +86,30 @@ Add the same port again with a different scope to widen it; **close** removes it
 A Minecraft server on this machine, shared with just your Gaming network, is one port (`25565`,
 TCP) with one scope.
 
+### Naming what you serve
+
+An exposed port is reachable, but `100.83.12.4:25565` is not something anyone remembers. Give it a
+name in the **Services** tab and it answers to one: `mc` becomes `mc.alice.unity.internal`, which you
+can type into a game's server browser, a browser, or an SSH command — and read out loud to a friend.
+
+One machine can serve as many as you like: `mc`, `jellyfin`, `git`, each its own name pointing at the
+same device. The Services tab also lists what everyone else on your mesh is running, which is the
+easiest way to find out what's there.
+
+A service is an exposed port with a name, so it is scoped the same way. A service you offer to one
+network is invisible to everyone else — people outside it aren't told the name exists, so nothing
+leaks about what you run.
+
+Two small things worth knowing. Names are announced device to device rather than through the
+coordinator, so a name you just added takes up to half a minute to reach other people, and a device
+that's offline doesn't advertise anything. And if two of *your own* devices claim the same name, one
+of them wins — the app marks the other, so you can rename it.
+
+**If the service is a website, tick the HTTPS box** (it appears once you've turned certificates on
+below). Then `jellyfin.alice.mesh.unitylan.com` opens in a browser with no warning page. That name
+goes into public certificate logs permanently, same as your device's own — so it's a separate,
+deliberate tick rather than something naming a service does for you.
+
 ### Getting an HTTPS certificate (advanced)
 
 Once a port is exposed, a checkbox appears: **Get an HTTPS certificate for this device**. It's there
@@ -130,6 +154,7 @@ Your machines get names other members can use:
 | `laptop.alice.unity.internal` | Alice's device named `laptop` |
 | `alice.unity.internal` | Whichever of Alice's devices is set primary |
 | `plex.laptop.alice.unity.internal` | Also Alice's `laptop` — anything one label below a device name reaches it, for serving several sites from one machine |
+| `mc.alice.unity.internal` | Whichever of Alice's devices serves the `mc` service (see above) |
 
 If your coordinator is configured with a certificate domain, the same machines answer to matching
 names under it — `laptop.alice.mesh.unitylan.com` on the hosted one — which is what makes a real

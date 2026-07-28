@@ -83,6 +83,68 @@ Two shapes worth knowing:
 - **A media or file host** often wants `--own-devices` for admin access (SSH, the web UI) plus a
   network scope for the service itself, so your friends can watch but not administer.
 
+## 6. Name it
+
+A port that people have to remember by number is a port they will ask you about. Name it instead:
+
+```sh
+sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
+sudo unitylan-engine ctl service add jellyfin 8096              # to every peer you mesh with
+sudo unitylan-engine ctl services                               # names, ports and who can reach them
+sudo unitylan-engine ctl service rm mc                          # stop serving it, closing its ports
+```
+
+`service add` is `expose` plus a name, so everything above about scopes applies unchanged — including
+that a name is only announced to peers who could reach the port anyway. Run it twice with the same
+name to put one service on two ports (a game wanting TCP and UDP), and `service rm` closes both.
+
+One machine can carry as many names as it runs things: `mc`, `jellyfin`, `git`. They all resolve to
+this device, from any meshed machine, with nothing to configure on the other end.
+
+Names travel peer to peer rather than through the coordinator, so allow up to 30 seconds for one to
+reach other people, and expect an offline device to advertise nothing. A device name always wins over
+a service label — you cannot take a machine's own hostname by naming a service after it.
+
+**A service a browser opens wants `--web`:**
+
+```sh
+sudo unitylan-engine ctl cert on                                 # once per device
+sudo unitylan-engine ctl service add jellyfin 8096 --web         # jellyfin.<you>.<domain>
+```
+
+That puts the service's name in this device's certificate, so a browser reaches
+`https://jellyfin.alice.mesh.unitylan.com` with no warning page. It is the one part of services the
+coordinator is told about — only it can publish the DNS record the certificate authority checks — and
+it stores nothing beyond the label. Everything in the certificate section below applies: it is opt-in,
+and the name is published to public Certificate Transparency logs permanently.
+
+**Jellyfin itself needs no TLS configuration.** The engine runs a small TLS proxy
+(`unitylan-proxy`) that serves your web services on the mesh and forwards to them over plain HTTP on
+loopback, so several of them share port 443 under different names and none of them has to learn about
+certificates. It reads its whole configuration from the engine as it changes, so a renewal or a newly
+named service needs no restart.
+
+It runs as its **own unprivileged user**, because parsing web requests from mesh peers has no
+business happening in a daemon that holds your WireGuard keys. The packages create that account and
+put it in the certificate key's group; if you built from source, say who it should be:
+
+```toml
+[proxy]
+user = "unitylan-proxy"    # required when the engine runs as root
+# enabled = false          # ...or turn it off and serve TLS yourself with nginx/Caddy
+[cert]
+group = "unitylan-proxy"   # so the proxy can read the key
+```
+
+A root engine with no `[proxy] user` **refuses to start the proxy** and logs what to set, rather than
+running it as root — that would look like it worked while giving away the isolation it exists for.
+
+Two behaviours to expect. Naming several web services in a row reissues **once**, about ten minutes
+after you stop — CAs cap certificates per domain per week and that cap is shared by every device on
+your coordinator, so a burst is batched rather than spent one at a time. And a label another of your
+devices already registered is refused rather than moved: the service still runs and still resolves,
+it just is not certified, and `ctl services` says so.
+
 These commands find `/etc/unitylan/engine.toml` on their own. An `engine.toml` in the working
 directory wins if there is one, and `-c <path>` overrides both — worth remembering when a command
 seems to be talking to the wrong daemon.
@@ -200,6 +262,9 @@ Then remove the package. Un-enrolling is what returns the mesh address to the po
 | `ctl expose <port> [net]` | Open a port — `--own-devices` or `--guild` to scope it |
 | `ctl unexpose <port>` | Close a port, or one scope with `--net` / `--own-devices` |
 | `ctl exposes` | List open ports and who can reach them |
+| `ctl service add <name> <port>` | Name a port — same scope flags as `expose` |
+| `ctl service rm <name>` | Stop serving a name, closing every port it was on |
+| `ctl services` | List this device's named services and the names they answer to |
 | `ctl net <enable\|disable> <network>` | Peer with a network, or stop |
 | `ctl own-devices <on\|off>` | Peer with your own devices, or stop |
 | `ctl cert [on\|off]` | Show the TLS certificate and its paths, or opt in and out of issuance |

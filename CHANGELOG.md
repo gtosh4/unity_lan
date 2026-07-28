@@ -7,6 +7,50 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Added
 
+- **Services: give a port a name people can remember.** `mc.alice.unity.internal` instead of an
+  address and a port number — type it into a game's server browser, a browser, an SSH command. Name
+  one with `unitylan-engine ctl service add mc 25565`, or in the app's new **Services** tab, which
+  also shows what everyone else on your mesh is running.
+
+  A service is just an exposed port with a name, so it inherits the scoping you already had: a
+  service offered to one network is invisible to everyone else — peers outside it are not told the
+  name exists, not merely refused when they try it. Names are announced device-to-device over the
+  tunnel and the coordinator holds none of them, so this costs your server nothing and keeps working
+  through a coordinator outage. The trade is that a peer learns a new service on its next check
+  rather than instantly: allow up to 30 seconds for a name you just added to reach your friends.
+
+  Exposed ports are still there and still work; a named service is the same thing with a friendlier
+  front door, and ports you exposed before this release keep running exactly as they were until you
+  choose to name them.
+
+  **A service that's a website can be in your HTTPS certificate.** Add `--web` (or tick the box in
+  the Services tab) and `jellyfin.alice.mesh.unitylan.com` gets a real, publicly-trusted certificate
+  — no warning page. This is the one part of services the coordinator has to know about, since only
+  it can publish the DNS record a certificate authority checks, and it holds nothing beyond the name
+  itself. Off unless you ask: a certified name goes into public certificate logs permanently, the
+  same trade the per-device certificate already made.
+
+  Naming several web services in a row costs **one** certificate, not one each — the engine waits
+  about ten minutes for you to finish before reissuing, because certificate authorities cap how many
+  a domain may have per week and that cap is shared by everyone on your coordinator.
+
+  **And the service itself needs no TLS setup at all.** A new `unitylan-proxy` serves your web
+  services on the mesh: run Jellyfin on plain HTTP as you always have, and
+  `https://jellyfin.alice.mesh.unitylan.com` works — certificate handled, several services on one
+  machine, no port numbers. It runs as its own unprivileged process rather than inside the engine,
+  because parsing web requests is not something a daemon holding your WireGuard keys should do; it
+  reads its whole configuration live from the engine, so a renewed certificate or a newly-named
+  service needs no restart.
+
+  Access control is unchanged and enforced twice: the firewall admits only peers who could reach
+  *some* web service of yours, and the proxy then narrows that to the one being asked for. A name
+  nothing serves gets nothing — there is no default backend to fall through to.
+
+  On Linux the packages create the account it runs as; on Windows it is installed as a second
+  service under the built-in LocalService account, started and stopped by the engine as you add and
+  remove web services. Either way it updates in lockstep with the engine, and nothing about it needs
+  configuring.
+
 - Mesh services can now serve **real HTTPS**, with a certificate browsers already trust — no warning
   page, no root certificate to install on every machine. Tick "Get an HTTPS certificate" beside your
   exposed ports (or run `unitylan-engine ctl cert on`), and the device obtains and renews one by
