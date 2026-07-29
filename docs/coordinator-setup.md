@@ -222,7 +222,9 @@ generates and keeps its own key; **the coordinator never sees key material.**
 - **A CA's rate limits are per-domain, and they're shared across your whole deployment.** Exhausting
   the weekly cap locks *everyone* out until the window rolls, so `max_certs_per_week` meters it
   coordinator-side. Watch `unitylan_certs_issued_week` in the metrics below; a LAN party enrolling
-  thirty devices at once is exactly the burst that would otherwise blow the budget.
+  thirty devices at once is exactly the burst that would otherwise blow the budget. No single device
+  can spend more than a small slice of that budget per week either, so one member looping through
+  orders runs out of its own allowance rather than everyone's.
 
 Verify the whole path — zone delegation, challenge, issuance — with `scripts/cert-test.sh`.
 

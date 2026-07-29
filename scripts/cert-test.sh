@@ -319,11 +319,22 @@ socketserver.TCPServer(("127.0.0.1", 8096), H).serve_forever()
   fi
 fi
 
-# Last, because it deliberately spends the deployment's remaining quota: anything ordering after it
-# would be refused for the wrong reason.
-echo "=== the weekly budget refuses rather than spending the last of it ==="
+echo "=== a challenge value must be shaped like one ==="
+# The value lands in a TXT record the spoofable zone listener clones on every lookup, so an
+# unbounded or unparseable one is an amplifier rather than merely junk.
+CODE=$(publish "$TOKEN" "[\"$(printf 'a%.0s' $(seq 1 200))\"]")
+check "an over-long value is refused" "$CODE" "400"
+CODE=$(publish "$TOKEN" '["not base64url!"]')
+check "a value outside base64url is refused" "$CODE" "400"
+
+# Last, because it deliberately spends the remaining quota: anything ordering after it would be
+# refused for the wrong reason.
+echo "=== issuance is refused rather than spending the last of the budget ==="
 # Exhausting the CA's per-domain cap locks the deployment out for the rest of the week, which is
-# worse than declining early — so the coordinator meters and says no.
+# worse than declining early — so the coordinator meters and says no. One device drains here, so with
+# `max_certs_per_week = 3` its own slice (`MAX_CERTS_PER_DEVICE_PER_WEEK`, capped at the deployment
+# budget) is what binds first — which is the containment that matters: the refusal has to arrive
+# before this device has spent everybody else's issuance too.
 # Drain rather than assume a count: how much budget is left here depends on whether the ACME leg
 # above ran, and a hard-coded expectation would pass or fail for the wrong reason.
 DRAINED=0
@@ -333,8 +344,11 @@ for i in $(seq 1 6); do
   [ "$CODE" = "200" ] || { bad "unexpected $CODE while draining the budget"; break; }
 done
 [ "$DRAINED" = "1" ] \
-  && ok "orders are refused once the weekly budget is spent" \
-  || bad "the budget never refused an order — the meter is not enforcing"
+  && ok "orders are refused once the allowance is spent" \
+  || bad "the meter never refused an order — it is not enforcing"
+grep -q "allowance" "$TMP/pub.out" \
+  && ok "...and it is this device's own slice that ran out, not the deployment's" \
+  || bad "the refusal was not the per-device slice: $(cat "$TMP/pub.out")"
 
 if [ "$FAILED" = "0" ]; then
   if [ "$SKIPPED_ACME" = "1" ]; then

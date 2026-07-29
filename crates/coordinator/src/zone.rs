@@ -48,8 +48,24 @@ const ZONE_TTL_SECS: u32 = 300;
 /// fleet could pin. Sized far above any real deployment's in-flight issuances (each lives 5 minutes).
 const MAX_LIVE_CHALLENGES: usize = 4_096;
 
+/// Values kept at one challenge name. A retry adds a value rather than replacing (see
+/// [`Live::push`]), so this is the bound on how far one name can grow; past it the oldest value —
+/// the one least likely to belong to the order still being validated — is evicted.
+const MAX_VALUES_PER_NAME: usize = 8;
+
 /// The rolling window `max_certs_per_week` is measured over.
 const ISSUANCE_WINDOW: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The slice of the deployment's weekly budget any single device may spend. Without it, one member —
+/// malicious, or merely crash-looping through orders — exhausts `max_certs_per_week` and locks
+/// certificate issuance out for everybody until the window rolls. The client-side gates that would
+/// otherwise pace issuance (opt-in, exposed-port requirement, `cert.rs`'s backoff) all run on the
+/// device, so they bound only a device that is behaving.
+///
+/// Sized for a device that is churning legitimately: a certificate is renewed about every 60 days,
+/// and the extra orders come from adding service names, which `cert.rs` already coalesces over a
+/// 10-minute settle window.
+const MAX_CERTS_PER_DEVICE_PER_WEEK: u32 = 5;
 
 /// Largest response we will put in a UDP datagram absent EDNS (RFC 1035). Past this we set TC and
 /// let the resolver retry over TCP.
@@ -93,6 +109,10 @@ pub struct DnsState {
 /// Why a challenge could not be published.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PublishError {
+    /// This device has already spent its own slice of the week (see
+    /// [`MAX_CERTS_PER_DEVICE_PER_WEEK`]). Distinct from [`Self::BudgetExhausted`] so the message can
+    /// tell the operator which one they are looking at.
+    DeviceBudgetExhausted,
     /// The deployment has already admitted `max_certs_per_week` issuances this week.
     BudgetExhausted,
     /// Too many challenges are live at once (see [`MAX_LIVE_CHALLENGES`]).
@@ -102,6 +122,10 @@ pub enum PublishError {
 impl std::fmt::Display for PublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::DeviceBudgetExhausted => write!(
+                f,
+                "this device has spent its weekly certificate allowance; try again later"
+            ),
             Self::BudgetExhausted => write!(
                 f,
                 "this deployment's weekly certificate budget is exhausted; try again later"
@@ -127,6 +151,10 @@ struct Inner {
     /// When each admitted issuance happened, pruned to [`ISSUANCE_WINDOW`]. Bounded by
     /// `max_certs_per_week`, so it stays tiny.
     issuances: Vec<Instant>,
+    /// The same, per device pubkey. An entry exists only while that device has an issuance inside the
+    /// window, and every issuance in here is also in `issuances` — so the map is bounded by
+    /// `max_certs_per_week` too.
+    per_device: HashMap<[u8; 32], Vec<Instant>>,
 }
 
 struct Live {
@@ -140,26 +168,61 @@ impl ChallengeStore {
             inner: Mutex::new(Inner {
                 live: HashMap::new(),
                 issuances: Vec::new(),
+                per_device: HashMap::new(),
             }),
             max_certs_per_week,
         }
     }
 
-    /// Publish every `(name, value)` of one certificate order, spending one unit of weekly budget.
+    /// Publish every `(name, value)` of one certificate order for `device`, spending one unit of that
+    /// device's weekly slice and one of the deployment's.
     ///
     /// Budget is charged per *order*, not per name: a certificate covering a device and its primary
     /// alias raises one authorization per name but is still one certificate against the CA's cap.
-    pub fn publish(&self, records: &[(String, String)]) -> Result<(), PublishError> {
-        self.publish_at(records, Instant::now())
+    /// Re-posting an order whose values are all still live costs nothing at all — a device retrying
+    /// inside the challenge TTL is the same certificate, and charging it would let a client burn its
+    /// own allowance (and the deployment's) on retries the CA never counted.
+    pub fn publish(
+        &self,
+        device: &[u8; 32],
+        records: &[(String, String)],
+    ) -> Result<(), PublishError> {
+        self.publish_at(device, records, Instant::now())
     }
 
-    fn publish_at(&self, records: &[(String, String)], now: Instant) -> Result<(), PublishError> {
+    fn publish_at(
+        &self,
+        device: &[u8; 32],
+        records: &[(String, String)],
+        now: Instant,
+    ) -> Result<(), PublishError> {
         let mut inner = self.inner.lock().expect("challenge store poisoned");
         inner.prune(now);
 
-        inner
-            .issuances
-            .retain(|at| now.duration_since(*at) < ISSUANCE_WINDOW);
+        // Nothing new to say: refresh the expiry so the in-flight validation keeps its records, and
+        // charge nothing.
+        let novel = records.iter().any(|(name, value)| {
+            !inner
+                .live
+                .get(name)
+                .is_some_and(|live| live.values.iter().any(|v| v == value))
+        });
+        if !novel {
+            let expires_at = now + CHALLENGE_TTL;
+            for (name, _) in records {
+                if let Some(live) = inner.live.get_mut(name) {
+                    live.expires_at = expires_at;
+                }
+            }
+            return Ok(());
+        }
+
+        // Per device before the shared counter, so a device that is over its own allowance never
+        // touches the budget everyone else draws on.
+        let per_device_cap = MAX_CERTS_PER_DEVICE_PER_WEEK.min(self.max_certs_per_week) as usize;
+        if inner.per_device.get(device).map_or(0, Vec::len) >= per_device_cap {
+            return Err(PublishError::DeviceBudgetExhausted);
+        }
         if inner.issuances.len() >= self.max_certs_per_week as usize {
             return Err(PublishError::BudgetExhausted);
         }
@@ -185,6 +248,7 @@ impl ChallengeStore {
                 .push(value.clone(), expires_at);
         }
         inner.issuances.push(now);
+        inner.per_device.entry(*device).or_default().push(now);
         Ok(())
     }
 
@@ -200,9 +264,7 @@ impl ChallengeStore {
     pub fn issued_this_week(&self) -> usize {
         let now = Instant::now();
         let mut inner = self.inner.lock().expect("challenge store poisoned");
-        inner
-            .issuances
-            .retain(|at| now.duration_since(*at) < ISSUANCE_WINDOW);
+        inner.prune(now);
         inner.issuances.len()
     }
 }
@@ -210,6 +272,14 @@ impl ChallengeStore {
 impl Inner {
     fn prune(&mut self, now: Instant) {
         self.live.retain(|_, live| live.expires_at > now);
+        let in_window = |at: &Instant| now.duration_since(*at) < ISSUANCE_WINDOW;
+        self.issuances.retain(in_window);
+        // Dropping the emptied entries is what keeps the map bounded by the weekly budget rather than
+        // by how many devices have ever ordered a certificate.
+        self.per_device.retain(|_, ats| {
+            ats.retain(in_window);
+            !ats.is_empty()
+        });
     }
 }
 
@@ -217,8 +287,15 @@ impl Live {
     /// A retry for the same name adds a value rather than replacing: the CA accepts the challenge if
     /// *any* TXT at the name matches, so keeping both makes a re-post safe when the first attempt is
     /// still being validated.
+    ///
+    /// Capped at [`MAX_VALUES_PER_NAME`], oldest evicted. Every lookup clones this vector, so an
+    /// unbounded one turns a name into an amplifier for the spoofable UDP listener; the value an
+    /// eviction can cost is the one that has been sitting unvalidated the longest.
     fn push(&mut self, value: String, expires_at: Instant) {
         if !self.values.contains(&value) {
+            if self.values.len() >= MAX_VALUES_PER_NAME {
+                self.values.remove(0);
+            }
             self.values.push(value);
         }
         self.expires_at = expires_at;
@@ -492,6 +569,11 @@ mod tests {
         Zone::new("mesh.example.com", Arc::new(ChallengeStore::new(40))).unwrap()
     }
 
+    /// A distinct device pubkey per `n`, so a test can say whose budget it is spending.
+    fn dev(n: u8) -> [u8; 32] {
+        [n; 32]
+    }
+
     fn query(name: &str, qtype: RecordType) -> Message {
         let mut m = Message::query();
         m.metadata.id = 1234;
@@ -527,10 +609,13 @@ mod tests {
         let store = Arc::new(ChallengeStore::new(40));
         let zone = Zone::new("mesh.example.com", Arc::clone(&store)).unwrap();
         store
-            .publish(&[(
-                "_acme-challenge.laptop.gordon.mesh.example.com".into(),
-                "token-value".into(),
-            )])
+            .publish(
+                &dev(1),
+                &[(
+                    "_acme-challenge.laptop.gordon.mesh.example.com".into(),
+                    "token-value".into(),
+                )],
+            )
             .unwrap();
 
         let resp = answer_of(
@@ -615,7 +700,9 @@ mod tests {
         let store = Arc::new(ChallengeStore::new(40));
         let zone = Zone::new("mesh.example.com", Arc::clone(&store)).unwrap();
         let name = "_acme-challenge.laptop.gordon.mesh.example.com";
-        store.publish(&[(name.into(), "v".into())]).unwrap();
+        store
+            .publish(&dev(1), &[(name.into(), "v".into())])
+            .unwrap();
         let resp = answer_of(&zone, &format!("{name}."), RecordType::A);
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
         assert!(resp.answers.is_empty());
@@ -643,6 +730,7 @@ mod tests {
         let start = Instant::now();
         store
             .publish_at(
+                &dev(1),
                 &[("_acme-challenge.a.mesh.example.com".into(), "v".into())],
                 start,
             )
@@ -652,6 +740,7 @@ mod tests {
         // Re-publishing after the TTL prunes the stale entry rather than accumulating it.
         store
             .publish_at(
+                &dev(1),
                 &[("_acme-challenge.b.mesh.example.com".into(), "v".into())],
                 start + CHALLENGE_TTL + Duration::from_secs(1),
             )
@@ -682,10 +771,14 @@ mod tests {
                 ),
             ]
         };
-        store.publish(&order(1)).unwrap();
-        store.publish(&order(2)).unwrap();
+        // A device apiece, so this exercises the deployment budget rather than the per-device slice.
+        store.publish(&dev(1), &order(1)).unwrap();
+        store.publish(&dev(2), &order(2)).unwrap();
         assert_eq!(store.issued_this_week(), 2);
-        assert_eq!(store.publish(&order(3)), Err(PublishError::BudgetExhausted));
+        assert_eq!(
+            store.publish(&dev(3), &order(3)),
+            Err(PublishError::BudgetExhausted)
+        );
     }
 
     #[test]
@@ -694,12 +787,139 @@ mod tests {
         // re-post safe while the first attempt is still being validated.
         let store = ChallengeStore::new(40);
         let name = "_acme-challenge.laptop.gordon.mesh.example.com";
-        store.publish(&[(name.into(), "first".into())]).unwrap();
-        store.publish(&[(name.into(), "second".into())]).unwrap();
+        store
+            .publish(&dev(1), &[(name.into(), "first".into())])
+            .unwrap();
+        store
+            .publish(&dev(1), &[(name.into(), "second".into())])
+            .unwrap();
         let values = store.lookup(name).unwrap();
         assert_eq!(values, vec!["first".to_string(), "second".to_string()]);
         // ...and an identical re-post does not grow the set without bound.
-        store.publish(&[(name.into(), "second".into())]).unwrap();
+        store
+            .publish(&dev(1), &[(name.into(), "second".into())])
+            .unwrap();
         assert_eq!(store.lookup(name).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn one_device_cannot_spend_the_whole_deployment_budget() {
+        // The failure this exists to prevent: a single member — hostile, or just crash-looping
+        // through orders — locking certificate issuance out for everybody else for a week.
+        let store = ChallengeStore::new(40);
+        let order = |n: u32| {
+            vec![(
+                "_acme-challenge.laptop.gordon.mesh.example.com".to_string(),
+                format!("value{n}"),
+            )]
+        };
+        for n in 0..MAX_CERTS_PER_DEVICE_PER_WEEK {
+            store.publish(&dev(1), &order(n)).unwrap();
+        }
+        assert_eq!(
+            store.publish(&dev(1), &order(99)),
+            Err(PublishError::DeviceBudgetExhausted)
+        );
+        // The deployment budget is untouched by the refusal, so everyone else still issues.
+        assert_eq!(
+            store.issued_this_week(),
+            MAX_CERTS_PER_DEVICE_PER_WEEK as usize
+        );
+        store.publish(&dev(2), &order(1)).unwrap();
+    }
+
+    #[test]
+    fn a_device_slice_is_never_larger_than_the_deployment_budget() {
+        // A deployment that meters itself to one certificate a week does not hand one device five.
+        let store = ChallengeStore::new(1);
+        store
+            .publish(
+                &dev(1),
+                &[("_acme-challenge.a.mesh.example.com".into(), "a".into())],
+            )
+            .unwrap();
+        assert_eq!(
+            store.publish(
+                &dev(1),
+                &[("_acme-challenge.a.mesh.example.com".into(), "b".into())]
+            ),
+            Err(PublishError::DeviceBudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn a_device_budget_frees_as_its_window_rolls() {
+        let store = ChallengeStore::new(40);
+        let start = Instant::now();
+        let order = |n: u32| {
+            vec![(
+                "_acme-challenge.laptop.gordon.mesh.example.com".to_string(),
+                format!("value{n}"),
+            )]
+        };
+        for n in 0..MAX_CERTS_PER_DEVICE_PER_WEEK {
+            store.publish_at(&dev(1), &order(n), start).unwrap();
+        }
+        assert_eq!(
+            store.publish_at(&dev(1), &order(99), start),
+            Err(PublishError::DeviceBudgetExhausted)
+        );
+        // Once the oldest issuances age out, so does the refusal — and the per-device row goes with
+        // them rather than accumulating one entry per device that has ever ordered.
+        let later = start + ISSUANCE_WINDOW + Duration::from_secs(1);
+        store.publish_at(&dev(1), &order(99), later).unwrap();
+        assert_eq!(store.inner.lock().unwrap().per_device.len(), 1);
+    }
+
+    #[test]
+    fn re_posting_a_live_order_is_free() {
+        // A device retrying inside the challenge TTL is the same certificate to the CA, so charging
+        // it would let a client burn its own allowance (and the deployment's) on retries.
+        let store = ChallengeStore::new(40);
+        let order = vec![
+            (
+                "_acme-challenge.laptop.gordon.mesh.example.com".to_string(),
+                "device-value".to_string(),
+            ),
+            (
+                "_acme-challenge.gordon.mesh.example.com".to_string(),
+                "primary-value".to_string(),
+            ),
+        ];
+        store.publish(&dev(1), &order).unwrap();
+        for _ in 0..20 {
+            store.publish(&dev(1), &order).unwrap();
+        }
+        assert_eq!(store.issued_this_week(), 1);
+        // ...and the records are still there, with their expiry refreshed rather than duplicated.
+        assert_eq!(
+            store
+                .lookup("_acme-challenge.laptop.gordon.mesh.example.com")
+                .unwrap(),
+            vec!["device-value".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_names_values_are_capped() {
+        // Every lookup clones this vector for the spoofable UDP listener, so the name cannot be
+        // allowed to grow into an amplifier.
+        let store = ChallengeStore::new(40);
+        let name = "_acme-challenge.laptop.gordon.mesh.example.com";
+        // Two devices' worth of allowance, so more distinct values reach one name than it may hold.
+        let mut n = 0;
+        for device in [dev(1), dev(2)] {
+            for _ in 0..MAX_CERTS_PER_DEVICE_PER_WEEK {
+                store
+                    .publish(&device, &[(name.to_string(), format!("value{n}"))])
+                    .unwrap();
+                n += 1;
+            }
+        }
+        let values = store.lookup(name).unwrap();
+        assert_eq!(values.len(), MAX_VALUES_PER_NAME);
+        // Oldest evicted, newest kept — the newest is the order most likely still validating.
+        assert_eq!(values.last().unwrap(), &format!("value{}", n - 1));
+        assert!(!values.contains(&"value0".to_string()));
     }
 }

@@ -63,6 +63,31 @@ pub(super) async fn acme_challenge(
             "a certificate order raises one or two challenges for a device's own name",
         ));
     }
+    if req.services.len() > common::api::MAX_WEB_SERVICES_PER_DEVICE {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "more service challenges than a device may hold service names",
+        ));
+    }
+    // Every value we publish becomes a TXT record the spoofable zone listener clones on each lookup,
+    // so the shape is checked here rather than trusted: a caller with a valid token is authenticated,
+    // not trusted with the coordinator's memory. Checked for the whole request before anything is
+    // published, so a bad value cannot leave half an order live.
+    if !req
+        .device
+        .iter()
+        .chain(req.primary.iter())
+        .chain(req.services.values())
+        .all(|v| common::api::valid_challenge_value(v))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "a dns-01 challenge value is unpadded base64url, at most {} characters",
+                common::api::MAX_CHALLENGE_VALUE_LEN
+            ),
+        ));
+    }
 
     // One name, possibly two values: the certificate covers `<device>.<user>` and its wildcard, and
     // a wildcard authorization validates at the same `_acme-challenge` name as the base one.
@@ -103,7 +128,7 @@ pub(super) async fn acme_challenge(
     }
 
     dns.challenges
-        .publish(&records)
+        .publish(&pubkey, &records)
         .map_err(|e| ApiError::new(StatusCode::TOO_MANY_REQUESTS, e.to_string()))?;
 
     // Distinct names, not one per record: the device's two values share a name, and the client is
