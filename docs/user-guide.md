@@ -75,12 +75,15 @@ you're not in is invisible rather than listed-and-refused.
 
 ### Manage
 
-Your account and your devices.
+Your account, your devices, and this device's certificate.
 
 - **Account** — who you're signed in as, the version you're running, and **log out**.
 - **Devices** — every machine you've enrolled. **set primary** picks which one answers to your bare
   `<you>.unity.internal` name; **remove** un-enrolls one you no longer have; **rename** on this
-  device's own row turns it into a text field, seeded with the current name.
+  device's own row turns it into a text field, seeded with the current name, and this device's full
+  name is shown beneath it.
+- **HTTPS certificate** — whether this device holds one, and where it's stored. Appears once you're
+  serving something on a coordinator that issues them; see below.
 When an update is ready, an **update** button appears here; after it installs, **restart now**
 finishes the job.
 
@@ -132,8 +135,10 @@ deliberate tick rather than something naming a service does for you.
 
 ### Getting an HTTPS certificate (advanced)
 
-Once a port is exposed, a checkbox appears: **Get an HTTPS certificate for this device**. It's there
-for people serving something a browser opens — a media library, a dashboard, a web UI.
+Once you're serving something, a checkbox appears in **Manage**: **Get an HTTPS certificate for this
+device**. It's there for people serving something a browser opens — a media library, a dashboard, a
+web UI. Turning it on is per device; *which* of your services go into that certificate is the
+separate **It's a website** tick beside each one in the Services tab.
 
 Mesh names end in `.unity.internal`, which no certificate authority will ever certify, so browsers
 show a warning page. If your coordinator is set up for it, your device also answers to a name under

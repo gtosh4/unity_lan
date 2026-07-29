@@ -163,13 +163,14 @@ impl App {
                 .push(self.peers_section()),
             Tab::Services => Column::new()
                 .push(self.my_services_section())
-                .push(self.mesh_services_section())
-                // Last: a set-once, advanced control. Between the two lists it pushed everyone
-                // else's services below the fold, which is the thing people open this tab to read.
-                .push_maybe(self.certs_section()),
+                .push(self.mesh_services_section()),
             Tab::Manage => Column::new()
                 .push(self.account_section())
-                .push(self.devices_section()),
+                .push(self.devices_section())
+                // A per-device opt-in, like rename and set-primary — and one that has to be on
+                // before the per-service "it's a website" tick does anything. In Services it pushed
+                // everyone else's services below the fold, which is what people open that tab for.
+                .push_maybe(self.certs_section()),
         };
         col.spacing(18).padding([2, 6]).into()
     }
@@ -868,13 +869,17 @@ impl App {
         for e in [name_err, port_err].into_iter().flatten() {
             col = col.push(text(e).size(13).color(RED));
         }
-        // The web toggle only appears where it can do anything: it puts the name in this device's
-        // certificate, so it needs a deployment that issues them and the opt-in already on.
-        if self
-            .status
-            .as_ref()
-            .is_some_and(|s| s.cert.domain.is_some() && s.cert.enabled)
-        {
+        // The web tick only appears where it can do anything: it puts the name in this device's
+        // certificate, so it needs a deployment that issues them and the opt-in already on. When the
+        // deployment issues them but this device hasn't opted in, say where that lives — the setting
+        // moved to Manage, and a tick that is simply absent is a dead end.
+        let certs = self.status.as_ref().map(|s| &s.cert);
+        if certs.is_some_and(|c| c.domain.is_some() && !c.enabled) {
+            col = col.push(muted(
+                "To serve one of these over HTTPS, turn on the certificate for this device in Manage.",
+            ));
+        }
+        if certs.is_some_and(|c| c.domain.is_some() && c.enabled) {
             col = col.push(
                 checkbox(
                     "It's a website — put this name in my HTTPS certificate",
@@ -948,8 +953,9 @@ impl App {
         column![header("on the mesh"), inner].spacing(8).into()
     }
 
-    /// The HTTPS-certificate opt-in, shown under this device's services because that is the only
-    /// place it makes sense: a certificate is for serving something.
+    /// The HTTPS-certificate opt-in: a per-*device* setting, so it lives in Manage beside the other
+    /// ones. Which service names go *into* that certificate is the per-service tick in the Services
+    /// tab — this is only whether the device holds one at all.
     ///
     /// Hidden unless the deployment issues certificates at all **and** either a port is exposed or
     /// the pref is already on. That second arm matters — without it, closing your last port would
