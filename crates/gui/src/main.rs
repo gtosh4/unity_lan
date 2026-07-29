@@ -160,6 +160,8 @@ struct App {
     /// you type in are the same row.
     rename_input: String,
     renaming: bool,
+    /// Which service's "offer it to another network" picker is open, if any. One at a time, by name.
+    widening: Option<String>,
     /// Draft text for the expose port field.
     expose_port_input: String,
     /// Draft protocol for the exposure being composed.
@@ -288,6 +290,15 @@ enum Message {
     ServiceWeb(bool),
     ServiceSubmit,
     RemoveService(String),
+    /// Open the "offer this to another network" picker for a service, or close it. Carries the
+    /// service name, so opening one closes any other — two open pickers under different services
+    /// would leave no way to tell which network you were about to hand a service to.
+    WidenOpen(Option<String>),
+    /// Offer an existing service to one more scope, on every port it already runs on.
+    Widen {
+        name: String,
+        scope: ExposeScope,
+    },
     Unexpose {
         proto: Proto,
         port: u16,
@@ -378,6 +389,7 @@ impl App {
             exposed: Vec::new(),
             rename_input: String::new(),
             renaming: false,
+            widening: None,
             expose_port_input: String::new(),
             expose_proto: Proto::Tcp,
             expose_scopes: Vec::new(),
@@ -622,6 +634,16 @@ impl App {
             Message::RemoveService(name) => {
                 return Task::perform(
                     ctl::expose(self.socket.clone(), ExposeOp::RemoveNamed { name }),
+                    Message::ExposesFetched,
+                );
+            }
+            Message::WidenOpen(name) => self.widening = name,
+            Message::Widen { name, scope } => {
+                // Closes on the way out: the picker offers scopes the service lacks, and the one
+                // just picked is about to stop being one of them.
+                self.widening = None;
+                return Task::perform(
+                    ctl::expose(self.socket.clone(), ExposeOp::AddScopeNamed { name, scope }),
                     Message::ExposesFetched,
                 );
             }
@@ -1320,6 +1342,86 @@ mod tests {
         // The draft is consumed once, not once per scope.
         assert!(a.expose_scopes.is_empty());
         assert!(a.error.is_none());
+    }
+
+    /// Widening offers only what would change something. A scope the service already has is a chip
+    /// beside the `+`, and `everyone` is a superset — offering it next to narrower scopes would put
+    /// a chip on the service implying a restriction the firewall is not enforcing.
+    #[test]
+    fn widening_offers_only_the_scopes_that_would_change_access() {
+        use common::api::NetworkStatus;
+        let mut a = app();
+        let net = |role_id: u64, name: &str| NetworkStatus {
+            guild_id: 1,
+            role_id,
+            name: name.into(),
+            guild_name: "acme".into(),
+            enabled: true,
+        };
+        let _ = a.update(Message::StatusFetched(Ok(StatusReport {
+            networks: vec![net(10, "eng"), net(20, "ops")],
+            ..Default::default()
+        })));
+        let exposure = |name: &str, scope: ExposeScope| ExposedPort {
+            proto: Proto::Tcp,
+            port: 8080,
+            scope,
+            label: String::new(),
+            name: Some(name.into()),
+            kind: Default::default(),
+            active: true,
+        };
+        a.exposed = vec![exposure(
+            "wiki",
+            ExposeScope::Net {
+                guild_id: 1,
+                role_id: 10,
+            },
+        )];
+
+        let offered = a.widenable_scopes("wiki").expect("not open to everyone");
+        let labels: Vec<&str> = offered.iter().map(|(_, l)| l.as_str()).collect();
+        assert!(
+            labels.iter().any(|l| l.contains("ops")),
+            "a network it lacks is offered: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|l| l.contains("eng")),
+            "the scope it already has is not re-offered: {labels:?}"
+        );
+        assert!(
+            !offered.iter().any(|(s, _)| *s == ExposeScope::AllPeers),
+            "going public is not a widening"
+        );
+        // Own-devices is a real widening and stays on offer.
+        assert!(offered.iter().any(|(s, _)| *s == ExposeScope::OwnDevices));
+
+        // Open to every peer already: nothing to offer at all, rather than a list of no-ops.
+        a.exposed = vec![exposure("wiki", ExposeScope::AllPeers)];
+        assert!(a.widenable_scopes("wiki").is_none());
+    }
+
+    /// The picker closes on the way out — it lists what the service lacks, and the scope just
+    /// picked is about to stop being one of them.
+    #[test]
+    fn widening_a_service_sends_the_op_and_closes_the_picker() {
+        let mut a = app();
+        a.widening = Some("wiki".into());
+        let _ = a.update(Message::Widen {
+            name: "wiki".into(),
+            scope: ExposeScope::OwnDevices,
+        });
+        assert!(a.widening.is_none());
+        assert!(a.error.is_none());
+
+        // Opening one picker closes any other: two open at once leaves no way to tell which service
+        // you are about to hand to a network.
+        let _ = a.update(Message::WidenOpen(Some("mc".into())));
+        assert_eq!(a.widening.as_deref(), Some("mc"));
+        let _ = a.update(Message::WidenOpen(Some("wiki".into())));
+        assert_eq!(a.widening.as_deref(), Some("wiki"));
+        let _ = a.update(Message::WidenOpen(None));
+        assert!(a.widening.is_none());
     }
 
     #[test]
