@@ -9,6 +9,8 @@
 
 use anyhow::Context as _;
 use std::path::{Path, PathBuf};
+/// Only the unix path spawns a child; Windows asks the SCM to start a service it does not own.
+#[cfg(unix)]
 use std::process::Stdio;
 
 /// What the supervisor should do this reconcile.
@@ -81,7 +83,9 @@ fn proxy_file_name() -> &'static str {
 /// that drops to another uid loses its capabilities, and `NoNewPrivileges` in the systemd unit means
 /// file capabilities on the binary would not help either. Handing over an already-bound socket is
 /// the standard way out and the better one — the proxy then runs with *no* capability at all, rather
-/// than one it has to be trusted with.
+/// than one it has to be trusted with. Windows has no privileged port to hand over, so there is
+/// nothing to name there.
+#[cfg(unix)]
 const LISTEN_FD: i32 = 3;
 
 /// A running proxy, stopped when this is dropped.
