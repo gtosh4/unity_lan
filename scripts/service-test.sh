@@ -3,7 +3,10 @@
 #   A ∈ {mesh, mesh2}   B ∈ {mesh}   C ∈ {mesh2}
 # A serves `mc` scoped to mesh and `jelly` open to every peer, then we prove the two halves of the
 # feature that only meet on a real mesh:
-#   * the name resolves — B's resolver answers `mc.nodea.unity.internal` with A's mesh address;
+#   * the name resolves — B's resolver answers A's service name with A's mesh address. A's handle is
+#     deliberately not a valid DNS label, so the expected names are derived from the hostname the
+#     engine reports rather than hardcoded: composing them from the Discord handle is the bug this
+#     pins down;
 #   * the name is scoped exactly like the port — C, who cannot reach `mc`, is never even told it
 #     exists, while both peers learn the unscoped `jelly`.
 # Announcements are peer-direct over the tunnel; the coordinator holds no service state, so this
@@ -62,7 +65,11 @@ id = 1
 name = "Test"
 [[fake.guild.member]]
 user_id = 1
-username = "nodea"
+# Deliberately not a usable DNS label. The user part of a mesh name is allocated by the
+# coordinator (sanitised, suffixed on collision), so a client that composes a name from the Discord
+# handle instead prints one that never resolves. NOTE: no backticks in this heredoc -- it is
+# unquoted, so they would run as command substitution and silently empty the config.
+username = "nodea#4021"
 role_ids = [10, 20]
 [[fake.guild.member]]
 user_id = 2
@@ -141,10 +148,21 @@ echo "=== A serves 'mc' (scoped to mesh) and 'jelly' (every peer) ==="
 "$ENG" -c "$TMP/a.toml" ctl service add jelly 8096 >>"$TMP/svc.log" 2>&1 \
   || { bad "service add jelly: $(tail -2 "$TMP/svc.log")"; }
 
+# A's allocated `<user>` label, read out of the hostname the engine reports — never assumed from the
+# Discord handle, which here is `nodea#4021` and is not a DNS label at all.
+A_HOST=$(grep -oE 'host-a\.[a-z0-9-]+\.unity\.internal' "$TMP/a.log" | head -1)
+A_USER=${A_HOST#host-a.}
+A_USER=${A_USER%.unity.internal}
+[ -n "$A_USER" ] && [ "$A_USER" != "nodea#4021" ] \
+  && ok "A's user label was allocated, not taken from the handle ($A_USER)" \
+  || bad "could not read A's allocated user label (host=$A_HOST)"
+MC="mc.$A_USER.unity.internal"
+JELLY="jelly.$A_USER.unity.internal"
+
 # The name a peer types, printed by A itself — it is the one that knows its allocated user label.
 LIST=$("$ENG" -c "$TMP/a.toml" ctl services 2>&1)
-echo "$LIST" | grep -q "mc.nodea.unity.internal" \
-  && ok "A lists mc under its own user label" || bad "A's service list is wrong: $LIST"
+echo "$LIST" | grep -q "$MC" \
+  && ok "A lists mc under its allocated user label" || bad "A's service list is wrong: $LIST"
 
 # An unusable label must be refused before it reaches the daemon's state.
 badname=$("$ENG" -c "$TMP/a.toml" ctl service add 'Not A Name' 9999 2>&1 || true)
@@ -158,32 +176,32 @@ dig_at() { # $1=netns-prefix $2=resolver-ip $3=name → the A record, or empty
   $1 dig @"$2" +short A "$3" +time=2 +tries=1 2>/dev/null | head -1
 }
 for _ in $(seq 1 90); do
-  [ "$(dig_at "$NSB" "$B_IP" mc.nodea.unity.internal)" = "$A_IP" ] && break
+  [ "$(dig_at "$NSB" "$B_IP" "$MC")" = "$A_IP" ] && break
   sleep 0.5
 done
 
-got=$(dig_at "$NSB" "$B_IP" mc.nodea.unity.internal)
-[ "$got" = "$A_IP" ] && ok "B resolves mc.nodea.unity.internal -> A" \
+got=$(dig_at "$NSB" "$B_IP" "$MC")
+[ "$got" = "$A_IP" ] && ok "B resolves $MC -> A" \
   || bad "B resolved mc to '$got', expected $A_IP"
 
-got=$(dig_at "$NSB" "$B_IP" jelly.nodea.unity.internal)
-[ "$got" = "$A_IP" ] && ok "B resolves jelly.nodea.unity.internal -> A" \
+got=$(dig_at "$NSB" "$B_IP" "$JELLY")
+[ "$got" = "$A_IP" ] && ok "B resolves $JELLY -> A" \
   || bad "B resolved jelly to '$got', expected $A_IP"
 
 # C is in mesh2, which `mc` is not scoped to. It must never learn the name — being told about a
 # service it cannot reach would leak exactly what the scope exists to withhold.
-got=$(dig_at "$NSC" "$C_IP" mc.nodea.unity.internal)
+got=$(dig_at "$NSC" "$C_IP" "$MC")
 [ -z "$got" ] && ok "C is never told about mc (scoped to a network it isn't in)" \
   || bad "C resolved a service outside its scope: '$got'"
 
 # ...while the unscoped one reaches both.
-got=$(dig_at "$NSC" "$C_IP" jelly.nodea.unity.internal)
+got=$(dig_at "$NSC" "$C_IP" "$JELLY")
 [ "$got" = "$A_IP" ] && ok "C resolves the unscoped jelly" \
   || bad "C resolved jelly to '$got', expected $A_IP"
 
 # A device name outranks a service label: A cannot make its own hostname point elsewhere, and a
 # name nobody claims stays NXDOMAIN.
-got=$(dig_at "$NSB" "$B_IP" nothing.nodea.unity.internal)
+got=$(dig_at "$NSB" "$B_IP" "nothing.$A_USER.unity.internal")
 [ -z "$got" ] && ok "an unclaimed name does not resolve" \
   || bad "an unclaimed service name resolved to '$got'"
 
@@ -192,10 +210,10 @@ echo "=== removing a service withdraws the name ==="
   || bad "service rm failed: $(tail -2 "$TMP/svc.log")"
 # Withdrawal travels the same way an announcement does, so it takes a poll too.
 for _ in $(seq 1 90); do
-  [ -z "$(dig_at "$NSB" "$B_IP" mc.nodea.unity.internal)" ] && break
+  [ -z "$(dig_at "$NSB" "$B_IP" "$MC")" ] && break
   sleep 0.5
 done
-got=$(dig_at "$NSB" "$B_IP" mc.nodea.unity.internal)
+got=$(dig_at "$NSB" "$B_IP" "$MC")
 [ -z "$got" ] && ok "B stops resolving mc once A withdraws it" \
   || bad "mc still resolves to '$got' after removal"
 

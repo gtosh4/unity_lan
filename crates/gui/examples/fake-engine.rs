@@ -209,7 +209,11 @@ impl State {
             disable_new_networks: self.disable_new_networks,
             peer_own_devices: self.peer_own_devices,
             cert: self.cert_status(),
-            identity: Some("alice#4021".into()),
+            // The **allocated DNS label**, not a Discord handle — the coordinator signs the label
+            // into the attestation (`user_label`), so a real engine reports the same string here
+            // that appears in `hostname` below. A fixture where the two disagree renders names no
+            // engine could produce, which is exactly how a wrong screenshot ships.
+            identity: Some("alice".into()),
             coordinator_online: true,
             blocked: self.blocked.clone(),
             // Our own version, so the demo shows a settled install. A hardcoded one drifts out of

@@ -1098,7 +1098,9 @@ fn print_services(
     resp: &common::control::ExposeResp,
     status: common::control::StatusReport,
 ) -> anyhow::Result<()> {
-    let user = status.identity.as_deref();
+    // Derived from the hostname rather than `identity`: both carry the allocated `<user>` label
+    // today, but the hostname is the one that cannot mean anything else.
+    let hostname = status.device.as_ref().map(|d| d.hostname.as_str());
     let mut names: Vec<&str> = resp
         .exposed
         .iter()
@@ -1111,8 +1113,8 @@ fn print_services(
         return Ok(());
     }
     for name in names {
-        match user {
-            Some(user) => println!("{name}  ({name}.{user}.{})", common::DNS_SUFFIX),
+        match hostname.and_then(|h| common::service::service_name(h, name)) {
+            Some(full) => println!("{name}  ({full})"),
             // Not enrolled yet: the ports are real, the name they will answer to is not known.
             None => println!("{name}  (log in to learn the name this answers to)"),
         }

@@ -50,7 +50,10 @@ pub struct SelfDevice {
     /// own other devices among the peers — they carry this same `user_id` — for the "My devices"
     /// display grouping.
     pub user_id: u64,
-    /// The owner's Discord handle this device is enrolled as (the `<user>` label).
+    /// The owner's allocated `<user>` DNS label — **not** their Discord handle, which may carry a
+    /// discriminator or characters DNS refuses. The coordinator allocates it once
+    /// (`Store::user_label`) and signs *that* into the attestation, so this is always the string
+    /// that appears in `hostname`.
     pub username: String,
     pub networks: Vec<String>,
     pub wg_ip: Ipv4Addr,

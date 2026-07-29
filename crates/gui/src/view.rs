@@ -825,11 +825,15 @@ impl App {
     /// A service is an exposed port with a name, so this reads the same `exposed` list the Manage
     /// tab does — grouped by name rather than by port, because the name is what a person uses.
     fn my_services_section(&self) -> Element<'_, Message> {
-        let user = self
+        // From the *hostname*, not `identity` — that is the Discord handle, which may carry a
+        // discriminator or characters DNS refuses, while the `<user>` label was allocated by the
+        // coordinator. Composing from the handle prints a name that never resolves.
+        let hostname = self
             .status
             .as_ref()
-            .and_then(|s| s.identity.as_deref())
-            .unwrap_or("");
+            .and_then(|s| s.device.as_ref())
+            .map(|d| d.hostname.clone())
+            .unwrap_or_default();
         let mut names: Vec<&str> = self
             .exposed
             .iter()
@@ -851,19 +855,24 @@ impl App {
                 {
                     chips = chips.push(scope_chip(e));
                 }
-                let ports: Vec<String> = self
+                // One port per line, however many scopes carry it: the scopes are the chips below,
+                // and repeating `tcp/8080` once per scope reads as two services on one name.
+                let mut ports: Vec<String> = self
                     .exposed
                     .iter()
                     .filter(|e| e.name.as_deref() == Some(name))
                     .map(|e| format!("{}/{}", e.proto.as_str(), e.port))
                     .collect();
+                // Sorted before dedup: `dedup` only drops *consecutive* repeats, and two exposures
+                // of one port need not be adjacent in the list.
+                ports.sort_unstable();
+                ports.dedup();
                 let head = row![
                     column![
-                        text(if user.is_empty() {
-                            name.to_string()
-                        } else {
-                            format!("{name}.{user}.{}", common::DNS_SUFFIX)
-                        })
+                        text(
+                            common::service::service_name(&hostname, name)
+                                .unwrap_or_else(|| name.to_string()),
+                        )
                         .size(14),
                         muted(ports.join(", ")),
                     ]

@@ -91,6 +91,25 @@ pub struct MeshService {
     pub kind: ServiceKind,
 }
 
+/// The full name a service answers to, given this device's own hostname and the service's label:
+/// `mc.alice.unity.internal` from `laptop.alice.unity.internal` and `mc`.
+///
+/// **Derived from the hostname, never from the Discord handle.** The `<user>` part of a mesh name is
+/// a label the coordinator *allocated* — sanitised to what DNS allows, and suffixed if it would have
+/// collided with someone else's. A handle like `alice#4021` is neither, and composing a name from one
+/// produces something that will never resolve. The hostname is the only thing on hand that already
+/// contains the real label.
+///
+/// `None` if the hostname is not a mesh name (nothing to take a label from).
+pub fn service_name(device_hostname: &str, label: &str) -> Option<String> {
+    let rest = device_hostname
+        .trim_end_matches('.')
+        .strip_suffix(&format!(".{}", crate::DNS_SUFFIX))?
+        .split_once('.')
+        .map(|(_device, user)| user)?;
+    Some(format!("{label}.{rest}.{}", crate::DNS_SUFFIX).to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +133,29 @@ mod tests {
         }
         assert!(valid_label(&"a".repeat(MAX_LABEL_LEN)));
         assert!(!valid_label(&"a".repeat(MAX_LABEL_LEN + 1)));
+    }
+
+    /// The name has to come from the *hostname*, not the Discord handle. A handle can carry a
+    /// discriminator (`alice#4021`) or characters DNS refuses, and the coordinator may have suffixed
+    /// the label to avoid a collision — so a name built from the handle is one that never resolves.
+    #[test]
+    fn a_service_name_takes_the_user_label_from_the_hostname() {
+        assert_eq!(
+            service_name("laptop.alice.unity.internal", "mc").as_deref(),
+            Some("mc.alice.unity.internal")
+        );
+        // A collision-suffixed label carries through exactly as allocated.
+        assert_eq!(
+            service_name("laptop.alice-2.unity.internal", "mc").as_deref(),
+            Some("mc.alice-2.unity.internal")
+        );
+        assert_eq!(
+            service_name("Laptop.Alice.unity.internal", "MC").as_deref(),
+            Some("mc.alice.unity.internal"),
+            "one canonical case, like every other mesh name"
+        );
+        // Not a mesh name, so there is no label to take.
+        assert_eq!(service_name("laptop.alice.example.com", "mc"), None);
+        assert_eq!(service_name("alice.unity.internal", "mc"), None);
     }
 }
