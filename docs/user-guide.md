@@ -133,6 +133,11 @@ below). Then `jellyfin.alice.mesh.unitylan.com` opens in a browser with no warni
 goes into public certificate logs permanently, same as your device's own — so it's a separate,
 deliberate tick rather than something naming a service does for you.
 
+Once ticked, that is the name the list shows for it, on your services and other people's alike. The
+`.unity.internal` one still resolves, but no certificate covers it and a browser rejects it on sight,
+so the list gives you the one you can actually open. The port underneath is shown as what it is — the
+local port the built-in proxy forwards to, not somewhere to connect.
+
 ### Getting an HTTPS certificate (advanced)
 
 Once you're serving something, a checkbox appears in **Manage**: **Get an HTTPS certificate for this

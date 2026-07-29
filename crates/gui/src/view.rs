@@ -778,6 +778,23 @@ impl App {
     ///
     /// A service is an exposed port with a name, so this reads the same `exposed` list the Manage
     /// tab does — grouped by name rather than by port, because the name is what a person uses.
+    /// The name to *show* for a service.
+    ///
+    /// A web service is served on 443 by its owner's proxy under a certificate covering the
+    /// deployment's public domain — so the `.internal` spelling, however well it resolves, is the
+    /// one a browser rejects on a name mismatch. Show the name that works. Everything else, and any
+    /// deployment that issues no certificates at all, keeps its mesh name.
+    pub(crate) fn browser_name(&self, web: bool, mesh_name: &str) -> String {
+        let domain = self
+            .status
+            .as_ref()
+            .and_then(|s| s.cert.domain.as_deref())
+            .filter(|_| web);
+        domain
+            .and_then(|d| common::service::certificate_alias(mesh_name, d))
+            .unwrap_or_else(|| mesh_name.to_string())
+    }
+
     fn my_services_section(&self) -> Element<'_, Message> {
         // From the *hostname*, not `identity` — that is the Discord handle, which may carry a
         // discriminator or characters DNS refuses, while the `<user>` label was allocated by the
@@ -824,14 +841,24 @@ impl App {
                 // of one port need not be adjacent in the list.
                 ports.sort_unstable();
                 ports.dedup();
+                let web = self
+                    .exposed
+                    .iter()
+                    .filter(|e| e.name.as_deref() == Some(name))
+                    .any(|e| e.kind == common::service::ServiceKind::Web);
+                let mesh_name = common::service::service_name(&hostname, name)
+                    .unwrap_or_else(|| name.to_string());
+                // The exposed port of a web service is the loopback backend the proxy forwards to,
+                // so it is not the thing to dial — say what it is instead of printing it alone.
+                let detail = if web {
+                    format!("https  ·  {} behind it", ports.join(", "))
+                } else {
+                    ports.join(", ")
+                };
                 let head = row![
                     column![
-                        text(
-                            common::service::service_name(&hostname, name)
-                                .unwrap_or_else(|| name.to_string()),
-                        )
-                        .size(14),
-                        muted(ports.join(", ")),
+                        text(self.browser_name(web, &mesh_name)).size(14),
+                        muted(detail)
                     ]
                     .spacing(2)
                     .width(Length::Fill),
@@ -935,6 +962,14 @@ impl App {
                     // A shadowed service is running but its name points at another of the owner's
                     // devices — worth saying, since the fix is theirs to make and invisible
                     // otherwise.
+                    let web = svc.kind == common::service::ServiceKind::Web;
+                    // Their backend port is no more dialable than ours — a web service is reached
+                    // through their proxy on 443, so `https` is the whole of what a visitor needs.
+                    let reach = if web {
+                        "https".to_string()
+                    } else {
+                        format!("{}/{}", svc.proto.as_str(), svc.port)
+                    };
                     let line = row![
                         dot(if svc.shadowed {
                             AMBER
@@ -944,15 +979,11 @@ impl App {
                             RED
                         }),
                         column![
-                            text(svc.hostname.clone()).size(14),
+                            text(self.browser_name(web, &svc.hostname)).size(14),
                             muted(if svc.shadowed {
-                                format!(
-                                    "{}/{} — name taken by another of their devices",
-                                    svc.proto.as_str(),
-                                    svc.port
-                                )
+                                format!("{reach} — name taken by another of their devices")
                             } else {
-                                format!("{}/{}", svc.proto.as_str(), svc.port)
+                                reach
                             }),
                         ]
                         .spacing(2),
@@ -961,7 +992,10 @@ impl App {
                     .align_y(Vertical::Center);
                     rows = rows.push(line);
                 }
-                list = list.push(column![muted(peer.username.clone()), rows].spacing(4));
+                // The device, not the owner: every name below already ends in the owner's label, and
+                // two of their machines each serving something gave two identical headings with
+                // nothing to tell you which held what.
+                list = list.push(column![muted(peer.hostname.clone()), rows].spacing(4));
             }
             list.into()
         };

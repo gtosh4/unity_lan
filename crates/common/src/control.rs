@@ -462,6 +462,12 @@ pub struct PeerService {
     pub hostname: String,
     pub proto: Proto,
     pub port: u16,
+    /// What kind of service it is. Decides how the name is *reached*: a `Web` one answers on 443
+    /// through the owner's proxy, so `port` below is the loopback backend the proxy forwards to —
+    /// a number nobody types. An engine from before this field reports `Port`, which is what every
+    /// service was then.
+    #[serde(default)]
+    pub kind: crate::service::ServiceKind,
     /// False when another of the same owner's devices won this label — the service is announced but
     /// its name points elsewhere, which is worth showing rather than silently hiding.
     #[serde(default)]

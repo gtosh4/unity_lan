@@ -279,7 +279,10 @@ fn peer(
 
 /// Attach named services to a peer. Separate from [`peer`] so only the fixtures that need them
 /// carry them, and so the Services tab has something representative to show in the stills.
-fn serving(mut p: PeerStatus, services: &[(&str, Proto, u16)]) -> PeerStatus {
+fn serving(
+    mut p: PeerStatus,
+    services: &[(&str, Proto, u16, common::service::ServiceKind)],
+) -> PeerStatus {
     let user = p
         .hostname
         .split_once('.')
@@ -287,11 +290,12 @@ fn serving(mut p: PeerStatus, services: &[(&str, Proto, u16)]) -> PeerStatus {
         .unwrap_or_default();
     p.services = services
         .iter()
-        .map(|(name, proto, port)| common::control::PeerService {
+        .map(|(name, proto, port, kind)| common::control::PeerService {
             name: (*name).into(),
             hostname: format!("{name}.{user}"),
             proto: *proto,
             port: *port,
+            kind: *kind,
             shadowed: false,
         })
         .collect();
@@ -338,7 +342,7 @@ fn fixture_peers() -> Vec<PeerStatus> {
                 "bob",
                 &[("Gaming", "playhouse")],
             ),
-            &[("mc", Proto::Tcp, 25565)],
+            &[("mc", Proto::Tcp, 25565, common::service::ServiceKind::Port)],
         ),
         // The home server: one machine, several named things on it — the case the Services tab
         // exists for.
@@ -354,9 +358,21 @@ fn fixture_peers() -> Vec<PeerStatus> {
                 &[("Engineering", "acme")],
             ),
             &[
-                ("jellyfin", Proto::Tcp, 8096),
-                ("git", Proto::Tcp, 3000),
-                ("factorio", Proto::Udp, 34197),
+                // A browser thing: shown under the certificate domain, because that is the name a
+                // browser will accept. The others are dialled by name and port.
+                (
+                    "jellyfin",
+                    Proto::Tcp,
+                    8096,
+                    common::service::ServiceKind::Web,
+                ),
+                ("git", Proto::Tcp, 3000, common::service::ServiceKind::Port),
+                (
+                    "factorio",
+                    Proto::Udp,
+                    34197,
+                    common::service::ServiceKind::Port,
+                ),
             ],
         ),
         peer(

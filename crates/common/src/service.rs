@@ -131,6 +131,21 @@ pub fn service_name(device_hostname: &str, label: &str) -> Option<String> {
     Some(format!("{label}.{rest}.{}", crate::DNS_SUFFIX).to_ascii_lowercase())
 }
 
+/// The same mesh name under a deployment's certificate domain: `wiki.alice.unity.internal` and
+/// `mesh.example.com` give `wiki.alice.mesh.example.com`.
+///
+/// This is the name a **browser** has to be handed for a [`ServiceKind::Web`] service. A certificate
+/// covers the public domain and nothing else, so the `.internal` spelling fails name validation
+/// however well it resolves — showing it to someone about to open a browser sends them at a warning.
+///
+/// `None` if `name` is not a mesh name, so there is no suffix to swap.
+pub fn certificate_alias(name: &str, domain: &str) -> Option<String> {
+    let stem = name
+        .trim_end_matches('.')
+        .strip_suffix(&format!(".{}", crate::DNS_SUFFIX))?;
+    Some(format!("{stem}.{domain}").to_ascii_lowercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +204,23 @@ mod tests {
         // Not a mesh name, so there is no label to take.
         assert_eq!(service_name("laptop.alice.example.com", "mc"), None);
         assert_eq!(service_name("alice.unity.internal", "mc"), None);
+    }
+
+    #[test]
+    fn a_certificate_alias_swaps_the_suffix_and_nothing_else() {
+        assert_eq!(
+            certificate_alias("wiki.alice.unity.internal", "mesh.example.com").as_deref(),
+            Some("wiki.alice.mesh.example.com")
+        );
+        // Rooted and mixed-case in, one canonical form out.
+        assert_eq!(
+            certificate_alias("Wiki.Alice.unity.internal.", "mesh.example.com").as_deref(),
+            Some("wiki.alice.mesh.example.com")
+        );
+        // Not a mesh name: nothing to swap, rather than a name with two suffixes.
+        assert_eq!(
+            certificate_alias("wiki.alice.example.com", "mesh.example.com"),
+            None
+        );
     }
 }

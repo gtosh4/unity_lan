@@ -955,6 +955,38 @@ mod tests {
         assert_eq!(a.status.unwrap().peers.len(), 1);
     }
 
+    /// A web service is reached through the proxy on 443, under a certificate that covers the
+    /// deployment's public domain and nothing else. The `.internal` spelling resolves perfectly well
+    /// and then fails name validation — so showing it is handing someone a browser warning.
+    #[test]
+    fn a_web_service_is_shown_under_the_name_a_browser_will_accept() {
+        let mut a = app();
+        let mut report = StatusReport {
+            cert: common::control::CertStatus {
+                domain: Some("mesh.example.com".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let _ = a.update(Message::StatusFetched(Ok(report.clone())));
+        assert_eq!(
+            a.browser_name(true, "wiki.alice.unity.internal"),
+            "wiki.alice.mesh.example.com"
+        );
+        // A plain port is dialled by name and port; nothing certifies it and nothing needs to.
+        assert_eq!(
+            a.browser_name(false, "mc.bob.unity.internal"),
+            "mc.bob.unity.internal"
+        );
+        // A deployment that issues no certificates has no other name to give.
+        report.cert.domain = None;
+        let _ = a.update(Message::StatusFetched(Ok(report)));
+        assert_eq!(
+            a.browser_name(true, "wiki.alice.unity.internal"),
+            "wiki.alice.unity.internal"
+        );
+    }
+
     #[test]
     fn shared_networks_group_by_community() {
         let net = |name: &str, community: &str| common::api::SharedNetwork {
@@ -1158,6 +1190,7 @@ mod tests {
             hostname: "jellyfin.bob.unity.internal".into(),
             proto: Proto::Tcp,
             port: 8096,
+            kind: common::service::ServiceKind::Port,
             shadowed: false,
         }];
         let _ = a.update(Message::StatusFetched(Ok(report.clone())));

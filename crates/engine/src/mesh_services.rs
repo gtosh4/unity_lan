@@ -93,6 +93,7 @@ pub struct Claim {
     pub hostname: String,
     pub proto: common::control::Proto,
     pub port: u16,
+    pub kind: common::service::ServiceKind,
 }
 
 /// The outcome of resolving every claim.
@@ -150,6 +151,7 @@ fn claim(pubkey: [u8; 32], user: &str, ip: Ipv4Addr, s: &MeshService) -> Claim {
         hostname: format!("{}.{}.{}", s.name, user, common::DNS_SUFFIX).to_ascii_lowercase(),
         proto: s.proto,
         port: s.port,
+        kind: s.kind,
     }
 }
 
@@ -184,6 +186,7 @@ mod tests {
             hostname: format!("{name}.{user}.{}", common::DNS_SUFFIX),
             proto: common::control::Proto::Tcp,
             port: 25565,
+            kind: common::service::ServiceKind::Port,
         }
     }
 
@@ -225,6 +228,44 @@ mod tests {
         );
         assert_eq!(r.names.len(), 2);
         assert!(r.shadowed.is_empty());
+    }
+
+    /// The kind has to survive from the announcement into the claim: it is what tells the frontend
+    /// a name is reached over https under the certificate domain rather than dialled on the port
+    /// below it. Dropped here, every web service is displayed as its loopback backend.
+    #[test]
+    fn a_web_services_kind_reaches_the_claim() {
+        let me = SelfDevice {
+            community_name: "c".into(),
+            user_id: 1,
+            username: "alice".into(),
+            networks: Vec::new(),
+            wg_ip: Ipv4Addr::new(100, 64, 0, 1),
+            wg_net: "100.64.0.0/10".parse().unwrap(),
+            hostname: "laptop.alice.unity.internal".into(),
+            is_primary: true,
+            grant_expires_at: 0,
+            primary_alias: None,
+            networks_status: Vec::new(),
+            dns_domain: Some("mesh.example.com".into()),
+        };
+        let own = [
+            MeshService {
+                name: "wiki".into(),
+                proto: common::control::Proto::Tcp,
+                port: 8080,
+                kind: common::service::ServiceKind::Web,
+            },
+            MeshService {
+                name: "mc".into(),
+                proto: common::control::Proto::Tcp,
+                port: 25565,
+                kind: common::service::ServiceKind::Port,
+            },
+        ];
+        let claims = own_claims(&me, [1u8; 32], &own);
+        assert_eq!(claims[0].kind, common::service::ServiceKind::Web);
+        assert_eq!(claims[1].kind, common::service::ServiceKind::Port);
     }
 
     #[test]

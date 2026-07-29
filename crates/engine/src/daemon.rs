@@ -1709,6 +1709,7 @@ fn peer_services(
                 hostname: claim.hostname,
                 proto: claim.proto,
                 port: claim.port,
+                kind: claim.kind,
             });
     }
     out

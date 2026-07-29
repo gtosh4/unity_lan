@@ -61,13 +61,13 @@ impl CertNames {
         domain: &str,
         services: &[String],
     ) -> Option<Self> {
-        let device = swap_suffix(hostname, domain)?;
+        let device = common::service::certificate_alias(hostname, domain)?;
         // A service name sits under the *user*, not the device — `jellyfin.alice`, beside
         // `laptop.alice` — so it is built from the user part of our own hostname.
         let user = device.split_once('.').map(|(_, rest)| rest.to_string())?;
         Some(Self {
             device,
-            primary: primary_alias.and_then(|a| swap_suffix(a, domain)),
+            primary: primary_alias.and_then(|a| common::service::certificate_alias(a, domain)),
             services: services
                 .iter()
                 .map(|label| format!("{label}.{user}").to_ascii_lowercase())
@@ -106,13 +106,6 @@ impl CertNames {
             .chain(self.services.iter().cloned())
             .collect()
     }
-}
-
-fn swap_suffix(name: &str, domain: &str) -> Option<String> {
-    let stem = name
-        .trim_end_matches('.')
-        .strip_suffix(&format!(".{}", common::DNS_SUFFIX))?;
-    Some(format!("{stem}.{domain}").to_ascii_lowercase())
 }
 
 /// What we last did, persisted beside the certificate.
