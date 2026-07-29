@@ -157,7 +157,7 @@ enum CtlCmd {
     Expose {
         /// Port to open: `25565` (tcp), or `tcp/25565` / `udp/34197`.
         port: String,
-        /// Restrict the port to this network's peers; omit to open it to every peer.
+        /// Open the port to this network's peers. Required unless `--own-devices`.
         net: Option<String>,
         /// The guild `net` belongs to, when two of your guilds share the role name.
         #[arg(long, requires = "net")]
@@ -252,7 +252,7 @@ enum ServiceCmd {
         name: String,
         /// Port to serve it on: `25565` (tcp), or `tcp/25565` / `udp/34197`.
         port: String,
-        /// Restrict it to this network's peers; omit to offer it to every peer.
+        /// Offer it to this network's peers. Required unless `--own-devices`.
         #[arg(long)]
         net: Option<String>,
         /// The guild `--net` belongs to, when two of your guilds share the role name.
@@ -856,7 +856,7 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             name,
         } => {
             let (proto, port) = parse_port(&port)?;
-            let scope = expose_scope(net, guild, own_devices);
+            let scope = expose_scope(net, guild, own_devices)?;
             print_exposed(
                 control::client_expose(
                     &socket,
@@ -885,7 +885,7 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
                 anyhow::bail!("{}", common::service::label_error(&name));
             }
             let (proto, port) = parse_port(&port)?;
-            let scope = expose_scope(net, guild, own_devices);
+            let scope = expose_scope(net, guild, own_devices)?;
             print_exposed(
                 control::client_expose(
                     &socket,
@@ -910,17 +910,9 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             guild,
             own_devices,
         }) => {
-            // `add` treats "no scope given" as every peer, because that is a choice made while
-            // creating the service. Here it would be an unasked-for widening of something already
-            // running, from one keystroke short of the command they meant — so it is refused.
-            if net.is_none() && !own_devices {
-                anyhow::bail!(
-                    "say who to open {name:?} to: `--net <network>` (with `--guild` if the name is \
-                     ambiguous), or `--own-devices`. To offer it to every peer, \
-                     `ctl service add {name} <port>` with no scope."
-                );
-            }
-            let scope = expose_scope(net, guild, own_devices);
+            // Naming no scope is refused by `expose_scope` itself, the same way it is for `expose`
+            // and `service add` — one rule, one message, rather than three near-copies.
+            let scope = expose_scope(net, guild, own_devices)?;
             print_exposed(
                 control::client_expose(
                     &socket,
@@ -947,7 +939,7 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
             // No scope named at all still means "close every scope of this port".
             let scope = match (net, own_devices) {
                 (None, false) => common::control::RemoveScope::All,
-                (net, own) => common::control::RemoveScope::Exact(expose_scope(net, guild, own)),
+                (net, own) => common::control::RemoveScope::Exact(expose_scope(net, guild, own)?),
             };
             print_exposed(
                 control::client_expose(
@@ -1080,13 +1072,20 @@ fn expose_scope(
     net: Option<String>,
     guild: Option<String>,
     own_devices: bool,
-) -> common::control::ExposeScope {
+) -> anyhow::Result<common::control::ExposeScope> {
     match (net, own_devices) {
-        (_, true) => common::control::ExposeScope::OwnDevices,
+        (_, true) => Ok(common::control::ExposeScope::OwnDevices),
         // A name, resolved to `(guild_id, role_id)` by the engine against the caller's held
         // networks — refusing if two guilds share the role name rather than guessing.
-        (Some(n), false) => common::control::ExposeScope::Unresolved { guild, name: n },
-        (None, false) => common::control::ExposeScope::AllPeers,
+        (Some(n), false) => Ok(common::control::ExposeScope::Unresolved { guild, name: n }),
+        // Omitting the scope used to mean every peer you mesh with. Refused now: the widest sharing
+        // available was the one you got by typing least, and a port opened that way looks identical
+        // to one you meant to scope. There is no flag for it — an existing exposure keeps working,
+        // but a new one names who it is for.
+        (None, false) => anyhow::bail!(
+            "say who this is for: `--net <network>` (with `--guild` if two of your communities \
+             share the role name), or `--own-devices`"
+        ),
     }
 }
 

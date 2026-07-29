@@ -98,6 +98,27 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Changed
 
+- **Sharing now names who, every time — there is no "everyone" scope.** Opening a port used to offer
+  a third choice alongside a network and your own devices: every peer you mesh with. It was also what
+  you got by leaving the scope out, which made the widest reach the mesh can express the one that took
+  the least thought. It is gone from the app's picker, and `ctl expose` / `ctl service add` now
+  require `--net <network>` or `--own-devices` instead of defaulting.
+
+  **This breaks two things on upgrade, both loudly.** An `expose` entry in `engine.toml` with no
+  `net` or `own_devices` is refused when the config loads, naming the port so you can find the line —
+  the daemon will not start until you say who it is for. And a script running `ctl expose <port>` with
+  no scope now exits with an error rather than opening the port. Both were previously legal and both
+  meant "every peer", so read them as a question rather than a mistake: which network was that for?
+
+  **Nothing already open changes.** A port exposed to every peer keeps working exactly as it was,
+  keeps its chip in the app, and is still announced to the peers it always reached. This removes a
+  choice, not a capability.
+
+- A web service is now reachable from **the device serving it**, by its own name. The firewall
+  already let traffic to your own mesh address through, but the proxy did not, so `curl` to your own
+  service — the first thing you do after setting one up — was refused unless the service happened to
+  be open to every peer.
+
 - Your mesh hostname is now built from your **global Discord username**, not your nickname in
   whichever server you share. It is also assigned once and then kept, so changing your Discord name
   later leaves your hostname — and anything pointing at it — alone. Previously the name tracked your

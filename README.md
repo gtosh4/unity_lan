@@ -299,13 +299,13 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
    the config). The box joins as `gameserver.<you>.unity.internal`.
 
 4. **Check it's on the mesh, then name what it serves.** The mesh firewall drops all inbound by
-   default, so open the service's port — to every peer, to one network's members, or to just your own
-   devices — and give it a name people can type:
+   default, so open the service's port — to one network's members, or to just your own devices — and
+   give it a name people can type:
 
    ```sh
    sudo unitylan-engine ctl status
    sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
-   sudo unitylan-engine ctl service add jellyfin 8096 --web        # + a real HTTPS certificate
+   sudo unitylan-engine ctl service add jellyfin 8096 --net home --web   # + a real HTTPS certificate
    sudo unitylan-engine ctl expose 22 --own-devices                # unnamed → `port-22`
    ```
 

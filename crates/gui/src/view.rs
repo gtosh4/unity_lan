@@ -1062,14 +1062,13 @@ impl App {
 
     /// The scopes the service called `name` could still be offered to.
     ///
-    /// `None` when it is already open to every peer: there is nothing wider, and every narrower
-    /// scope would be a click that changes no access while adding a chip implying a restriction.
+    /// `None` when it is already open to every peer — an exposure made before that stopped being
+    /// offered. Nothing is wider, so every scope here would be a click that changes no access while
+    /// adding a chip implying a restriction.
     ///
-    /// Scopes it already holds are dropped — they are the chips beside the `+`, and re-offering one
-    /// is a click that does nothing. `AllPeers` is dropped too, deliberately: it is a superset, so
-    /// pairing it with the narrower scopes already on the service would display a restriction the
-    /// firewall is not enforcing, which is the same reason the add form treats the two as exclusive.
-    /// Going public is a decision made when adding a service, not a widening.
+    /// Scopes it already holds are dropped: they are the chips beside the `+`, and re-offering one
+    /// is a click that does nothing. All-peers is not in [`Self::selectable_scopes`] at all, so it
+    /// cannot be offered here either — widening names a network, like every other kind of sharing.
     pub(crate) fn widenable_scopes(&self, name: &str) -> Option<Vec<(ExposeScope, String)>> {
         let held: Vec<&ExposeScope> = self
             .exposed
@@ -1083,7 +1082,7 @@ impl App {
         Some(
             self.selectable_scopes()
                 .into_iter()
-                .filter(|(scope, _)| *scope != ExposeScope::AllPeers && !held.contains(&scope))
+                .filter(|(scope, _)| !held.contains(&scope))
                 .collect(),
         )
     }
@@ -1138,25 +1137,25 @@ impl App {
         opts.into()
     }
 
-    /// Scopes offered in the picker, each with the label to show for it: all-peers, the owner's own
-    /// devices, then every network this device holds. Building the list from held networks is what
-    /// keeps a typo — or a network the engine would reject — from being expressible at all.
+    /// Scopes offered in the picker, each with the label to show for it: the owner's own devices,
+    /// then every network this device holds. Building the list from held networks is what keeps a
+    /// typo — or a network the engine would reject — from being expressible at all.
+    ///
+    /// **Every peer is not on the list.** It was, and it was the easiest thing to pick: one click,
+    /// no thought, and the widest sharing the mesh can express — the wrong shape for a decision
+    /// about who reaches a port on your machine. Sharing now names who, every time. An exposure
+    /// that already has it keeps working and still shows its chip; there is just no way to choose
+    /// it afresh.
     ///
     /// Each network is offered per `(guild_id, role_id)`, never merged by role name: two guilds may
     /// each have an `Engineering`, they are different networks with different members, and
     /// collapsing them into one row would offer a scope that admits both. The name is only ever the
     /// label; the scope the picker emits carries ids.
-    fn selectable_scopes(&self) -> Vec<(ExposeScope, String)> {
-        let mut out = vec![
-            (
-                ExposeScope::AllPeers,
-                ExposeScope::AllPeers.fallback_label(),
-            ),
-            (
-                ExposeScope::OwnDevices,
-                ExposeScope::OwnDevices.fallback_label(),
-            ),
-        ];
+    pub(crate) fn selectable_scopes(&self) -> Vec<(ExposeScope, String)> {
+        let mut out = vec![(
+            ExposeScope::OwnDevices,
+            ExposeScope::OwnDevices.fallback_label(),
+        )];
         for n in self.networks() {
             let scope = ExposeScope::Net {
                 guild_id: n.guild_id,

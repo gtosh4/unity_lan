@@ -222,9 +222,9 @@ EOF
   # Expose a port and opt in — both gates the daemon requires before it will issue. The web service
   # is named *before* the opt-in so it is in the first order rather than forcing a reissue: the
   # settle window batches changes to a *held* certificate, and there is none yet.
-  "$ENG" -c "$TMP/a.toml" ctl expose 8443 >>"$TMP/ctl.log" 2>&1 \
+  "$ENG" -c "$TMP/a.toml" ctl expose 8443 mesh >>"$TMP/ctl.log" 2>&1 \
     || bad "ctl expose failed: $(tail -2 "$TMP/ctl.log")"
-  "$ENG" -c "$TMP/a.toml" ctl service add jellyfin 8096 --web >>"$TMP/ctl.log" 2>&1 \
+  "$ENG" -c "$TMP/a.toml" ctl service add jellyfin 8096 --net mesh --web >>"$TMP/ctl.log" 2>&1 \
     || bad "ctl service add --web failed: $(tail -2 "$TMP/ctl.log")"
   "$ENG" -c "$TMP/a.toml" ctl cert on >>"$TMP/ctl.log" 2>&1 \
     || bad "ctl cert on failed: $(tail -2 "$TMP/ctl.log")"

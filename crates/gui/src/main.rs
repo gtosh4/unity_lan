@@ -283,8 +283,8 @@ enum Message {
     ExposeProto(Proto),
     /// Open/close the scope picker.
     ExposeScopeToggleOpen,
-    /// Tick (`true`) or untick a scope. `AllPeers` is exclusive with the rest — it's a superset, so
-    /// pairing it with a narrower scope would show a restriction the firewall isn't enforcing.
+    /// Tick (`true`) or untick a scope. Several may be ticked at once — one `Add` op is sent per
+    /// scope. There is no all-peers entry to be exclusive with any more; see `selectable_scopes`.
     ExposeScopeToggle(ExposeScope, bool),
     ServiceNameInput(String),
     ServiceWeb(bool),
@@ -570,13 +570,6 @@ impl App {
             Message::ExposeScopeToggle(scope, on) => {
                 self.expose_scopes.retain(|s| *s != scope);
                 if on {
-                    // All-peers is a superset of every other scope, so it stands alone: ticking it
-                    // clears the rest, and ticking anything else clears it.
-                    if scope == ExposeScope::AllPeers {
-                        self.expose_scopes.clear();
-                    } else {
-                        self.expose_scopes.retain(|s| *s != ExposeScope::AllPeers);
-                    }
                     self.expose_scopes.push(scope);
                 }
             }
@@ -1302,27 +1295,67 @@ mod tests {
         assert!(a.expose_port_input == "8080", "draft survives");
     }
 
-    /// All-peers is a superset of every other scope, so the picker must never hold it alongside a
-    /// narrower one — that would show a restriction the firewall isn't enforcing.
+    /// Sharing names who, every time. "Every peer" is not on offer anywhere in the app — it was the
+    /// easiest thing to pick and the widest thing the mesh can express, which is the wrong way round
+    /// for a decision about who reaches a port on your machine.
     #[test]
-    fn all_peers_is_exclusive_with_the_narrower_scopes() {
+    fn sharing_never_offers_every_peer() {
+        use common::api::NetworkStatus;
         let mut a = app();
+        let _ = a.update(Message::StatusFetched(Ok(StatusReport {
+            networks: vec![NetworkStatus {
+                guild_id: 1,
+                role_id: 2,
+                name: "eng".into(),
+                guild_name: "acme".into(),
+                enabled: true,
+            }],
+            ..Default::default()
+        })));
+
+        let offered = a.selectable_scopes();
+        assert!(
+            !offered.iter().any(|(s, _)| *s == ExposeScope::AllPeers),
+            "creating a service cannot pick every peer: {:?}",
+            offered.iter().map(|(s, _)| s).collect::<Vec<_>>()
+        );
+        // The narrower scopes are all still there — this removes one option, not the feature.
+        assert!(offered.iter().any(|(s, _)| *s == ExposeScope::OwnDevices));
+        assert!(offered.iter().any(|(s, _)| matches!(
+            s,
+            ExposeScope::Net {
+                guild_id: 1,
+                role_id: 2
+            }
+        )));
+
+        // Several narrow scopes still combine — one `Add` op per tick.
         let net = ExposeScope::Net {
             guild_id: 1,
             role_id: 2,
         };
-
         let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
         let _ = a.update(Message::ExposeScopeToggle(ExposeScope::OwnDevices, true));
-        assert_eq!(a.expose_scopes.len(), 2, "narrow scopes combine");
+        assert_eq!(a.expose_scopes.len(), 2);
+        let _ = a.update(Message::ExposeScopeToggle(net, false));
+        assert_eq!(a.expose_scopes, vec![ExposeScope::OwnDevices]);
+    }
 
-        // Ticking all-peers clears them...
-        let _ = a.update(Message::ExposeScopeToggle(ExposeScope::AllPeers, true));
-        assert_eq!(a.expose_scopes, vec![ExposeScope::AllPeers]);
-
-        // ...and ticking a narrow one clears all-peers.
-        let _ = a.update(Message::ExposeScopeToggle(net.clone(), true));
-        assert_eq!(a.expose_scopes, vec![net]);
+    /// An exposure made when every-peer *was* offered keeps working — this removes a choice, not a
+    /// capability — and widening it is refused because nothing is wider.
+    #[test]
+    fn an_existing_every_peer_service_still_shows_and_cannot_widen() {
+        let mut a = app();
+        a.exposed = vec![ExposedPort {
+            proto: Proto::Tcp,
+            port: 8096,
+            scope: ExposeScope::AllPeers,
+            label: String::new(),
+            name: Some("jelly".into()),
+            kind: Default::default(),
+            active: true,
+        }];
+        assert!(a.widenable_scopes("jelly").is_none());
     }
 
     /// One `Add` op per ticked scope — the wire carries one scope per exposure.
