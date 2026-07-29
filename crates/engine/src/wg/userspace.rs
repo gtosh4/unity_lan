@@ -72,16 +72,23 @@ fn api_socket_paths(ifname: &str) -> [std::path::PathBuf; 2] {
 /// kernel telling us the file outlived its process, which is the only case we act on.
 #[cfg(unix)]
 fn reap_stale_api_socket(ifname: &str) -> anyhow::Result<bool> {
+    reap_stale_sockets(&api_socket_paths(ifname))
+}
+
+/// The path-taking half of [`reap_stale_api_socket`], split out so tests can aim it at a directory
+/// they are allowed to write.
+#[cfg(unix)]
+fn reap_stale_sockets(paths: &[std::path::PathBuf]) -> anyhow::Result<bool> {
     let mut removed = false;
-    for path in api_socket_paths(ifname) {
+    for path in paths {
         if !path.exists() {
             continue;
         }
-        match std::os::unix::net::UnixStream::connect(&path) {
+        match std::os::unix::net::UnixStream::connect(path) {
             // Someone answered — a live engine holds this interface. Leave it alone.
             Ok(_) => return Ok(false),
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                std::fs::remove_file(&path)
+                std::fs::remove_file(path)
                     .with_context(|| format!("removing stale api socket {}", path.display()))?;
                 removed = true;
             }
@@ -271,28 +278,46 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reaper_spares_a_socket_that_still_has_a_listener() {
-        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::os::unix::net::UnixListener;
 
-        let dir = crate::testutil::TempDir::new("wg-reaper");
+        let dir = crate::testutil::TempDir::new("wg-reaper-live");
         let path = dir.join("live.sock");
         let _listener = UnixListener::bind(&path).expect("bind");
 
-        // Someone answers → this is a live engine, leave the file alone.
-        assert!(UnixStream::connect(&path).is_ok());
-        assert!(path.exists());
+        assert!(!reap_stale_sockets(std::slice::from_ref(&path)).expect("reap"));
+        assert!(path.exists(), "a socket someone answers must survive");
+    }
 
-        // With the listener gone the file remains but refuses connections — that is the orphan.
-        drop(_listener);
-        std::fs::remove_file(&path).expect("cleanup");
-        let stale = dir.join("stale.sock");
-        let l = UnixListener::bind(&stale).expect("bind");
-        drop(l);
-        // A bound-then-dropped path either vanishes or refuses; both are safe to remove.
-        if stale.exists() {
-            assert_eq!(
-                UnixStream::connect(&stale).unwrap_err().kind(),
-                std::io::ErrorKind::ConnectionRefused
-            );
+    /// And the case the reaper exists for: the file outlived its process, so nobody answers. Left in
+    /// place it fails every future `create_interface`, which is a restart loop on a headless box.
+    #[cfg(unix)]
+    #[test]
+    fn reaper_removes_a_socket_nobody_answers() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+
+        let dir = crate::testutil::TempDir::new("wg-reaper-stale");
+        let path = dir.join("stale.sock");
+        drop(UnixListener::bind(&path).expect("bind"));
+        assert!(
+            path.exists(),
+            "closing a unix socket leaves its file behind"
+        );
+
+        // Closing our fd is not the same as the socket dying: it dies when the *last* reference
+        // goes, and any test that shells out duplicates every fd into its child for the moment
+        // between fork and exec — CLOEXEC only takes effect at the exec. That brief extra reference
+        // keeps this socket listening. Wait it out rather than racing it.
+        for _ in 0..200 {
+            match UnixStream::connect(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                _ => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
         }
+
+        assert!(
+            reap_stale_sockets(std::slice::from_ref(&path)).expect("reap"),
+            "an unanswered socket is the orphan the reaper is for"
+        );
+        assert!(!path.exists(), "and it must be gone afterwards");
     }
 }
