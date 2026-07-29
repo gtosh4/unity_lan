@@ -121,6 +121,17 @@ coordinator is told about — only it can publish the DNS record the certificate
 it stores nothing beyond the label. Everything in the certificate section below applies: it is opt-in,
 and the name is published to public Certificate Transparency logs permanently.
 
+`ctl services` then lists it under that name rather than its `.unity.internal` one — that one still
+resolves, but no certificate covers it, so a browser rejects it. Its port is shown as what it is, the
+local one the proxy forwards to:
+
+```
+jellyfin  (jellyfin.alice.mesh.unitylan.com)
+    https  ·  tcp/8096 behind it (everyone)
+mc  (mc.alice.unity.internal)
+    tcp/25565 (minecraft)
+```
+
 **Jellyfin itself needs no TLS configuration.** The engine runs a small TLS proxy
 (`unitylan-proxy`) that serves your web services on the mesh and forwards to them over plain HTTP on
 loopback, so several of them share port 443 under different names and none of them has to learn about

@@ -30,8 +30,8 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   itself. Off unless you ask: a certified name goes into public certificate logs permanently, the
   same trade the per-device certificate already made.
 
-  The app lists a web service under that certified name, yours and other people's alike, rather than
-  its `.unity.internal` one — that one still resolves, but no certificate covers it, so a browser
+  The app and `ctl services` list a web service under that certified name — yours and, in the app,
+  other people's alike — rather than its `.unity.internal` one — that one still resolves, but no certificate covers it, so a browser
   refuses it however well it works everywhere else. The port beneath is labelled as what it is: the
   local port the proxy forwards to, not an address to connect to.
 

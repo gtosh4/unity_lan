@@ -1113,19 +1113,37 @@ fn print_services(
         println!("no named services on this device (`ctl service add <name> <port>`)");
         return Ok(());
     }
+    let domain = status.cert.domain.as_deref();
     for name in names {
-        match hostname.and_then(|h| common::service::service_name(h, name)) {
+        let entries: Vec<_> = resp
+            .exposed
+            .iter()
+            .filter(|e| e.name.as_deref() == Some(name))
+            .collect();
+        // A web service is reached on 443 under the certificate domain, and no certificate covers
+        // the `.internal` spelling — so printing that one hands a browser a name it will reject.
+        let web = entries
+            .iter()
+            .any(|e| e.kind == common::service::ServiceKind::Web);
+        let full = hostname.and_then(|h| common::service::service_name(h, name));
+        let shown = match (web, domain, &full) {
+            (true, Some(d), Some(f)) => common::service::certificate_alias(f, d),
+            _ => full,
+        };
+        match shown {
             Some(full) => println!("{name}  ({full})"),
             // Not enrolled yet: the ports are real, the name they will answer to is not known.
             None => println!("{name}  (log in to learn the name this answers to)"),
         }
-        for e in resp
-            .exposed
-            .iter()
-            .filter(|e| e.name.as_deref() == Some(name))
-        {
+        for e in entries {
             let idle = if e.active { "" } else { "  [no peers online]" };
-            println!("    {}/{} ({}){}", e.proto.as_str(), e.port, e.label, idle);
+            // Its port is the loopback backend the proxy forwards to, not somewhere to connect.
+            let reach = if web {
+                format!("https  ·  {}/{} behind it", e.proto.as_str(), e.port)
+            } else {
+                format!("{}/{}", e.proto.as_str(), e.port)
+            };
+            println!("    {reach} ({}){}", e.label, idle);
         }
     }
     Ok(())
