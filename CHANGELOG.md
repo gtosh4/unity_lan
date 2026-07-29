@@ -87,6 +87,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   `[cert] reload_command` runs after each renewal so it picks the new certificate up instead of
   quietly serving an expired one two months later.
 
+  **One member can't take certificates away from everyone else.** Certificate authorities cap
+  issuance per domain and that cap is shared across a whole deployment, so a single device looping
+  through orders — malicious, or just misconfigured — could otherwise leave every other member unable
+  to get a certificate until the week rolled over. Each device now gets its own small slice of the
+  operator's `max_certs_per_week`, and runs out of that instead. Retrying an order already in flight
+  is free, so a device that loses its connection mid-issuance doesn't pay for it twice.
+
 - You can now use UnityLAN for just your own machines, without joining or running a Discord server.
   Log in, install it on a second device, and the two find each other — no server to set up, no role
   for an admin to grant, nothing to configure. Previously an account that held no role anywhere got

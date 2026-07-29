@@ -439,6 +439,25 @@ pub const MAX_WEB_SERVICES_PER_DEVICE: usize = 8;
 /// coordinator's in-memory value list without bound.
 pub const MAX_DEVICE_CHALLENGES: usize = 2;
 
+/// Longest DNS-01 challenge value the coordinator will publish.
+///
+/// A real one is always 43 characters — base64url of a SHA-256 digest, unpadded (RFC 8555 §8.4) — so
+/// this is loose cover for a CA that surprises us, not a guess. It exists because the value ends up in
+/// a TXT record that the *unauthenticated, source-spoofable* zone listener clones on every lookup: an
+/// unbounded value is an amplifier, not just wasted memory. See [`valid_challenge_value`].
+pub const MAX_CHALLENGE_VALUE_LEN: usize = 64;
+
+/// Whether `value` is shaped like a DNS-01 challenge value: non-empty, at most
+/// [`MAX_CHALLENGE_VALUE_LEN`], and base64url (RFC 4648 §5, unpadded) — which is also exactly the
+/// character set a TXT record can carry without quoting.
+pub fn valid_challenge_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CHALLENGE_VALUE_LEN
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// The names the coordinator actually published, so a client can check they match the order it
 /// created rather than discovering a mismatch as an opaque CA validation failure.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -676,5 +695,28 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(round.proto, crate::PROTOCOL_VERSION);
         assert_eq!(round.server_version, crate::VERSION);
+    }
+
+    #[test]
+    fn a_real_challenge_value_is_accepted() {
+        // 43 characters of unpadded base64url — what RFC 8555 §8.4 actually produces.
+        assert!(valid_challenge_value(
+            "toxSLMDDR-b0ZOaBBhH1EJKZI_h6VBnKZOn7hqPGVwo"
+        ));
+        assert!(valid_challenge_value("A-_0"));
+    }
+
+    #[test]
+    fn a_challenge_value_is_bounded_and_base64url() {
+        assert!(!valid_challenge_value(""));
+        assert!(!valid_challenge_value(
+            &"a".repeat(MAX_CHALLENGE_VALUE_LEN + 1)
+        ));
+        // Padding, dots and whitespace are all outside base64url — and a dot in particular would let
+        // a value read like a name in a zone file.
+        assert!(!valid_challenge_value("dG9rZW4="));
+        assert!(!valid_challenge_value("has.a.dot"));
+        assert!(!valid_challenge_value("has space"));
+        assert!(!valid_challenge_value("has\nnewline"));
     }
 }
