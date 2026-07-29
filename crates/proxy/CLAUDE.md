@@ -17,6 +17,15 @@ consequences to preserve: a renewal or a newly-named service needs no restart, a
 unreachable this serves **nothing** — its last word may already be stale, and serving on a narrowed
 allow-list is the failure the whole design is arranged to avoid.
 
+**It connects to the engine's read-only endpoint** — `control-ro.sock` / `unitylan-control-ro`,
+derived by `common::control::readonly_endpoint`, bound with `control::server::Access::ReadOnly`. That
+endpoint answers `Status` and `Watch` and refuses everything else *at the socket*; the full one
+grants device authority (`Expose`, `Logout`, `ApplyUpdate`) and is the control group's / SYSTEM's
+alone. Keep it that way: pointing this process at the full socket, or granting its account the
+control group, undoes the isolation the separate process exists for — a compromised HTTP parser would
+then be able to open ports and apply updates. On unix the read-only socket is owned by the proxy
+account's own primary group; on Windows `NT AUTHORITY\LocalService` is granted on that pipe only.
+
 **Two gates, both fail closed.** The engine's firewall opens 443 to the union of everyone allowed
 *some* web service; `route.rs` narrows that to the one actually asked for, which the packet filter
 cannot distinguish once they share a port. An empty allow-list is nobody, not everybody. A name no

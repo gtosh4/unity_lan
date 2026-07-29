@@ -10,9 +10,14 @@
 //!
 //! It is a **client of the engine**, not a peer of it: the whole configuration — which names to
 //! serve, which loopback port each is, who may reach it, where the certificate lives — arrives over
-//! the engine's control socket on the same `Watch` subscription the GUI uses, and updates live. So a
-//! renewed certificate or a newly-named service needs no restart, and there is no config file to
+//! the engine's control channel on the same `Watch` subscription the GUI uses, and updates live. So
+//! a renewed certificate or a newly-named service needs no restart, and there is no config file to
 //! drift.
+//!
+//! Specifically the engine's **read-only** endpoint (`control-ro.sock`, `unitylan-control-ro`),
+//! which answers `Status` and `Watch` and refuses every mutation. The full socket grants authority
+//! over the whole device — expose a port, log out, apply an update — and this process must not hold
+//! it: that is the same reason it runs unprivileged at all.
 //!
 //! Two independent gates decide who gets in, and both fail closed. The engine's firewall opens 443
 //! to the union of everyone allowed *any* web service; this process then narrows that to the one
@@ -102,7 +107,7 @@ fn main() -> anyhow::Result<()> {
     let socket = PathBuf::from(
         std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "control.sock".to_string()),
+            .unwrap_or_else(|| "control-ro.sock".to_string()),
     );
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

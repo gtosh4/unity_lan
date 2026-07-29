@@ -347,11 +347,16 @@ async fn finalize(state_dir: &Path, order: &mut instant_acme::Order) -> anyhow::
     Ok(expires_at)
 }
 
-/// Hand the key to the group that needs to read it: `root:<group>`, mode `0640`.
+/// Hand the key to the group that needs to read it: `root:<group>`, mode `0640`, inside a
+/// `root:<group>` `0710` directory.
 ///
 /// Without this the key is owner-only and the engine is root, so the daemon that actually serves TLS
-/// cannot open it. Failure is reported, not fatal — the certificate is still valid and an operator
-/// can fix the group; silently continuing with an unreadable key would be worse.
+/// cannot open it. The directory matters as much as the file: that account reaches the key by
+/// traversing here, and a group grant on a file nobody can walk to is dead letter. `0710` gives the
+/// group traversal and no listing; the certificate itself is public, the key is still `0640`.
+///
+/// Failure is reported, not fatal — the certificate is still valid and an operator can fix the
+/// group; silently continuing with an unreadable key would be worse.
 #[cfg(not(windows))]
 pub fn grant_key_group(state_dir: &Path, group: &str) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -359,6 +364,11 @@ pub fn grant_key_group(state_dir: &Path, group: &str) -> anyhow::Result<()> {
     let path = key_path(state_dir);
     let gid = crate::control::server::group_gid(group)
         .with_context(|| format!("no such group {group:?} for the certificate key"))?;
+    let dir = certs_dir(state_dir);
+    std::os::unix::fs::chown(&dir, None, Some(gid))
+        .with_context(|| format!("giving {} to group {group}", dir.display()))?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710))
+        .context("making the certificate directory group-traversable")?;
     std::os::unix::fs::chown(&path, None, Some(gid))
         .with_context(|| format!("giving {} to group {group}", path.display()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))

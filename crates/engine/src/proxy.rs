@@ -229,21 +229,23 @@ pub fn spawn(
         // look, which for a service failing to serve is the difference between a diagnosis and a
         // mystery.
         .kill_on_drop(true);
-    #[cfg(unix)]
     {
-        if let Some(user) = run_as {
-            let (uid, gid) = unix_ids(user)?;
-            cmd.uid(uid).gid(gid);
-        }
+        // Resolved *before* the fork: `getpwnam`/`getgrouplist` allocate and lock, neither of which
+        // is allowed between fork and exec. The child only makes syscalls with what we hand it.
+        let ids = run_as.map(Ids::lookup).transpose()?;
         // Rust marks every socket it opens close-on-exec, so the child would otherwise inherit
         // nothing. `dup2` both duplicates it onto the agreed descriptor and clears that flag.
         let raw = std::os::fd::AsRawFd::as_raw_fd(&listener);
         // SAFETY: runs in the forked child between `fork` and `exec`, where only async-signal-safe
-        // calls are allowed — `dup2` is one. `raw` is the listener's descriptor, still open in the
-        // child because nothing has closed it, and `LISTEN_FD` is not otherwise in use (stdio has
-        // 0..=2, and stdin is replaced above).
+        // calls are allowed — `setgroups`, `setgid`, `setuid` and `dup2` are. `ids` was resolved
+        // before the fork and is only read here. `raw` is the listener's descriptor, still open in
+        // the child because nothing has closed it, and `LISTEN_FD` is not otherwise in use (stdio
+        // has 0..=2, and stdin is replaced above).
         unsafe {
             cmd.pre_exec(move || {
+                if let Some(ids) = &ids {
+                    ids.drop_privileges()?;
+                }
                 if libc::dup2(raw, LISTEN_FD) == -1 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -262,20 +264,93 @@ pub fn spawn(
     })
 }
 
-/// Resolve a user name to its uid and primary gid.
+/// The credentials the proxy runs under: uid, primary gid, and the **full** group list its account
+/// is a member of.
+///
+/// The group list is the point. `Command::uid`/`gid` alone would be simpler, but std then calls
+/// `setgroups(0, NULL)` before `setuid` — the child keeps *no* supplementary groups, so an account
+/// that was added to a group in order to reach something (the packaged `unitylan-proxy` account and
+/// the certificate key's group) silently cannot. Nothing in std calls `initgroups`, so the drop is
+/// done here instead, in the order the kernel requires: groups and gid while still root, uid last.
 #[cfg(unix)]
-fn unix_ids(user: &str) -> anyhow::Result<(u32, u32)> {
-    let name = std::ffi::CString::new(user)?;
-    // SAFETY: `getpwnam` takes a NUL-terminated string, which `CString` guarantees, and returns a
-    // pointer into a static buffer that stays valid until the next call in this thread. The fields
-    // are copied out immediately, before anything else can call it.
-    let pw = unsafe { libc::getpwnam(name.as_ptr()) };
-    if pw.is_null() {
-        anyhow::bail!("no such user {user:?} for the TLS proxy to run as");
+struct Ids {
+    uid: libc::uid_t,
+    gid: libc::gid_t,
+    groups: Vec<libc::gid_t>,
+}
+
+#[cfg(unix)]
+impl Ids {
+    /// Resolve a user name to its uid, primary gid and group list. Called before the fork.
+    fn lookup(user: &str) -> anyhow::Result<Self> {
+        let name = std::ffi::CString::new(user)?;
+        // SAFETY: `getpwnam` takes a NUL-terminated string, which `CString` guarantees, and returns
+        // a pointer into a static buffer that stays valid until the next call in this thread. The
+        // fields are copied out immediately, before anything else can call it.
+        let pw = unsafe { libc::getpwnam(name.as_ptr()) };
+        if pw.is_null() {
+            anyhow::bail!("no such user {user:?} for the TLS proxy to run as");
+        }
+        // SAFETY: checked non-null directly above, and not dereferenced after any further libc call.
+        let (uid, gid) = unsafe { ((*pw).pw_uid, (*pw).pw_gid) };
+
+        // `getgrouplist` reports how many groups there are when the buffer is too small, so ask
+        // twice rather than guessing a ceiling. A failure is not fatal: the primary group alone is
+        // still a correct, tighter-than-intended drop.
+        let mut count: libc::c_int = 16;
+        let mut groups: Vec<libc::gid_t> = vec![0; count as usize];
+        // SAFETY: `name` is NUL-terminated and `groups` has `count` elements; `getgrouplist` writes
+        // at most that many and updates `count` with what it needed.
+        let rc = unsafe { libc::getgrouplist(name.as_ptr(), gid, groups.as_mut_ptr(), &mut count) };
+        if rc == -1 && count > 0 {
+            groups = vec![0; count as usize];
+            // SAFETY: as above, with the buffer `getgrouplist` just asked for.
+            let rc =
+                unsafe { libc::getgrouplist(name.as_ptr(), gid, groups.as_mut_ptr(), &mut count) };
+            if rc == -1 {
+                count = 1;
+                groups = vec![gid];
+            }
+        }
+        groups.truncate(count.max(0) as usize);
+        if groups.is_empty() {
+            groups.push(gid);
+        }
+        Ok(Self { uid, gid, groups })
     }
-    // SAFETY: checked non-null directly above, and not dereferenced after any further libc call.
-    let (uid, gid) = unsafe { ((*pw).pw_uid, (*pw).pw_gid) };
-    Ok((uid, gid))
+
+    /// Become that user. Runs in the forked child, so it may only make async-signal-safe calls.
+    ///
+    /// Order matters and is not interchangeable: `setgroups` and `setgid` need the privilege that
+    /// `setuid` gives up, so a mistake here either fails outright or — worse — leaves the child
+    /// holding root's groups.
+    ///
+    /// # Safety
+    ///
+    /// Must be called between `fork` and `exec` in a child that is still privileged.
+    unsafe fn drop_privileges(&self) -> std::io::Result<()> {
+        // SAFETY: the caller guarantees the fork/exec window; each call is async-signal-safe and
+        // reads only `self`, which was populated before the fork.
+        unsafe {
+            if libc::setgroups(self.groups.len() as _, self.groups.as_ptr()) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setgid(self.gid) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::setuid(self.uid) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The proxy account's primary group, which the read-only control endpoint is handed to. `None` when
+/// no `[proxy] user` is configured — the engine is then unprivileged and the proxy runs as itself.
+#[cfg(unix)]
+pub fn primary_gid(user: Option<&str>) -> Option<u32> {
+    Ids::lookup(user?).ok().map(|ids| ids.gid)
 }
 
 #[cfg(test)]
@@ -308,6 +383,30 @@ mod tests {
         );
         // A rootless engine has no privileges to drop, so running as itself is already the goal.
         assert_eq!(run_as(None, 1000).unwrap(), None);
+    }
+
+    /// The whole point of resolving ids ourselves: the child must keep the groups its account is a
+    /// member of. `Command::uid`/`gid` alone would clear them, and the packaged proxy reaches the
+    /// certificate key through exactly such a membership.
+    #[cfg(unix)]
+    #[test]
+    fn the_resolved_ids_carry_the_accounts_group_list() {
+        let root = Ids::lookup("root").expect("root exists on every unix");
+        assert_eq!(root.uid, 0);
+        assert!(
+            root.groups.contains(&root.gid),
+            "the primary group is always in the list, got {:?}",
+            root.groups
+        );
+        assert!(
+            !root.groups.is_empty(),
+            "an empty list would clear them all"
+        );
+        assert_eq!(primary_gid(Some("root")), Some(root.gid));
+        assert_eq!(primary_gid(None), None);
+        // A typo'd `[proxy] user` must fail loudly here rather than at exec time in the child, where
+        // the only symptom is a proxy that exits with a status nobody reads.
+        assert!(Ids::lookup("no-such-unitylan-user").is_err());
     }
 
     #[test]

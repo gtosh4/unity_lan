@@ -207,7 +207,7 @@ pub const RELOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3
 /// own_devices = true      # only this owner's other devices
 /// ```
 /// The TLS proxy the engine supervises — `[proxy]`.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct ProxyConfig {
     /// Run it at all. On by default: a device with no web services starts nothing either way, so
     /// the only reason to turn this off is serving TLS yourself (nginx, Caddy) from the same
@@ -215,13 +215,28 @@ pub struct ProxyConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// The unprivileged account to run it as. **Required when the engine runs as root** — see
-    /// [`crate::proxy::run_as`]. The packages create `unitylan-proxy` and put it in the group that
-    /// owns the certificate key.
+    /// [`crate::proxy::run_as`]. The packages create `unitylan-proxy`, whose own group owns the
+    /// certificate key and the read-only control socket — and which is deliberately in no other
+    /// group, least of all the one that owns the full control socket.
     #[serde(default)]
     pub user: Option<String>,
     /// Path to the proxy binary, when it is not beside the engine.
     #[serde(default)]
     pub binary: Option<PathBuf>,
+}
+
+/// Spelled out rather than derived: a derived `Default` would make `enabled` **false**, and that is
+/// the value a config with no `[proxy]` block at all gets — silently turning the feature off for
+/// exactly the deployments that never configured anything, which is the opposite of the field's own
+/// serde default.
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            user: None,
+            binary: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -411,6 +426,41 @@ impl Config {
         #[cfg(not(windows))]
         {
             self.control_socket_path().to_string_lossy().into_owned()
+        }
+    }
+
+    /// The **read-only** control endpoint the TLS proxy reads its configuration from — the same
+    /// local-socket naming as [`Self::control_name`], derived from the control socket path by
+    /// [`common::control::readonly_endpoint`] so the proxy computes the identical name from the
+    /// path it is handed.
+    ///
+    /// A second endpoint rather than a second caller on the first one: the proxy parses HTTP sent by
+    /// mesh peers, and the full socket grants whoever opens it authority over the whole device.
+    pub fn control_readonly_path(&self) -> PathBuf {
+        #[cfg(windows)]
+        {
+            common::control::readonly_endpoint(
+                &self
+                    .control_socket
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("control.sock")),
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            common::control::readonly_endpoint(&self.control_socket_path())
+        }
+    }
+
+    /// Platform local-socket name for [`Self::control_readonly_path`].
+    pub fn control_readonly_name(&self) -> String {
+        #[cfg(windows)]
+        {
+            common::control::pipe_name(Some(&self.control_readonly_path()))
+        }
+        #[cfg(not(windows))]
+        {
+            self.control_readonly_path().to_string_lossy().into_owned()
         }
     }
 

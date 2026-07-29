@@ -41,6 +41,21 @@ the *announcer* by `fw::Firewall::services_for`, so a peer that cannot reach a p
 name exists. `proxy.rs` supervises the TLS proxy — see `crates/proxy/CLAUDE.md`; the refusal to run it
 as root lives there and is deliberate.
 
+**Dropping privilege is done by hand, not by `Command::uid`/`gid`.** std clears *every* supplementary
+group before `setuid` when no explicit list is given, so a `uid`/`gid` spawn hands the proxy an
+account stripped of the memberships it exists to have — it could then reach neither the certificate
+key nor its control socket. `proxy::Ids` resolves uid, gid and the full group list **before** the
+fork (`getpwnam`/`getgrouplist` allocate and lock, neither allowed after it) and the `pre_exec`
+closure applies them in the only order that works: `setgroups`, `setgid`, `setuid`. Note std runs
+`pre_exec` closures *after* its own uid change, so a fix placed there while also setting `.uid()`
+would run unprivileged and fail.
+
+**The proxy gets a read-only control endpoint, never the full one** (`control::server::Access`). The
+full socket grants device authority; the process that parses peer HTTP holds status-read and nothing
+else. The proxy account is deliberately in no group of ours beyond its own — which is why the state
+dir may need `0711` rather than `0710` (`control::grant_dir_traversal`'s `others`) for it to reach
+the key at all.
+
 **Certificates.** `cert.rs` runs the whole ACME DNS-01 conversation on the device: it makes the
 keypair, talks to the CA, keeps the private key. The coordinator only publishes the challenge TXT it
 derives from our own allocation. CA rate limits shape the module more than anything else — the account

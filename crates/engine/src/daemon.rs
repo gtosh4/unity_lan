@@ -559,9 +559,13 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
         // would make the socket's own ownership unreachable — open up traversal (only) for the same
         // caller the socket is granted to. Skipped for a socket configured elsewhere: that parent is
         // not ours to re-own.
+        // The certificate key lives under the state dir too, and is read by the proxy account —
+        // which is deliberately *not* in the control group, so it needs the last traversal bit.
         #[cfg(unix)]
-        if cfg.control_socket_path().parent() == Some(cfg.state_dir.as_path()) {
-            control::grant_dir_traversal(&cfg.state_dir, control_group.as_deref());
+        let cert_reader = cfg.proxy.enabled && cfg.cert.group.is_some();
+        #[cfg(unix)]
+        if cfg.control_socket_path().parent() == Some(cfg.state_dir.as_path()) || cert_reader {
+            control::grant_dir_traversal(&cfg.state_dir, control_group.as_deref(), cert_reader);
         }
         let ctx = control::Ctx {
             status: status.clone(),
@@ -579,8 +583,39 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
             #[cfg(unix)]
             exec_slot: exec_slot.clone(),
         };
+        // The read-only twin, for the TLS proxy: same status stream, every mutation refused at the
+        // socket. Bound whenever the proxy is enabled, since it is the proxy's only way in — the
+        // full socket above is the control group's (unix) / SYSTEM's, Administrators' and
+        // INTERACTIVE's (Windows), and the proxy is none of those on purpose.
+        if cfg.proxy.enabled {
+            let ro_name = cfg.control_readonly_name();
+            #[cfg(unix)]
+            let ro_owner = match crate::proxy::primary_gid(cfg.proxy.user.as_deref()) {
+                Some(gid) => control::Owner::Gid(gid),
+                // No `[proxy] user`: the proxy runs as whoever the engine is, so the same grant the
+                // full socket gets is exactly right.
+                None => control::Owner::Group(cfg.control_group.clone()),
+            };
+            #[cfg(not(unix))]
+            let ro_owner = control::Owner::Group(None);
+            let ro_ctx = ctx.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    control::serve(&ro_name, ro_owner, control::Access::ReadOnly, ro_ctx).await
+                {
+                    tracing::error!("read-only control socket ended: {e:#}");
+                }
+            });
+        }
         tokio::spawn(async move {
-            if let Err(e) = control::serve(&name, control_group, ctx).await {
+            if let Err(e) = control::serve(
+                &name,
+                control::Owner::Group(control_group),
+                control::Access::Full,
+                ctx,
+            )
+            .await
+            {
                 tracing::error!("control socket ended: {e:#}");
             }
         });
@@ -1640,13 +1675,10 @@ fn sync_proxy(
             let Some(bind) = bind else { return };
             let started = crate::proxy::run_as(cfg.proxy.user.as_deref(), euid).and_then(|user| {
                 let binary = crate::proxy::binary(cfg.proxy.binary.as_deref());
-                crate::proxy::spawn(
-                    &binary,
-                    std::path::Path::new(&cfg.control_name()),
-                    bind,
-                    user.as_deref(),
-                )
-                .map_err(|e| format!("{e:#}"))
+                // The read-only endpoint, never the full one: the proxy reads status and must not be
+                // able to drive the daemon it reads it from.
+                crate::proxy::spawn(&binary, &cfg.control_readonly_path(), bind, user.as_deref())
+                    .map_err(|e| format!("{e:#}"))
             });
             match started {
                 Ok(proxy) => {

@@ -14,11 +14,13 @@ use common::wire::Signed;
 /// should be able to list or read. Windows inherits the service profile's ACLs. Best-effort on the
 /// permission step so a filesystem that can't represent the mode (rare) doesn't block startup.
 ///
-/// An existing group-execute bit is preserved: the control socket defaults to living *inside* the
-/// state dir, and `control::grant_dir_traversal` sets `root:<control_group>` 0710 so a frontend can
-/// reach it. Clearing that bit here would revoke the grant the next time any state file is written
-/// (the relay secret is created per enrollment), silently cutting off the GUI. Group-execute alone
-/// grants traversal to a named path, not listing — and every secret in the dir is 0600.
+/// Existing execute bits are preserved: the control socket defaults to living *inside* the state
+/// dir, and `control::grant_dir_traversal` sets `root:<control_group>` 0710 so a frontend can reach
+/// it — 0711 when the TLS proxy account, which is in no group of ours, must also reach the
+/// certificate key below. Clearing those bits here would revoke the grant the next time any state
+/// file is written (the relay secret is created per enrollment), silently cutting off the GUI or the
+/// proxy. An execute bit alone grants traversal to a named path, not listing — and every secret in
+/// the dir is 0600, the certificate key 0640 to its own group.
 pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     // Whether the dir predates this call. A dir we create ourselves gets `0777 & ~umask` from mkdir,
     // which usually carries a group-execute bit that means nothing — only a bit found on an existing
@@ -30,8 +32,11 @@ pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let traverse = if existed {
+            // Both traversal bits: `grant_dir_traversal` sets the group one for the frontend and,
+            // when a `[cert] group` is configured, the other one for the TLS proxy account — which
+            // is in neither group and reaches the certificate key through here.
             std::fs::metadata(dir)
-                .map(|m| m.permissions().mode() & 0o010)
+                .map(|m| m.permissions().mode() & 0o011)
                 .unwrap_or(0)
         } else {
             0
@@ -307,20 +312,23 @@ mod security_tests {
         create_private_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
 
-        // A dir left group/world-readable is tightened back down — every read and list bit goes,
-        // including the group's; only its traversal bit is spared (see below).
+        // A dir left group/world-readable is tightened back down — every read and list bit goes;
+        // only the traversal bits are spared (see below).
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         create_private_dir(&dir).unwrap();
-        assert_eq!(mode(&dir), 0o710);
+        assert_eq!(mode(&dir), 0o711);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o744)).unwrap();
         create_private_dir(&dir).unwrap();
         assert_eq!(mode(&dir), 0o700);
 
-        // But the traversal bit `grant_dir_traversal` sets survives, or writing any state file
-        // (e.g. the per-enrollment relay secret) would revoke the frontend's path to the socket.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710)).unwrap();
-        create_private_dir(&dir).unwrap();
-        assert_eq!(mode(&dir), 0o710);
+        // But the traversal bits `grant_dir_traversal` sets survive, or writing any state file
+        // (e.g. the per-enrollment relay secret) would revoke the frontend's path to the socket —
+        // and, with 0711, the TLS proxy account's path to the certificate key.
+        for granted in [0o710, 0o711] {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(granted)).unwrap();
+            create_private_dir(&dir).unwrap();
+            assert_eq!(mode(&dir), granted);
+        }
     }
 
     #[test]

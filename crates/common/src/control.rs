@@ -39,6 +39,30 @@ pub fn pipe_name(control_socket: Option<&std::path::Path>) -> String {
     format!("unitylan-{stem}")
 }
 
+/// The **read-only** control endpoint beside a control socket path: `control.sock` →
+/// `control-ro.sock`.
+///
+/// The TLS proxy reads its whole configuration off the control channel, and nothing else. It is also
+/// the process most likely to be compromised — it parses HTTP sent by mesh peers — so it is pointed
+/// at this second endpoint, which answers `Status` and `Watch` and refuses every mutation. The full
+/// socket stays reachable only by the control group (unix) / SYSTEM, Administrators and INTERACTIVE
+/// (Windows).
+///
+/// Derived rather than configured so both sides compute it from the one path they already agree on;
+/// on Windows [`pipe_name`] of this path gives the matching `unitylan-control-ro` pipe.
+pub fn readonly_endpoint(control_socket: &std::path::Path) -> std::path::PathBuf {
+    let stem = control_socket
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("control");
+    let ext = control_socket.extension().and_then(|s| s.to_str());
+    let name = match ext {
+        Some(ext) => format!("{stem}-ro.{ext}"),
+        None => format!("{stem}-ro"),
+    };
+    control_socket.with_file_name(name)
+}
+
 /// Display label for the synthetic "own devices" grouping: the pseudo-network the GUI shows for the
 /// always-on own-device peering toggle, and the tag on peers that are the owner's other devices. Not
 /// a real network (never on the coordinator wire) — a client-side display convention only, so both
@@ -521,8 +545,8 @@ pub fn classify_reach(punched: bool, connected: bool, attempt_age_secs: u64) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_reach, pipe_name, ExposeOp, ExposeScope, PeerReach, Proto, RemoveScope,
-        StatusReport,
+        classify_reach, pipe_name, readonly_endpoint, ExposeOp, ExposeScope, PeerReach, Proto,
+        RemoveScope, StatusReport,
     };
 
     /// The engine and every frontend derive the Windows pipe name from their own copy of the socket
@@ -546,6 +570,25 @@ mod tests {
         assert_eq!(
             pipe_name(Some(std::path::Path::new("/run/unitylan/dev.sock"))),
             "unitylan-dev"
+        );
+    }
+
+    /// The engine binds the read-only endpoint and the proxy connects to it, each deriving the name
+    /// from the same control path — so they have to agree, on both transports.
+    #[test]
+    fn the_readonly_endpoint_sits_beside_the_control_socket_and_names_its_own_pipe() {
+        let ro = readonly_endpoint(std::path::Path::new("/run/unitylan/control.sock"));
+        assert_eq!(ro, std::path::Path::new("/run/unitylan/control-ro.sock"));
+        assert_eq!(pipe_name(Some(&ro)), "unitylan-control-ro");
+        // A custom socket name carries through, so a non-default deployment still agrees.
+        assert_eq!(
+            readonly_endpoint(std::path::Path::new("/run/unitylan/dev.sock")),
+            std::path::Path::new("/run/unitylan/dev-ro.sock")
+        );
+        // No extension is a valid socket name too, and must not produce `control-ro.` .
+        assert_eq!(
+            readonly_endpoint(std::path::Path::new("/tmp/control")),
+            std::path::Path::new("/tmp/control-ro")
         );
     }
 

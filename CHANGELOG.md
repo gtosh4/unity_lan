@@ -137,7 +137,27 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
-- Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
+- HTTPS for web services now actually comes up on a packaged install. The TLS proxy runs as its own
+  account, and the group memberships that let it read the certificate key and reach the engine were
+  being stripped from it the moment it started — so it looped "control socket: no such file or
+  directory" and served nothing, on precisely the installs the feature was written for. It keeps its
+  memberships now. A build from source running everything as one user was never affected, which is
+  why this survived testing.
+
+- A config with no `[proxy]` block no longer silently turns the TLS proxy off. It is documented as on
+  by default and the packaged config sets the block explicitly, so this hit hand-written configs
+  only — where web services were named, certified, and then never served.
+
+### Security
+
+- The TLS proxy can no longer drive the engine. It reads which names to serve and who may reach them
+  over the engine's control channel — but that channel also carries every command the app can send:
+  open a port, log out, install an update. The proxy is the one part of UnityLAN that parses requests
+  from other people's machines, and it is a separate unprivileged process precisely so that a flaw in
+  it stays contained; being able to reach the full control channel undid most of that. It now reads
+  from a second, read-only endpoint that answers status and refuses everything else, and it is no
+  longer a member of the group that owns the full one. Nothing to configure — packages handle the
+  accounts. On Windows the proxy service is repointed when you upgrade. Mesh names are sanitised down to what DNS
   allows, and that folded distinct Discord accounts together — `alice.smith` and `alice_smith` both
   became `alice-smith`, as did `_alice` and `alice`, and anyone whose name survived sanitising with no
   letters or digits left landed on a shared fallback. Whoever connected last quietly took the name, so

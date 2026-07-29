@@ -18,12 +18,55 @@ use crate::coord;
 use crate::fw::Firewall;
 use crate::oauth;
 
+/// What a caller reaching this endpoint may ask for.
+///
+/// The control channel grants **full device authority** — `Expose`, `Logout`, `ApplyUpdate` and the
+/// rest — so it is only ever handed to callers trusted with the device: the control group on unix,
+/// SYSTEM/Administrators/INTERACTIVE on Windows.
+///
+/// The TLS proxy is deliberately not one of them. It parses HTTP from mesh peers, which is why it
+/// runs in its own unprivileged process at all, and it needs exactly one thing from the engine: the
+/// status stream. So it gets a second endpoint bound in [`ReadOnly`](Access::ReadOnly) mode, where
+/// every mutation is refused at the socket rather than at the handler — a compromised proxy then has
+/// no path from "reads status" to "drives the daemon".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    /// Every [`ControlRequest`].
+    Full,
+    /// `Status` and `Watch` only.
+    ReadOnly,
+}
+
+impl Access {
+    /// Whether this endpoint answers `req` at all.
+    fn allows(self, req: &ControlRequest) -> bool {
+        match self {
+            Access::Full => true,
+            Access::ReadOnly => matches!(req, ControlRequest::Status | ControlRequest::Watch),
+        }
+    }
+}
+
+/// Who a socket is handed to on unix. Windows ownership is the pipe's DACL instead (`control_pipe_sd`
+/// — a windows-only item, so not a doc link), so this is inert there.
+#[cfg_attr(windows, allow(dead_code))]
+pub enum Owner {
+    /// A configured group name — `control_group`, with the `$SUDO_UID` fallback when unset.
+    Group(Option<String>),
+    /// An already-resolved gid: the TLS proxy account's primary group, for the read-only endpoint.
+    Gid(u32),
+}
+
 /// Serve the control socket until the task is dropped. `endpoint` is the platform local-socket
 /// name (see [`crate::config::Config::control_name`]).
-// `group` only applies to unix socket ownership (`grant_socket_access`); Windows named pipes
+///
+/// `owner` decides who may open it on unix; `access` decides what they may then ask for. The daemon
+/// binds one [`Access::Full`] endpoint for frontends and, when the TLS proxy is enabled, one
+/// [`Access::ReadOnly`] endpoint for it.
+// `owner` only applies to unix socket ownership (`grant_socket_access`); Windows named pipes
 // don't use it.
 #[cfg_attr(windows, allow(unused_variables))]
-pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::Result<()> {
+pub async fn serve(endpoint: &str, owner: Owner, access: Access, ctx: Ctx) -> anyhow::Result<()> {
     // Clear a stale unix socket file from a previous run (named pipes have no filesystem residue).
     #[cfg(not(windows))]
     let _ = std::fs::remove_file(endpoint);
@@ -32,7 +75,7 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
     #[cfg(windows)]
     let opts = {
         use interprocess::os::windows::local_socket::ListenerOptionsExt;
-        opts.security_descriptor(control_pipe_sd()?)
+        opts.security_descriptor(control_pipe_sd(access)?)
     };
     // Create the socket owner-only from the start. bind() applies the process umask, so without
     // this the socket file exists at the ambient umask (often group/world-accessible) for the window
@@ -47,7 +90,7 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
     #[cfg(not(windows))]
     {
         drop(umask_guard);
-        grant_socket_access(endpoint, group.as_deref());
+        grant_socket_access(endpoint, &owner);
     }
     tracing::info!(socket = %endpoint, "control socket listening");
     // Bound concurrent connections. The socket is a privilege boundary reachable by an
@@ -66,7 +109,7 @@ pub async fn serve(endpoint: &str, group: Option<String>, ctx: Ctx) -> anyhow::R
         let ctx = ctx.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(e) = handle_conn(stream, ctx).await {
+            if let Err(e) = handle_conn(stream, access, ctx).await {
                 tracing::warn!("control conn: {e:#}");
             }
         });
@@ -104,13 +147,20 @@ impl Drop for UmaskGuard {
 /// - else launched via sudo → hand it to the invoking user (`$SUDO_UID`), the dev path.
 /// - else left root-only.
 ///
+/// The read-only endpoint is granted to an already-resolved gid instead — the TLS proxy account's
+/// own primary group, which nothing else is in, so reaching that socket confers only what that
+/// socket answers.
+///
 /// All best-effort: a failure only means the frontend can't connect, never a broken daemon.
 #[cfg(not(windows))]
-fn grant_socket_access(endpoint: &str, group: Option<&str>) {
+fn grant_socket_access(endpoint: &str, owner: &Owner) {
     use std::os::unix::fs::{chown, PermissionsExt};
     let _ = std::fs::set_permissions(endpoint, std::fs::Permissions::from_mode(0o660));
-    match group {
-        Some(name) => match group_gid(name) {
+    match owner {
+        Owner::Gid(gid) => {
+            let _ = chown(endpoint, None, Some(*gid));
+        }
+        Owner::Group(Some(name)) => match group_gid(name) {
             Some(gid) => {
                 let _ = chown(endpoint, None, Some(gid));
             }
@@ -119,7 +169,7 @@ fn grant_socket_access(endpoint: &str, group: Option<&str>) {
                 "control_group not found; socket left root-only"
             ),
         },
-        None => {
+        Owner::Group(None) => {
             if let Some(uid) = std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
                 let gid = std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok());
                 let _ = chown(endpoint, Some(uid), gid);
@@ -138,18 +188,31 @@ fn grant_socket_access(endpoint: &str, group: Option<&str>) {
 /// order as the socket grant so both agree on who the frontend is; unlike the socket the dir keeps
 /// `root` as owner, since only the daemon writes here.
 ///
+/// `others` adds the last `--x`, for when a *second*, different account must also reach something
+/// inside — the TLS proxy opening the certificate key its own group owns. A directory carries one
+/// group, so there is no way to name two; `0711` grants the same traversal-only right to both
+/// without granting either a listing, and every file below keeps its own mode (the WG key and token
+/// stay `0600`, the certificate key `0640 root:<cert group>`).
+///
 /// Best-effort, as with the socket: a failure costs the frontend its connection, not the daemon.
 #[cfg(not(windows))]
-pub fn grant_dir_traversal(dir: &std::path::Path, group: Option<&str>) {
+pub fn grant_dir_traversal(dir: &std::path::Path, group: Option<&str>, others: bool) {
     use std::os::unix::fs::{chown, PermissionsExt};
     let gid = match group {
         Some(name) => group_gid(name),
         None => std::env::var("SUDO_GID").ok().and_then(|g| g.parse().ok()),
     };
-    // No authorized non-root caller (no group, no sudo): leave the dir owner-only.
-    let Some(gid) = gid else { return };
+    let mode = if others { 0o711 } else { 0o710 };
+    // No authorized non-root caller (no group, no sudo): leave the dir owner-only, unless something
+    // else below it (the certificate key) needs the traversal bit regardless.
+    let Some(gid) = gid else {
+        if others {
+            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o701));
+        }
+        return;
+    };
     if chown(dir, None, Some(gid)).is_ok() {
-        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o710));
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode));
     }
 }
 
@@ -160,17 +223,25 @@ pub fn grant_dir_traversal(dir: &std::path::Path, group: Option<&str>) {
 /// service daemon. Replace it with a protected DACL: `SYSTEM` + `Administrators` full, `INTERACTIVE`
 /// users read+write. INTERACTIVE covers the local GUI at any integrity level (elevated or not) and
 /// excludes network/anonymous logons — the analogue of the unix `grant_socket_access` gate.
+///
+/// `LocalService` — the TLS proxy's account — is granted on the [`Access::ReadOnly`] pipe **only**.
+/// On the full pipe it would be able to send `Expose`, `Logout` or `ApplyUpdate` to a LocalSystem
+/// daemon, which is precisely the authority running the proxy in its own low-privilege account is
+/// meant to withhold from the process that parses peer HTTP.
 #[cfg(windows)]
 fn control_pipe_sd(
+    access: Access,
 ) -> anyhow::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
     // D:P — protected DACL (drops inheritance). FA = full; GRGW = GENERIC_READ|GENERIC_WRITE (write
     // carries FILE_CREATE_PIPE_INSTANCE, which the server needs for each accept). SY=SYSTEM,
-    // BA=Administrators, IU=INTERACTIVE, LS=LocalService — the account the TLS proxy service runs
-    // as, which reads its whole configuration from this pipe and can do nothing else with it.
+    // BA=Administrators, IU=INTERACTIVE, LS=LocalService.
+    let sddl = match access {
+        Access::Full => "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)",
+        Access::ReadOnly => "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;LS)",
+    };
     let sddl =
-        widestring::U16CString::from_str("D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGW;;;IU)(A;;GRGW;;;LS)")
-            .expect("static SDDL contains no interior nul");
+        widestring::U16CString::from_str(sddl).expect("static SDDL contains no interior nul");
     SecurityDescriptor::deserialize(&sddl).context("building control-pipe security descriptor")
 }
 
@@ -204,7 +275,7 @@ const MAX_CONTROL_CONNS: usize = 256;
 /// for as long as the client stays connected.
 const REQUEST_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
+async fn handle_conn(stream: LocalStream, access: Access, ctx: Ctx) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let n = tokio::time::timeout(
@@ -220,6 +291,18 @@ async fn handle_conn(stream: LocalStream, ctx: Ctx) -> anyhow::Result<()> {
         anyhow::bail!("control request exceeds {MAX_REQUEST_BYTES}-byte cap");
     }
     let req: ControlRequest = serde_json::from_str(line.trim())?;
+    // Refused here, before any handler runs: on a read-only endpoint the caller is not trusted with
+    // the device, so "can it do this?" is a property of the socket it arrived on, not of the request.
+    if !access.allows(&req) {
+        let resp = ControlResponse::Error(
+            "this control endpoint is read-only; it answers Status and Watch only".into(),
+        );
+        let mut line = serde_json::to_vec(&resp)?;
+        line.push(b'\n');
+        let mut stream = reader.into_inner();
+        stream.write_all(&line).await?;
+        return Ok(stream.flush().await?);
+    }
     // Watch holds the connection open and streams status changes, so it doesn't fit the
     // one-request/one-response path below — hand off to the streaming loop.
     if let ControlRequest::Watch = req {
@@ -619,11 +702,47 @@ fn apply_expose(
 }
 
 #[cfg(all(test, windows))]
-mod tests {
+mod windows_tests {
+    use super::Access;
+
     /// The control-pipe SDDL must parse — a typo would only surface as a runtime bind failure on a
     /// Windows service start, which the Linux-heavy test suite would never catch.
     #[test]
     fn control_pipe_sddl_is_valid() {
-        super::control_pipe_sd().expect("control-pipe SDDL should deserialize");
+        for access in [Access::Full, Access::ReadOnly] {
+            super::control_pipe_sd(access).expect("control-pipe SDDL should deserialize");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Access;
+    use common::control::{ControlRequest, ExposeOp};
+
+    /// The read-only endpoint exists so the TLS proxy — the process that parses peer HTTP — can read
+    /// status without being able to drive the device. Everything that changes state must be refused
+    /// there, or the separate unprivileged process buys nothing.
+    #[test]
+    fn a_read_only_endpoint_answers_status_and_watch_and_nothing_else() {
+        for allowed in [ControlRequest::Status, ControlRequest::Watch] {
+            assert!(Access::ReadOnly.allows(&allowed));
+            assert!(Access::Full.allows(&allowed));
+        }
+        for refused in [
+            ControlRequest::Expose(ExposeOp::List),
+            ControlRequest::Logout,
+            ControlRequest::ApplyUpdate,
+            ControlRequest::Login,
+            ControlRequest::SetConnected { connected: false },
+            ControlRequest::SetCertsEnabled { enabled: true },
+            ControlRequest::BlockPeer {
+                user_id: 1,
+                username: "someone".into(),
+            },
+        ] {
+            assert!(!Access::ReadOnly.allows(&refused));
+            assert!(Access::Full.allows(&refused));
+        }
     }
 }

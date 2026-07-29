@@ -8,12 +8,16 @@ set -e
 groupadd -f unitylan >/dev/null 2>&1 || true
 
 # The TLS proxy runs as its own unprivileged account, because parsing HTTP from mesh peers has no
-# business happening in the root daemon. Two group memberships are what make that workable:
+# business happening in the root daemon. Its own group `unitylan-proxy` is the whole grant:
 #
-#   * its own group `unitylan-proxy` owns the certificate **private key** (engine.toml's
-#     `[cert] group`), which the engine chmods to 0640 root:unitylan-proxy after each issuance;
-#   * membership of `unitylan` lets it read the control socket (root:unitylan 0660), which is where
-#     it gets its whole configuration.
+#   * it owns the certificate **private key** (engine.toml's `[cert] group`), which the engine
+#     chmods to 0640 root:unitylan-proxy after each issuance;
+#   * it owns the **read-only** control socket (`control-ro.sock`), where the proxy reads its whole
+#     configuration — status and nothing else.
+#
+# Deliberately *not* a member of `unitylan`: that group owns the full control socket, which grants
+# authority over the whole device (expose a port, log out, apply an update). The process most likely
+# to be compromised is the last one that should hold it.
 #
 # A system account with no login shell and no home: it never needs either, and both are attack
 # surface on a machine that just serves web pages to a handful of mesh peers.
@@ -23,8 +27,8 @@ if ! getent passwd unitylan-proxy >/dev/null 2>&1; then
       || useradd --system --user-group --no-create-home --shell /sbin/nologin \
         --comment "UnityLAN TLS proxy" unitylan-proxy >/dev/null 2>&1 || true
 fi
-# Idempotent across upgrades, and re-applied in case an earlier install predates it.
-usermod -aG unitylan unitylan-proxy >/dev/null 2>&1 || true
+# Undo the membership older packages granted: it is what this account must not have.
+gpasswd -d unitylan-proxy unitylan >/dev/null 2>&1 || true
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || true

@@ -151,8 +151,10 @@ certificates. It reads its whole configuration from the engine as it changes, so
 named service needs no restart.
 
 It runs as its **own unprivileged user**, because parsing web requests from mesh peers has no
-business happening in a daemon that holds your WireGuard keys. The packages create that account and
-put it in the certificate key's group; if you built from source, say who it should be:
+business happening in a daemon that holds your WireGuard keys. That account's own group owns the
+certificate key and a **read-only** control socket beside the usual one — status only, every command
+refused — and it is in no other group, so a proxy someone breaks into still cannot drive the engine.
+The packages create the account; if you built from source, say who it should be:
 
 ```toml
 [proxy]

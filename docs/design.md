@@ -458,7 +458,9 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   the firewall and the resolver — and parsing HTTP sent by mesh peers is the archetypal work that
   should not happen there. A root engine with no `[proxy] user` **refuses** to start it rather than
   running it privileged (`proxy::run_as`). Its configuration arrives on the engine's existing `Watch`
-  push, so a renewal or a new service needs no restart and there is no file to drift; when the engine
+  push — over a **read-only** control endpoint that answers status and refuses every mutation, since
+  the full one grants authority over the whole device and this is the process most exposed to peers —
+  so a renewal or a new service needs no restart and there is no file to drift; when the engine
   is unreachable it serves nothing, since its last word may already be stale. Two gates, both fail
   closed: the firewall opens 443 to the union of everyone allowed *some* web service (a synthetic
   exposure per scope, `Firewall::effective_exposed`), and the proxy narrows that to the one service

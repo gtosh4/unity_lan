@@ -278,7 +278,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 socketserver.TCPServer(("127.0.0.1", 8096), H).serve_forever()
 ' >/dev/null 2>&1 &
-      "$PROXY" "$TMP/a/control.sock" >"$TMP/proxy.log" 2>&1 &
+      # The read-only endpoint, which is the only one a packaged proxy can open — so the test
+      # exercises the socket the real thing uses, not the full one beside it.
+      "$PROXY" "$TMP/a/control-ro.sock" >"$TMP/proxy.log" 2>&1 &
       for _ in $(seq 1 40); do
         grep -q "serving web services" "$TMP/proxy.log" 2>/dev/null && break; sleep 0.5
       done

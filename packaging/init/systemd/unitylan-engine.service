@@ -28,9 +28,12 @@ Group=unitylan
 # anchor. State survives restarts.
 StateDirectory=unitylan
 StateDirectoryMode=0700
-# /run/unitylan — root:unitylan 0750 so `unitylan` group members can traverse to the control socket.
+# /run/unitylan — root:unitylan 0751 so `unitylan` group members can traverse to the control socket,
+# and the `unitylan-proxy` account (which is deliberately not in that group) can traverse to the
+# read-only one beside it. Traversal only: neither can list the directory, and each socket carries
+# its own 0660 ownership, which is what actually decides who may connect.
 RuntimeDirectory=unitylan
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0751
 
 # Privilege: userspace WireGuard (ip/TUN), the nftables firewall, and resolvectl all need
 # CAP_NET_ADMIN; the `.internal` resolver may bind :53 (CAP_NET_BIND_SERVICE); the per-peer latency

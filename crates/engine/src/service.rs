@@ -383,6 +383,15 @@ fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<(
         println!("  note: unitylan-proxy.exe not found beside the engine; HTTPS for web services will be unavailable.");
         return Ok(());
     }
+    // The **read-only** control endpoint, derived from this installation's own config so both sides
+    // name the same pipe. Never the full one: LocalService is granted on the read-only pipe alone,
+    // and a proxy that could send `Expose` or `ApplyUpdate` to a LocalSystem daemon would give away
+    // the isolation its separate account exists for.
+    let endpoint = crate::config::Config::load(config)
+        .map(|cfg| cfg.control_readonly_path())
+        .unwrap_or_else(|_| {
+            common::control::readonly_endpoint(std::path::Path::new("control.sock"))
+        });
     let info = ServiceInfo {
         name: OsString::from(common::control::WINDOWS_PROXY_SERVICE_NAME),
         display_name: OsString::from("UnityLAN TLS proxy"),
@@ -390,9 +399,7 @@ fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<(
         start_type: ServiceStartType::OnDemand,
         error_control: ServiceErrorControl::Normal,
         executable_path: exe,
-        // The control pipe it reads its configuration from is derived from the engine's config path,
-        // the same way every other frontend derives it.
-        launch_arguments: vec![config.to_path_buf().into_os_string()],
+        launch_arguments: vec![endpoint.into_os_string()],
         dependencies: vec![],
         account_name: Some(OsString::from("NT AUTHORITY\\LocalService")),
         account_password: None,
