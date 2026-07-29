@@ -956,7 +956,9 @@ impl App {
         col.into()
     }
 
-    /// What everyone else is serving, grouped by owner — the "what's on this mesh" view.
+    /// What everyone else is serving, grouped by the device serving it — the "what's on this mesh"
+    /// view. Per device rather than per person: one owner can serve different names from different
+    /// machines, and the header is the thing you'd actually reach.
     ///
     /// Peers announce these directly over the tunnel, so a peer that is offline simply isn't here.
     fn mesh_services_section(&self) -> Element<'_, Message> {

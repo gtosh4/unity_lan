@@ -31,8 +31,15 @@ Below that, four tabs.
 
 ### Networks
 
-Every network you're in, each with a toggle. Turning one off stops peering with that network's
-members — you keep the Discord role, you just stop talking to them.
+Every network you're in, each with a toggle, grouped under the community that registered it. Turning
+one off stops peering with that network's members — you keep the Discord role, you just stop talking
+to them.
+
+At the top, **Disable new networks on discovery** governs the list below. Leave it ticked and a
+network that appears later — an admin registers a role you already hold, or you join a new server —
+arrives switched **off** until you turn it on here. Untick it and new ones start peering as soon as
+they show up. It's ticked by default on purpose: gaining a Discord role somewhere shouldn't quietly
+open your machine to that server's members.
 
 **My devices** is the same kind of toggle for machines you own. It's on by default and works with no
 Discord server at all. Turn it off and this device holds no personal address.
@@ -66,9 +73,10 @@ Named things, on your machine and everyone else's.
 - **My services** — what this machine serves under a name, each showing the full name people type
   and the ports behind it. The form below adds one; **remove** stops serving a name and closes every
   port it was on.
-- **On the mesh** — what other members are running, grouped by owner. This is the easiest way to
-  find out what's there: a green dot means the machine is up, amber means the owner has two devices
-  claiming that name and this one lost (they can rename it), red means offline.
+- **On the mesh** — what other members are running, grouped by the machine serving it, since one
+  person can serve different names from different machines. This is the easiest way to find out
+  what's there: a green dot means the machine is up, amber means the owner has two devices claiming
+  that name and this one lost (they can rename it), red means offline.
 
 Only services you're allowed to reach appear here — someone else's service scoped to a network
 you're not in is invisible rather than listed-and-refused.
