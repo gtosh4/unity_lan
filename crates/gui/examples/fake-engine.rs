@@ -239,6 +239,9 @@ fn fixture_self() -> DeviceStatus {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `username` is the owner's **allocated `<user>` label**, the same string that appears in `host` —
+/// a real engine takes both from one attestation, so a fixture where they disagree renders owners
+/// no mesh could produce.
 fn peer(
     host: &str,
     last: u8,
@@ -306,7 +309,7 @@ fn fixture_peers() -> Vec<PeerStatus> {
             true,
             Some(2),
             1001,
-            "alice#4021",
+            "alice",
             &[(common::control::OWN_DEVICES_LABEL, "")],
         ),
         // bob's primary device shows the bare `<user>.unity.internal` alias, and shares networks
@@ -318,20 +321,24 @@ fn fixture_peers() -> Vec<PeerStatus> {
             true,
             Some(12),
             2001,
-            "bob#1180",
+            "bob",
             &[("Engineering", "acme"), ("Gaming", "playhouse")],
         ),
-        // The game box the site's hero illustrates connecting to — same name in both places, so the
-        // "type a name, not an address" claim and the app's peer list line up.
-        peer(
-            "mc.bob.unity.internal",
-            11,
-            PeerReach::Ice,
-            true,
-            Some(38),
-            2001,
-            "bob#1180",
-            &[("Gaming", "playhouse")],
+        // The game box the site's hero illustrates connecting to. The *machine* is `gamebox`; the
+        // name a friend types into the game — `mc.bob.unity.internal` — is the **service** on it,
+        // which is the whole point and would read as a device name if the box were called `mc`.
+        serving(
+            peer(
+                "gamebox.bob.unity.internal",
+                11,
+                PeerReach::Ice,
+                true,
+                Some(38),
+                2001,
+                "bob",
+                &[("Gaming", "playhouse")],
+            ),
+            &[("mc", Proto::Tcp, 25565)],
         ),
         // The home server: one machine, several named things on it — the case the Services tab
         // exists for.
@@ -343,7 +350,7 @@ fn fixture_peers() -> Vec<PeerStatus> {
                 true,
                 Some(73),
                 3044,
-                "carol#7788",
+                "carol",
                 &[("Engineering", "acme")],
             ),
             &[
@@ -359,7 +366,7 @@ fn fixture_peers() -> Vec<PeerStatus> {
             false,
             None,
             4055,
-            "dave#2093",
+            "dave",
             &[("Gaming", "playhouse")],
         ),
         peer(
@@ -369,7 +376,7 @@ fn fixture_peers() -> Vec<PeerStatus> {
             false,
             None,
             5066,
-            "erin#6610",
+            "erin",
             &[("Engineering", "acme")],
         ),
     ]

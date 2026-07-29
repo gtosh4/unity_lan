@@ -102,6 +102,16 @@ pub fn default_label(port: u16) -> String {
     format!("port-{port}")
 }
 
+/// Whether a label is one [`default_label`] handed out rather than one a person chose.
+///
+/// Used to sort the chosen ones first: a list led by `port-51820` buries the service someone
+/// actually named, and the defaulted ones are exactly the entries nobody has looked at yet.
+pub fn is_default_label(label: &str) -> bool {
+    label
+        .strip_prefix("port-")
+        .is_some_and(|rest| rest.parse::<u16>().is_ok())
+}
+
 /// The full name a service answers to, given this device's own hostname and the service's label:
 /// `mc.alice.unity.internal` from `laptop.alice.unity.internal` and `mc`.
 ///
@@ -144,6 +154,17 @@ mod tests {
         }
         assert!(valid_label(&"a".repeat(MAX_LABEL_LEN)));
         assert!(!valid_label(&"a".repeat(MAX_LABEL_LEN + 1)));
+    }
+
+    #[test]
+    fn a_defaulted_label_is_recognisable_as_one() {
+        assert!(is_default_label("port-8080"));
+        assert!(is_default_label(&default_label(25565)));
+        // A name someone chose, even one that looks close.
+        assert!(!is_default_label("port"));
+        assert!(!is_default_label("port-mc"));
+        assert!(!is_default_label("port-99999"), "not a port number");
+        assert!(!is_default_label("jellyfin"));
     }
 
     /// The name has to come from the *hostname*, not the Discord handle. A handle can carry a

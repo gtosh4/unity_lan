@@ -93,8 +93,10 @@ pub struct RelayReport {
 #[derive(Clone)]
 pub struct SeedPeer {
     pub pubkey: [u8; 32],
-    /// The peer owner's Discord id + handle (from the verified attestation). `user_id` is the
-    /// identity a local peer-block acts on — stable across the owner re-keying/renaming a device.
+    /// The peer owner's Discord id, plus their allocated `<user>` DNS label — **not** their Discord
+    /// handle; the coordinator signs the label into the attestation (see [`SelfDevice::username`]).
+    /// `user_id` is the identity a local peer-block acts on — stable across the owner re-keying or
+    /// renaming a device.
     pub user_id: u64,
     pub username: String,
     pub ip: Ipv4Addr,

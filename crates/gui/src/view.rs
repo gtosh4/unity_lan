@@ -163,8 +163,10 @@ impl App {
                 .push(self.peers_section()),
             Tab::Services => Column::new()
                 .push(self.my_services_section())
-                .push_maybe(self.certs_section())
-                .push(self.mesh_services_section()),
+                .push(self.mesh_services_section())
+                // Last: a set-once, advanced control. Between the two lists it pushed everyone
+                // else's services below the fold, which is the thing people open this tab to read.
+                .push_maybe(self.certs_section()),
             Tab::Manage => Column::new()
                 .push(self.account_section())
                 .push(self.devices_section()),
@@ -777,6 +779,9 @@ impl App {
             .collect();
         names.sort_unstable();
         names.dedup();
+        // Names someone chose come first. A list led by `port-51820` buries the service they
+        // actually named, and the defaulted ones are the entries nobody has been back to.
+        names.sort_by_key(|n| common::service::is_default_label(n));
 
         let inner: Element<'_, Message> = if names.is_empty() {
             muted("Nothing named yet. A name makes a port memorable: `mc`, `jellyfin`.").into()
