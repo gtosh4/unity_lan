@@ -5,9 +5,9 @@ Unprivileged iced desktop app; drives the engine over its control socket (`commo
 
 **GUI screenshots are docs.** When a change alters what the app looks like, regenerate them with
 `scripts/readme-demo.sh` (fake-engine fixtures + scripted tour + screencast): it writes
-`assets/demo.gif`, `demo-peers.{webm,mp4}` (site hero), `peers.png`, `services.png`, `exposed.png`,
-`networks.png`. The script needs an interactive Wayland desktop with a screencast portal — not
-headless-able, so the user runs it themselves via the `! <cmd>` prefix; ask rather than attempting.
+`assets/demo.gif`, `demo-peers.{webm,mp4}` (site hero), `peers.png`, `services.png`, `networks.png`.
+The script needs an interactive Wayland desktop with a screencast portal — not headless-able, so the
+user runs it themselves via the `! <cmd>` prefix; ask rather than attempting.
 
 Keep the fixtures in `examples/fake-engine.rs` representative of the feature shown, else regenerated
 stills won't demonstrate it. Its `demo_script` is the tour the recording follows, and the still marks

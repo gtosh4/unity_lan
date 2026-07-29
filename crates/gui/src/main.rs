@@ -275,7 +275,6 @@ enum Message {
     /// Tick (`true`) or untick a scope. `AllPeers` is exclusive with the rest — it's a superset, so
     /// pairing it with a narrower scope would show a restriction the firewall isn't enforcing.
     ExposeScopeToggle(ExposeScope, bool),
-    ExposeSubmit,
     ServiceNameInput(String),
     ServiceWeb(bool),
     ServiceSubmit,
@@ -516,46 +515,6 @@ impl App {
                     }
                     self.expose_scopes.push(scope);
                 }
-            }
-            Message::ExposeSubmit => {
-                let port = match parse_port(self.expose_port_input.trim()) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.error = Some(e);
-                        return Task::none();
-                    }
-                };
-                if self.expose_scopes.is_empty() {
-                    self.error = Some("pick who can reach this port".into());
-                    return Task::none();
-                }
-                // One `Add` per scope. They're independent ops, so a scope that fails (a role
-                // revoked since the picker was built) leaves the others applied — the refetch that
-                // each op triggers shows what actually landed.
-                let proto = self.expose_proto;
-                let socket = self.socket.clone();
-                let ops: Vec<Task<Message>> = self
-                    .expose_scopes
-                    .drain(..)
-                    .map(|scope| {
-                        Task::perform(
-                            ctl::expose(
-                                socket.clone(),
-                                ExposeOp::Add {
-                                    proto,
-                                    port,
-                                    scope,
-                                    name: None,
-                                    kind: ServiceKind::Port,
-                                },
-                            ),
-                            Message::ExposesFetched,
-                        )
-                    })
-                    .collect();
-                self.expose_port_input.clear();
-                self.expose_scope_open = false;
-                return Task::batch(ops);
             }
             Message::ServiceNameInput(s) => self.service_name_input = s,
             Message::ServiceWeb(v) => self.service_web = v,
@@ -1100,21 +1059,6 @@ mod tests {
     }
 
     #[test]
-    fn expose_submit_valid_clears_the_draft() {
-        let mut a = app();
-        a.expose_port_input = "34197".into();
-        a.expose_proto = Proto::Udp;
-        a.expose_scopes = vec![ExposeScope::Net {
-            guild_id: 1,
-            role_id: 2,
-        }];
-        let _ = a.update(Message::ExposeSubmit); // dispatches the expose task
-        assert!(a.expose_port_input.is_empty());
-        assert!(a.expose_scopes.is_empty());
-        assert!(a.error.is_none());
-    }
-
-    #[test]
     fn service_submit_clears_the_draft_and_sends_the_name() {
         let mut a = app();
         a.service_name_input = "jellyfin".into();
@@ -1142,11 +1086,12 @@ mod tests {
     }
 
     #[test]
-    fn expose_submit_bad_port_surfaces_error_and_keeps_input() {
+    fn submit_with_a_bad_port_surfaces_the_error_and_keeps_the_input() {
         let mut a = app();
+        a.service_name_input = "mc".into();
         a.expose_port_input = "notaport".into();
         a.expose_scopes = vec![ExposeScope::AllPeers];
-        let _ = a.update(Message::ExposeSubmit);
+        let _ = a.update(Message::ServiceSubmit);
         assert!(a.error.is_some());
         assert_eq!(a.expose_port_input, "notaport");
         assert_eq!(
@@ -1158,10 +1103,11 @@ mod tests {
 
     /// Submitting with nothing ticked would otherwise send zero ops and look like it worked.
     #[test]
-    fn expose_submit_without_a_scope_is_refused() {
+    fn submit_without_a_scope_is_refused() {
         let mut a = app();
+        a.service_name_input = "mc".into();
         a.expose_port_input = "8080".into();
-        let _ = a.update(Message::ExposeSubmit);
+        let _ = a.update(Message::ServiceSubmit);
         assert!(a.error.is_some());
         assert!(a.expose_port_input == "8080", "draft survives");
     }
@@ -1193,6 +1139,7 @@ mod tests {
     #[test]
     fn each_ticked_scope_becomes_its_own_exposure() {
         let mut a = app();
+        a.service_name_input = "mc".into();
         a.expose_port_input = "8080".into();
         a.expose_scopes = vec![
             ExposeScope::OwnDevices,
@@ -1201,7 +1148,7 @@ mod tests {
                 role_id: 2,
             },
         ];
-        let _ = a.update(Message::ExposeSubmit);
+        let _ = a.update(Message::ServiceSubmit);
         // The draft is consumed once, not once per scope.
         assert!(a.expose_scopes.is_empty());
         assert!(a.error.is_none());

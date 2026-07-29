@@ -322,7 +322,7 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
    running:
 
    <p align="center">
-     <img src="assets/exposed.png" alt="The Manage tab: exposed ports, each with a chip per scope that can reach it" width="360">
+     <img src="assets/services.png" alt="The Services tab: this device's named services, and what other members are serving" width="360">
    </p>
 
 ## Building from source

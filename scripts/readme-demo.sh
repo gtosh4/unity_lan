@@ -16,7 +16,7 @@
 #        (flatpak install flathub com.dec05eba.gpu_screen_recorder)
 # Usage: scripts/readme-demo.sh            # writes assets/demo.gif (README), assets/demo-peers.{webm,mp4}
 #                                          # (site hero), assets/peers.png, assets/services.png,
-#                                          # assets/exposed.png, assets/networks.png
+#                                          # assets/networks.png
 #        SECS=30 FPS=15 WIDTH=400 scripts/readme-demo.sh
 set -uo pipefail
 
@@ -101,16 +101,16 @@ ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
 ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
   -c:v libx264 -crf 26 -preset slow -movflags +faststart -an "$OUT/demo-peers.mp4"
 # Stills from stable tour marks (recording starts a couple seconds into the tour): a clean Peers
-# list in the menu-closed window (tour ~18-21s), Services mid-dwell (tour 21-30s), the Manage tab
-# mid-dwell for the exposed ports (tour 30-37s), and Networks from the tour's end (it returns to the
-# Networks tab at tour t=37 and dwells there — the initial Networks view is gone before the
-# recording starts). Each mark sits in the *middle* of its dwell, so a tour timing change in
-# `fake-engine.rs` means moving these too.
+# list in the menu-closed window (tour ~18-21s), Services mid-dwell (tour 21-30s), and Networks from
+# the tour's end (it returns to the Networks tab at tour t=37 and dwells there — the initial
+# Networks view is gone before the recording starts). Each mark sits in the *middle* of its dwell, so
+# a tour timing change in `fake-engine.rs` means moving these too. The Manage tab is still visited —
+# it keeps the tour honest about what the app has — but holds only the account and devices now, so
+# nothing is cut from it.
 ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/peers.png"
 ffmpeg -y -v error -ss 25 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/services.png"
-ffmpeg -y -v error -ss 34 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/exposed.png"
 ffmpeg -y -v error -ss 39 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
 
 echo "==> done:"
 ls -la "$OUT/demo.gif" "$OUT/demo-peers.webm" "$OUT/demo-peers.mp4" \
-  "$OUT/peers.png" "$OUT/services.png" "$OUT/exposed.png" "$OUT/networks.png"
+  "$OUT/peers.png" "$OUT/services.png" "$OUT/networks.png"

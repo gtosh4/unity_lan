@@ -90,8 +90,8 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         // named ports, and what everyone else on the mesh is serving — and it is what `services.png`
         // is cut from.
         (21, UiAction::SelectTab(UiTab::Services)),
-        // Manage still holds the raw exposed-ports UI, so it dwells long enough to read the scope
-        // chips and to cut `exposed.png` from the middle of the pause.
+        // Manage is still visited so the tour shows the whole app, but it holds only the account
+        // and devices now — sharing moved to Services — so nothing is cut from it.
         (30, UiAction::SelectTab(UiTab::Manage)),
         (37, UiAction::SelectTab(UiTab::Networks)),
     ]

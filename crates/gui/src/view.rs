@@ -163,11 +163,12 @@ impl App {
                 .push(self.peers_section()),
             Tab::Services => Column::new()
                 .push(self.my_services_section())
+                .push_maybe(self.unnamed_ports_section())
+                .push_maybe(self.certs_section())
                 .push(self.mesh_services_section()),
             Tab::Manage => Column::new()
                 .push(self.account_section())
-                .push(self.devices_section())
-                .push(self.exposed_section()),
+                .push(self.devices_section()),
         };
         col.spacing(18).padding([2, 6]).into()
     }
@@ -740,84 +741,65 @@ impl App {
         column![header("networks"), policy, list].spacing(8).into()
     }
 
-    fn exposed_section(&self) -> Element<'_, Message> {
-        let inner: Element<'_, Message> = if self.exposed.is_empty() {
-            muted("No ports exposed.").into()
-        } else {
-            // One row per port, with a chip per scope that can reach it. The wire keeps these as
-            // separate exposures; collapsing them here is what makes "who can reach this port"
-            // answerable at a glance instead of by reading three rows that share a number.
-            // The chips sit on their own line below the port. A port can carry any number of
-            // scopes, so sharing one line with the port label and the close button only fits until
-            // it doesn't — at the window's 440px it already breaks at two.
-            let mut list = Column::new().spacing(10);
-            for (proto, port) in self.exposed_ports() {
-                let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
-                for e in self
-                    .exposed
+    /// Ports opened without a name — shown only when there are any.
+    ///
+    /// A named service is the front door, so this is not a second way in: it is what a port opened
+    /// by `ctl expose`, or seeded from the config, or left over from before names existed, looks
+    /// like here. Each can be closed; naming one is `add` above with the same port. Hidden entirely
+    /// when there are none, which on a device that only ever used services is always.
+    fn unnamed_ports_section(&self) -> Option<Element<'_, Message>> {
+        let unnamed: Vec<(Proto, u16)> = self
+            .exposed_ports()
+            .into_iter()
+            .filter(|(proto, port)| {
+                self.exposed
                     .iter()
-                    .filter(|e| e.proto == proto && e.port == port)
-                {
-                    chips = chips.push(scope_chip(e));
-                }
-                let head = row![
-                    text(format!("{}/{}", proto.as_str(), port))
-                        .size(14)
-                        .width(Length::Fill),
-                    button(text("close").size(13))
-                        .style(button::secondary)
-                        .on_press(Message::Unexpose {
-                            proto,
-                            port,
-                            scope: RemoveScope::All,
-                        }),
-                ]
-                .spacing(8)
-                .align_y(Vertical::Center);
-                list = list.push(column![head, chips].spacing(4));
-            }
-            list.into()
-        };
-
-        // Compose row: the port number, the protocol, and who may reach it.
-        let port_err = (!self.expose_port_input.trim().is_empty())
-            .then(|| parse_port(self.expose_port_input.trim()).err())
-            .flatten();
-        let ready = port_err.is_none()
-            && !self.expose_port_input.trim().is_empty()
-            && !self.expose_scopes.is_empty();
-        let add = row![
-            text_input("port", &self.expose_port_input)
-                .on_input(Message::ExposePortInput)
-                .on_submit(Message::ExposeSubmit)
-                .width(Length::Fixed(64.0)),
-            proto_toggle(self.expose_proto),
-            self.scope_picker(),
+                    .any(|e| e.proto == *proto && e.port == *port && e.name.is_none())
+            })
+            .collect();
+        if unnamed.is_empty() {
+            return None;
+        }
+        // One row per port, with a chip per scope that can reach it. The wire keeps these as
+        // separate exposures; collapsing them here is what makes "who can reach this port"
+        // answerable at a glance instead of by reading three rows that share a number. The chips
+        // sit on their own line below the port — a port can carry any number of scopes, so sharing
+        // one line with the port and the close button only fits until it doesn't.
+        let mut list = Column::new().spacing(10);
+        for (proto, port) in unnamed {
+            let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
+            for e in self
+                .exposed
+                .iter()
+                .filter(|e| e.proto == proto && e.port == port && e.name.is_none())
             {
-                let b = button(text("expose").size(13)).style(button::secondary);
-                // Disabled until the draft is actually sendable, so the failure shows up as a
-                // dimmed button rather than an error banner after the click.
-                if ready {
-                    b.on_press(Message::ExposeSubmit)
-                } else {
-                    b
-                }
-            },
-        ]
-        .spacing(8)
-        .align_y(Vertical::Center);
-
-        let mut col = column![header("exposed ports"), inner, add].spacing(8);
-        if let Some(e) = port_err {
-            col = col.push(text(e).size(13).color(RED));
+                chips = chips.push(scope_chip(e));
+            }
+            let head = row![
+                text(format!("{}/{}", proto.as_str(), port))
+                    .size(14)
+                    .width(Length::Fill),
+                button(text("close").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::Unexpose {
+                        proto,
+                        port,
+                        scope: RemoveScope::All,
+                    }),
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center);
+            list = list.push(column![head, chips].spacing(4));
         }
-        col = col.push(muted(
-            "Exposed ports are reachable only over the mesh, and only by the scopes you pick.",
-        ));
-        if let Some(certs) = self.certs_section() {
-            col = col.push(certs);
-        }
-        col.into()
+        Some(
+            column![
+                header("other open ports"),
+                list,
+                muted("Open, but with no name. Give one the same port above to name it."),
+            ]
+            .spacing(8)
+            .into(),
+        )
     }
 
     /// This device's own named services, plus the form that adds one.
@@ -1007,8 +989,8 @@ impl App {
         column![header("on the mesh"), inner].spacing(8).into()
     }
 
-    /// The HTTPS-certificate opt-in, shown under the exposed ports because that is the only place it
-    /// makes sense: a certificate is for serving something.
+    /// The HTTPS-certificate opt-in, shown under this device's services because that is the only
+    /// place it makes sense: a certificate is for serving something.
     ///
     /// Hidden unless the deployment issues certificates at all **and** either a port is exposed or
     /// the pref is already on. That second arm matters — without it, closing your last port would
