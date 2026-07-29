@@ -199,6 +199,34 @@ got=$(dig_at "$NSC" "$C_IP" "$JELLY")
 [ "$got" = "$A_IP" ] && ok "C resolves the unscoped jelly" \
   || bad "C resolved jelly to '$got', expected $A_IP"
 
+echo "=== widening a service by name reaches the network it gains ==="
+# `service scope` widens by name: A never restates mc's port, and the announcement scoping follows,
+# so C — previously not told the name existed — starts resolving it.
+"$ENG" -c "$TMP/a.toml" ctl service scope mc --net mesh2 >>"$TMP/svc.log" 2>&1 \
+  || bad "service scope failed: $(tail -2 "$TMP/svc.log")"
+for _ in $(seq 1 90); do
+  [ "$(dig_at "$NSC" "$C_IP" "$MC")" = "$A_IP" ] && break
+  sleep 0.5
+done
+got=$(dig_at "$NSC" "$C_IP" "$MC")
+[ "$got" = "$A_IP" ] && ok "C resolves mc once A widens it to mesh2" \
+  || bad "C resolved mc to '$got' after widening, expected $A_IP"
+
+# Widening must not have moved it: B is in mesh and keeps it.
+got=$(dig_at "$NSB" "$B_IP" "$MC")
+[ "$got" = "$A_IP" ] && ok "B still resolves mc after the widening" \
+  || bad "widening mc lost its original scope (B got '$got')"
+
+# One name, one port, two scopes — not a second port invented along the way.
+ports=$("$ENG" -c "$TMP/a.toml" ctl exposes 2>&1 | grep -c "25565" || true)
+[ "$ports" = 2 ] && ok "the widened service is one port on two scopes" \
+  || bad "expected 25565 on exactly 2 scopes, found $ports"
+
+# Saying it twice is a no-op, not a duplicate rule.
+again=$("$ENG" -c "$TMP/a.toml" ctl service scope mc --net mesh2 2>&1)
+echo "$again" | grep -qi "already open" \
+  && ok "widening to a scope it already has says so" || bad "re-widening was not a no-op: $again"
+
 # A device name outranks a service label: A cannot make its own hostname point elsewhere, and a
 # name nobody claims stays NXDOMAIN.
 got=$(dig_at "$NSB" "$B_IP" "nothing.$A_USER.unity.internal")
