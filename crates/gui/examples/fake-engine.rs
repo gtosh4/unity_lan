@@ -137,12 +137,15 @@ impl State {
                     kind: common::service::ServiceKind::Web,
                     active: true,
                 },
+                // A port opened without a name of its own, which the engine names after its
+                // number on load — there is no such thing as a nameless exposure any more, and a
+                // fixture carrying one would show a state the app can no longer be in.
                 ExposedPort {
                     proto: Proto::Udp,
                     port: 51820,
                     scope: ExposeScope::OwnDevices,
                     label: common::control::OWN_DEVICES_LABEL.into(),
-                    name: None,
+                    name: Some(common::service::default_label(51820)),
                     kind: common::service::ServiceKind::Port,
                     active: true,
                 },
@@ -466,6 +469,8 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                             || scope.fallback_label(),
                             |n| format!("{} @ {}", n.name, n.guild_name),
                         );
+                    // Mirrors the engine: an exposure with no name of its own gets `port-<number>`.
+                    let name = Some(name.unwrap_or_else(|| common::service::default_label(port)));
                     let what = name
                         .clone()
                         .unwrap_or_else(|| format!("{}/{port}", proto.as_str()));

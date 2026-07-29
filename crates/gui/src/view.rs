@@ -163,7 +163,6 @@ impl App {
                 .push(self.peers_section()),
             Tab::Services => Column::new()
                 .push(self.my_services_section())
-                .push_maybe(self.unnamed_ports_section())
                 .push_maybe(self.certs_section())
                 .push(self.mesh_services_section()),
             Tab::Manage => Column::new()
@@ -757,67 +756,6 @@ impl App {
         column![policy, list].spacing(8).into()
     }
 
-    /// Ports opened without a name — shown only when there are any.
-    ///
-    /// A named service is the front door, so this is not a second way in: it is what a port opened
-    /// by `ctl expose`, or seeded from the config, or left over from before names existed, looks
-    /// like here. Each can be closed; naming one is `add` above with the same port. Hidden entirely
-    /// when there are none, which on a device that only ever used services is always.
-    fn unnamed_ports_section(&self) -> Option<Element<'_, Message>> {
-        let unnamed: Vec<(Proto, u16)> = self
-            .exposed_ports()
-            .into_iter()
-            .filter(|(proto, port)| {
-                self.exposed
-                    .iter()
-                    .any(|e| e.proto == *proto && e.port == *port && e.name.is_none())
-            })
-            .collect();
-        if unnamed.is_empty() {
-            return None;
-        }
-        // One row per port, with a chip per scope that can reach it. The wire keeps these as
-        // separate exposures; collapsing them here is what makes "who can reach this port"
-        // answerable at a glance instead of by reading three rows that share a number. The chips
-        // sit on their own line below the port — a port can carry any number of scopes, so sharing
-        // one line with the port and the close button only fits until it doesn't.
-        let mut list = Column::new().spacing(10);
-        for (proto, port) in unnamed {
-            let mut chips = Row::new().spacing(6).align_y(Vertical::Center);
-            for e in self
-                .exposed
-                .iter()
-                .filter(|e| e.proto == proto && e.port == port && e.name.is_none())
-            {
-                chips = chips.push(scope_chip(e));
-            }
-            let head = row![
-                text(format!("{}/{}", proto.as_str(), port))
-                    .size(14)
-                    .width(Length::Fill),
-                button(text("close").size(13))
-                    .style(button::secondary)
-                    .on_press(Message::Unexpose {
-                        proto,
-                        port,
-                        scope: RemoveScope::All,
-                    }),
-            ]
-            .spacing(8)
-            .align_y(Vertical::Center);
-            list = list.push(column![head, chips].spacing(4));
-        }
-        Some(
-            column![
-                header("other open ports"),
-                list,
-                muted("Open, but with no name. Give one the same port above to name it."),
-            ]
-            .spacing(8)
-            .into(),
-        )
-    }
-
     /// This device's own named services, plus the form that adds one.
     ///
     /// A service is an exposed port with a name, so this reads the same `exposed` list the Manage
@@ -1046,18 +984,6 @@ impl App {
             }
         }
         Some(column![header("https certificate"), col].spacing(8).into())
-    }
-
-    /// The exposed (proto, port) pairs in first-seen order — the rows, each of which may carry
-    /// several scopes.
-    fn exposed_ports(&self) -> Vec<(Proto, u16)> {
-        let mut seen = Vec::new();
-        for e in &self.exposed {
-            if !seen.contains(&(e.proto, e.port)) {
-                seen.push((e.proto, e.port));
-            }
-        }
-        seen
     }
 
     /// The multi-select scope picker. Collapsed it reports the selection; expanded it offers

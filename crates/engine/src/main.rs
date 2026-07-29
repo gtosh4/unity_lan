@@ -166,7 +166,8 @@ enum CtlCmd {
         #[arg(long, conflicts_with = "net")]
         own_devices: bool,
         /// Name this port, so peers reach it as `<name>.<you>.unity.internal` — the same thing
-        /// `service add` does, for when you are already reaching for `expose`.
+        /// `service add` does, for when you are already reaching for `expose`. Without it the port
+        /// is named `port-<number>`: every exposure is a service, so none of them is nameless.
         #[arg(long)]
         name: Option<String>,
     },

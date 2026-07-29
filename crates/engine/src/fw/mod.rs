@@ -230,6 +230,20 @@ impl Firewall {
             }),
             Err(_) => seeds.clone(),
         };
+        // Name anything that arrived without one. A port from `ctl expose`, a config seed, or a
+        // state file written before names existed would otherwise be a second kind of thing the UI
+        // and the announcement path both have to special-case; giving it `port-<n>` makes every
+        // exposure a service and leaves one list instead of two. Done at load rather than in the
+        // apply path so the *new* binary is what repairs old state (see the engine's CLAUDE.md).
+        let exposed: Vec<Exposed> = exposed
+            .into_iter()
+            .map(|mut e| {
+                if e.name.is_none() {
+                    e.name = Some(common::service::default_label(e.port));
+                }
+                e
+            })
+            .collect();
         Self {
             backend,
             iface,
@@ -295,6 +309,8 @@ impl Firewall {
         name: Option<String>,
         kind: common::service::ServiceKind,
     ) -> anyhow::Result<Vec<ExposedPort>> {
+        // Unnamed is not a state an exposure can be in — `ctl expose 8080` is `port-8080`.
+        let name = Some(name.unwrap_or_else(|| common::service::default_label(port)));
         if let Some(name) = &name {
             if !common::service::valid_label(name) {
                 anyhow::bail!("{}", common::service::label_error(name));
@@ -735,8 +751,8 @@ mod tests {
         assert_eq!(f.unexpose_named("mc").unwrap().0, 0, "already gone");
     }
 
-    /// Naming an already-open port is how an existing exposure gets a name — the alternative is
-    /// closing and reopening it, which drops traffic for no reason.
+    /// Renaming an already-open port is how a defaulted name becomes a real one — the alternative
+    /// is closing and reopening it, which drops traffic for no reason.
     #[test]
     fn re_exposing_a_port_with_a_name_names_it_in_place() {
         let d = TempDir::new("svc-rename");
@@ -749,7 +765,11 @@ mod tests {
             ServiceKind::Port,
         )
         .unwrap();
-        assert!(f.own_services().is_empty());
+        assert_eq!(
+            f.own_services()[0].name,
+            "port-8096",
+            "the default to begin with"
+        );
         let listed = f
             .expose(
                 Proto::Tcp,
@@ -890,9 +910,11 @@ mod tests {
             .all(|e| e.port != common::control::HTTPS_PORT));
     }
 
-    /// A state file written before names existed must still load, with its ports unnamed.
+    /// A state file written before names existed still loads, and its ports are named on the way in
+    /// — "an open port with no name" is not a state the model has any more, so the migration happens
+    /// where the *new* binary reads the old file rather than where the old one wrote it.
     #[test]
-    fn an_exposure_written_before_names_loads_as_an_unnamed_port() {
+    fn an_exposure_written_before_names_is_named_on_load() {
         let d = TempDir::new("svc-legacy");
         std::fs::write(
             d.join("exposed.json"),
@@ -901,8 +923,43 @@ mod tests {
         .unwrap();
         let f = fw(&d, vec![]);
         assert_eq!(f.list().len(), 1);
-        assert_eq!(f.list()[0].name, None);
-        assert!(f.own_services().is_empty());
+        assert_eq!(f.list()[0].name.as_deref(), Some("port-8080"));
+        // ...and it is a service like any other: announced, and resolvable by that name.
+        assert_eq!(f.own_services().len(), 1);
+        assert_eq!(f.own_services()[0].name, "port-8080");
+    }
+
+    /// The same rule at runtime: `ctl expose 8080` with no name is `port-8080`, not a nameless port.
+    #[test]
+    fn a_port_exposed_without_a_name_gets_the_default_one() {
+        let d = TempDir::new("svc-default-name");
+        let f = fw(&d, vec![]);
+        f.expose(
+            Proto::Tcp,
+            8080,
+            ExposeScope::AllPeers,
+            None,
+            ServiceKind::Port,
+        )
+        .unwrap();
+        assert_eq!(f.list()[0].name.as_deref(), Some("port-8080"));
+        // tcp and udp on one port are one service, which is what a game server usually wants.
+        f.expose(
+            Proto::Udp,
+            8080,
+            ExposeScope::AllPeers,
+            None,
+            ServiceKind::Port,
+        )
+        .unwrap();
+        let services = f.own_services();
+        let names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["port-8080", "port-8080"]);
+        assert_eq!(
+            f.unexpose_named("port-8080").unwrap().0,
+            2,
+            "closed together"
+        );
     }
 
     /// A resolved network scope, addressed by the shared fixture ids so a scope built here matches

@@ -95,7 +95,10 @@ sudo unitylan-engine ctl service rm mc                          # stop serving i
 ```
 
 `service add` is `expose` plus a name, so everything above about scopes applies unchanged — including
-that a name is only announced to peers who could reach the port anyway. Run it twice with the same
+that a name is only announced to peers who could reach the port anyway. A port opened by `expose`
+with no name of its own is called `port-<number>`: every exposure is a service, so there is no second
+kind of thing to keep track of. Re-run `service add` with the same port and scope to give one a real
+name in place. Run it twice with the same
 name to put one service on two ports (a game wanting TCP and UDP), and `service rm` closes both.
 
 One machine can carry as many names as it runs things: `mc`, `jellyfin`, `git`. They all resolve to

@@ -173,7 +173,7 @@ Want the real depth — trust model, NAT strategy, why not fully serverless? See
 - **Nothing on your machine is exposed by default.** Joining a network does *not* open your box up.
   The engine installs a host firewall that, on the mesh interface, **drops all inbound** except what
   you explicitly share — a peer can ping you and nothing else. To let peers reach a service you name
-  it (or `expose` a bare port), and you can scope it to a single network's members — a peer outside
+  it, and you can scope it to a single network's members — a peer outside
   that scope isn't even told the name exists. Your regular LAN and
   localhost traffic is never touched. So a random role-holder can be *on the mesh* without being able
   to open a single connection to your machine.
@@ -306,7 +306,7 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
    sudo unitylan-engine ctl status
    sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
    sudo unitylan-engine ctl service add jellyfin 8096 --web        # + a real HTTPS certificate
-   sudo unitylan-engine ctl expose 22 --own-devices                # a bare port, unnamed
+   sudo unitylan-engine ctl expose 22 --own-devices                # unnamed → `port-22`
    ```
 
    These find `/etc/unitylan/engine.toml` on their own (an `engine.toml` in the working directory

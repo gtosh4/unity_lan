@@ -66,8 +66,6 @@ Named things, on your machine and everyone else's.
 - **My services** — what this machine serves under a name, each showing the full name people type
   and the ports behind it. The form below adds one; **remove** stops serving a name and closes every
   port it was on.
-- **Other open ports** — ports opened without a name (from the command line, or carried over from
-  an older version). Only shown when you have some.
 - **On the mesh** — what other members are running, grouped by owner. This is the easiest way to
   find out what's there: a green dot means the machine is up, amber means the owner has two devices
   claiming that name and this one lost (they can rename it), red means offline.
@@ -109,9 +107,10 @@ The name is the point. `100.83.12.4:25565` is not something anyone remembers, bu
 `mc.alice.unity.internal` — which you can type into a game's server browser, a browser, or an SSH
 command, and read out loud to a friend.
 
-If you opened a port from the command line without naming it, or carried one over from an older
-version, it appears under **other open ports** with a **close** button. Adding a service on the same
-port gives it a name.
+Every open port is a service, so there is only ever one list. A port you opened without naming it —
+from the command line, or carried over from an older version — is called `port-25565` after its
+number, and resolves like any other name. To give it a better one, add a service with the same port
+and scope: that renames it in place rather than opening a second copy.
 
 One machine can serve as many as you like: `mc`, `jellyfin`, `git`, each its own name pointing at the
 same device. The Services tab also lists what everyone else on your mesh is running, which is the

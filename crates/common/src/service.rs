@@ -91,6 +91,17 @@ pub struct MeshService {
     pub kind: ServiceKind,
 }
 
+/// The name an unnamed port gets: `port-25565`.
+///
+/// Every exposure carries a name, so "an open port with no name" is not a state the model has — a
+/// port opened without one (from `ctl expose`, a config seed, or a state file written before names
+/// existed) is given this at load. That keeps one list instead of two, and the name is a real one:
+/// `port-25565.alice.unity.internal` resolves like any other, so even a port nobody bothered to name
+/// is reachable without an address.
+pub fn default_label(port: u16) -> String {
+    format!("port-{port}")
+}
+
 /// The full name a service answers to, given this device's own hostname and the service's label:
 /// `mc.alice.unity.internal` from `laptop.alice.unity.internal` and `mc`.
 ///
