@@ -260,7 +260,14 @@ impl ExposeSeed {
                 name: n.clone(),
             }),
             (None, true) => Ok(common::control::ExposeScope::OwnDevices),
-            (None, false) => Ok(common::control::ExposeScope::AllPeers),
+            // No scope used to mean every peer. It is refused now: the widest possible sharing was
+            // what you got by leaving a field out, which is the wrong way round for a decision this
+            // size. Say who, every time.
+            (None, false) => anyhow::bail!(
+                "expose entry for port {} names no scope; add `net = \"<network>\"` (with `guild` \
+                 if two of your communities share the role name) or `own_devices = true`",
+                self.port
+            ),
             (Some(_), true) => anyhow::bail!(
                 "expose entry for port {} sets both `net` and `own_devices`; an exposure has one \
                  scope, so pick one (repeat the entry to open a port to both)",
@@ -447,16 +454,15 @@ mod tests {
         assert_eq!(none.log_file_path(), None);
     }
 
-    /// A config-seeded exposure gets the same three scopes as `ctl expose`, defaulting to the
-    /// behaviour config seeds always had (every peer).
+    /// A config-seeded exposure carries the same scopes `ctl expose` accepts — and, like it, must
+    /// name one. A seed that named none used to open the port to every peer, which made the widest
+    /// sharing the mesh can express the thing you got by leaving a line out.
     #[test]
     fn expose_seeds_carry_a_scope() {
         let cfg: Config = toml::from_str(
             r#"
 coordinator = "https://c"
 state_dir = "s"
-[[expose]]
-port = 25565
 [[expose]]
 port = 9001
 net = "minecraft"
@@ -475,7 +481,6 @@ own_devices = true
         assert_eq!(
             scopes,
             vec![
-                common::control::ExposeScope::AllPeers,
                 common::control::ExposeScope::Unresolved {
                     guild: None,
                     name: "minecraft".into(),
@@ -486,6 +491,22 @@ own_devices = true
                 },
                 common::control::ExposeScope::OwnDevices,
             ],
+        );
+
+        // A seed with no scope is refused at load, naming the port so the line is findable.
+        let unscoped: Config = toml::from_str(
+            r#"
+coordinator = "https://c"
+state_dir = "s"
+[[expose]]
+port = 25565
+"#,
+        )
+        .unwrap();
+        let err = unscoped.expose[0].scope().unwrap_err().to_string();
+        assert!(
+            err.contains("25565") && err.contains("own_devices"),
+            "{err}"
         );
     }
 

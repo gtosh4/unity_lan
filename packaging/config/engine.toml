@@ -33,10 +33,13 @@ control_group = "unitylan"
 
 # --- firewall (default-deny inbound on the wg iface; secure by default) ---
 # firewall = true
-# expose = [ { port = 25565, proto = "tcp" } ]
+# Every entry names who it is for: `net` (a network you're in, plus `guild` if two of your
+# communities share the role name), or `own_devices = true`. There is no "everyone" — sharing says
+# who, so the widest reach is never the thing you get by leaving a field out.
+# expose = [ { port = 25565, proto = "tcp", net = "gaming" } ]
 # A named service is an exposed port people can remember — `mc.<you>.unity.internal`. Add `web = true`
 # for something a browser opens, and it goes into this device's HTTPS certificate too.
-# expose = [ { port = 25565, proto = "tcp", name = "mc" }, { port = 8096, name = "jellyfin", web = true } ]
+# expose = [ { port = 25565, proto = "tcp", name = "mc", net = "gaming" }, { port = 8096, name = "jellyfin", web = true, net = "home" } ]
 
 # --- HTTPS for web services ---
 # The proxy terminates TLS for `web` services and forwards to them over plain HTTP on loopback, so

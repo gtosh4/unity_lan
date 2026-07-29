@@ -66,10 +66,15 @@ Nothing is reachable until you say so — the mesh firewall drops all inbound ex
 ```sh
 sudo unitylan-engine ctl status                        # confirm it's on the mesh
 sudo unitylan-engine ctl expose 25565 minecraft        # to one network's members
-sudo unitylan-engine ctl expose udp/34197              # to every peer you mesh with
+sudo unitylan-engine ctl expose udp/34197 gaming       # ...and another network
 sudo unitylan-engine ctl expose 22 --own-devices       # to your own machines only
 sudo unitylan-engine ctl exposes                       # what's open, and to whom
 ```
+
+Every exposure names who it is for — a network, or `--own-devices`. There is no "everyone": the
+widest sharing the mesh can express should never be what you get by typing least, so it is not a
+default and there is no flag for it. A port exposed that way before this stays open and keeps
+working; nothing is taken away, there is just no way to choose it afresh.
 
 Scopes stack: run `expose` again with a different network to open one port to several, then close
 them individually with `unexpose … --net <name>`. `unexpose <port>` with no scope closes every scope
@@ -89,7 +94,7 @@ A port that people have to remember by number is a port they will ask you about.
 
 ```sh
 sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
-sudo unitylan-engine ctl service add jellyfin 8096              # to every peer you mesh with
+sudo unitylan-engine ctl service add jellyfin 8096 --own-devices  # just your own machines
 sudo unitylan-engine ctl services                               # names, ports and who can reach them
 sudo unitylan-engine ctl service scope mc --net gaming          # also offer it to another network
 sudo unitylan-engine ctl service rm mc                          # stop serving it, closing its ports
@@ -105,8 +110,8 @@ name to put one service on two ports (a game wanting TCP and UDP), and `service 
 `service scope` offers an existing one to another network without restating it: name the service and
 the network, and every port it runs on opens there. Nothing to look up, and no way to add a port by
 mistyping one — which is what happens if you reach for `service add` instead and get the number
-wrong. Saying it twice is a no-op. It insists on `--net` or `--own-devices` rather than defaulting to
-every peer, since that would be a silent widening of something already running.
+wrong. Saying it twice is a no-op. Like every other kind of sharing it insists on `--net` or
+`--own-devices`.
 
 One machine can carry as many names as it runs things: `mc`, `jellyfin`, `git`. They all resolve to
 this device, from any meshed machine, with nothing to configure on the other end.
@@ -134,7 +139,7 @@ local one the proxy forwards to:
 
 ```
 jellyfin  (jellyfin.alice.mesh.unitylan.com)
-    https  ·  tcp/8096 behind it (everyone)
+    https  ·  tcp/8096 behind it (My devices)
 mc  (mc.alice.unity.internal)
     tcp/25565 (minecraft)
 ```

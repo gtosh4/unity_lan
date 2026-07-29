@@ -168,7 +168,7 @@ becomes() { # becomes <port> open|closed
 
 probe 9001 && { echo "FAIL: 9001 reachable before expose (default-deny not enforced)"; exit 1; }
 echo "pre-expose: 9001 blocked by default-deny ✓"
-"$ENG" -c "$TMP/b.toml" ctl expose 9001
+"$ENG" -c "$TMP/b.toml" ctl expose 9001 mesh
 becomes 9001 open || { echo "FAIL: 9001 unreachable after expose"; exit 1; }
 echo "post-expose: 9001 reachable ✓"
 probe 9002 && { echo "FAIL: never-exposed 9002 reachable"; exit 1; }

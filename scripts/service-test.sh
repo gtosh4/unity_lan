@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Named services, end to end. Three nodes on two networks:
 #   A ∈ {mesh, mesh2}   B ∈ {mesh}   C ∈ {mesh2}
-# A serves `mc` scoped to mesh and `jelly` open to every peer, then we prove the two halves of the
+# A serves `mc` scoped to mesh and `jelly` offered to both networks, then we prove the two halves of the
 # feature that only meet on a real mesh:
 #   * the name resolves — B's resolver answers A's service name with A's mesh address. A's handle is
 #     deliberately not a valid DNS label, so the expected names are derived from the hostname the
 #     engine reports rather than hardcoded: composing them from the Discord handle is the bug this
 #     pins down;
 #   * the name is scoped exactly like the port — C, who cannot reach `mc`, is never even told it
-#     exists, while both peers learn the unscoped `jelly`.
+#     exists, while both peers learn `jelly`, which A offered to both.
 # Announcements are peer-direct over the tunnel; the coordinator holds no service state, so this
 # also demonstrates a mesh feature that costs the control plane nothing.
 #
@@ -142,11 +142,14 @@ fail=0
 ok()  { echo "  ok: $1"; }
 bad() { echo "  FAIL: $1"; fail=1; }
 
-echo "=== A serves 'mc' (scoped to mesh) and 'jelly' (every peer) ==="
+echo "=== A serves 'mc' (scoped to mesh) and 'jelly' (both networks) ==="
 "$ENG" -c "$TMP/a.toml" ctl service add mc 25565 --net mesh >"$TMP/svc.log" 2>&1 \
   || { bad "service add mc: $(tail -2 "$TMP/svc.log")"; }
-"$ENG" -c "$TMP/a.toml" ctl service add jelly 8096 >>"$TMP/svc.log" 2>&1 \
-  || { bad "service add jelly: $(tail -2 "$TMP/svc.log")"; }
+# Every exposure names who it is for, so reaching both networks is two scopes on one name.
+for n in mesh mesh2; do
+  "$ENG" -c "$TMP/a.toml" ctl service add jelly 8096 --net "$n" >>"$TMP/svc.log" 2>&1 \
+    || { bad "service add jelly --net $n: $(tail -2 "$TMP/svc.log")"; }
+done
 
 # A's allocated `<user>` label, read out of the hostname the engine reports — never assumed from the
 # Discord handle, which here is `nodea#4021` and is not a DNS label at all.
@@ -188,15 +191,23 @@ got=$(dig_at "$NSB" "$B_IP" "$JELLY")
 [ "$got" = "$A_IP" ] && ok "B resolves $JELLY -> A" \
   || bad "B resolved jelly to '$got', expected $A_IP"
 
+# C polls on its own cadence, so wait for it the way we waited for B before asserting anything about
+# what C knows — otherwise "C hasn't polled yet" and "C was never told" look identical, which would
+# make the scope assertion below pass for the wrong reason.
+for _ in $(seq 1 90); do
+  [ "$(dig_at "$NSC" "$C_IP" "$JELLY")" = "$A_IP" ] && break
+  sleep 0.5
+done
+
 # C is in mesh2, which `mc` is not scoped to. It must never learn the name — being told about a
 # service it cannot reach would leak exactly what the scope exists to withhold.
 got=$(dig_at "$NSC" "$C_IP" "$MC")
 [ -z "$got" ] && ok "C is never told about mc (scoped to a network it isn't in)" \
   || bad "C resolved a service outside its scope: '$got'"
 
-# ...while the unscoped one reaches both.
+# ...while the one offered to both networks reaches both.
 got=$(dig_at "$NSC" "$C_IP" "$JELLY")
-[ "$got" = "$A_IP" ] && ok "C resolves the unscoped jelly" \
+[ "$got" = "$A_IP" ] && ok "C resolves jelly, which A offered to mesh2 as well" \
   || bad "C resolved jelly to '$got', expected $A_IP"
 
 echo "=== widening a service by name reaches the network it gains ==="

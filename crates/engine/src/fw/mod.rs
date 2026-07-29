@@ -515,13 +515,25 @@ impl Firewall {
         cert_domain: Option<&str>,
     ) -> Vec<common::control::ProxyRoute> {
         let peers = self.peers.lock().unwrap();
+        // This device's own mesh address is always allowed. The firewall already exempts traffic
+        // addressed to it (the loopback half of the CGNAT compat rules), so without this the two
+        // layers disagree: the packet arrives and the proxy then refuses it. Reaching your own
+        // service by its own name — the first thing anyone does after setting one up — is not
+        // sharing, and no scope should have to list you.
+        let own = *self.mesh_addr.lock().unwrap();
         let mut out: Vec<common::control::ProxyRoute> = Vec::new();
         for e in self.exposed.lock().unwrap().iter() {
             if e.kind != common::service::ServiceKind::Web {
                 continue;
             }
             let Some(name) = &e.name else { continue };
-            let allow = peers.sources(&e.scope).map(<[Ipv4Addr]>::to_vec);
+            let allow = peers.sources(&e.scope).map(|ips| {
+                let mut ips = ips.to_vec();
+                ips.extend(own);
+                ips.sort_unstable();
+                ips.dedup();
+                ips
+            });
             let hostnames: Vec<String> =
                 std::iter::once(format!("{name}.{user}.{}", common::DNS_SUFFIX))
                     .chain(cert_domain.map(|d| format!("{name}.{user}.{d}")))
@@ -964,6 +976,36 @@ mod tests {
         assert_eq!(f.web_service_labels(), vec!["jellyfin".to_string()]);
         // ...while both are announced to peers, which is where a game server belongs.
         assert_eq!(f.own_services().len(), 2);
+    }
+
+    /// The route a scoped web service hands the proxy admits its scope *and this device*. The
+    /// firewall already lets traffic to our own mesh address through, so leaving us off the list
+    /// makes the two layers disagree — the packet arrives and the proxy refuses it — and reaching
+    /// your own service by its own name is the first thing anyone does after setting one up.
+    #[test]
+    fn a_web_route_admits_its_scope_and_this_device() {
+        let d = TempDir::new("svc-route-self");
+        let f = fw(&d, vec![]);
+        let me = Ipv4Addr::new(100, 64, 0, 1);
+        let peer = Ipv4Addr::new(100, 64, 0, 5);
+        let stranger = Ipv4Addr::new(100, 64, 0, 9);
+        f.set_mesh_addr(me).unwrap();
+        f.update_peers(peers_with(&[peer], &[])).unwrap();
+        f.expose(
+            Proto::Tcp,
+            8096,
+            net("minecraft"),
+            Some("jellyfin".into()),
+            ServiceKind::Web,
+        )
+        .unwrap();
+
+        let routes = f.web_routes("alice", Some("mesh.example.com"));
+        assert_eq!(routes.len(), 1);
+        let allow = routes[0].allow.as_ref().expect("a scoped route restricts");
+        assert!(allow.contains(&peer), "the scope's peers");
+        assert!(allow.contains(&me), "and us");
+        assert!(!allow.contains(&stranger), "and nobody else");
     }
 
     /// A web service's own port is never opened to the mesh — the proxy reaches it over loopback —
