@@ -829,6 +829,16 @@ impl App {
                 {
                     chips = chips.push(scope_chip(e));
                 }
+                // Removing a scope is one click on its chip; adding one used to mean retyping the
+                // name and port in the form below, where a mistyped port gives the name a second
+                // port instead of widening it. So: the same row, the other direction.
+                let widen_open = self.widening.as_deref() == Some(name);
+                chips = chips.push(
+                    button(text(if widen_open { "cancel" } else { "+" }).size(13))
+                        .style(button::text)
+                        .padding([0, 4])
+                        .on_press(Message::WidenOpen((!widen_open).then(|| name.to_string()))),
+                );
                 // One port per line, however many scopes carry it: the scopes are the chips below,
                 // and repeating `tcp/8080` once per scope reads as two services on one name.
                 let mut ports: Vec<String> = self
@@ -868,7 +878,11 @@ impl App {
                 ]
                 .spacing(8)
                 .align_y(Vertical::Center);
-                list = list.push(column![head, chips].spacing(4));
+                let mut entry = column![head, chips].spacing(4);
+                if widen_open {
+                    entry = entry.push(self.widen_picker(name));
+                }
+                list = list.push(entry);
             }
             list.into()
         };
@@ -1044,6 +1058,55 @@ impl App {
             }
         }
         Some(column![header("https certificate"), col].spacing(8).into())
+    }
+
+    /// The scopes the service called `name` could still be offered to.
+    ///
+    /// `None` when it is already open to every peer: there is nothing wider, and every narrower
+    /// scope would be a click that changes no access while adding a chip implying a restriction.
+    ///
+    /// Scopes it already holds are dropped — they are the chips beside the `+`, and re-offering one
+    /// is a click that does nothing. `AllPeers` is dropped too, deliberately: it is a superset, so
+    /// pairing it with the narrower scopes already on the service would display a restriction the
+    /// firewall is not enforcing, which is the same reason the add form treats the two as exclusive.
+    /// Going public is a decision made when adding a service, not a widening.
+    pub(crate) fn widenable_scopes(&self, name: &str) -> Option<Vec<(ExposeScope, String)>> {
+        let held: Vec<&ExposeScope> = self
+            .exposed
+            .iter()
+            .filter(|e| e.name.as_deref() == Some(name))
+            .map(|e| &e.scope)
+            .collect();
+        if held.contains(&&ExposeScope::AllPeers) {
+            return None;
+        }
+        Some(
+            self.selectable_scopes()
+                .into_iter()
+                .filter(|(scope, _)| *scope != ExposeScope::AllPeers && !held.contains(&scope))
+                .collect(),
+        )
+    }
+
+    /// One click per network this service could also be offered to. No port to confirm — the engine
+    /// takes the ports from the name, which is the whole point of widening this way.
+    fn widen_picker(&self, name: &str) -> Element<'_, Message> {
+        let Some(scopes) = self.widenable_scopes(name) else {
+            return muted("already offered to every peer you mesh with").into();
+        };
+        if scopes.is_empty() {
+            return muted("already offered to every network you're in").into();
+        }
+        let mut col = Column::new().spacing(4).padding([0, 8]);
+        for (scope, label) in scopes {
+            let name = name.to_string();
+            col = col.push(
+                button(text(format!("offer to {label}")).size(13))
+                    .style(button::secondary)
+                    .on_press(Message::Widen { name, scope }),
+            );
+        }
+        col.into()
     }
 
     /// The multi-select scope picker. Collapsed it reports the selection; expanded it offers

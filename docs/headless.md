@@ -91,6 +91,7 @@ A port that people have to remember by number is a port they will ask you about.
 sudo unitylan-engine ctl service add mc 25565 --net minecraft   # mc.<you>.unity.internal
 sudo unitylan-engine ctl service add jellyfin 8096              # to every peer you mesh with
 sudo unitylan-engine ctl services                               # names, ports and who can reach them
+sudo unitylan-engine ctl service scope mc --net gaming          # also offer it to another network
 sudo unitylan-engine ctl service rm mc                          # stop serving it, closing its ports
 ```
 
@@ -100,6 +101,12 @@ with no name of its own is called `port-<number>`: every exposure is a service, 
 kind of thing to keep track of. Re-run `service add` with the same port and scope to give one a real
 name in place. Run it twice with the same
 name to put one service on two ports (a game wanting TCP and UDP), and `service rm` closes both.
+
+`service scope` offers an existing one to another network without restating it: name the service and
+the network, and every port it runs on opens there. Nothing to look up, and no way to add a port by
+mistyping one — which is what happens if you reach for `service add` instead and get the number
+wrong. Saying it twice is a no-op. It insists on `--net` or `--own-devices` rather than defaulting to
+every peer, since that would be a silent widening of something already running.
 
 One machine can carry as many names as it runs things: `mc`, `jellyfin`, `git`. They all resolve to
 this device, from any meshed machine, with nothing to configure on the other end.

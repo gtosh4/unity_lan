@@ -381,6 +381,56 @@ impl Firewall {
         Ok(self.list())
     }
 
+    /// Open every port carrying `name` to one more scope — the counterpart of [`Self::unexpose_named`].
+    ///
+    /// Returns how many ports were newly opened alongside the exposed set: `0` means either no such
+    /// service or one already open to that scope, which the caller distinguishes and phrases. Ports
+    /// already carrying the scope are left alone rather than re-pushed, so widening twice is a
+    /// no-op instead of a duplicate rule.
+    ///
+    /// The service's `kind` rides along per port. A web service widened to another network stays a
+    /// web service there — the alternative would silently demote it to a plain port on the new
+    /// scope, and it would drop out of the certificate for reasons nobody could see.
+    pub fn expose_named_scope(
+        &self,
+        name: &str,
+        scope: ExposeScope,
+    ) -> anyhow::Result<(usize, Vec<ExposedPort>)> {
+        let added = {
+            let mut set = self.exposed.lock().unwrap();
+            // Collected first: the loop below pushes to `set`, and the new entries carry the name
+            // too, so iterating it live would widen the ones we just added.
+            let targets: Vec<(Proto, u16, common::service::ServiceKind)> = set
+                .iter()
+                .filter(|e| e.name.as_deref() == Some(name))
+                .map(|e| (e.proto, e.port, e.kind))
+                .collect();
+            let mut added = 0;
+            for (proto, port, kind) in targets {
+                if set
+                    .iter()
+                    .any(|e| e.proto == proto && e.port == port && e.scope == scope)
+                {
+                    continue;
+                }
+                set.push(Exposed {
+                    proto,
+                    port,
+                    scope: scope.clone(),
+                    name: Some(name.to_string()),
+                    kind,
+                });
+                added += 1;
+            }
+            added
+        };
+        if added > 0 {
+            self.persist()?;
+            self.reconcile()?;
+        }
+        Ok((added, self.list()))
+    }
+
     /// Close every port carrying `name`. Returns the exposed set and how many were closed, so the
     /// caller can tell "deleted" from "no such service" rather than reporting success either way.
     pub fn unexpose_named(&self, name: &str) -> anyhow::Result<(usize, Vec<ExposedPort>)> {
@@ -749,6 +799,66 @@ mod tests {
         assert_eq!(removed, 2);
         assert!(left.is_empty());
         assert_eq!(f.unexpose_named("mc").unwrap().0, 0, "already gone");
+    }
+
+    /// Widening by name has to reach every port the service is assembled from, keep each port's
+    /// kind, and stay a no-op when the scope is already held — the alternative is restating the
+    /// service port by port, where a mistyped number quietly adds a port instead of a scope.
+    #[test]
+    fn widening_a_service_by_name_opens_every_port_it_runs_on() {
+        let d = TempDir::new("svc-widen");
+        let f = fw(&d, vec![]);
+        let gaming = ExposeScope::Net {
+            guild_id: 7,
+            role_id: 8,
+        };
+        for proto in [Proto::Tcp, Proto::Udp] {
+            f.expose(
+                proto,
+                25565,
+                ExposeScope::OwnDevices,
+                Some("mc".into()),
+                ServiceKind::Port,
+            )
+            .unwrap();
+        }
+        // A second service that must not be dragged along.
+        f.expose(
+            Proto::Tcp,
+            8080,
+            ExposeScope::OwnDevices,
+            Some("wiki".into()),
+            ServiceKind::Web,
+        )
+        .unwrap();
+
+        let (added, all) = f.expose_named_scope("mc", gaming.clone()).unwrap();
+        assert_eq!(added, 2, "both of mc's ports");
+        let widened: Vec<_> = all.iter().filter(|e| e.scope == gaming).collect();
+        assert_eq!(widened.len(), 2);
+        assert!(widened.iter().all(|e| e.name.as_deref() == Some("mc")));
+        assert!(
+            all.iter()
+                .filter(|e| e.name.as_deref() == Some("wiki"))
+                .all(|e| e.scope == ExposeScope::OwnDevices),
+            "another service is left where it was"
+        );
+
+        // Idempotent: widening again opens nothing rather than duplicating the rules.
+        let (again, all) = f.expose_named_scope("mc", gaming.clone()).unwrap();
+        assert_eq!(again, 0);
+        assert_eq!(all.len(), 5, "two original + two widened + wiki");
+
+        // A web service stays one on the scope it gains, or it would drop out of the certificate.
+        let (added, all) = f.expose_named_scope("wiki", gaming.clone()).unwrap();
+        assert_eq!(added, 1);
+        assert!(all
+            .iter()
+            .filter(|e| e.name.as_deref() == Some("wiki"))
+            .all(|e| e.kind == ServiceKind::Web));
+
+        // A name nothing runs under opens nothing, rather than inventing a port to open.
+        assert_eq!(f.expose_named_scope("nosuch", gaming).unwrap().0, 0);
     }
 
     /// Renaming an already-open port is how a defaulted name becomes a real one — the alternative

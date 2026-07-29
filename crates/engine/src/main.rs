@@ -269,6 +269,23 @@ enum ServiceCmd {
         #[arg(long)]
         web: bool,
     },
+    /// Offer an existing service to one more network, on every port it already runs on.
+    ///
+    /// The ports are looked up from the name, so there is nothing to restate — and no way to add a
+    /// port by mistyping one.
+    Scope {
+        /// The service name, as shown by `ctl services`.
+        name: String,
+        /// Also offer it to this network's peers.
+        #[arg(long)]
+        net: Option<String>,
+        /// The guild `--net` belongs to, when two of your guilds share the role name.
+        #[arg(long, requires = "net")]
+        guild: Option<String>,
+        /// Also offer it to the owner's own other devices.
+        #[arg(long, conflicts_with = "net")]
+        own_devices: bool,
+    },
     /// Stop serving a name, closing every port it was opened on.
     Rm {
         /// The service name, as shown by `ctl services`.
@@ -883,6 +900,31 @@ async fn ctl(sub: CtlCmd, config: Option<String>) -> anyhow::Result<()> {
                             common::service::ServiceKind::Port
                         },
                     },
+                )
+                .await?,
+            )
+        }
+        CtlCmd::Service(ServiceCmd::Scope {
+            name,
+            net,
+            guild,
+            own_devices,
+        }) => {
+            // `add` treats "no scope given" as every peer, because that is a choice made while
+            // creating the service. Here it would be an unasked-for widening of something already
+            // running, from one keystroke short of the command they meant — so it is refused.
+            if net.is_none() && !own_devices {
+                anyhow::bail!(
+                    "say who to open {name:?} to: `--net <network>` (with `--guild` if the name is \
+                     ambiguous), or `--own-devices`. To offer it to every peer, \
+                     `ctl service add {name} <port>` with no scope."
+                );
+            }
+            let scope = expose_scope(net, guild, own_devices);
+            print_exposed(
+                control::client_expose(
+                    &socket,
+                    common::control::ExposeOp::AddScopeNamed { name, scope },
                 )
                 .await?,
             )

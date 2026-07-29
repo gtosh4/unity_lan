@@ -23,6 +23,12 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   front door, and ports you exposed before this release keep running exactly as they were until you
   choose to name them.
 
+  **Sharing one with another network takes a click.** Each service lists a chip per network that can
+  reach it; the **+** at the end of that row offers it somewhere new, opening every port the service
+  runs on. On a server, `unitylan-engine ctl service scope mc --net gaming`. Neither asks you to
+  restate the port — which matters, because getting that number wrong doesn't widen the service, it
+  quietly gives the name a second port. Only networks that would change something are offered.
+
   **A service that's a website can be in your HTTPS certificate.** Add `--web` (or tick the box in
   the Services tab) and `jellyfin.alice.mesh.unitylan.com` gets a real, publicly-trusted certificate
   — no warning page. This is the one part of services the coordinator has to know about, since only
@@ -31,9 +37,10 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   same trade the per-device certificate already made.
 
   The app and `ctl services` list a web service under that certified name — yours and, in the app,
-  other people's alike — rather than its `.unity.internal` one — that one still resolves, but no certificate covers it, so a browser
-  refuses it however well it works everywhere else. The port beneath is labelled as what it is: the
-  local port the proxy forwards to, not an address to connect to.
+  other people's alike — rather than its `.unity.internal` one. That one still resolves, but no
+  certificate covers it, so a browser refuses it however well it works everywhere else. The port
+  beneath is labelled as what it is: the local port the proxy forwards to, not an address to connect
+  to.
 
   Naming several web services in a row costs **one** certificate, not one each — the engine waits
   about ten minutes for you to finish before reissuing, because certificate authorities cap how many

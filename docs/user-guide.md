@@ -99,9 +99,14 @@ choose a **scope**:
 - **one of my devices**, so only machines you own can,
 - or leave it open to every peer you mesh with.
 
-Then click **add**. Each service lists chips underneath, one per scope that can reach it. Add the
-same name and port again with a different scope to widen it; **remove** takes the whole service down,
-closing every port it was on.
+Then click **add**. Each service lists chips underneath, one per scope that can reach it. The **x** on
+a chip stops offering it there, and the **+** at the end of the row offers it somewhere new — pick a
+network and it opens on every port that service runs on, with nothing to retype. **remove** takes the
+whole service down, closing every port it was on.
+
+The **+** lists only networks that would change something: one the service already reaches isn't
+offered again, and neither is "every peer" — that's a superset of the rest, so it's a choice you make
+when adding a service rather than a widening.
 
 A Minecraft server on this machine, shared with just your Gaming network, is one service (`mc`,
 `25565`, TCP) with one scope.
