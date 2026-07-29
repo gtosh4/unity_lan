@@ -131,6 +131,18 @@ pub enum ExposeOp {
         port: u16,
         scope: RemoveScope,
     },
+    /// Open every port carrying this service name to one more scope — widening a service by the
+    /// name it is known by, the counterpart of [`ExposeOp::RemoveNamed`].
+    ///
+    /// Exists because the alternative is restating the service: an [`ExposeOp::Add`] per port with
+    /// the name and number typed again, where a mistyped port does not widen anything — it gives
+    /// the name a second port, silently. The ports are already known here, so nobody has to recall
+    /// them and nobody can get them wrong.
+    AddScopeNamed {
+        name: String,
+        #[serde(rename = "net")]
+        scope: ExposeScope,
+    },
     /// Close every port carrying this service name — deleting a service by the name it is known by,
     /// rather than making the owner recall which ports and scopes it was assembled from.
     RemoveNamed {

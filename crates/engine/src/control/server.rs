@@ -588,6 +588,23 @@ fn apply_expose(
                 fw.unexpose(proto, port, scope)?,
             )
         }
+        ExposeOp::AddScopeNamed { name, scope } => {
+            let scope = resolve_scope(scope, held_nets)?;
+            let (added, exposed) = fw.expose_named_scope(&name, scope.clone())?;
+            // Nothing opened means one of two different things, and saying "widened" to either
+            // would be a lie: the service may not exist here at all.
+            let serves = exposed.iter().any(|e| e.name.as_deref() == Some(&name));
+            let label = exposed
+                .iter()
+                .find(|e| e.scope == scope)
+                .map_or_else(|| scope.fallback_label(), |e| e.label.clone());
+            let message = match (added, serves) {
+                (0, false) => format!("no service named {name:?} is running here"),
+                (0, true) => format!("{name} was already open to {label}"),
+                (n, _) => format!("opened {name} to {label} ({n} port(s))"),
+            };
+            (message, exposed)
+        }
         ExposeOp::RemoveNamed { name } => {
             let (removed, exposed) = fw.unexpose_named(&name)?;
             let message = if removed == 0 {

@@ -519,6 +519,49 @@ fn handle(state: &Mutex<State>, req: ControlRequest) -> ControlResponse {
                     });
                     format!("unexposed {}/{port}", proto.as_str())
                 }
+                ExposeOp::AddScopeNamed { name, scope } => {
+                    let label = fixture_networks()
+                        .iter()
+                        .find(|n| {
+                            scope
+                                == ExposeScope::Net {
+                                    guild_id: n.guild_id,
+                                    role_id: n.role_id,
+                                }
+                        })
+                        .map_or_else(
+                            || scope.fallback_label(),
+                            |n| format!("{} @ {}", n.name, n.guild_name),
+                        );
+                    // Like the engine: every port carrying the name gains the scope, and one that
+                    // already has it is left alone.
+                    let targets: Vec<_> = s
+                        .exposed
+                        .iter()
+                        .filter(|e| e.name.as_deref() == Some(name.as_str()))
+                        .map(|e| (e.proto, e.port, e.kind))
+                        .collect();
+                    let mut added = 0;
+                    for (proto, port, kind) in targets {
+                        if s.exposed
+                            .iter()
+                            .any(|e| e.proto == proto && e.port == port && e.scope == scope)
+                        {
+                            continue;
+                        }
+                        s.exposed.push(ExposedPort {
+                            proto,
+                            port,
+                            scope: scope.clone(),
+                            label: label.clone(),
+                            name: Some(name.clone()),
+                            kind,
+                            active: true,
+                        });
+                        added += 1;
+                    }
+                    format!("opened {name} to {label} ({added} port(s))")
+                }
                 ExposeOp::RemoveNamed { name } => {
                     s.exposed
                         .retain(|e| e.name.as_deref() != Some(name.as_str()));
