@@ -271,20 +271,21 @@ fn load_tls(cert_path: &str, key_path: &str) -> anyhow::Result<TlsAcceptor> {
 /// The engine binds 443 because it can and we deliberately cannot — a process that dropped to an
 /// unprivileged user has no capability to take a privileged port, which is exactly the property
 /// worth having. Binding ourselves is the standalone path (a developer, a test) where we were
-/// started with enough privilege to do it.
+/// started with enough privilege to do it — and on Windows it is the *only* path: there is no
+/// privileged-port concept there, so the engine hands nothing over and this service binds 443 as
+/// `NT AUTHORITY\LocalService`.
 fn listener_for(addr: SocketAddr) -> anyhow::Result<std::net::TcpListener> {
-    match std::env::var(common::control::PROXY_LISTEN_FD_VAR) {
-        Ok(fd) => {
-            let fd: i32 = fd
-                .parse()
-                .context("the handed-over listener is not a descriptor")?;
-            // SAFETY: the engine `dup2`'d a bound, listening TCP socket onto exactly this
-            // descriptor before exec'ing us, and nothing in this process has touched it since — we
-            // are the only owner, so taking it is sound.
-            Ok(unsafe { <std::net::TcpListener as std::os::fd::FromRawFd>::from_raw_fd(fd) })
-        }
-        Err(_) => std::net::TcpListener::bind(addr).with_context(|| format!("binding {addr}")),
+    #[cfg(unix)]
+    if let Ok(fd) = std::env::var(common::control::PROXY_LISTEN_FD_VAR) {
+        let fd: i32 = fd
+            .parse()
+            .context("the handed-over listener is not a descriptor")?;
+        // SAFETY: the engine `dup2`'d a bound, listening TCP socket onto exactly this descriptor
+        // before exec'ing us, and nothing in this process has touched it since — we are the only
+        // owner, so taking it is sound.
+        return Ok(unsafe { <std::net::TcpListener as std::os::fd::FromRawFd>::from_raw_fd(fd) });
     }
+    std::net::TcpListener::bind(addr).with_context(|| format!("binding {addr}"))
 }
 
 async fn listen(addr: SocketAddr, serving: watch::Receiver<Serving>) -> anyhow::Result<()> {

@@ -79,10 +79,13 @@ endpoint = "127.0.0.1:$4"
 refresh_secs = 2
 EOF
 }
-mkcfg a1 key-a1 unla1 51820   # user 1, device 1
-mkcfg a2 key-a2 unla2 51821   # user 1, device 2
-mkcfg b1 key-b1 unlb1 51822   # user 2, device 1
-mkcfg a3 key-a3 unla3 51823   # user 1, device 3 — opts out of own-device peering below
+# Ports skip 51821: these engines share one netns, and the first one up binds that port for its LAN
+# discovery beacon (`beacon::DEFAULT_PORT`). A later engine asking boringtun for it as its WireGuard
+# port then fails to configure the interface — a race, so the test only failed sometimes.
+mkcfg a1 key-a1 unla1 51840   # user 1, device 1
+mkcfg a2 key-a2 unla2 51841   # user 1, device 2
+mkcfg b1 key-b1 unlb1 51842   # user 2, device 1
+mkcfg a3 key-a3 unla3 51843   # user 1, device 3 — opts out of own-device peering below
 
 "$COORD" "$TMP/coord.toml" >"$TMP/coord.log" 2>&1 &
 for _ in $(seq 1 40); do curl -sf http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.25; done

@@ -32,3 +32,8 @@ rustls-pemfile = "2"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+# `unitylan-common` is imported as `common` (its [lib] name), which cargo-machete's source scan
+# doesn't follow — it reports the crate as unused. It isn't.
+[package.metadata.cargo-machete]
+ignored = ["unitylan-common"]
