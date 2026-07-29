@@ -575,22 +575,34 @@ impl App {
             for d in &self.devices {
                 let primary = if d.is_primary { "  [primary]" } else { "" };
                 let this = if d.is_self { "  (this device)" } else { "" };
+                // This device's full mesh name, under the row it names — the thing rename changes,
+                // and the name a peer types. Detached at the end of the list it read as belonging
+                // to no device in particular. Shown while renaming too: that is when what's being
+                // changed most needs spelling out.
+                let hostname = d
+                    .is_self
+                    .then(|| {
+                        self.status
+                            .as_ref()
+                            .and_then(|s| s.device.as_ref())
+                            .map(|dev| muted(dev.hostname.clone()))
+                    })
+                    .flatten();
                 // This device's row *is* the rename control: armed, the label becomes the field.
                 // A detached "new name" box below the list left you matching a box to a row.
                 if d.is_self && self.renaming {
-                    list = list.push(
-                        row![
-                            text_input("new name", &self.rename_input)
-                                .on_input(Message::RenameInput)
-                                .on_submit(Message::RenameSubmit),
-                            button(text("save").size(13)).on_press(Message::RenameSubmit),
-                            button(text("cancel").size(13))
-                                .style(button::secondary)
-                                .on_press(Message::CancelRename),
-                        ]
-                        .spacing(8)
-                        .align_y(Vertical::Center),
-                    );
+                    let field = row![
+                        text_input("new name", &self.rename_input)
+                            .on_input(Message::RenameInput)
+                            .on_submit(Message::RenameSubmit),
+                        button(text("save").size(13)).on_press(Message::RenameSubmit),
+                        button(text("cancel").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::CancelRename),
+                    ]
+                    .spacing(8)
+                    .align_y(Vertical::Center);
+                    list = list.push(column![field].push_maybe(hostname).spacing(2));
                     continue;
                 }
                 let mut r = row![text(format!("{}{}{}", d.device_name, primary, this))
@@ -628,21 +640,24 @@ impl App {
                         r = r.push(e);
                     }
                 }
-                list = list.push(r);
+                // This device's full mesh name, under the row it names — the thing rename changes,
+                // and the name a peer types. Detached at the end of the list it read as belonging
+                // to no device in particular.
+                let hostname = d
+                    .is_self
+                    .then(|| {
+                        self.status
+                            .as_ref()
+                            .and_then(|s| s.device.as_ref())
+                            .map(|dev| muted(dev.hostname.clone()))
+                    })
+                    .flatten();
+                list = list.push(column![r].push_maybe(hostname).spacing(2));
             }
             list.into()
         };
 
-        // Rename this device. Show the current hostname so it's clear what's being changed.
-        let current = self
-            .status
-            .as_ref()
-            .and_then(|s| s.device.as_ref())
-            .map(|d| muted(format!("current: {}", d.hostname)));
-        column![header("devices"), inner]
-            .push_maybe(current)
-            .spacing(8)
-            .into()
+        column![header("devices"), inner].spacing(8).into()
     }
 
     fn login_section(&self) -> Element<'_, Message> {
