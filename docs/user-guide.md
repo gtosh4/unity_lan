@@ -19,11 +19,15 @@ viewer and remote control for it — closing the app doesn't take you off the me
 
 ## Reading the main window
 
+The app opens on whichever tab has something to show — **Services** if anything on the mesh is
+serving one, else **Peers** if you have any, else **Networks**. Pick a tab yourself and it stays
+picked.
+
 Along the top: a dot for the **coordinator** connection, a dot for the **mesh**, and a
 **disconnect** / **connect** button that takes your tunnels down or brings them back without
 stopping the service.
 
-Below that, three tabs.
+Below that, four tabs.
 
 ### Networks
 
@@ -77,8 +81,8 @@ Your account and your devices.
 
 - **Account** — who you're signed in as, the version you're running, and **log out**.
 - **Devices** — every machine you've enrolled. **set primary** picks which one answers to your bare
-  `<you>.unity.internal` name; **remove** un-enrolls one you no longer have; the text box plus
-  **rename** changes this machine's name.
+  `<you>.unity.internal` name; **remove** un-enrolls one you no longer have; **rename** on this
+  device's own row turns it into a text field, seeded with the current name.
 When an update is ready, an **update** button appears here; after it installs, **restart now**
 finishes the job.
 

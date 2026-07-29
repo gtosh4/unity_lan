@@ -155,8 +155,11 @@ struct App {
     status: Option<StatusReport>,
     devices: Vec<DeviceInfo>,
     exposed: Vec<ExposedPort>,
-    /// Draft text for the device-rename field.
+    /// Draft text for the device-rename field, and whether the rename is armed. Armed turns this
+    /// device's row in the device list *into* the field, so the thing being renamed and the box
+    /// you type in are the same row.
     rename_input: String,
+    renaming: bool,
     /// Draft text for the expose port field.
     expose_port_input: String,
     /// Draft protocol for the exposure being composed.
@@ -167,6 +170,9 @@ struct App {
     expose_scopes: Vec<ExposeScope>,
     /// Whether the scope picker is expanded.
     expose_scope_open: bool,
+    /// Whether the user has chosen a tab themselves. Until they do, [`App::settle_tab`] moves it as
+    /// the mesh's state arrives.
+    tab_picked: bool,
     /// Whether the service being composed is a web service — its name goes into this device's
     /// certificate, and so into public Certificate Transparency logs, permanently.
     service_web: bool,
@@ -263,6 +269,9 @@ enum Message {
     DevicesFetched(Result<ManageResp, String>),
     /// Result of an expose/unexpose/list → the exposed ports.
     ExposesFetched(Result<ExposeResp, String>),
+    /// Arm the rename, seeded with the current name so editing beats retyping.
+    StartRename(String),
+    CancelRename,
     RenameInput(String),
     RenameSubmit,
     SetPrimary(String),
@@ -368,12 +377,14 @@ impl App {
             devices: Vec::new(),
             exposed: Vec::new(),
             rename_input: String::new(),
+            renaming: false,
             expose_port_input: String::new(),
             expose_proto: Proto::Tcp,
             expose_scopes: Vec::new(),
             service_name_input: String::new(),
             service_web: false,
             expose_scope_open: false,
+            tab_picked: false,
             login_url: None,
             connect_busy: false,
             confirm: None,
@@ -403,6 +414,10 @@ impl App {
         self.last_directive_seq = d.seq;
         match &d.action {
             UiAction::SelectTab(t) => {
+                // A directive is the script standing in for a person, so it counts as a choice:
+                // without this, `settle_tab` would pull the tour's selection straight back to
+                // whatever the fixtures rank highest, and the recording would fight itself.
+                self.tab_picked = true;
                 self.tab = match t {
                     UiTab::Networks => Tab::Networks,
                     UiTab::Peers => Tab::Peers,
@@ -461,6 +476,41 @@ impl App {
         }
     }
 
+    /// Open on the tab that has something to show, until the user picks one themselves.
+    ///
+    /// Networks is the right landing spot for someone who has just joined and has nothing else yet,
+    /// but it is the least interesting tab for everyone else — a settled mesh wants Peers, and a
+    /// device that serves or reaches services wants Services. The state that decides this does not
+    /// all arrive at once (a peer's services take a poll to show up), so this runs on each update.
+    ///
+    /// **Only ever moves up the ranking.** Re-deciding freely would let a tab slide out from under
+    /// someone mid-read as a late poll lands, and worse, oscillate when a peer drops. Monotonic
+    /// means it settles once and stays.
+    fn settle_tab(&mut self) {
+        if self.tab_picked {
+            return;
+        }
+        let rank = |t: Tab| match t {
+            Tab::Services => 2,
+            Tab::Peers => 1,
+            _ => 0,
+        };
+        let peers = self.status.as_ref().is_some_and(|s| !s.peers.is_empty());
+        let services = self.exposed.iter().any(|e| e.name.is_some())
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|s| s.peers.iter().any(|p| !p.services.is_empty()));
+        let want = match (services, peers) {
+            (true, _) => Tab::Services,
+            (false, true) => Tab::Peers,
+            (false, false) => Tab::Networks,
+        };
+        if rank(want) > rank(self.tab) {
+            self.tab = want;
+        }
+    }
+
     /// Fetch the device list + exposed ports concurrently. Status isn't polled here — it arrives
     /// over the live `watch_status` subscription (see [`Self::status_subscription`]), which pushes a
     /// fresh snapshot the instant the engine's state changes.
@@ -486,6 +536,7 @@ impl App {
                 self.smooth_latencies(&s);
                 self.status = Some(s);
                 self.error = None;
+                self.settle_tab();
             }
             Message::StatusFetched(Err(e)) => self.error = Some(e),
             Message::DevicesFetched(Ok(r)) => {
@@ -496,6 +547,7 @@ impl App {
             Message::ExposesFetched(Ok(r)) => {
                 self.exposed = r.exposed;
                 self.error = None;
+                self.settle_tab();
             }
             Message::ExposesFetched(Err(e)) => self.error = Some(e),
             Message::ExposePortInput(s) => self.expose_port_input = s,
@@ -733,11 +785,20 @@ impl App {
             }
             Message::CloseRequested => return self.hide_window(),
             Message::WindowOpened(id) => return window::gain_focus(id),
+            Message::StartRename(current) => {
+                self.rename_input = current;
+                self.renaming = true;
+            }
+            Message::CancelRename => {
+                self.renaming = false;
+                self.rename_input.clear();
+            }
             Message::RenameInput(s) => self.rename_input = s,
             Message::RenameSubmit => {
                 let name = self.rename_input.trim().to_string();
                 if !name.is_empty() {
                     self.rename_input.clear();
+                    self.renaming = false;
                     return Task::perform(
                         ctl::manage(self.socket.clone(), ManageOp::Rename { new_name: name }),
                         Message::DevicesFetched,
@@ -771,7 +832,11 @@ impl App {
             }
             Message::CloseMenu => self.menu_open = None,
             Message::DismissError => self.error = None,
-            Message::SelectTab(t) => self.tab = t,
+            Message::SelectTab(t) => {
+                self.tab = t;
+                // From here the tab is theirs; nothing arriving later moves it.
+                self.tab_picked = true;
+            }
             Message::TogglePeerGroup(g) => {
                 if !self.collapsed_groups.remove(&g) {
                     self.collapsed_groups.insert(g);
@@ -1056,6 +1121,76 @@ mod tests {
         let _ = a.update(Message::ExposesFetched(Ok(resp)));
         assert_eq!(a.exposed.len(), 1);
         assert_eq!(a.exposed[0].port, 25565);
+    }
+
+    /// The landing tab follows what there is to look at, but only ever upward: a late poll must not
+    /// slide the tab out from under someone mid-read, and a peer dropping must not bounce it back.
+    #[test]
+    fn the_tab_settles_upward_and_stops_once_the_user_picks_one() {
+        let mut a = app();
+        assert_eq!(a.tab, Tab::Networks, "nothing to show yet");
+
+        // A peer appears → Peers.
+        let mut report = StatusReport {
+            peers: vec![PeerStatus {
+                services: Vec::new(),
+                hostname: "bob.unity.internal".into(),
+                wg_ip: Ipv4Addr::new(100, 64, 0, 2),
+                endpoint: None,
+                reach: common::control::PeerReach::Direct,
+                user_id: 2,
+                username: "bob".into(),
+                up: true,
+                latency_ms: None,
+                rx_bytes: 0,
+                tx_bytes: 0,
+                last_handshake_secs: None,
+                networks: Vec::new(),
+            }],
+            ..Default::default()
+        };
+        let _ = a.update(Message::StatusFetched(Ok(report.clone())));
+        assert_eq!(a.tab, Tab::Peers);
+
+        // That peer turns out to serve something → Services.
+        report.peers[0].services = vec![common::control::PeerService {
+            name: "jellyfin".into(),
+            hostname: "jellyfin.bob.unity.internal".into(),
+            proto: Proto::Tcp,
+            port: 8096,
+            shadowed: false,
+        }];
+        let _ = a.update(Message::StatusFetched(Ok(report.clone())));
+        assert_eq!(a.tab, Tab::Services);
+
+        // The peer goes away entirely: the tab stays put rather than walking back down.
+        let _ = a.update(Message::StatusFetched(Ok(StatusReport::default())));
+        assert_eq!(a.tab, Tab::Services, "never moves down");
+
+        // And once the user chooses, later arrivals leave it alone.
+        let _ = a.update(Message::SelectTab(Tab::Networks));
+        let _ = a.update(Message::StatusFetched(Ok(report)));
+        assert_eq!(a.tab, Tab::Networks, "their choice wins");
+    }
+
+    /// Arming the rename seeds the field with the current name — the common edit is a tweak, not a
+    /// retype — and both finishing and cancelling put the row back.
+    #[test]
+    fn renaming_arms_from_the_current_name_and_disarms_either_way() {
+        let mut a = app();
+        let _ = a.update(Message::StartRename("laptop".into()));
+        assert!(a.renaming);
+        assert_eq!(a.rename_input, "laptop");
+
+        let _ = a.update(Message::CancelRename);
+        assert!(!a.renaming);
+        assert!(a.rename_input.is_empty());
+
+        let _ = a.update(Message::StartRename("laptop".into()));
+        let _ = a.update(Message::RenameInput("workstation".into()));
+        let _ = a.update(Message::RenameSubmit);
+        assert!(!a.renaming, "submitting closes the editor");
+        assert!(a.rename_input.is_empty());
     }
 
     #[test]

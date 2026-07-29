@@ -573,11 +573,36 @@ impl App {
             for d in &self.devices {
                 let primary = if d.is_primary { "  [primary]" } else { "" };
                 let this = if d.is_self { "  (this device)" } else { "" };
+                // This device's row *is* the rename control: armed, the label becomes the field.
+                // A detached "new name" box below the list left you matching a box to a row.
+                if d.is_self && self.renaming {
+                    list = list.push(
+                        row![
+                            text_input("new name", &self.rename_input)
+                                .on_input(Message::RenameInput)
+                                .on_submit(Message::RenameSubmit),
+                            button(text("save").size(13)).on_press(Message::RenameSubmit),
+                            button(text("cancel").size(13))
+                                .style(button::secondary)
+                                .on_press(Message::CancelRename),
+                        ]
+                        .spacing(8)
+                        .align_y(Vertical::Center),
+                    );
+                    continue;
+                }
                 let mut r = row![text(format!("{}{}{}", d.device_name, primary, this))
                     .size(14)
                     .width(Length::Fill)]
                 .spacing(8)
                 .align_y(Vertical::Center);
+                if d.is_self {
+                    r = r.push(
+                        button(text("rename").size(13))
+                            .style(button::secondary)
+                            .on_press(Message::StartRename(d.device_name.clone())),
+                    );
+                }
                 if !d.is_primary {
                     r = r.push(
                         button(text("set primary").size(13))
@@ -612,19 +637,8 @@ impl App {
             .as_ref()
             .and_then(|s| s.device.as_ref())
             .map(|d| muted(format!("current: {}", d.hostname)));
-        let rename = row![
-            text_input("new name for this device", &self.rename_input)
-                .on_input(Message::RenameInput)
-                .on_submit(Message::RenameSubmit),
-            button(text("rename").size(13))
-                .style(button::secondary)
-                .on_press(Message::RenameSubmit),
-        ]
-        .spacing(8);
-
         column![header("devices"), inner]
             .push_maybe(current)
-            .push(rename)
             .spacing(8)
             .into()
     }
@@ -738,7 +752,9 @@ impl App {
                 }
             }
         }
-        column![header("networks"), policy, list].spacing(8).into()
+        // No `header("networks")`: the tab strip directly above already says Networks, and
+        // repeating it costs a line of a 440px window to say nothing.
+        column![policy, list].spacing(8).into()
     }
 
     /// Ports opened without a name — shown only when there are any.
