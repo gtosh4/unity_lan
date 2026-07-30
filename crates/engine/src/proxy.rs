@@ -65,8 +65,9 @@ pub fn run_as(configured: Option<&str>, euid: u32) -> Result<Option<String>, Str
 /// half-installed, and cannot be a version out of step with the engine that supervises it.
 pub const SUBCOMMAND: &str = "proxy-serve";
 
-/// The image to re-execute for the proxy: our own.
-fn self_exe() -> anyhow::Result<PathBuf> {
+/// The image to run the proxy from: our own. Used by both platforms' start paths — unix re-executes
+/// it directly, Windows registers it as the proxy service's `ImagePath` (`service::install_proxy`).
+pub(crate) fn self_exe() -> anyhow::Result<PathBuf> {
     std::env::current_exe().context("resolving our own executable to run the TLS proxy from")
 }
 

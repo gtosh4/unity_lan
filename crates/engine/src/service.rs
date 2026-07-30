@@ -373,8 +373,9 @@ fn uninstall() -> Result<()> {
 /// handed to it.
 fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<()> {
     // This very image, registered under the hidden proxy subcommand — there is no second executable
-    // to be missing, nor to drift a release behind the engine that supervises it.
-    let exe = std::env::current_exe().context("locating the engine executable")?;
+    // to be missing, nor to drift a release behind the engine that supervises it. Same helper the
+    // unix start path re-executes, so both platforms name the proxy's image one way.
+    let exe = crate::proxy::self_exe()?;
     // The **read-only** control endpoint, derived from this installation's own config so both sides
     // name the same pipe. Never the full one: LocalService is granted on the read-only pipe alone,
     // and a proxy that could send `Expose` or `ApplyUpdate` to a LocalSystem daemon would give away
