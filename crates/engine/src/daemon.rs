@@ -495,6 +495,20 @@ pub async fn run(cfg: Config, shutdown: Shutdown) -> anyhow::Result<RunOutcome> 
     #[cfg(windows)]
     crate::selfupdate::sweep_stale_gui_aside();
 
+    // Re-grant the certificate key to `[cert] group`. Issuance does this too, but only there: a grant
+    // that failed at the time (the group did not exist yet, or the daemon lacked CAP_CHOWN) would
+    // otherwise stay broken until the next renewal ~60 days later, with a valid certificate on disk
+    // that the proxy cannot read. Startup is where such leftovers get repaired — see this crate's
+    // CLAUDE.md — and it is idempotent, so an already-correct key costs two stats.
+    #[cfg(not(windows))]
+    if let Some(group) = &cfg.cert.group {
+        if crate::cert::cert_path(&cfg.state_dir).exists() {
+            if let Err(e) = crate::cert::grant_key_group(&cfg.state_dir, group) {
+                tracing::error!("certificate: {e:#}");
+            }
+        }
+    }
+
     // Local per-network peering opt-out (persisted; the client is the source of truth). Sent to
     // the coordinator on every register/refresh; also enforced locally so it works while the
     // coordinator is unreachable.
@@ -1679,10 +1693,9 @@ fn sync_proxy(
             let euid = 1;
             let Some(bind) = bind else { return };
             let started = crate::proxy::run_as(cfg.proxy.user.as_deref(), euid).and_then(|user| {
-                let binary = crate::proxy::binary(cfg.proxy.binary.as_deref());
                 // The read-only endpoint, never the full one: the proxy reads status and must not be
                 // able to drive the daemon it reads it from.
-                crate::proxy::spawn(&binary, &cfg.control_readonly_path(), bind, user.as_deref())
+                crate::proxy::spawn(&cfg.control_readonly_path(), bind, user.as_deref())
                     .map_err(|e| format!("{e:#}"))
             });
             match started {

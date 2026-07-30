@@ -36,10 +36,8 @@ contents:
   - src: /usr/lib/unitylan/unitylan-engine
     dst: /usr/bin/unitylan
     type: symlink
-  # The TLS proxy the engine supervises for web services. In /usr/bin like the GUI, which is where
-  # the engine's update path looks for a companion binary to replace.
-  - src: ../../target/release/unitylan-proxy
-    dst: /usr/bin/unitylan-proxy
+  # No entry for the TLS proxy: it is this same binary, re-executed under a hidden subcommand and
+  # dropped to the `unitylan-proxy` account the postinstall creates.
   - src: ../init/systemd/unitylan-engine.service
     dst: /usr/lib/systemd/system/unitylan-engine.service
   - src: ../config/engine.toml

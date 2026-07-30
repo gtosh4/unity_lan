@@ -21,7 +21,7 @@ if ! command -v nfpm >/dev/null 2>&1; then
 fi
 
 echo ">> building release binaries (v$VERSION, $ARCH)"
-( cd "$ROOT" && cargo build --release -p unitylan-engine -p unitylan-gui -p unitylan-proxy )
+( cd "$ROOT" && cargo build --release -p unitylan-engine -p unitylan-gui )
 
 DIST="$ROOT/packaging/dist"
 mkdir -p "$DIST"
@@ -34,10 +34,10 @@ done
 
 # Two Linux artifacts for the signed auto-update path, because the rollout is phased.
 #
-# The bundle carries **every** binary: engine, GUI and TLS proxy all speak the same unversioned
-# control protocol, so an update replacing only the engine leaves an older frontend talking to a
-# newer daemon. Engines from 0.3 on sniff gzip magic and unpack it; ones from this release on also
-# pick the proxy out of it.
+# The bundle carries both binaries: engine and GUI speak the same unversioned control protocol, so an
+# update replacing only the engine leaves an older frontend talking to a newer daemon. Engines from
+# 0.3 on sniff gzip magic and unpack it. The TLS proxy needs no entry — it is the engine binary run
+# under a hidden subcommand, so it is updated by the engine's own swap.
 #
 # The raw binary is what a **pre-0.3 engine** must be pointed at. Its `apply` writes the artifact
 # bytes straight over its own executable — hand it the tarball and it installs a gzip file as its
@@ -47,7 +47,7 @@ done
 # clients remain, and switch to the bundle once they're gone. See packaging/README.md.
 cp "$ROOT/target/release/unitylan-engine" "$DIST/unitylan-engine-linux-$ARCH"
 tar -czf "$DIST/unitylan-linux-$ARCH.tar.gz" \
-    -C "$ROOT/target/release" unitylan-engine unitylan-gui unitylan-proxy
+    -C "$ROOT/target/release" unitylan-engine unitylan-gui
 
 # SHA256SUMS over every artifact — the admin pastes the relevant hash into the coordinator's
 # [release] config so clients can verify the download against the signed manifest.

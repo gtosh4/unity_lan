@@ -14,7 +14,7 @@ A Cargo workspace with five crates (`Cargo.toml`):
 | `crates/coordinator` | `unitylan-coordinator` | the server: Discord auth, network membership, signed attestations |
 | `crates/engine` | `unitylan-engine` | the privileged node daemon: WireGuard, firewall, DNS, control socket |
 | `crates/gui` | `unitylan-gui` | unprivileged iced desktop app driving the engine over its control socket |
-| `crates/proxy` | `unitylan-proxy` | unprivileged TLS terminator for web services; reads its config off the engine's control socket, forwards to loopback |
+| `crates/proxy` | — (a library the engine links) | unprivileged TLS terminator for web services; reads its config off the engine's control socket, forwards to loopback. Runs as the engine binary re-executed with `proxy-serve`, dropped to an unprivileged account |
 
 Platform-specific engine code is split by module: `wg/{userspace,windows}.rs`,
 `fw/{nftables,windows}.rs`, `resolver/{linux,windows}.rs`, selected at runtime.

@@ -6,9 +6,20 @@ configuration of its own. Root `CLAUDE.md` has the project-wide rules.
 **It is a separate process for one reason: privilege.** The engine is root (Linux) / LocalSystem
 (Windows) because it drives WireGuard, the firewall and the resolver. Parsing HTTP sent by mesh peers
 is the archetypal work that must not happen there. Anything that moves request handling back into the
-engine gives that away — a root engine with no `[proxy] user` **refuses** to start this
+engine *process* gives that away — a root engine with no `[proxy] user` **refuses** to start this
 (`engine/src/proxy.rs::run_as`) rather than running it privileged, and that refusal is the feature,
 not an inconvenience to route around.
+
+**A separate process, not a separate binary.** This crate is a **library**; the engine links it and
+re-executes its own image under the hidden `proxy-serve` subcommand (`engine/src/proxy.rs::SUBCOMMAND`,
+dispatched at the top of the engine's `main` before clap and before the log-file layer, since the
+child's environment is cleared and the engine's log file is root's). What isolates this is the uid and
+the two descriptors it is handed, none of which cares that the bytes on disk are shared. It *was* its
+own executable until 0.6.1, and every way that can go wrong, did: the package installed it where the
+engine did not look, an update replaced an existing copy but never placed a missing one, and a
+source-built install had none — each surfacing only as "HTTPS silently does not work". Do not split it
+back out; if it ever links into something that must not hold the proxy's code, make that a build
+feature, not a second artifact.
 
 **It is a client of the engine, not a peer of it.** The whole configuration — names to serve, the
 loopback port behind each, who may reach it, where the certificate is — arrives on the engine's
@@ -44,10 +55,11 @@ once with a handed-over descriptor. Windows has no privileged-port concept — t
 itself and this does not apply.
 
 **Windows is unverified.** The `#[cfg(windows)]` paths (a second SCM service under
-`NT AUTHORITY\LocalService`, started and stopped by the engine) have never been compiled: cross-checking
-`x86_64-pc-windows-msvc` from Linux stops in ring's build script. Build on real Windows before
-trusting any change to them.
+`NT AUTHORITY\LocalService`, started and stopped by the engine — now registered as the *engine's* image
+plus `proxy-serve`, since there is no separate exe to point at) have never been run. Note the service
+process never talks to the SCM dispatcher, which is its own unfixed problem on that platform. Build and
+run on real Windows before trusting any change to them.
 
-Behaviour is covered end-to-end by `scripts/cert-test.sh`, which runs this binary against a
-pebble-issued certificate with a plain-HTTP backend. `route.rs`'s access decision is a pure function
+Behaviour is covered end-to-end by `scripts/cert-test.sh`, which runs `unitylan-engine proxy-serve`
+against a pebble-issued certificate with a plain-HTTP backend. `route.rs`'s access decision is a pure function
 and unit-tested — keep it that way; it is where a mistake hands one member another member's service.

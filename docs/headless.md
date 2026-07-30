@@ -144,8 +144,8 @@ mc  (mc.alice.unity.internal)
     tcp/25565 (minecraft)
 ```
 
-**Jellyfin itself needs no TLS configuration.** The engine runs a small TLS proxy
-(`unitylan-proxy`) that serves your web services on the mesh and forwards to them over plain HTTP on
+**Jellyfin itself needs no TLS configuration.** The engine runs a small TLS proxy — itself, re-executed
+unprivileged — that serves your web services on the mesh and forwards to them over plain HTTP on
 loopback, so several of them share port 443 under different names and none of them has to learn about
 certificates. It reads its whole configuration from the engine as it changes, so a renewal or a newly
 named service needs no restart.

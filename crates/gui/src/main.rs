@@ -1002,6 +1002,36 @@ mod tests {
         );
     }
 
+    /// A web service's name is a link, because opening it in a browser is the whole point of marking
+    /// one `web`. What it must never be is a link to somewhere nothing listens: the exposed port of a
+    /// certified web service is the *loopback backend* the proxy forwards to, so linking that would
+    /// hand out an address off this machine that refuses every connection.
+    #[test]
+    fn only_a_web_service_is_a_link_and_only_to_where_it_answers() {
+        use crate::view::service_url;
+
+        assert_eq!(
+            service_url("wiki.alice.mesh.example.com", true, true, Some(8080)),
+            Some("https://wiki.alice.mesh.example.com/".into()),
+            "certified: the proxy serves 443 under this name, not the backend port"
+        );
+        // No certificates in this deployment: the port really is what answers, over plain HTTP.
+        assert_eq!(
+            service_url("wiki.alice.unity.internal", true, false, Some(8080)),
+            Some("http://wiki.alice.unity.internal:8080/".into())
+        );
+        // Nothing to open: neither a certified name nor a port.
+        assert_eq!(
+            service_url("wiki.alice.unity.internal", true, false, None),
+            None
+        );
+        // A game server is dialled by its own client, not a browser.
+        assert_eq!(
+            service_url("mc.bob.unity.internal", false, true, Some(25565)),
+            None
+        );
+    }
+
     #[test]
     fn shared_networks_group_by_community() {
         let net = |name: &str, community: &str| common::api::SharedNetwork {

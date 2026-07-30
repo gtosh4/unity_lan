@@ -12,8 +12,11 @@ file tracks the code. When the two disagree, the code wins — flag the drift.
 
 Cargo workspace, **five crates**, two planes. The client is **two processes** in the common case
 (privileged engine + unprivileged iced GUI) — the Tailscale/WireGuard-GUI split (design §3.2) — plus a
-third, `unitylan-proxy`, on devices that serve web services: TLS termination is unprivileged work and
-so does not live in the root daemon. All crates ship from one
+third on devices that serve web services: TLS termination is unprivileged work and so does not live in
+the root daemon. That third process is the **engine's own binary** re-executed under a hidden
+`proxy-serve` subcommand and dropped to `[proxy] user`, so `crates/proxy` is a library rather than a
+fifth executable — the isolation is the uid, and one image cannot be half-installed or a release out of
+step with its supervisor. All crates ship from one
 monorepo tag (`common::VERSION`), so the coordinator can advertise its own version as "the release
 the mesh should run".
 

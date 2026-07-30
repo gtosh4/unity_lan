@@ -22,6 +22,7 @@ test-insecure-tls = []
 
 [dependencies]
 unitylan-common.workspace = true
+unitylan-proxy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

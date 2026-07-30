@@ -17,15 +17,14 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENG="${ENG:-$ROOT/target/debug/unitylan-engine}"
 COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
-PROXY="${PROXY:-$ROOT/target/debug/unitylan-proxy}"
 
 # Re-exec under a user+net+mount namespace. Only the issuance leg needs it — a real daemon, and so a
 # real WireGuard interface — but the whole script runs inside so the coordinator, pebble and the
 # daemon share one loopback. No host root required.
 if [ "${UNL_INNS:-}" != "1" ]; then
-  [ -x "$ENG" ] && [ -x "$COORD" ] && [ -x "$PROXY" ] || { echo "build first: cargo build"; exit 1; }
+  [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
   command -v dig >/dev/null || { echo "needs dig (bind-utils / dnsutils)"; exit 1; }
-  exec unshare -Urnm --map-root-user env UNL_INNS=1 ENG="$ENG" COORD="$COORD" PROXY="$PROXY" \
+  exec unshare -Urnm --map-root-user env UNL_INNS=1 ENG="$ENG" COORD="$COORD" \
     PATH="$PATH" bash "${BASH_SOURCE[0]}"
 fi
 
@@ -278,9 +277,10 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
 socketserver.TCPServer(("127.0.0.1", 8096), H).serve_forever()
 ' >/dev/null 2>&1 &
-      # The read-only endpoint, which is the only one a packaged proxy can open — so the test
-      # exercises the socket the real thing uses, not the full one beside it.
-      "$PROXY" "$TMP/a/control-ro.sock" >"$TMP/proxy.log" 2>&1 &
+      # The engine's own binary under its hidden proxy subcommand — the same image and entry point
+      # the supervisor spawns. The read-only endpoint is the only one a real proxy can open, so the
+      # test exercises the socket the real thing uses, not the full one beside it.
+      "$ENG" proxy-serve "$TMP/a/control-ro.sock" >"$TMP/proxy.log" 2>&1 &
       for _ in $(seq 1 40); do
         grep -q "serving web services" "$TMP/proxy.log" 2>/dev/null && break; sleep 0.5
       done

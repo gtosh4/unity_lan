@@ -220,9 +220,6 @@ pub struct ProxyConfig {
     /// group, least of all the one that owns the full control socket.
     #[serde(default)]
     pub user: Option<String>,
-    /// Path to the proxy binary, when it is not beside the engine.
-    #[serde(default)]
-    pub binary: Option<PathBuf>,
 }
 
 /// Spelled out rather than derived: a derived `Default` would make `enabled` **false**, and that is
@@ -234,7 +231,6 @@ impl Default for ProxyConfig {
         Self {
             enabled: true,
             user: None,
-            binary: None,
         }
     }
 }

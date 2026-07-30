@@ -3,6 +3,41 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## v0.6.1
+
+### Added
+
+- **Web services are clickable in the app.** A service marked as a website now opens in your browser
+  when you click its name, in both your own list and the mesh list — the address it takes you to is the
+  one the row already showed, so there is nothing new to read off the screen and retype. Services that
+  aren't websites stay plain text: a game server is dialled by its own client, not a browser.
+
+### Fixed
+
+- **HTTPS for web services now actually works on a packaged Linux install.** Naming a `web` service
+  and turning certificates on got you a real, publicly-trusted certificate — and then nothing served
+  it: the TLS proxy could not start on any packaged install, and said only `Operation not permitted`.
+  Three separate reasons, all fixed. The proxy is no longer a second binary that could be installed
+  where the engine did not look (or, on a source build or an auto-updated host, not installed at all)
+  — the engine now runs it as itself, re-executed unprivileged, so it is always present and always the
+  same version. The systemd unit grants the two capabilities the proxy's privilege drop needs and the
+  one that hands the certificate key to its account; without them the kernel refused the operation
+  even though the daemon runs as root.
+- **A certificate key whose group grant failed is repaired on the next start.** Previously that
+  happened only during issuance, so if the grant failed — the account did not exist yet, or the daemon
+  lacked the capability — the key stayed unreadable for the certificate's whole 60-day life, with a
+  valid certificate on disk that the proxy could not open.
+- **The engine now names the missing capability when the kernel refuses one of these operations**,
+  and the systemd setting to add, instead of surfacing a bare `Operation not permitted` that points at
+  nothing. Relevant to hosts that auto-updated into this release: an update replaces binaries but not
+  the systemd unit, so a host that updates from 0.6.0 still needs its package upgraded (or the two
+  settings added by hand) before HTTPS can work.
+
+### Changed
+
+- `[proxy] binary` is gone from the config. There is no separate proxy binary to point at; the setting
+  is ignored if left in place.
+
 ## v0.6.0
 
 ### Added

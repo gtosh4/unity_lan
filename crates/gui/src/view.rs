@@ -795,6 +795,30 @@ impl App {
             .unwrap_or_else(|| mesh_name.to_string())
     }
 
+    /// The service's browser-facing name, as a **link** when it is a web service — the point of
+    /// marking one `web` is that a browser opens it, so the name is the thing to click. Anything else
+    /// is plain text: there is nothing a click could do with `tcp/25565`.
+    ///
+    /// The target is the same reach the row already prints, so clicking makes no claim the display
+    /// does not: `https://<name>/` where the deployment issues certificates (the proxy serves 443
+    /// under that name), else the backend port over plain HTTP on the mesh name, which is what a
+    /// device with no certificate actually answers on.
+    fn service_link(&self, web: bool, mesh_name: &str, port: Option<u16>) -> Element<'_, Message> {
+        let name = self.browser_name(web, mesh_name);
+        let certified = self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.cert.domain.is_some());
+        match service_url(&name, web, certified, port) {
+            Some(url) => button(text(name).size(14))
+                .style(button::text)
+                .padding(0)
+                .on_press(Message::OpenUrl(url))
+                .into(),
+            None => text(name).size(14).into(),
+        }
+    }
+
     fn my_services_section(&self) -> Element<'_, Message> {
         // From the *hostname*, not `identity` — that is the Discord handle, which may carry a
         // discriminator or characters DNS refuses, while the `<user>` label was allocated by the
@@ -865,13 +889,18 @@ impl App {
                 } else {
                     ports.join(", ")
                 };
+                let web_port = self
+                    .exposed
+                    .iter()
+                    .find(|e| {
+                        e.name.as_deref() == Some(name)
+                            && e.kind == common::service::ServiceKind::Web
+                    })
+                    .map(|e| e.port);
                 let head = row![
-                    column![
-                        text(self.browser_name(web, &mesh_name)).size(14),
-                        muted(detail)
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
+                    column![self.service_link(web, &mesh_name, web_port), muted(detail)]
+                        .spacing(2)
+                        .width(Length::Fill),
                     button(text("remove").size(13))
                         .style(button::secondary)
                         .on_press(Message::RemoveService(name.to_string())),
@@ -995,7 +1024,7 @@ impl App {
                             RED
                         }),
                         column![
-                            text(self.browser_name(web, &svc.hostname)).size(14),
+                            self.service_link(web, &svc.hostname, Some(svc.port)),
                             muted(if svc.shadowed {
                                 format!("{reach} — name taken by another of their devices")
                             } else {
@@ -1329,6 +1358,26 @@ fn error_banner<'a>(e: &str) -> Element<'a, Message> {
 
 /// Parse the port field. The protocol is a separate control now, so this is just the number —
 /// 1..=65535, since 0 is not a port anything can listen on.
+/// Where a service's name should take a browser, or `None` for a row that is not a link.
+///
+/// Only web services are links, and the target is the reach the row already prints — never a guess:
+/// `https://<name>/` once the deployment issues certificates (the proxy serves 443 under that name),
+/// otherwise the backend port over plain HTTP, which is what an uncertified device answers on. A web
+/// service with neither is left as text rather than pointed somewhere nothing listens.
+pub(crate) fn service_url(
+    name: &str,
+    web: bool,
+    certified: bool,
+    port: Option<u16>,
+) -> Option<String> {
+    match (web, certified, port) {
+        (false, _, _) => None,
+        (true, true, _) => Some(format!("https://{name}/")),
+        (true, false, Some(port)) => Some(format!("http://{name}:{port}/")),
+        (true, false, None) => None,
+    }
+}
+
 pub(crate) fn parse_port(s: &str) -> Result<u16, String> {
     match s.parse::<u16>() {
         Ok(0) | Err(_) => Err(format!("'{s}' is not a port (1-65535)")),

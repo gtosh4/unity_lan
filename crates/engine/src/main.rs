@@ -323,6 +323,18 @@ fn main() -> anyhow::Result<()> {
         return service::main();
     }
 
+    // The TLS proxy is this same binary, re-executed and dropped to an unprivileged account
+    // (`proxy::spawn`). Dispatched before clap and before the log-file layer below: the child's
+    // environment was cleared, so it has no `--config` to peek for a `log_file`, and that file
+    // belongs to root anyway — opening it as the proxy account would fail and take the proxy down
+    // with it. It sets up its own stdout subscriber, which the engine inherits.
+    if std::env::args().nth(1).as_deref() == Some(proxy::SUBCOMMAND) {
+        let socket = std::env::args()
+            .nth(2)
+            .context("the proxy subcommand needs the control socket to read")?;
+        return unitylan_proxy::run_blocking(socket.into());
+    }
+
     let cli = Cli::parse();
 
     // An explicit `--log-file` wins; otherwise fall back to the config's `log_file` (resolved under

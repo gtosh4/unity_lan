@@ -56,24 +56,18 @@ pub fn run_as(configured: Option<&str>, euid: u32) -> Result<Option<String>, Str
     }
 }
 
-/// Where the proxy binary is: beside this executable, which is how every packaged install lays the
-/// two out, unless the config says otherwise.
-pub fn binary(configured: Option<&Path>) -> PathBuf {
-    if let Some(path) = configured {
-        return path.to_path_buf();
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join(proxy_file_name())))
-        .unwrap_or_else(|| PathBuf::from(proxy_file_name()))
-}
+/// The hidden subcommand that runs the proxy: `unitylan-engine proxy-serve <control-ro socket>`.
+///
+/// The proxy is a separate *process*, not a separate *binary*. It used to be its own executable, and
+/// every way that could be got wrong, was: the packages installed it somewhere the engine did not
+/// look, an update would replace a copy but never place a missing one, and a hand-built install had
+/// no copy at all — each failure surfacing only as "HTTPS does not work". One image cannot be
+/// half-installed, and cannot be a version out of step with the engine that supervises it.
+pub const SUBCOMMAND: &str = "proxy-serve";
 
-fn proxy_file_name() -> &'static str {
-    if cfg!(windows) {
-        "unitylan-proxy.exe"
-    } else {
-        "unitylan-proxy"
-    }
+/// The image to re-execute for the proxy: our own.
+fn self_exe() -> anyhow::Result<PathBuf> {
+    std::env::current_exe().context("resolving our own executable to run the TLS proxy from")
 }
 
 /// The descriptor the pre-bound listener is handed over on; the variable naming it is
@@ -140,7 +134,6 @@ impl Proxy {
 /// reconcile: a missing binary or an unusable user does not get better by retrying in two seconds.
 #[cfg(windows)]
 pub fn spawn(
-    _binary: &Path,
     _socket: &Path,
     bind: std::net::SocketAddr,
     run_as: Option<&str>,
@@ -212,21 +205,22 @@ fn windows_service_running() -> anyhow::Result<bool> {
 
 #[cfg(unix)]
 pub fn spawn(
-    binary: &Path,
     socket: &Path,
     bind: std::net::SocketAddr,
     run_as: Option<&str>,
 ) -> anyhow::Result<Proxy> {
+    let binary = self_exe()?;
     // Bound here, while we still have the capability to take a privileged port, and handed over.
     let listener = std::net::TcpListener::bind(bind)
         .with_context(|| format!("binding {bind} for the TLS proxy"))?;
 
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = tokio::process::Command::new(&binary);
     // Nothing of the root engine's environment crosses into the less-trusted process. Whatever the
     // administrator, the service manager or a packaging script left in there was addressed to a
     // privileged daemon, and the HTTP parser is the one process on this device assumed to be
     // compromised — so it is handed exactly what it reads and nothing else.
     cmd.env_clear()
+        .arg(SUBCOMMAND)
         .arg(socket)
         .env(common::control::PROXY_LISTEN_FD_VAR, LISTEN_FD.to_string())
         .stdin(Stdio::null())
@@ -265,9 +259,20 @@ pub fn spawn(
             });
         }
     }
-    let child = cmd
-        .spawn()
-        .with_context(|| format!("starting {}", binary.display()))?;
+    // A `pre_exec` failure surfaces here as the spawn's error, so the usual cause of `EPERM` is not
+    // the binary at all: it is `setgroups`/`setgid`/`setuid` being refused for want of a capability
+    // this daemon was never granted. Name it, because the bare errno names nothing.
+    let child = cmd.spawn().map_err(|e| {
+        #[cfg(target_os = "linux")]
+        if e.kind() == std::io::ErrorKind::PermissionDenied && run_as.is_some() {
+            return anyhow::anyhow!(
+                "starting {}: {e}{}",
+                binary.display(),
+                crate::util::caps::hint(crate::util::caps::SETUID, "CAP_SETUID and CAP_SETGID")
+            );
+        }
+        anyhow::anyhow!("starting {}: {e}", binary.display())
+    })?;
     // Ours is closed on return; the child holds the only copy from here.
     drop(listener);
     Ok(Proxy {
@@ -421,14 +426,14 @@ mod tests {
         assert!(Ids::lookup("no-such-unitylan-user").is_err());
     }
 
+    /// The proxy runs from *our own* image, so there is no second binary to be missing, mismatched or
+    /// installed somewhere the engine does not look — each of which was once a way HTTPS silently did
+    /// not work.
     #[test]
-    fn the_binary_sits_beside_the_engine_unless_told_otherwise() {
-        let explicit = PathBuf::from("/opt/unitylan/proxy");
-        assert_eq!(binary(Some(&explicit)), explicit);
-        let found = binary(None);
+    fn the_proxy_runs_this_very_binary() {
         assert_eq!(
-            found.file_name().and_then(|n| n.to_str()),
-            Some(proxy_file_name())
+            self_exe().expect("our own path is resolvable in a test"),
+            std::env::current_exe().unwrap()
         );
     }
 }

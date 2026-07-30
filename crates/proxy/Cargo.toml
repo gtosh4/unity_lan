@@ -9,9 +9,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "unitylan-proxy"
-path = "src/main.rs"
+[lib]
+name = "unitylan_proxy"
+path = "src/lib.rs"
 
 [dependencies]
 unitylan-common.workspace = true

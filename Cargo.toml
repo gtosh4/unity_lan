@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/common", "crates/coordinator", "crates/engine", "crates/gui", "crates/proxy"]
 
 [workspace.package]
-version = "0.6.0"
+version = "0.6.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
 rust-version = "1.96"
@@ -63,3 +63,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.8"
 unitylan-common = { path = "crates/common" }
+# The TLS proxy is a library the engine links and re-executes itself into, not a second binary — see
+# `crates/proxy/CLAUDE.md`.
+unitylan-proxy = { path = "crates/proxy" }

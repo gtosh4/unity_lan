@@ -365,12 +365,18 @@ pub fn grant_key_group(state_dir: &Path, group: &str) -> anyhow::Result<()> {
     let gid = crate::control::server::group_gid(group)
         .with_context(|| format!("no such group {group:?} for the certificate key"))?;
     let dir = certs_dir(state_dir);
+    // A root daemon whose bounding set has no CAP_CHOWN gets `EPERM` here, which on its own reads as
+    // a filesystem problem rather than the unit setting it is.
+    #[cfg(target_os = "linux")]
+    let hint = || crate::util::caps::hint(crate::util::caps::CHOWN, "CAP_CHOWN");
+    #[cfg(not(target_os = "linux"))]
+    let hint = String::new;
     std::os::unix::fs::chown(&dir, None, Some(gid))
-        .with_context(|| format!("giving {} to group {group}", dir.display()))?;
+        .with_context(|| format!("giving {} to group {group}{}", dir.display(), hint()))?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o710))
         .context("making the certificate directory group-traversable")?;
     std::os::unix::fs::chown(&path, None, Some(gid))
-        .with_context(|| format!("giving {} to group {group}", path.display()))?;
+        .with_context(|| format!("giving {} to group {group}{}", path.display(), hint()))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
         .context("relaxing the certificate key to group-readable")?;
     Ok(())

@@ -372,17 +372,9 @@ fn uninstall() -> Result<()> {
 /// Windows has no privileged-port concept — so unlike unix, it binds 443 itself and needs nothing
 /// handed to it.
 fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<()> {
-    let exe = std::env::current_exe()
-        .context("locating the engine executable")?
-        .parent()
-        .map(|d| d.join("unitylan-proxy.exe"))
-        .context("resolving the proxy executable path")?;
-    if !exe.exists() {
-        // Not fatal: an engine-only install is a valid deployment, and the operator may serve TLS
-        // themselves. Say so rather than failing the whole install.
-        println!("  note: unitylan-proxy.exe not found beside the engine; HTTPS for web services will be unavailable.");
-        return Ok(());
-    }
+    // This very image, registered under the hidden proxy subcommand — there is no second executable
+    // to be missing, nor to drift a release behind the engine that supervises it.
+    let exe = std::env::current_exe().context("locating the engine executable")?;
     // The **read-only** control endpoint, derived from this installation's own config so both sides
     // name the same pipe. Never the full one: LocalService is granted on the read-only pipe alone,
     // and a proxy that could send `Expose` or `ApplyUpdate` to a LocalSystem daemon would give away
@@ -399,7 +391,10 @@ fn install_proxy(manager: &ServiceManager, config: &std::path::Path) -> Result<(
         start_type: ServiceStartType::OnDemand,
         error_control: ServiceErrorControl::Normal,
         executable_path: exe,
-        launch_arguments: vec![endpoint.into_os_string()],
+        launch_arguments: vec![
+            OsString::from(crate::proxy::SUBCOMMAND),
+            endpoint.into_os_string(),
+        ],
         dependencies: vec![],
         account_name: Some(OsString::from("NT AUTHORITY\\LocalService")),
         account_password: None,

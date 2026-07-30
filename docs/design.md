@@ -452,11 +452,11 @@ exist for the deployment, and clients are told so (`RegisterResp::dns_domain`) s
   default, and offered only where a port is actually exposed. And CAs cap certificates per registered
   domain per week; the coordinator meters issuance (`max_certs_per_week`) so a burst is refused early
   rather than exhausting a budget the whole deployment shares.
-- **TLS is terminated by a separate, unprivileged process.** `unitylan-proxy` serves the web services
-  on the mesh address's `:443` and forwards to loopback backends, so an app needs no TLS
-  configuration of its own. It is a distinct binary because the engine is root — it drives WireGuard,
-  the firewall and the resolver — and parsing HTTP sent by mesh peers is the archetypal work that
-  should not happen there. A root engine with no `[proxy] user` **refuses** to start it rather than
+- **TLS is terminated by a separate, unprivileged process.** It serves the web services on the mesh
+  address's `:443` and forwards to loopback backends, so an app needs no TLS configuration of its own.
+  It is a distinct *process* — the engine's own binary re-executed under a hidden subcommand and
+  dropped to `[proxy] user` — because the engine is root, driving WireGuard, the firewall and the
+  resolver, and parsing HTTP sent by mesh peers is the archetypal work that should not happen there. A root engine with no `[proxy] user` **refuses** to start it rather than
   running it privileged (`proxy::run_as`). Its configuration arrives on the engine's existing `Watch`
   push — over a **read-only** control endpoint that answers status and refuses every mutation, since
   the full one grants authority over the whole device and this is the process most exposed to peers —

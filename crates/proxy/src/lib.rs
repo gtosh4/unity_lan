@@ -8,6 +8,12 @@
 //! no privileges: it reads the certificate and key through the group the engine grants them to
 //! (`[cert] group`), talks only to loopback backends, and holds nothing else.
 //!
+//! A separate *process*, not a separate *binary*: the engine re-executes its own image with a hidden
+//! subcommand ([`crate::run_blocking`] is what that runs) and drops the child to the proxy account.
+//! The isolation is the uid and the descriptors it holds, neither of which cares that the bytes on
+//! disk are shared — and one image means the two halves can never be different versions, nor one of
+//! them missing from an install.
+//!
 //! It is a **client of the engine**, not a peer of it: the whole configuration — which names to
 //! serve, which loopback port each is, who may reach it, where the certificate lives — arrives over
 //! the engine's control channel on the same `Watch` subscription the GUI uses, and updates live. So
@@ -97,18 +103,19 @@ impl Live {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+/// Serve until the process is killed, reading configuration from the engine's read-only endpoint at
+/// `socket`.
+///
+/// The engine calls this after re-executing itself as the unprivileged proxy account, so this runs in
+/// a process of its own with its own runtime and its own log sink — the engine's subscriber never
+/// reaches here, and the child's environment was cleared before exec, so there is nothing to inherit.
+pub fn run_blocking(socket: PathBuf) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".parse().expect("a valid default filter")),
         )
         .init();
-    let socket = PathBuf::from(
-        std::env::args()
-            .nth(1)
-            .unwrap_or_else(|| "control-ro.sock".to_string()),
-    );
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
