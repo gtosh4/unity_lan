@@ -337,6 +337,16 @@ async fn listen(addr: SocketAddr, serving: watch::Receiver<Serving>) -> anyhow::
 
 type Body = hyper::body::Incoming;
 
+/// The **only** refusal this proxy ever gives a caller — one status, one body, for a name it may not
+/// reach and for a name nothing answers to alike.
+///
+/// A single constant rather than a branch, because the property is that there is nothing to branch
+/// on. Peer discovery deliberately withholds a scoped service from everyone outside its scope, so a
+/// distinguishable 403 would hand that back to anyone willing to guess labels: a member could
+/// enumerate which services its neighbours run without ever being allowed to reach one. 404 is the
+/// honest answer to give someone for whom the name may as well not exist.
+const REFUSAL: (StatusCode, &str) = (StatusCode::NOT_FOUND, "no such service here");
+
 /// Route one request and forward it, or refuse it.
 async fn handle(
     mut req: Request<Body>,
@@ -354,16 +364,16 @@ async fn handle(
         .to_string();
     let port = match routes.resolve(&host, peer) {
         Decision::Forward(port) => port,
-        // Deliberately terse and identical in shape: a caller learns whether *they* may reach a
-        // service, not whether it exists. 404 rather than 403 for the unknown name, so probing the
-        // namespace tells you nothing you did not already know.
-        Decision::Forbidden => {
-            tracing::debug!(%peer, %host, "refused: outside this service's scope");
-            return Ok(status(StatusCode::FORBIDDEN, "not for you"));
-        }
-        Decision::Unknown => {
-            tracing::debug!(%peer, %host, "refused: no service answers to this name");
-            return Ok(status(StatusCode::NOT_FOUND, "no such service here"));
+        refused => {
+            // Which one it was goes to the local log and nowhere else.
+            match refused {
+                Decision::Forbidden => {
+                    tracing::debug!(%peer, %host, "refused: outside this service's scope")
+                }
+                _ => tracing::debug!(%peer, %host, "refused: no service answers to this name"),
+            }
+            let (code, body) = REFUSAL;
+            return Ok(status(code, body));
         }
     };
 

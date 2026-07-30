@@ -165,9 +165,17 @@ pub fn load_or_create_relay_secret(state_dir: &Path) -> anyhow::Result<String> {
     Ok(secret)
 }
 
-/// Discard local enrollment on logout: delete the device token and the WG private key, so the next
-/// enrollment generates a *fresh* key (the old one is never reused). The pinned coordinator anchor
-/// is kept — logging out doesn't change who we trust. Missing files are not an error.
+/// Discard local enrollment on logout: delete the device token, the WG private key and every piece
+/// of certificate material, so the next enrollment generates a *fresh* key (the old one is never
+/// reused). The pinned coordinator anchor is kept — logging out doesn't change who we trust. Missing
+/// files are not an error.
+///
+/// The certificate has to go with the key. Logging out and back in — as the same person or, on a
+/// shared machine, as somebody else — enrolls a new pubkey, which means a new device row and possibly
+/// a new device name, so the old leaf names an identity this install no longer has. Leaving it behind
+/// would keep the previous account's **private key** on disk, readable by the certificate group, and
+/// have the proxy go on serving that certificate until a fresh order completes. Nothing of value is
+/// discarded by removing it: it could not be presented for the new identity's names anyway.
 pub fn clear_enrollment(state_dir: &Path) -> anyhow::Result<()> {
     for name in ["token", "wg.key"] {
         match std::fs::remove_file(state_dir.join(name)) {
@@ -175,6 +183,14 @@ pub fn clear_enrollment(state_dir: &Path) -> anyhow::Result<()> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).context(format!("removing {name}")),
         }
+    }
+    // Leaf, private key, ACME account credential and the issued-state record, in one go — the ACME
+    // account key in particular can act for every certificate this device ever holds, so it is the
+    // last thing that should outlive the identity that created it.
+    match std::fs::remove_dir_all(crate::cert::certs_dir(state_dir)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).context("removing the certificate directory"),
     }
     Ok(())
 }
@@ -290,6 +306,51 @@ fn install_private_file(tmp: &Path, path: &Path) -> anyhow::Result<()> {
             .with_context(|| format!("installing private file {}", path.display()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logout_takes_the_certificate_with_the_key_but_leaves_the_anchors() {
+        let tmp = crate::testutil::TempDir::new("clear-enrollment");
+        let state = tmp.join("state");
+        std::fs::create_dir_all(crate::cert::certs_dir(&state)).unwrap();
+        std::fs::create_dir_all(state.join("anchors")).unwrap();
+        for (path, body) in [
+            (state.join("token"), "device-token"),
+            (state.join("wg.key"), "wg-private-key"),
+            (state.join("anchors").join("1.pub"), "pinned"),
+            (crate::cert::cert_path(&state), "leaf"),
+            (crate::cert::key_path(&state), "certificate private key"),
+        ] {
+            std::fs::write(&path, body).unwrap();
+        }
+
+        clear_enrollment(&state).unwrap();
+
+        // The identity, and everything that could speak for it.
+        assert!(!state.join("token").exists());
+        assert!(!state.join("wg.key").exists());
+        assert!(
+            !crate::cert::certs_dir(&state).exists(),
+            "the certificate directory outlived the enrollment it belongs to"
+        );
+        // ...but not who we trust. Logging out is not un-pinning a coordinator.
+        assert!(state.join("anchors").join("1.pub").exists());
+    }
+
+    #[test]
+    fn logging_out_twice_is_not_an_error() {
+        // The GUI and `ctl` can both reach this path, and a device that never held a certificate has
+        // no `certs/` at all — neither may fail.
+        let tmp = crate::testutil::TempDir::new("clear-enrollment-twice");
+        let state = tmp.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        clear_enrollment(&state).unwrap();
+        clear_enrollment(&state).unwrap();
+    }
 }
 
 // Unix-only: the sole test here exercises symlink/permission behavior that doesn't apply on Windows.

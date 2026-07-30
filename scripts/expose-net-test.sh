@@ -159,6 +159,18 @@ A_IP=$(wg_ip a); B_IP=$(wg_ip b); C_IP=$(wg_ip c); D_IP=$(wg_ip d)
 [ -n "$A_IP" ] && [ -n "$B_IP" ] && [ -n "$C_IP" ] && [ -n "$D_IP" ] || { echo "FAIL: missing wg IPs"; exit 1; }
 echo "A=$A_IP (mesh,mesh2)  B=$B_IP (mesh)  C=$C_IP (mesh2)  D=$D_IP (A's other device)"
 
+# The probes dial A *from* B, C and D, so each of them needs A configured as a peer — A's own view
+# being complete is not enough. A learns its co-members in one snapshot; a spoke can lag a refresh
+# cycle behind, and dialing then reads as "blocked" when the scope was fine.
+for n in b c d; do
+  for _ in $(seq 1 60); do
+    grep -q "peer set.*$A_IP" "$TMP/$n.log" 2>/dev/null && break
+    sleep 0.5
+  done
+  grep -q "peer set.*$A_IP" "$TMP/$n.log" 2>/dev/null \
+    || { echo "FAIL: node $n never peered with A"; tail -n 20 "$TMP"/*.log; exit 1; }
+done
+
 # Listeners on A for both ports (A is in the root netns).
 socat TCP-LISTEN:9001,fork,reuseaddr /dev/null >/dev/null 2>&1 &
 socat TCP-LISTEN:9002,fork,reuseaddr /dev/null >/dev/null 2>&1 &

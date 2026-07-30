@@ -222,13 +222,25 @@ pub fn spawn(
         .with_context(|| format!("binding {bind} for the TLS proxy"))?;
 
     let mut cmd = tokio::process::Command::new(binary);
-    cmd.arg(socket)
+    // Nothing of the root engine's environment crosses into the less-trusted process. Whatever the
+    // administrator, the service manager or a packaging script left in there was addressed to a
+    // privileged daemon, and the HTTP parser is the one process on this device assumed to be
+    // compromised — so it is handed exactly what it reads and nothing else.
+    cmd.env_clear()
+        .arg(socket)
         .env(common::control::PROXY_LISTEN_FD_VAR, LISTEN_FD.to_string())
         .stdin(Stdio::null())
         // Inherit stdout/stderr so the proxy's log lands wherever the engine's does — one place to
         // look, which for a service failing to serve is the difference between a diagnosis and a
         // mystery.
         .kill_on_drop(true);
+    // The one variable worth carrying across: the proxy filters its log on `RUST_LOG` like every
+    // other binary here, and clearing the environment would otherwise make it the only process whose
+    // logs cannot be turned up. Passed only when non-empty — an empty filter is not "the default",
+    // it is one that matches nothing, so forwarding `RUST_LOG=""` would silence the proxy entirely.
+    if let Some(filter) = std::env::var("RUST_LOG").ok().filter(|v| !v.is_empty()) {
+        cmd.env("RUST_LOG", filter);
+    }
     {
         // Resolved *before* the fork: `getpwnam`/`getgrouplist` allocate and lock, neither of which
         // is allowed between fork and exec. The child only makes syscalls with what we hand it.

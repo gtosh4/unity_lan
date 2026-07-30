@@ -179,6 +179,25 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   accounts. On Windows the proxy service is repointed when you upgrade.
 
 - Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
+  accounts. On Windows the proxy service is repointed when you upgrade.
+
+- Logging out now takes your HTTPS certificate with it. The device token and mesh key were cleared,
+  but the certificate, its private key and the account credential the certificate authority issued
+  all stayed on disk — so on a shared machine the next person to log in inherited the previous
+  account's private key, and the proxy went on presenting the old certificate until a new one was
+  issued. Logging back in has always generated a fresh mesh key, which means the old certificate
+  named an identity the install no longer had; nothing you can use is lost by removing it.
+
+- A service you aren't allowed to reach is now indistinguishable from one that doesn't exist. The
+  proxy answered "not for you" for the first and "no such service here" for the second, so anyone on
+  your mesh could guess service names and learn which ones their neighbours run — the same names
+  UnityLAN deliberately hides from people outside a service's scope. Both answers are now identical.
+
+- The TLS proxy no longer inherits the privileged daemon's environment. It is the one process here
+  that reads requests from other people's machines, so it now starts with nothing but the two things
+  it actually uses.
+
+- Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
   allows, and that folded distinct Discord accounts together — `alice.smith` and `alice_smith` both
   became `alice-smith`, as did `_alice` and `alice`, and anyone whose name survived sanitising with no
   letters or digits left landed on a shared fallback. Whoever connected last quietly took the name, so
