@@ -144,6 +144,18 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- Certificate names now actually resolve on the machine you type them into. On a deployment with a
+  certificate domain, every mesh name has an alias under it — `jellyfin.alice.mesh.unitylan.com` beside
+  `jellyfin.alice.unity.internal` — and that alias is the one a browser accepts without a warning page.
+  But nothing told your computer where to look it up: only `.unity.internal` was routed to the mesh, so
+  the certificate name went to public DNS, which holds no mesh addresses and never will, and the browser
+  simply failed. Both names now resolve, on Linux and Windows, so the HTTPS address a service shows you
+  works from any meshed device with no setup — as documented.
+
+  Coordinator operators: point `[dns] domain` at a subdomain used for nothing but the mesh. Members'
+  machines now resolve that whole domain locally, so other records under it stop being visible to them.
+  `docs/coordinator-setup.md` has the detail.
+
 - HTTPS for web services now actually comes up on a packaged install. The TLS proxy runs as its own
   account, and the group memberships that let it read the certificate key and reach the engine were
   being stripped from it the moment it started — so it looped "control socket: no such file or
@@ -164,7 +176,9 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   it stays contained; being able to reach the full control channel undid most of that. It now reads
   from a second, read-only endpoint that answers status and refuses everything else, and it is no
   longer a member of the group that owns the full one. Nothing to configure — packages handle the
-  accounts. On Windows the proxy service is repointed when you upgrade. Mesh names are sanitised down to what DNS
+  accounts. On Windows the proxy service is repointed when you upgrade.
+
+- Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
   allows, and that folded distinct Discord accounts together — `alice.smith` and `alice_smith` both
   became `alice-smith`, as did `_alice` and `alice`, and anyone whose name survived sanitising with no
   letters or digits left landed on a shared fallback. Whoever connected last quietly took the name, so

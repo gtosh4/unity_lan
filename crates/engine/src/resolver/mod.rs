@@ -23,7 +23,25 @@ mod windows;
 pub trait ResolverHook: Send + Sync {
     /// Route `.unity.internal` queries to our resolver at `server`. `iface` is the wg link (used by
     /// link-scoped backends like systemd-resolved; ignored by namespace-scoped ones like NRPT).
-    fn install(&self, iface: &str, server: SocketAddr) -> anyhow::Result<()>;
+    ///
+    /// `cert_domain` is the deployment's certificate domain (`RegisterResp::dns_domain`) when it has
+    /// one, and is routed alongside `.unity.internal` so the alias every mesh name gains under it
+    /// resolves too — that alias is the only one a publicly-trusted certificate can name, so without
+    /// this a browser sent to `https://jellyfin.alice.<domain>` asks *public* DNS, which by design
+    /// carries no `A` records for mesh addresses.
+    ///
+    /// The tradeoff: routing it means we shadow that whole domain locally. We answer `A` only —
+    /// every other query type under it gets empty-NOERROR with no fallback to public DNS, and an
+    /// unknown name gets empty-NOERROR rather than NXDOMAIN, since we are not its authority. That is
+    /// fine for a subdomain dedicated to the mesh (nothing else lives there, and the CA validates
+    /// `_acme-challenge` TXT from *outside* the mesh against the coordinator's zone), and wrong for a
+    /// domain carrying real public records — hence `docs/coordinator-setup.md` requires the former.
+    fn install(
+        &self,
+        iface: &str,
+        server: SocketAddr,
+        cert_domain: Option<&str>,
+    ) -> anyhow::Result<()>;
     /// Undo the resolver config.
     fn revert(&self, iface: &str) -> anyhow::Result<()>;
 }

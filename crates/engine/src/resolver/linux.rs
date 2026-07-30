@@ -15,10 +15,18 @@ const DOMAIN: &str = common::DNS_SUFFIX;
 pub struct ResolvectlHook;
 
 impl ResolverHook for ResolvectlHook {
-    fn install(&self, iface: &str, server: SocketAddr) -> anyhow::Result<()> {
+    fn install(
+        &self,
+        iface: &str,
+        server: SocketAddr,
+        cert_domain: Option<&str>,
+    ) -> anyhow::Result<()> {
         run(&dns_args(iface, server))?;
-        run(&domain_args(iface))?;
-        tracing::info!(%iface, %server, "resolver: routed .unity.internal via systemd-resolved");
+        run(&domain_args(iface, cert_domain))?;
+        tracing::info!(
+            %iface, %server, cert_domain,
+            "resolver: routed .unity.internal via systemd-resolved"
+        );
         Ok(())
     }
 
@@ -37,9 +45,17 @@ fn dns_args(iface: &str, server: SocketAddr) -> Vec<String> {
     vec!["dns".into(), iface.into(), server]
 }
 
-/// `resolvectl domain <iface> ~unity.internal` — a routing domain: only `*.unity.internal` uses our server.
-fn domain_args(iface: &str) -> Vec<String> {
-    vec!["domain".into(), iface.into(), format!("~{DOMAIN}")]
+/// `resolvectl domain <iface> ~unity.internal [~<cert_domain>]` — routing domains: only those
+/// suffixes use our server, global DNS is untouched.
+///
+/// Both go in *one* call because `resolvectl domain` **replaces** the link's whole domain list; a
+/// second invocation would drop the first domain rather than add to it.
+fn domain_args(iface: &str, cert_domain: Option<&str>) -> Vec<String> {
+    let mut args = vec!["domain".into(), iface.into(), format!("~{DOMAIN}")];
+    // The certificate domain carries the alias a publicly-trusted cert can name, so it has to route
+    // here too — see `ResolverHook::install` for what shadowing it locally costs.
+    args.extend(cert_domain.map(|d| format!("~{d}")));
+    args
 }
 
 fn run(args: &[String]) -> anyhow::Result<()> {
@@ -73,8 +89,18 @@ mod tests {
     #[test]
     fn domain_is_a_routing_domain() {
         assert_eq!(
-            domain_args("unl0"),
+            domain_args("unl0", None),
             vec!["domain", "unl0", "~unity.internal"]
+        );
+    }
+
+    #[test]
+    fn certificate_domain_routes_alongside_in_one_call() {
+        // One call carrying both: `resolvectl domain` replaces the link's list, so a second call
+        // would drop `~unity.internal`.
+        assert_eq!(
+            domain_args("unl0", Some("mesh.example.com")),
+            vec!["domain", "unl0", "~unity.internal", "~mesh.example.com"]
         );
     }
 }

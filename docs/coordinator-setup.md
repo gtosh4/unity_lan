@@ -213,6 +213,14 @@ authority can reach, so HTTP-01 and TLS-ALPN-01 are both impossible — DNS-01 i
 left, and it needs something authoritative for the name. The device still runs ACME itself and
 generates and keeps its own key; **the coordinator never sees key material.**
 
+**Use a subdomain dedicated to the mesh** — `mesh.example.com`, not the `example.com` that serves your
+website. Each member's engine routes the whole domain at its own local resolver so the aliases resolve,
+and that resolver answers for mesh names only: any other name under the domain resolves to nothing on a
+meshed device, and record types other than `A` return empty. On a subdomain that holds nothing but mesh
+names this costs nothing, and it does not affect certificate issuance (the CA validates
+`_acme-challenge` from outside the mesh, against this coordinator). Point it at a domain carrying real
+public records and members will stop seeing those records.
+
 **Two things to weigh before enabling it:**
 
 - **Certificate Transparency is permanent.** Every publicly-trusted certificate publishes its names

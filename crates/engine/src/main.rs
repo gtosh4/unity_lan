@@ -124,7 +124,14 @@ reverts the interface/firewall/DNS on shutdown); this handles the coordinator + 
     },
     /// Install this platform's OS resolver hook.
     #[command(hide = true)]
-    ResolverInstall { iface: String, server: SocketAddr },
+    ResolverInstall {
+        iface: String,
+        server: SocketAddr,
+        /// Also route this certificate domain at the resolver, as the daemon does when the
+        /// coordinator publishes one.
+        #[arg(long)]
+        cert_domain: Option<String>,
+    },
     /// Revert this platform's OS resolver hook.
     #[command(hide = true)]
     ResolverRevert { iface: String },
@@ -423,11 +430,15 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             let sock = tokio::net::UdpSocket::bind(bind).await?;
             dns::serve(sock, zone).await
         }
-        Some(Cmd::ResolverInstall { iface, server }) => {
+        Some(Cmd::ResolverInstall {
+            iface,
+            server,
+            cert_domain,
+        }) => {
             // Dev/test: drive this platform's ResolverHook.
             let hook = resolver::platform_hook()
                 .ok_or_else(|| anyhow::anyhow!("no OS resolver backend on this platform"))?;
-            hook.install(&iface, server)
+            hook.install(&iface, server, cert_domain.as_deref())
         }
         Some(Cmd::ResolverRevert { iface }) => {
             let hook = resolver::platform_hook()

@@ -3,9 +3,11 @@
 //!
 //! NRPT is *namespace*-scoped, not link-scoped: a single rule routes every `*.unity.internal` lookup to
 //! our resolver, system-wide, while all other names use the OS's normal DNS — the same split-horizon
-//! effect systemd-resolved gets from a per-link routing domain. Every rule carries `-Comment
-//! UnityLAN`, so `install` first clears any stale UnityLAN rule and then adds a fresh one (idempotent
-//! full replace), and `revert` removes exactly the rules we created.
+//! effect systemd-resolved gets from a per-link routing domain. On a deployment with a certificate
+//! domain there is a second rule for it, since the alias a publicly-trusted certificate names lives
+//! there. Every rule carries `-Comment UnityLAN`, so `install` first clears *all* UnityLAN rules
+//! (whatever namespace — a previous run's certificate domain may differ from this one's) and then adds
+//! a fresh set (idempotent full replace); `revert` removes exactly the rules we created.
 //!
 //! Two consequences of NRPT vs. the Linux backend:
 //! - **Port 53 only.** NRPT nameservers are IPs queried on port 53 — there is no port field. If the
@@ -34,15 +36,23 @@ const COMMENT: &str = "UnityLAN";
 pub struct NrptHook;
 
 impl ResolverHook for NrptHook {
-    fn install(&self, _iface: &str, server: SocketAddr) -> anyhow::Result<()> {
+    fn install(
+        &self,
+        _iface: &str,
+        server: SocketAddr,
+        cert_domain: Option<&str>,
+    ) -> anyhow::Result<()> {
         if server.port() != 53 {
             anyhow::bail!(
                 "NRPT routes to a nameserver IP on port 53 only, but the resolver bind is {server}; \
                  bind the resolver on port 53 to enable the Windows resolver hook"
             );
         }
-        crate::util::run_powershell(&install_script(server.ip()), "NRPT")?;
-        tracing::info!(server = %server.ip(), "resolver: routed .unity.internal via NRPT");
+        crate::util::run_powershell(&install_script(server.ip(), cert_domain), "NRPT")?;
+        tracing::info!(
+            server = %server.ip(), cert_domain,
+            "resolver: routed .unity.internal via NRPT"
+        );
         Ok(())
     }
 
@@ -51,28 +61,61 @@ impl ResolverHook for NrptHook {
     }
 }
 
-/// Clear any stale UnityLAN rule, then add a fresh `.unity.internal → <ip>` rule.
-fn install_script(server: IpAddr) -> String {
-    format!("{}\n{}", remove_script(), add_rule(server))
+/// Clear any stale UnityLAN rules, then add a fresh rule per namespace we route: `.unity.internal`
+/// always, and the certificate domain when the deployment has one.
+fn install_script(server: IpAddr, cert_domain: Option<&str>) -> String {
+    let mut s = remove_script();
+    s.push('\n');
+    s.push_str(&add_rule(DOMAIN, server));
+    if let Some(d) = cert_domain.and_then(routable_domain) {
+        s.push('\n');
+        s.push_str(&add_rule(d, server));
+    }
+    s
 }
 
-/// `Add-DnsClientNrptRule -Namespace '.unity.internal' -NameServers '<ip>' -Comment 'UnityLAN'`.
-fn add_rule(server: IpAddr) -> String {
-    // Namespace and comment are fixed literals; the IP is formatted from `IpAddr` — nothing to
-    // escape, so no PowerShell quoting concern.
+/// The certificate domain if it is safe to interpolate into the script, else `None` (logged).
+///
+/// Unlike the namespace and comment literals, this one arrives over the wire in
+/// `RegisterResp::dns_domain`, and the script runs as LocalSystem — so it is accepted only as a plain
+/// ASCII DNS name. A coordinator is our trust anchor for *names*, not for code on our machine.
+/// Refusing just this rule (rather than the whole install) keeps `.unity.internal` routed.
+fn routable_domain(domain: &str) -> Option<&str> {
+    let plain = !domain.is_empty()
+        && domain.len() <= 253
+        && domain.contains('.')
+        && domain
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.');
+    if !plain {
+        tracing::warn!(
+            ?domain,
+            "resolver: certificate domain is not a plain DNS name; not routing it via NRPT"
+        );
+        return None;
+    }
+    Some(domain)
+}
+
+/// `Add-DnsClientNrptRule -Namespace '.<domain>' -NameServers '<ip>' -Comment 'UnityLAN'`. The
+/// leading dot makes it a suffix rule ("this suffix and all subdomains").
+fn add_rule(domain: &str, server: IpAddr) -> String {
     format!(
-        "Add-DnsClientNrptRule -Namespace '.{DOMAIN}' -NameServers '{server}' \
+        "Add-DnsClientNrptRule -Namespace '.{domain}' -NameServers '{server}' \
          -Comment '{COMMENT}' | Out-Null"
     )
 }
 
-/// Remove our NRPT rules, matched by both namespace and our comment so nothing else is touched.
-/// Tolerant of "no such rules" so it's an idempotent no-op when nothing is installed.
+/// Remove our NRPT rules, matched by our comment alone — deliberately *not* by namespace, because we
+/// install one rule per routed namespace and the certificate domain is whatever the coordinator
+/// published at the time. A namespace filter would leave a previous run's certificate-domain rule
+/// behind in the registry, outliving the daemon and pointing at a resolver that is gone. The comment
+/// is ours, so nothing else is touched. Tolerant of "no such rules" — an idempotent no-op when
+/// nothing is installed.
 fn remove_script() -> String {
     format!(
-        "Get-DnsClientNrptRule | Where-Object {{ $_.Namespace -contains '.{DOMAIN}' \
-         -and $_.Comment -eq '{COMMENT}' }} | Remove-DnsClientNrptRule -Force \
-         -ErrorAction SilentlyContinue"
+        "Get-DnsClientNrptRule | Where-Object {{ $_.Comment -eq '{COMMENT}' }} \
+         | Remove-DnsClientNrptRule -Force -ErrorAction SilentlyContinue"
     )
 }
 
@@ -81,12 +124,13 @@ mod tests {
     use super::*;
     use std::net::Ipv4Addr;
 
+    const LOCAL: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
+
     #[test]
     fn install_clears_then_adds_rule_for_the_namespace() {
-        let s = install_script(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
-        // Clears stale rules first, scoped to our namespace + comment.
+        let s = install_script(LOCAL, None);
+        // Clears stale rules first, scoped to our comment.
         assert!(s.contains("Get-DnsClientNrptRule"));
-        assert!(s.contains("$_.Namespace -contains '.unity.internal'"));
         assert!(s.contains("$_.Comment -eq 'UnityLAN'"));
         assert!(s.contains("Remove-DnsClientNrptRule -Force"));
         // Then adds a suffix rule routing .unity.internal at our resolver.
@@ -94,14 +138,40 @@ mod tests {
             "Add-DnsClientNrptRule -Namespace '.unity.internal' -NameServers '127.0.0.1' \
              -Comment 'UnityLAN'"
         ));
+        // With no certificate domain, that is the *only* rule — exactly the pre-cert behavior.
+        assert_eq!(s.matches("Add-DnsClientNrptRule").count(), 1);
     }
 
     #[test]
-    fn revert_removes_only_our_rules() {
+    fn certificate_domain_gets_its_own_rule() {
+        let s = install_script(LOCAL, Some("mesh.example.com"));
+        assert_eq!(s.matches("Add-DnsClientNrptRule").count(), 2);
+        assert!(s.contains("-Namespace '.unity.internal' -NameServers '127.0.0.1'"));
+        assert!(s.contains("-Namespace '.mesh.example.com' -NameServers '127.0.0.1'"));
+        // Same tag on both, so the one comment-scoped remove cleans up the pair.
+        assert_eq!(s.matches("-Comment 'UnityLAN'").count(), 2);
+        assert!(s.contains("$_.Comment -eq 'UnityLAN'"));
+    }
+
+    #[test]
+    fn a_domain_that_is_not_a_plain_dns_name_is_not_routed() {
+        // The value crosses the wire and the script runs as LocalSystem, so anything that could
+        // break out of the quoted namespace is dropped — `.unity.internal` still gets routed.
+        for bad in ["mesh.example.com'; Remove-Item C:\\ -Recurse", "nodot", ""] {
+            let s = install_script(LOCAL, Some(bad));
+            assert_eq!(s.matches("Add-DnsClientNrptRule").count(), 1, "{bad:?}");
+            assert!(!s.contains("Remove-Item"), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn revert_removes_our_rules_in_any_namespace() {
         let s = remove_script();
-        assert!(s.contains("$_.Namespace -contains '.unity.internal'"));
         assert!(s.contains("$_.Comment -eq 'UnityLAN'"));
         assert!(s.contains("Remove-DnsClientNrptRule -Force"));
+        // No namespace filter: a previous run's certificate-domain rule must go too, and its domain
+        // is not knowable from here.
+        assert!(!s.contains("$_.Namespace"));
         // Never adds anything on revert.
         assert!(!s.contains("Add-DnsClientNrptRule"));
     }

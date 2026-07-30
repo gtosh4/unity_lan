@@ -1341,10 +1341,15 @@ async fn bring_up_host(
 
     // Point the OS resolver at our `.unity.internal` server on this link (best-effort). Reverted on
     // clean shutdown; also clears with the link if we exit uncleanly.
+    //
+    // The deployment's certificate domain rides along, so the alias every mesh name gains under it
+    // (`<device>.<user>.<domain>`) resolves as well — that alias is the one a publicly-trusted
+    // certificate can name, and without routing it a browser would ask public DNS, which by design
+    // holds no `A` record for a mesh address. It comes from register, which has already run.
     let resolver: Option<Box<dyn ResolverHook>> = match (cfg.resolver_hook, dns_bind) {
         (true, Some(bind)) => match crate::resolver::platform_hook() {
             Some(hook) => {
-                if let Err(e) = hook.install(&cfg.iface, bind) {
+                if let Err(e) = hook.install(&cfg.iface, bind, device.dns_domain.as_deref()) {
                     tracing::warn!("resolver hook (set `resolver_hook = false` to disable): {e:#}");
                 }
                 Some(hook)
