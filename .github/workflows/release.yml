@@ -55,10 +55,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-        # Include the release pubkey in the cache key: it's baked in at compile time, so a stale cache
-        # from an unarmed (or differently-keyed) build must not be reused, or clients ship unarmed.
+        # Restore only — never save. A tag run's cache scope is its own ref, and sibling tags can't
+        # read each other, so anything saved here is written once and never restored (v0.6.0 left
+        # 1.2 GB of quota nobody could reach). The readable scope is the default branch, seeded by
+        # ci.yml's `warm-release-cache` under this same shared-key.
+        #
+        # The release pubkey is deliberately *not* in the key any more: that kept every release
+        # build cold. It's baked in via `option_env!`, which rustc records in dep-info, so cargo
+        # rebuilds `common` by itself if the cached tree was built under a different (or absent)
+        # key — an unarmed cache can't silently produce an unarmed binary. The warmer sets the same
+        # variable anyway, so in the normal case there's nothing to rebuild.
         with:
-          key: relkey-${{ env.UNITYLAN_RELEASE_PUBKEY }}
+          shared-key: release
+          save-if: false
       - name: Release-signing arm status
         run: |
           if [ -n "$UNITYLAN_RELEASE_PUBKEY" ]; then
@@ -86,8 +95,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        # Restore-only, seeded on main — see the note in `packages` above.
         with:
-          key: relkey-${{ env.UNITYLAN_RELEASE_PUBKEY }}
+          shared-key: release
+          save-if: false
       - name: Release-signing arm status
         shell: bash
         run: |

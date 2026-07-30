@@ -48,6 +48,35 @@ jobs:
       - name: test
         run: cargo test --workspace --exclude unitylan-coordinator
 
+  # Seeds the cache the tag-triggered release build restores from. Actions caches are scoped to the
+  # run's ref, and a tag run (`refs/tags/vX.Y.Z`) can read only its own scope plus the default
+  # branch — sibling tags are invisible to each other. So release.yml could never warm itself, and
+  # every release rebuilt the world from cold. This job writes under main's scope, which every run
+  # can read, using the `release` shared-key both release jobs restore.
+  #
+  # It must build `--release`: the other jobs here are debug, and cargo shares nothing across
+  # profiles (different target dir, profile feeds `-C metadata`). Same crate set as
+  # packaging/build.sh and packaging/windows/build.ps1, so the tag build finds its dependencies
+  # already compiled.
+  #
+  # Push-only: a PR's cache lands in `refs/pull/N/merge`, which no release can read.
+  warm-release-cache:
+    if: github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      # Matched to release.yml so `common`'s baked-in pubkey is already compiled the right way.
+      UNITYLAN_RELEASE_PUBKEY: ${{ vars.UNITYLAN_RELEASE_PUBKEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+      - run: cargo build --release -p unitylan-engine -p unitylan-gui
+
   # Dependency-vulnerability gate. Reads the ignore-list in .cargo/audit.toml (triaged, non-
   # applicable advisories, all in the GUI's transitive deps) and fails on any new advisory in the
   # engine/coordinator trees.
