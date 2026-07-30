@@ -18,6 +18,7 @@ pub(crate) const GREEN: Color = Color::from_rgb(0.30, 0.78, 0.47); // healthy / 
 pub(crate) const AMBER: Color = Color::from_rgb(0.93, 0.69, 0.22); // in-progress / degraded
 pub(crate) const RED: Color = Color::from_rgb(0.90, 0.37, 0.37); // failed / unreachable / destructive
 pub(crate) const MUTED: Color = Color::from_rgb(0.74, 0.74, 0.80); // secondary text (IPs, endpoints, hints)
+pub(crate) const LINK: Color = Color::from_rgb(0.45, 0.70, 0.98); // a name a click opens in a browser
 
 /// A section title: slightly larger and semibold so sections read as a hierarchy above their rows.
 pub(crate) fn header<'a>(s: impl Into<String>) -> Text<'a> {

@@ -15,7 +15,7 @@ use common::control::{ExposeScope, ExposedPort, PeerReach, PeerStatus, Proto, Re
 
 use crate::widgets::{
     card, collapsible_header, confirm_controls, dot, fmt_bytes, header, modal, muted, peer_menu,
-    AMBER, GREEN, MUTED, RED,
+    AMBER, GREEN, LINK, MUTED, RED,
 };
 use crate::{App, Confirm, Message, PeerGroup, Tab};
 
@@ -810,7 +810,10 @@ impl App {
             .as_ref()
             .is_some_and(|s| s.cert.domain.is_some());
         match service_url(&name, web, certified, port) {
-            Some(url) => button(text(name).size(14))
+            // Colored, because a clickable name that looks exactly like the row above it is only
+            // discoverable by clicking things at random. Link blue is the one convention every user
+            // already knows; the underline iced has no primitive for is not what carries the meaning.
+            Some(url) => button(text(name).size(14).color(LINK))
                 .style(button::text)
                 .padding(0)
                 .on_press(Message::OpenUrl(url))
