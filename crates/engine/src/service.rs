@@ -536,21 +536,50 @@ fn restart_after() -> Result<()> {
     }
 }
 
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+/// Leave the SCM's job object, and don't take a console: without the first flag the helper dies with
+/// us and the service never comes back (see [`spawn_restart_helper`]).
+const DETACHED_BREAKAWAY: u32 = CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS;
+
 /// Launch [`restart_after`] as a detached child running the just-swapped engine binary, so it
 /// outlives this process and starts the service back up once we've stopped. `current_exe()` resolves
 /// the install path, which the file swap has already overwritten with the new binary — so the helper,
 /// and the service it starts, are both the new version.
+///
+/// **`CREATE_BREAKAWAY_FROM_JOB` is the load-bearing part.** A service's children join the SCM's job
+/// object, and the job dies with us — so a helper whose whole design is to act *after* we exit was
+/// being killed by our exit, leaving the service `Stopped` and the mesh down until someone ran
+/// `sc start` by hand. Breaking away first is what lets it outlive us. If the job forbids breakaway
+/// the spawn fails outright, so fall back to a plain detached spawn: same losing race as before, but
+/// the service is registered auto-start and comes up at the next boot either way — better than
+/// failing the update teardown.
 fn spawn_restart_helper() -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
     let exe =
         std::env::current_exe().context("locating the engine executable for the update restart")?;
     // Give the helper a stdin pipe and hand it the write end, which we then leak: the OS keeps it open
     // until *this* process exits and closes it then, so the helper reads EOF exactly when we're gone —
     // its cue that it's safe to start the service (see `restart_after`). We never write to it.
-    let mut child = std::process::Command::new(exe)
-        .args(["service", "restart-after"])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
-        .context("spawning the post-update restart helper")?;
+    let spawn = |flags: u32| {
+        std::process::Command::new(&exe)
+            .args(["service", "restart-after"])
+            .stdin(std::process::Stdio::piped())
+            .creation_flags(flags)
+            .spawn()
+    };
+    let mut child = match spawn(DETACHED_BREAKAWAY) {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!(
+                "could not break the post-update restart helper out of the service job ({e}); \
+                 retrying without it — if it doesn't survive, the service starts on the new binary \
+                 at the next boot"
+            );
+            spawn(DETACHED_PROCESS).context("spawning the post-update restart helper")?
+        }
+    };
     if let Some(stdin) = child.stdin.take() {
         std::mem::forget(stdin);
     }

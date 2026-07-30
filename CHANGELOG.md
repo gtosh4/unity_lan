@@ -3,7 +3,7 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
-## Unreleased
+## v0.6.0
 
 ### Added
 
@@ -144,6 +144,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **Windows: an update no longer leaves the engine stopped.** After the new version was written to
+  disk, the helper that starts the service back up was itself being killed the instant the old engine
+  exited — so the update finished correctly and then nothing brought the VPN back. It sat down until
+  the machine rebooted or someone ran `sc start UnityLANEngine` by hand. The helper now outlives the
+  engine it replaces, and the service comes back on the new version by itself. If your engine is
+  already stopped after an earlier update, start it once and this release takes it from there.
+
 - Certificate names now actually resolve on the machine you type them into. On a deployment with a
   certificate domain, every mesh name has an alias under it — `jellyfin.alice.mesh.unitylan.com` beside
   `jellyfin.alice.unity.internal` — and that alias is the one a browser accepts without a warning page.
@@ -176,9 +183,6 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   it stays contained; being able to reach the full control channel undid most of that. It now reads
   from a second, read-only endpoint that answers status and refuses everything else, and it is no
   longer a member of the group that owns the full one. Nothing to configure — packages handle the
-  accounts. On Windows the proxy service is repointed when you upgrade.
-
-- Two members can no longer end up sharing one hostname. Mesh names are sanitised down to what DNS
   accounts. On Windows the proxy service is repointed when you upgrade.
 
 - Logging out now takes your HTTPS certificate with it. The device token and mesh key were cleared,
