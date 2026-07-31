@@ -13,6 +13,17 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
   hostname off the screen and retyping it into a server browser was the one part of naming a port that
   the name didn't help with.
 
+### Fixed
+
+- **Stopping the engine no longer hangs.** A stop had two ways to stall. If the engine was between
+  attempts to reach an unreachable coordinator, it waited out the retry backoff — up to 45 seconds of a
+  daemon that had nothing left to do. And if removing the WireGuard interface got stuck (a known wedge
+  inside the userspace WireGuard library), it never finished at all: `systemctl stop` sat through its
+  whole timeout before killing the engine, and stopping it by hand left it running with the interface
+  still up. A stop now interrupts the backoff immediately, and teardown gives itself ten seconds before
+  exiting regardless — after the firewall, DNS and mesh presence have already been put back, so the
+  part it may cut short is the part that gets cleaned up on the next start.
+
 ### Changed
 
 - **The Services tab now leads with what the mesh is serving.** Finding someone else's Jellyfin or

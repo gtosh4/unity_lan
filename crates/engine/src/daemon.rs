@@ -272,6 +272,53 @@ enum TeardownKind {
     UpdateRestart,
 }
 
+/// How long [`teardown`] gets before we stop waiting on it and exit anyway. Every step is bounded
+/// except the interface removal: `backend.down()` is a *blocking* call into boringtun's uapi that
+/// wedges in the field (`/proc/<pid>/wchan` reads `unix_stream_data_wait`), and nothing can cancel a
+/// blocked syscall. Without a cap the process never exits at all — `systemctl stop` waits out its
+/// whole `TimeoutStopSec` before SIGKILLing, and a plain `kill` leaves a live daemon with the
+/// interface still up. Set under the unit's 15s so the engine bounds itself and systemd's timeout is
+/// only the backstop.
+const TEARDOWN_GRACE: Duration = Duration::from_secs(10);
+
+/// Arm the teardown watchdog: if nothing is sent on (or drops) the returned sender within
+/// [`TEARDOWN_GRACE`], exit the process. A plain thread rather than a task, because the wedge blocks
+/// a runtime worker and the Windows SCM stop path has no runtime in scope either.
+///
+/// Cutting teardown short here is the outcome the caller was heading for anyway — systemd's SIGKILL —
+/// minus the wait, and [`teardown`] orders its steps for exactly this case: host-global state
+/// (presence, firewall, resolver) is reverted *before* the interface, so what we may drop is the part
+/// the next start reclaims (`wg::up` reaps a leftover interface and uapi socket).
+fn watch_teardown(kind: TeardownKind) -> std::sync::mpsc::Sender<()> {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        if !watchdog_expired(&rx, TEARDOWN_GRACE) {
+            return;
+        }
+        tracing::error!(
+            "teardown still running after {}s (removing the interface can wedge inside boringtun); exiting anyway",
+            TEARDOWN_GRACE.as_secs()
+        );
+        // A stop exits clean. A cut-short *update* teardown must instead look like a failure, so the
+        // supervisor brings us back onto the new binary we never re-exec'd into (the Windows SCM
+        // failure action; systemd's `Restart=always` covers either).
+        std::process::exit(match kind {
+            TeardownKind::Stop => 0,
+            TeardownKind::UpdateRestart => 1,
+        });
+    });
+    tx
+}
+
+/// Whether the watched work overran `grace`. A disconnect means the sender was dropped — teardown
+/// returned (or panicked), either way it is no longer running — so only a timeout counts.
+fn watchdog_expired(rx: &std::sync::mpsc::Receiver<()>, grace: Duration) -> bool {
+    matches!(
+        rx.recv_timeout(grace),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    )
+}
+
 /// Reverse every host mutation this enrollment made — in the order that survives a SIGKILL
 /// mid-teardown: withdraw presence at the coordinator, then host-global state (firewall, resolver)
 /// *before* the interface, then stop the background tasks. Shared by the clean-shutdown and
@@ -300,6 +347,7 @@ async fn teardown(
     dns_task: &Option<tokio::task::JoinHandle<()>>,
     p2p_task: &Option<tokio::task::JoinHandle<()>>,
 ) {
+    let done = watch_teardown(kind);
     // Best-effort: tell the coordinator we're leaving so co-members prune us within seconds instead
     // of waiting out the presence reaper (~31 min). Bounded to 3s so an unreachable coordinator
     // can't stall teardown; a crash/power-loss can't send this — the reaper is the backstop.
@@ -357,6 +405,7 @@ async fn teardown(
     if let Some(t) = p2p_task {
         t.abort();
     }
+    let _ = done.send(()); // stand the watchdog down
 }
 
 /// Build the host firewall from `cfg.expose` (default-deny + established/icmp/exposed), *before* we
@@ -2157,6 +2206,11 @@ async fn register_until_ready(
                 &wg_pub,
             )) => {}
             _ = login_done.notified() => {}
+            // A stop must not wait out the backoff — up to 45s at the default `refresh_secs`, spent
+            // by a daemon that has nothing left to do. Loop back so the arm at the top runs the
+            // cleanup: its `shutdown.wait()` is already resolved, and no register is in flight to
+            // race it.
+            _ = shutdown.wait() => {}
         }
     }
 }
@@ -2336,6 +2390,22 @@ mod tests {
     use crate::coord::SeedPeer;
     use common::control::PeerReach;
     use std::time::Instant;
+
+    /// The watchdog fires only when teardown really overran. Both non-timeout outcomes stand it down:
+    /// the explicit "done" send, and the sender being dropped (teardown panicked) — killing the
+    /// process for work that already stopped would turn a logged warning into an outage.
+    #[test]
+    fn the_teardown_watchdog_fires_only_on_a_real_overrun() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        assert!(
+            watchdog_expired(&rx, Duration::from_millis(20)),
+            "nothing signalled within the grace → overran"
+        );
+        tx.send(()).expect("receiver alive");
+        assert!(!watchdog_expired(&rx, Duration::from_secs(60)));
+        drop(tx);
+        assert!(!watchdog_expired(&rx, Duration::from_secs(60)));
+    }
 
     #[test]
     fn staged_release_outranks_the_coordinators_own_version() {
