@@ -14,8 +14,8 @@ use iced::{Color, Element, Length};
 use common::control::{ExposeScope, ExposedPort, PeerReach, PeerStatus, Proto, RemoveScope};
 
 use crate::widgets::{
-    card, collapsible_header, confirm_controls, dot, fmt_bytes, header, modal, muted, peer_menu,
-    AMBER, GREEN, LINK, MUTED, RED,
+    card, collapsible_header, confirm_controls, copy_button, dot, fmt_bytes, header, modal, muted,
+    peer_menu, AMBER, GREEN, LINK, MUTED, RED,
 };
 use crate::{App, Confirm, Message, PeerGroup, Tab};
 
@@ -845,13 +845,7 @@ impl App {
             .status
             .as_ref()
             .is_some_and(|s| s.cert.domain.is_some());
-        button(text("copy").size(13))
-            .style(button::text)
-            .padding([0, 4])
-            .on_press(Message::CopyText(service_address(
-                &name, web, certified, port,
-            )))
-            .into()
+        copy_button(service_address(&name, web, certified, port))
     }
 
     fn my_services_section(&self) -> Element<'_, Message> {

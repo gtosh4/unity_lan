@@ -6,7 +6,7 @@ use std::net::Ipv4Addr;
 use iced::alignment::Vertical;
 use iced::font::Weight;
 use iced::widget::{
-    button, center, column, container, mouse_area, opaque, row, stack, svg, text, Text,
+    button, center, column, container, mouse_area, opaque, row, stack, svg, text, tooltip, Text,
 };
 use iced::{Color, Element, Font, Length, Theme};
 use iced_aw::{drop_down, DropDown};
@@ -69,6 +69,32 @@ pub(crate) fn dot<'a>(color: Color) -> Element<'a, Message> {
 /// because the default font renders such codepoints as tofu (same reason as [`dot`]). `fill` uses
 /// `currentColor`; the widget tints it via [`svg::Style::color`].
 const KEBAB_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>"##;
+
+/// The two-sheets copy glyph, for the button that puts a service's address on the clipboard. SVG for
+/// the same reason as [`KEBAB_ICON`], and drawn in strokes so it reads at 14px: a filled pair of
+/// rectangles that size turns into a smudge.
+const COPY_ICON: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg>"##;
+
+/// A borderless copy button: the glyph alone, since the word beside every row competed with the
+/// service names the list is actually read for. An icon on its own says less than a word, so it
+/// carries a tooltip naming what it hands over — which doubles as the answer to "what exactly will
+/// this paste?", a real question when a web service's address is not the port it lists.
+pub(crate) fn copy_button<'a>(address: String) -> Element<'a, Message> {
+    let icon = svg(svg::Handle::from_memory(COPY_ICON))
+        .width(Length::Fixed(14.0))
+        .height(Length::Fixed(14.0))
+        .style(|_theme, _status| svg::Style { color: Some(MUTED) });
+    let hint = text(format!("copy {address}")).size(12);
+    tooltip(
+        button(icon)
+            .style(button::text)
+            .padding([2, 4])
+            .on_press(Message::CopyText(address)),
+        container(hint).padding([2, 6]).style(container::dark),
+        tooltip::Position::Left,
+    )
+    .into()
+}
 
 /// Disclosure chevrons for a collapsible section header — down when open, right when collapsed.
 /// SVG for the same reason as [`dot`]/[`KEBAB_ICON`]: the default font tofus the triangle glyphs.
