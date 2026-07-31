@@ -66,8 +66,9 @@ amount of configuration fixes it.
 
 The fix is a second name. If your coordinator is configured with a certificate domain, every device
 also answers to an alias under it and can obtain a **publicly-trusted certificate** for that alias
-itself. On the hosted coordinator that domain is `mesh.unitylan.com`, so
-`mediabox.alice.unity.internal` is also `mediabox.alice.mesh.unitylan.com`.
+itself — from [Let's Encrypt](https://letsencrypt.org/), free, over ACME. On the hosted coordinator
+that domain is `mesh.unitylan.com`, so `mediabox.alice.unity.internal` is also
+`mediabox.alice.mesh.unitylan.com`.
 
 Two steps:
 
