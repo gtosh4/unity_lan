@@ -144,15 +144,47 @@ Usually one of:
 Neither has a clean fix from inside UnityLAN today. A peer that flaps but reconnects is usually
 still usable.
 
+## Collecting the engine log
+
+**Linux (packaged install).** The engine runs under systemd, so the journal has everything:
+
+```sh
+journalctl -u unitylan-engine -n 300 --no-pager
+```
+
+**Windows.** The service writes nothing to disk unless you tell it to — there is no log by default.
+Add a `log_file` line to `C:\Program Files\UnityLAN\engine.toml`:
+
+```toml
+log_file = 'C:\ProgramData\UnityLAN\engine.log'
+```
+
+then restart the service and reproduce the problem:
+
+```
+sc.exe stop UnityLANEngine
+sc.exe start UnityLANEngine
+```
+
+A relative path lands under `state_dir`; the absolute one above is the same place. The file grows
+without bound, so remove the line again once you're done.
+
+**Either platform, running by hand.** `RUST_LOG=debug` raises the level for one run — worth it when
+the default log says nothing useful. Don't set it to an empty string; the engine misbehaves.
+
+**What's in it.** Engine logs carry Discord user IDs, WireGuard public keys and mesh addresses.
+Read through before pasting into a public issue.
+
 ## Reporting a problem
 
 Include:
 
 - What the Peers tab shows for the peer in question (or `ctl status` output — redact addresses if
   you'd rather).
-- The version, from **Manage → account**.
-- Both ends' OS, whether either is behind CGNAT, and whether Tailscale is installed.
-- On a server, the engine log around the failure — the journal, or your configured `log_file`.
+- The version — **Manage → account** in the app, or `unitylan-engine --version`.
+- Both ends' OS, whether either is behind CGNAT, and whether Tailscale or any other VPN is
+  installed — even switched off, since some leave routes or a filter driver behind.
+- The engine log around the failure, collected as above.
 
 Bugs and feature requests belong in [GitHub issues](https://github.com/gtosh4/unity_lan/issues);
 questions are welcome in [Discord](https://discord.gg/QAmz2j54kS). Security problems go privately —
