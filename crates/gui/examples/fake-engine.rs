@@ -74,7 +74,7 @@ struct State {
 
 /// The demo timeline: at each `at_secs` mark the GUI is told to do one UI action, once. The peer
 /// menu is keyed by device IP — Bob's desktop is 100.64.0.10 (see [`fixture_peers`]) — while a block
-/// acts on the owner (`user_id` 2001) and opens the user-scoped modal. Tuned to loop-record in ~40s.
+/// acts on the owner (`user_id` 2001) and opens the user-scoped modal. Tuned to loop-record in ~47s.
 ///
 /// The still marks in `scripts/readme-demo.sh` are cut from the *middle* of each dwell here, so
 /// moving a step means moving them too — a shifted tour silently produces screenshots of a tab in
@@ -90,16 +90,18 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         // named ports, and what everyone else on the mesh is serving — and it is what `services.png`
         // is cut from.
         (21, UiAction::SelectTab(UiTab::Services)),
-        // Open the expose dialog *after* the 25s mark `services.png` is cut from, so the still keeps
+        // Open the expose dialog well after the mark `services.png` is cut from, so the still keeps
         // showing the list while the video goes on to show the form that adds to it. Exposing is the
         // one thing in this app a newcomer has to be talked through, and a screenshot of a list it
-        // was added to never shows it.
-        (27, UiAction::OpenAddService(true)),
-        (31, UiAction::OpenAddService(false)),
+        // was added to never shows it. Mind that the marks in `readme-demo.sh` are in *recording*
+        // time, which starts ~2.5s into this tour — a step at t here lands ~2.5s earlier there, and
+        // the first cut of this landed on the dialog for exactly that reason.
+        (29, UiAction::OpenAddService(true)),
+        (33, UiAction::OpenAddService(false)),
         // Manage is still visited so the tour shows the whole app, but it holds only the account
         // and devices now — sharing moved to Services — so nothing is cut from it.
-        (33, UiAction::SelectTab(UiTab::Manage)),
-        (40, UiAction::SelectTab(UiTab::Networks)),
+        (35, UiAction::SelectTab(UiTab::Manage)),
+        (42, UiAction::SelectTab(UiTab::Networks)),
     ]
 }
 
