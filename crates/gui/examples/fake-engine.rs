@@ -87,10 +87,10 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         (16, UiAction::Cancel),
         (18, UiAction::CloseMenu),
         // Services dwells longest: it is both halves of the feature in one view — this device's own
-        // named ports, and what everyone else on the mesh is serving — and it is what `services.png`
+        // named ports, and what everyone else on the mesh is serving — and it is what `services.webp`
         // is cut from.
         (21, UiAction::SelectTab(UiTab::Services)),
-        // Open the expose dialog well after the mark `services.png` is cut from, so the still keeps
+        // Open the expose dialog well after the mark `services.webp` is cut from, so the still keeps
         // showing the list while the video goes on to show the form that adds to it. Exposing is the
         // one thing in this app a newcomer has to be talked through, and a screenshot of a list it
         // was added to never shows it. Mind that the marks in `readme-demo.sh` are in *recording*

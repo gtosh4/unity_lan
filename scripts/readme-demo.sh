@@ -15,8 +15,8 @@
 # Deps:  cargo, ffmpeg, and the flatpak com.dec05eba.gpu_screen_recorder
 #        (flatpak install flathub com.dec05eba.gpu_screen_recorder)
 # Usage: scripts/readme-demo.sh            # writes assets/demo.gif (README), assets/demo-peers.{webm,mp4}
-#                                          # (site hero), assets/peers.png, assets/services.png,
-#                                          # assets/networks.png
+#                                          # (site hero), assets/peers.webp, assets/services.webp,
+#                                          # assets/networks.webp
 #        SECS=30 FPS=15 WIDTH=400 scripts/readme-demo.sh
 set -uo pipefail
 
@@ -107,10 +107,14 @@ ffmpeg -y -v error "${CUT[@]}" -vf "$CUT_VF" \
 # a tour timing change in `fake-engine.rs` means moving these too. The Manage tab is still visited —
 # it keeps the tour honest about what the app has — but holds only the account and devices now, so
 # nothing is cut from it.
-ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/peers.png"
-ffmpeg -y -v error -ss 22 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/services.png"
-ffmpeg -y -v error -ss 46 -i "$WORK/tour.mkv" -frames:v 1 "$OUT/networks.png"
+#
+# Written as lossless WebP: pixel-identical to the PNG these used to be and about half the bytes,
+# which is worth having on a page that now loads every screenshot up front.
+STILL=(-c:v libwebp -lossless 1 -compression_level 6 -frames:v 1)
+ffmpeg -y -v error -ss 17 -i "$WORK/tour.mkv" "${STILL[@]}" "$OUT/peers.webp"
+ffmpeg -y -v error -ss 22 -i "$WORK/tour.mkv" "${STILL[@]}" "$OUT/services.webp"
+ffmpeg -y -v error -ss 46 -i "$WORK/tour.mkv" "${STILL[@]}" "$OUT/networks.webp"
 
 echo "==> done:"
 ls -la "$OUT/demo.gif" "$OUT/demo-peers.webm" "$OUT/demo-peers.mp4" \
-  "$OUT/peers.png" "$OUT/services.png" "$OUT/networks.png"
+  "$OUT/peers.webp" "$OUT/services.webp" "$OUT/networks.webp"

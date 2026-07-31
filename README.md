@@ -331,7 +331,7 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
    running:
 
    <p align="center">
-     <img src="assets/services.png" alt="The Services tab: this device's named services, and what other members are serving" width="360">
+     <img src="assets/services.webp" alt="The Services tab: this device's named services, and what other members are serving" width="360">
    </p>
 
 ## Serve something over HTTPS

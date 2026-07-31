@@ -262,7 +262,7 @@ token = "…"   # a long random secret YOU generate, e.g. `openssl rand -hex 32`
 **real time** — the page long-polls the coordinator's membership version, so counts move the
 instant a device joins or leaves; otherwise a ~25 s heartbeat keeps it live.
 
-![UnityLAN coordinator admin dashboard](../assets/coordinator-admin.png)
+![UnityLAN coordinator admin dashboard](../assets/coordinator-admin.webp)
 
 **Network graph.** Below the stat cards, the dashboard draws a live graph of your mesh: one node
 per registered **network** (colored by its guild) and one per **online user**, with an edge wherever
@@ -288,7 +288,7 @@ guild-name lookup, and it refreshes on the same realtime tick as the counts.
 - **Download .dot** exports the current graph as [Graphviz](https://graphviz.org/) DOT (networks
   clustered per guild) for offline rendering or archiving.
 
-![UnityLAN coordinator network graph](../assets/coordinator-admin-graph.png)
+![UnityLAN coordinator network graph](../assets/coordinator-admin-graph.webp)
 
 In the shot above the networks are named (`minecraft`, `valheim`, `storage`, …) and colored by
 guild, while every member is an opaque `user-…` token. `user-68f112db` (center) sits in three
