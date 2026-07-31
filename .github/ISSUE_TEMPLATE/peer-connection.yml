@@ -1,0 +1,104 @@
+name: Peer won't connect
+description: A peer shows unreachable, or a tunnel keeps dropping and reconnecting.
+labels: ["bug", "connectivity"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things resolve most of these before you finish typing:
+
+        - **Do you run Tailscale, or any other VPN, on either machine?** Tailscale is the known one:
+          it claims `100.64.0.0/10`, the same range UnityLAN's mesh uses, and silently drops the
+          traffic. Anything else that adds routes, claims an address range, or filters UDP can
+          collide the same way. See
+          [troubleshooting](https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md).
+        - **Give it a minute.** Hole punching and the relay fallback take a few attempt cycles;
+          "unreachable" in the first seconds is normal.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version on both ends
+      description: "`unitylan-engine --version`, or **Manage → account**. Say if the two ends differ."
+      placeholder: both 0.6.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reachability
+    attributes:
+      label: What the peer's line says
+      description: Under the peer's name in the **Peers** tab, or in `ctl status`.
+      options:
+        - unreachable — never connects
+        - connects, then drops repeatedly (flapping)
+        - relayed, but I expected direct
+        - no handshake yet, and it stays that way
+        - something else
+    validations:
+      required: true
+
+  - type: dropdown
+    id: other-vpn
+    attributes:
+      label: Is Tailscale or other VPN software installed on either machine?
+      description: Counts even if it's switched off — some leave routes or a filter driver behind. Name it in the box below.
+      options:
+        - "No"
+        - "Yes — Tailscale"
+        - "Yes — a different VPN or mesh (name it below)"
+        - Not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: location
+    attributes:
+      label: Where the two machines are
+      options:
+        - Same LAN, same router
+        - Different networks, over the internet
+        - Same site but different subnets or VLANs
+    validations:
+      required: true
+
+  - type: textarea
+    id: networks
+    attributes:
+      label: Both ends' network situation
+      description: |
+        As much as you know: CGNAT, symmetric NAT, dual-WAN or load-balancing router, corporate or
+        campus network, UDP blocked, a manual port forward. "Home fibre, ISP router, no idea" is a
+        fine answer — say what you know rather than guessing.
+
+        If you answered yes above, name the VPN or mesh software here and say which machine it's on.
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: "`ctl status` from both ends"
+      description: "`sudo unitylan-engine ctl status`. Both sides matter here — one end often sees a path the other doesn't."
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Engine log around the failure
+      description: |
+        Linux: `journalctl -u unitylan-engine -n 300 --no-pager`
+        Windows: no log exists by default — see [collecting the engine log](https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md#collecting-the-engine-log).
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Before you post
+      options:
+        - label: I've read through anything I pasted above. Engine logs carry Discord user IDs, WireGuard public keys and mesh addresses, and this issue is public.
+          required: true

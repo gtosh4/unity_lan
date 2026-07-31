@@ -1,0 +1,101 @@
+name: Bug report
+description: Something is broken or behaves differently than documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A peer that won't connect has its own form — use **Peer won't connect** instead, it asks for
+        the things that actually diagnose it.
+
+        Not sure it's a bug? [Discord](https://discord.gg/QAmz2j54kS) is faster.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`unitylan-engine --version`, or **Manage → account** in the app. Not \"latest\" — auto-update means that could be anything."
+      placeholder: unitylan-engine 0.6.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it's installed
+      options:
+        - Linux — .deb or .rpm package
+        - Linux — built from source
+        - Windows — MSI installer
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: coordinator
+    attributes:
+      label: Which coordinator
+      description: Self-hosted and hosted fail in different places, so this decides where to look first.
+      options:
+        - Hosted (coordinator.unitylan.com)
+        - Self-hosted
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: What part
+      options:
+        - Desktop app (GUI)
+        - Engine / daemon
+        - Coordinator
+        - Named services or HTTPS certificates
+        - Hostnames / DNS resolution
+        - Install, packaging, or auto-update
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you saw. Exact error text beats a paraphrase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: "`ctl status` output"
+      description: "`sudo unitylan-engine ctl status` (Linux) or `unitylan-engine ctl status` in an elevated shell (Windows). Redact addresses if you'd rather."
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Engine log around the failure
+      description: |
+        Linux: `journalctl -u unitylan-engine -n 300 --no-pager`
+        Windows: no log exists by default — see [collecting the engine log](https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md#collecting-the-engine-log).
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Before you post
+      options:
+        - label: I've read through anything I pasted above. Engine logs carry Discord user IDs, WireGuard public keys and mesh addresses, and this issue is public.
+          required: true

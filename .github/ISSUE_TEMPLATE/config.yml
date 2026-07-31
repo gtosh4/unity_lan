@@ -1,0 +1,14 @@
+# A blank issue is almost always a support question with no version and no logs. Route those to
+# Discord, and route vulnerabilities to the private advisory flow *here*, where someone about to
+# file sees it — SECURITY.md only reaches people who go looking for it.
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/gtosh4/unity_lan/security/advisories/new
+    about: Never open a public issue for a vulnerability. This opens a private advisory visible only to you and the maintainers.
+  - name: Help — setup, "how do I", or something that might not be a bug
+    url: https://discord.gg/QAmz2j54kS
+    about: Ask in Discord. Faster than an issue, and most first-run trouble is answered there already.
+  - name: Troubleshooting guide
+    url: https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md
+    about: Symptom-by-symptom checks, and how to collect the engine log before filing.

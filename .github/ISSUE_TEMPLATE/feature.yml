@@ -1,0 +1,27 @@
+name: Feature request
+description: Something UnityLAN should do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation you're in, not the feature you've designed. Knowing the problem often turns up a better answer than the one either of us started with.
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: What do you do today instead?
+      description: Manual steps, another tool, or giving up. This is how a request gets prioritised.
+    validations:
+      required: false
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you had in mind
+      description: Optional. If you already have a shape in mind, describe it.
+    validations:
+      required: false
