@@ -86,7 +86,7 @@ fi
 # ---------------- inner phase: run (root inside the user+net+mount namespace) ----------------
 COORD="$ROOT/target/debug/unitylan-coordinator"
 ENG="$WORK/baseline/unitylan-engine"          # the running OLD engine (self-replaced on update)
-trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; sleep 0.5; kill -9 $(jobs -p) 2>/dev/null; rm -rf "$WORK"' EXIT
 mount -t tmpfs none /run 2>/dev/null || { echo "FAIL: mount /run"; exit 1; }
 mkdir -p /run/wireguard
 ip link set lo up

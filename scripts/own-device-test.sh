@@ -20,7 +20,7 @@ if [ "${UNL_INNS:-}" != "1" ]; then
 fi
 
 TMP="$(mktemp -d)"
-trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; sleep 0.5; kill -9 $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
 mount -t tmpfs none /run 2>/dev/null || { echo "FAIL: mount /run"; exit 1; }
 mkdir -p /run/wireguard
 ip link set lo up

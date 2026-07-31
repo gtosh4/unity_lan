@@ -20,7 +20,7 @@ COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
 
 TMP="$(mktemp -d)"
 COORD_PID=""
-trap 'kill "$COORD_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill "$COORD_PID" 2>/dev/null; sleep 0.5; kill -9 "$COORD_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*"; exit 1; }
 

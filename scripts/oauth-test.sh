@@ -16,7 +16,7 @@ COORD="${COORD:-$ROOT/target/debug/unitylan-coordinator}"
 [ -x "$ENG" ] && [ -x "$COORD" ] || { echo "build first: cargo build"; exit 1; }
 
 TMP="$(mktemp -d)"
-trap 'kill $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
+trap 'kill $(jobs -p) 2>/dev/null; sleep 0.5; kill -9 $(jobs -p) 2>/dev/null; rm -rf "$TMP"' EXIT
 
 cat >"$TMP/coord.toml" <<EOF
 bind = "127.0.0.1:8087"

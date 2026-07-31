@@ -9,7 +9,7 @@ N="${1:-250}"
 PARK="${2:-}"
 PORT="${PORT:-18080}"
 TMP="$(mktemp -d)"
-trap 'kill "${CPID:-}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
+trap 'kill "${CPID:-}" 2>/dev/null || true; sleep 0.5; kill -9 "${CPID:-}" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 trap 'echo "benchmark failed; coordinator log:" >&2; tail -40 "$TMP/coordinator.log" >&2 || true' ERR
 
 CFG="$TMP/coordinator.toml"

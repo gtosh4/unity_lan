@@ -20,7 +20,7 @@ fi
 # ---------------- inside the user+net+mount namespace ----------------
 command -v nsenter >/dev/null || { echo "FAIL: nsenter missing"; exit 1; }
 LOG="$(mktemp -d)"
-trap 'kill $A_PID $B_PID $CHILD 2>/dev/null; rm -rf "$LOG"' EXIT
+trap 'kill $A_PID $B_PID $CHILD 2>/dev/null; sleep 0.5; kill -9 $A_PID $B_PID $CHILD 2>/dev/null; rm -rf "$LOG"' EXIT
 
 # boringtun's control socket lives at /var/run/wireguard/<if>.sock; make /run writable.
 mount -t tmpfs none /run 2>/dev/null || { echo "FAIL: mount tmpfs /run"; exit 1; }
