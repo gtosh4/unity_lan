@@ -65,6 +65,14 @@ impl App {
                 self.block_modal(*user_id, username),
                 Message::CancelConfirm,
             ),
+            // Exposing a service is the other whole-window dialog: rare enough that its form doesn't
+            // earn permanent space in the tab, and long enough that inline it would push the mesh
+            // list off the fold.
+            _ if self.adding_service => modal(
+                content,
+                self.add_service_modal(),
+                Message::AddServiceOpen(false),
+            ),
             _ => content.into(),
         }
     }
@@ -161,9 +169,13 @@ impl App {
             Tab::Peers => Column::new()
                 .push(self.device_section())
                 .push(self.peers_section()),
+            // What the mesh is serving comes first: reaching someone else's service is the everyday
+            // reason to open this tab, while exposing one of your own is a thing you do once and
+            // rarely revisit. Own services stay below, and adding one is a modal off the button
+            // there rather than a form permanently occupying the space above the mesh list.
             Tab::Services => Column::new()
-                .push(self.my_services_section())
-                .push(self.mesh_services_section()),
+                .push(self.mesh_services_section())
+                .push(self.my_services_section()),
             Tab::Manage => Column::new()
                 .push(self.account_section())
                 .push(self.devices_section())
@@ -919,6 +931,26 @@ impl App {
             list.into()
         };
 
+        // Exposing is rare next to reading this list, so the form is a modal off this button rather
+        // than a permanent row of inputs.
+        let head = row![
+            header("my services"),
+            horizontal_space(),
+            button(text("expose a service").size(13))
+                .style(button::secondary)
+                .on_press(Message::AddServiceOpen(true)),
+        ]
+        .spacing(8)
+        .align_y(Vertical::Center);
+        column![head, inner].spacing(8).into()
+    }
+
+    /// The add-a-service form, shown as a modal from the Services tab's "expose a service" button.
+    ///
+    /// Same drafts the section used inline before, laid out down the dialog rather than across one
+    /// row — a modal has the width for a label per field, so `name` / `port` / who-can-reach-it stop
+    /// being three placeholder-only boxes.
+    fn add_service_modal(&self) -> Element<'_, Message> {
         let name_err = (!self.service_name_input.trim().is_empty()
             && !common::service::valid_label(self.service_name_input.trim()))
         .then(|| common::service::label_error(self.service_name_input.trim()));
@@ -930,41 +962,49 @@ impl App {
             && common::service::valid_label(self.service_name_input.trim())
             && !self.expose_port_input.trim().is_empty()
             && !self.expose_scopes.is_empty();
-        let add = row![
-            text_input("name", &self.service_name_input)
-                .on_input(Message::ServiceNameInput)
-                .on_submit(Message::ServiceSubmit)
-                .width(Length::Fixed(90.0)),
-            text_input("port", &self.expose_port_input)
-                .on_input(Message::ExposePortInput)
-                .on_submit(Message::ServiceSubmit)
-                .width(Length::Fixed(64.0)),
-            proto_toggle(self.expose_proto),
-            self.scope_picker(),
-            {
-                let b = button(text("add").size(13)).style(button::secondary);
-                if ready {
-                    b.on_press(Message::ServiceSubmit)
-                } else {
-                    b
-                }
-            },
-        ]
-        .spacing(6)
-        .align_y(Vertical::Center);
 
-        let mut col = column![header("my services"), inner, add].spacing(8);
-        for e in [name_err, port_err].into_iter().flatten() {
+        let fields = column![
+            column![
+                muted("name"),
+                text_input("mc", &self.service_name_input)
+                    .on_input(Message::ServiceNameInput)
+                    .on_submit(Message::ServiceSubmit),
+            ]
+            .spacing(2),
+            column![
+                muted("port"),
+                row![
+                    text_input("25565", &self.expose_port_input)
+                        .on_input(Message::ExposePortInput)
+                        .on_submit(Message::ServiceSubmit)
+                        .width(Length::Fixed(80.0)),
+                    proto_toggle(self.expose_proto),
+                ]
+                .spacing(6)
+                .align_y(Vertical::Center),
+            ]
+            .spacing(2),
+            column![muted("who can reach it"), self.scope_picker()].spacing(2),
+        ]
+        .spacing(12);
+
+        let mut col = column![header("expose a service"), fields].spacing(14);
+        // Validation errors and the last action error both belong in here: the top-of-window banner
+        // sits on the dimmed base, where the dialog covering it makes it something you can't read.
+        for e in [name_err, port_err, self.error.clone()]
+            .into_iter()
+            .flatten()
+        {
             col = col.push(text(e).size(13).color(RED));
         }
         // The web tick only appears where it can do anything: it puts the name in this device's
         // certificate, so it needs a deployment that issues them and the opt-in already on. When the
         // deployment issues them but this device hasn't opted in, say where that lives — the setting
-        // moved to Manage, and a tick that is simply absent is a dead end.
+        // lives in Manage, and a tick that is simply absent is a dead end.
         let certs = self.status.as_ref().map(|s| &s.cert);
         if certs.is_some_and(|c| c.domain.is_some() && !c.enabled) {
             col = col.push(muted(
-                "To serve one of these over HTTPS, turn on the certificate for this device in Manage.",
+                "To serve this over HTTPS, turn on the certificate for this device in Manage.",
             ));
         }
         if certs.is_some_and(|c| c.domain.is_some() && c.enabled) {
@@ -985,7 +1025,29 @@ impl App {
                 );
             }
         }
-        col.into()
+        col = col.push(
+            row![
+                horizontal_space(),
+                button(text("cancel").size(13))
+                    .style(button::secondary)
+                    .on_press(Message::AddServiceOpen(false)),
+                {
+                    let b = button(text("expose").size(13));
+                    if ready {
+                        b.on_press(Message::ServiceSubmit)
+                    } else {
+                        b.style(button::secondary)
+                    }
+                },
+            ]
+            .spacing(8)
+            .align_y(Vertical::Center),
+        );
+        container(col)
+            .padding(20)
+            .max_width(360)
+            .style(container::rounded_box)
+            .into()
     }
 
     /// What everyone else is serving, grouped by the device serving it — the "what's on this mesh"

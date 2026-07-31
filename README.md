@@ -68,7 +68,9 @@ Use the project's hosted coordinator, or run your own if you'd rather hold the t
   and no public exposure. Take the role away and they're off the LAN. (A network is always a
   role you pick; `@everyone` can't be one, so nobody joins just by being in the server.)
 - **You have a homelab and a few trusted people.** Share services (NAS, Jellyfin, a git server)
-  with exactly the people who hold a role — no VPN accounts to provision or revoke by hand.
+  with exactly the people who hold a role — no VPN accounts to provision or revoke by hand. Anything
+  a browser opens can have a **real HTTPS certificate**, so there's no warning page to click through
+  and no root certificate to install on everyone's machines.
 - **You want a private LAN for a team** but don't want to stand up an identity provider. You already
   have one: Discord.
 - **You just want your own machines to reach each other.** Laptop to desktop, phone-tethered to home
@@ -115,6 +117,11 @@ owns, pick one of those.
 **Where UnityLAN differs.** Membership comes from a Discord server you already run — no separate
 directory to maintain, no third-party account for anyone to create — and self-hosting keeps the
 signing key on your own box.
+
+**On par.** Names and publicly-trusted HTTPS on mesh addresses work the way you'd expect coming from
+Tailscale — with the domain being one you own (or the hosted `mesh.unitylan.com`), the certificate
+obtained by your own device, and a built-in TLS proxy so the app behind it needs no TLS setup.
+[Details](#serve-something-over-https).
 
 Compared July 2026 from each project's public docs, on architecture rather than pricing or limits,
 which change. Something wrong or out of date? Open an issue and we'll fix it. The engineering-level
@@ -240,7 +247,9 @@ in. A device enrolled through a community holds its address until it's un-enroll
 this project's maintainer ([gtosh4](https://github.com/gtosh4) on GitHub, `tosh` on Discord).
 [Invite the bot](https://discord.com/oauth2/authorize?client_id=1525265707821170818) to your Discord
 server, then run `/unitylan network add <role>` —
-nothing to host. Point clients at `https://coordinator.unitylan.com`. You're trusting that instance to gate
+nothing to host. Point clients at `https://coordinator.unitylan.com`. It **issues HTTPS certificates**
+under `mesh.unitylan.com`, so anything you serve to a browser works without a warning page (see
+[below](#serve-something-over-https)). You're trusting that instance to gate
 access to your mesh (it still never sees your traffic or your keys); self-host if you'd rather hold
 the trust anchor yourself.
 
@@ -325,6 +334,38 @@ how to scope a game or media port, is in [`docs/headless.md`](docs/headless.md).
      <img src="assets/services.png" alt="The Services tab: this device's named services, and what other members are serving" width="360">
    </p>
 
+## Serve something over HTTPS
+
+Mesh names end in `.unity.internal`, which ICANN reserves — **no certificate authority will ever
+certify one**, so a browser opening your media server over the mesh gets a warning page that no
+amount of configuration fixes. UnityLAN's answer is a second name under a real domain.
+
+If your coordinator has a certificate domain (the hosted one does: `mesh.unitylan.com`), every device
+also answers to an alias under it and obtains a **publicly-trusted certificate** for that alias
+itself — the private key never leaves the machine, and the coordinator only publishes the DNS record
+the CA checks.
+
+```sh
+sudo unitylan-engine ctl cert on                          # once per device
+sudo unitylan-engine ctl service add jellyfin 8096 --web  # per web service
+```
+
+Or, in the desktop app: **Get an HTTPS certificate** in **Manage**, then **It's a website** beside
+the service. Either way `https://jellyfin.alice.mesh.unitylan.com` then opens with no warning page,
+**and Jellyfin needs no TLS configuration of its own** — the engine runs a small unprivileged TLS
+proxy that terminates HTTPS for your web services and forwards to them over plain HTTP on loopback.
+Several services share port 443 under different names; renewals need no restart.
+
+Prefer to serve TLS yourself? `ctl cert` prints the certificate and key paths, and the certificate
+covers every name one label below the device (`grafana.mediabox.alice.mesh.unitylan.com`, as many as
+you run), so nginx or Caddy can route by `Host` from one TLS block.
+
+It's off by default and opt-in per device, because issuing publishes that name to public
+**Certificate Transparency logs, permanently**.
+
+Full walkthrough — scopes, the CLI, the proxy's privilege split, and what to check when nothing
+arrives: [`docs/services.md`](docs/services.md).
+
 ## Building from source
 
 It's a Rust workspace (five crates). To build and run a full offline mesh with a fake Discord — no
@@ -340,6 +381,7 @@ cargo build --release
 | --- | --- |
 | [`docs/user-guide.md`](docs/user-guide.md) | The desktop app: logging in, sharing a port, managing devices |
 | [`docs/headless.md`](docs/headless.md) | Game servers and media boxes: enrolling with a key, exposing a port, the full CLI |
+| [`docs/services.md`](docs/services.md) | Naming what you serve, who can reach it, and real HTTPS on mesh names |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Unreachable peers, names not resolving, the Tailscale address collision |
 | [`docs/design.md`](docs/design.md) | Concepts, trust model, addressing, NAT strategy, alternatives considered |
 | [`docs/technical.md`](docs/technical.md) | Wire protocols, engine internals, platform splits |

@@ -6,6 +6,9 @@ is CLI. For the desktop app, see [`user-guide.md`](user-guide.md).
 The shape of it: install the engine, enroll once with a key minted from Discord, then open the port
 your service listens on. No browser needed on the box, and no Discord client.
 
+Just want the overview of naming what you serve and putting it behind real HTTPS, app or CLI?
+[`services.md`](services.md).
+
 ## 1. Install
 
 Install the `unitylan` package — engine and CLI, no graphics libraries. Packages are attached to

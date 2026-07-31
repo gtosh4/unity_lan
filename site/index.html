@@ -171,7 +171,9 @@
         <h3>A homelab and a few trusted people</h3>
         <p>Share the NAS, Jellyfin, a git server — with exactly the people who hold a role. No VPN
         accounts to provision by hand, nothing published to the open internet, and no exit server
-        in the middle slowing traffic down.</p>
+        in the middle slowing traffic down. What a browser opens gets a
+        <a href="#https">real HTTPS certificate</a>: no warning page to click through, and no root
+        certificate to install on everybody's machines.</p>
       </article>
       <article class="card">
         <h3>A small Discord-native project team</h3>
@@ -207,12 +209,15 @@
         own. Either way it carries no traffic and holds no one's private keys.</p>
       </article>
       <article class="card">
-        <h3>Human-readable names</h3>
+        <h3>Human-readable names, with real HTTPS</h3>
         <p>Machines get names like <code>laptop.alice.unity.internal</code>, or just
         <code>alice.unity.internal</code> for a member's primary device — instead of raw IPs you
         have to remember. So does what you serve: <code>mc.alice.unity.internal</code> for the game
         server, <code>jellyfin.alice.unity.internal</code> for the media library. No port numbers to
-        pass around.</p>
+        pass around. Anything a browser opens also answers to a name under a real domain — the
+        hosted coordinator's is <code>mesh.unitylan.com</code> — with a
+        <strong>publicly-trusted certificate</strong> your own device obtains and a built-in proxy
+        serves, so there's no warning page and nothing to configure in the app behind it.</p>
       </article>
     </div>
     <p class="aside">If you know Tailscale: same <em>shape</em> — control plane plus P2P WireGuard
@@ -388,6 +393,10 @@
     with macOS and mobile clients, audited code, real ACL tooling and actual support behind them.
     UnityLAN is pre-1.0, Linux and Windows only, and maintained by one person. If you need something
     that just works on every device your group owns, pick one of those — genuinely.</p>
+    <p class="aside"><strong>On par.</strong> Names and publicly-trusted HTTPS on mesh addresses work
+    the way you'd expect coming from Tailscale — with the domain being one you own (or the hosted
+    <code>mesh.unitylan.com</code>), the certificate obtained by your own device, and a built-in TLS
+    proxy so the app behind it needs no TLS setup. <a href="#https">How that works</a>.</p>
     <p class="aside"><strong>Where UnityLAN differs.</strong> Membership comes from a Discord server
     you already run, so there's no separate directory or UnityLAN account to maintain. The trust
     anchor can be yours — self-host and the signing key never leaves your box. And the control plane
@@ -516,8 +525,9 @@ sudo systemctl enable --now unitylan-engine</code></pre>
       and free to use, run by the project's maintainer —
       <a href="https://github.com/gtosh4">gtosh4</a> on GitHub, <code>tosh</code> on Discord. Invite
       the bot to your server, run <code>/unitylan network add &lt;role&gt;</code>, and you're done.
-      You're trusting that instance to gate access to your mesh; it still never sees your traffic or
-      your keys.</p>
+      It <a href="#https">issues HTTPS certificates</a> under <code>mesh.unitylan.com</code>, so
+      anything your members serve to a browser works without a warning page. You're trusting that
+      instance to gate access to your mesh; it still never sees your traffic or your keys.</p>
       <p><strong>Full control — self-host.</strong> One container. You'll need a Discord app with a
       bot token and somewhere to run it behind HTTPS.</p>
       <p class="cta">
@@ -605,7 +615,7 @@ sudo systemctl enable --now unitylan-engine</code></pre>
         <code>mc.alice.unity.internal</code> points at whichever of your machines runs it, so moving
         the service later doesn't change the name people type.</p>
       </details>
-      <details>
+      <details id="https">
         <summary>Can I serve a website or media library over the mesh?</summary>
         <p>Yes, and it can have a real HTTPS certificate rather than a browser warning. Mesh names
         end in <code>.unity.internal</code>, which no certificate authority will ever certify — so a
@@ -655,6 +665,7 @@ sudo systemctl enable --now unitylan-engine</code></pre>
     <ul class="docs">
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/user-guide.md"><strong>User guide</strong><span>The desktop app: logging in, naming what you share, managing devices</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/headless.md"><strong>Headless servers</strong><span>Game servers and media boxes: enrolling with a key, the full CLI</span></a></li>
+      <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/services.md"><strong>Services and HTTPS</strong><span>Naming what you serve, who can reach it, real certificates on mesh names</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md"><strong>Troubleshooting</strong><span>Unreachable peers, names not resolving, the Tailscale collision</span></a></li>
       <li><a href="https://github.com/gtosh4/unity_lan/blob/main/docs/coordinator-setup.md"><strong>Coordinator setup</strong><span>Discord app and bot, config, admin dashboard</span></a></li>
     </ul>

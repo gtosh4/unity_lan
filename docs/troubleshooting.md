@@ -116,6 +116,22 @@ Renewal is automatic and the file paths never change, so a server pointed at the
 across renewals. If a certificate has lapsed and isn't coming back, check the port is still exposed:
 closing your last one stops renewal.
 
+## A certificate is issued, but the site won't load
+
+The certificate and the thing serving it are separate. If `ctl cert` shows a valid certificate and a
+browser still can't connect to `https://<name>`:
+
+- **On a packaged Linux install older than v0.6.1, upgrade.** The TLS proxy could not start at all
+  on those — it was installed where the engine didn't look for it, and the systemd unit lacked the
+  capabilities its privilege drop needs. The log said only `Operation not permitted`. There is no
+  workaround on the old packages.
+- **Built from source?** A root engine refuses to run the proxy without `[proxy] user` set in
+  `engine.toml`, and the proxy can only read the key if `[cert] group` matches that account. See
+  [`services.md`](services.md#serving-a-website-over-https).
+- **Check the name.** Only a service marked `--web` (or ticked as a website in the app) is in the
+  certificate and served over TLS; its `.unity.internal` name is not, and a browser rejects that one
+  however well it resolves.
+
 ## A peer keeps connecting and dropping
 
 Usually one of:

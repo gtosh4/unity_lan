@@ -3,6 +3,17 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Changed
+
+- **The Services tab now leads with what the mesh is serving.** Finding someone else's Jellyfin or
+  game server is the everyday reason to open that tab; exposing one of your own is something you do
+  once and rarely revisit — yet your own list and its row of input boxes sat on top, pushing everyone
+  else's services down the window. Your services moved below the mesh list, and adding one is now a
+  dialog off an "expose a service" button, with a labelled field per choice instead of four
+  placeholder-only boxes crammed into a line.
+
 ## v0.6.1
 
 ### Added

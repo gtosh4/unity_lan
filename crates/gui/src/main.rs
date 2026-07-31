@@ -182,6 +182,9 @@ struct App {
     /// exposure form: a service *is* an exposure with a name, and two parallel drafts of the same
     /// thing would only be two things to keep in step.
     service_name_input: String,
+    /// Whether the "expose a service" modal is open. The drafts above outlive it, so closing it by
+    /// accident doesn't cost what was typed.
+    adding_service: bool,
     /// The Discord authorize URL after the user clicks "Log in", shown for them to open.
     login_url: Option<String>,
     /// A mesh connect/disconnect is in flight — disables the button meanwhile.
@@ -288,6 +291,8 @@ enum Message {
     ExposeScopeToggle(ExposeScope, bool),
     ServiceNameInput(String),
     ServiceWeb(bool),
+    /// Open or close the "expose a service" modal.
+    AddServiceOpen(bool),
     ServiceSubmit,
     RemoveService(String),
     /// Open the "offer this to another network" picker for a service, or close it. Carries the
@@ -394,6 +399,7 @@ impl App {
             expose_proto: Proto::Tcp,
             expose_scopes: Vec::new(),
             service_name_input: String::new(),
+            adding_service: false,
             service_web: false,
             expose_scope_open: false,
             tab_picked: false,
@@ -575,6 +581,13 @@ impl App {
             }
             Message::ServiceNameInput(s) => self.service_name_input = s,
             Message::ServiceWeb(v) => self.service_web = v,
+            Message::AddServiceOpen(open) => {
+                self.adding_service = open;
+                // A stale error from some earlier action would otherwise open with the dialog and
+                // read as a complaint about the empty form.
+                self.error = None;
+                self.expose_scope_open = false;
+            }
             Message::ServiceSubmit => {
                 let name = self.service_name_input.trim().to_string();
                 if !common::service::valid_label(&name) {
@@ -622,6 +635,9 @@ impl App {
                 self.service_name_input.clear();
                 self.service_web = false;
                 self.expose_scope_open = false;
+                // Only once the ops are away: every early return above leaves the dialog up with
+                // its complaint, which is where the user can act on it.
+                self.adding_service = false;
                 return Task::batch(ops);
             }
             Message::RemoveService(name) => {
@@ -1312,6 +1328,36 @@ mod tests {
             vec![ExposeScope::AllPeers],
             "draft survives"
         );
+    }
+
+    /// The dialog closes only when something was actually sent. A refused submit keeps it up — its
+    /// complaint is drawn inside it, and closing would drop the user back to a list that gained
+    /// nothing with no clue why.
+    #[test]
+    fn the_expose_dialog_closes_on_a_sent_submit_and_stays_up_on_a_refused_one() {
+        let mut a = app();
+        let _ = a.update(Message::AddServiceOpen(true));
+        assert!(a.adding_service);
+
+        a.service_name_input = "My Service".into();
+        a.expose_port_input = "8096".into();
+        a.expose_scopes = vec![ExposeScope::AllPeers];
+        let _ = a.update(Message::ServiceSubmit);
+        assert!(a.adding_service, "bad name — stays open with the error");
+
+        a.service_name_input = "jellyfin".into();
+        let _ = a.update(Message::ServiceSubmit);
+        assert!(!a.adding_service, "sent — dialog is done");
+    }
+
+    /// An error from some earlier action would otherwise open with the dialog, where it reads as a
+    /// complaint about the empty form.
+    #[test]
+    fn opening_the_expose_dialog_clears_a_stale_error() {
+        let mut a = app();
+        a.error = Some("something else failed".into());
+        let _ = a.update(Message::AddServiceOpen(true));
+        assert!(a.error.is_none());
     }
 
     /// Submitting with nothing ticked would otherwise send zero ops and look like it worked.

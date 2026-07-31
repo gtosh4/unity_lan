@@ -3,7 +3,9 @@
 Using the desktop app. Everything here is done by clicking; nothing needs a terminal.
 
 Running a game server, media box, or anything else without a screen? That's
-[`headless.md`](headless.md). Something not working? [`troubleshooting.md`](troubleshooting.md).
+[`headless.md`](headless.md). Sharing something and want the whole picture in one place —
+scoping, naming, HTTPS — see [`services.md`](services.md). Something not working?
+[`troubleshooting.md`](troubleshooting.md).
 
 ## Getting on the mesh
 
@@ -143,8 +145,8 @@ coordinator, so a name you just added takes up to half a minute to reach other p
 that's offline doesn't advertise anything. And if two of *your own* devices claim the same name, one
 of them wins — the app marks the other, so you can rename it.
 
-**If the service is a website, tick the HTTPS box** (it appears once you've turned certificates on
-below). Then `jellyfin.alice.mesh.unitylan.com` opens in a browser with no warning page. That name
+**If the service is a website, tick the HTTPS box** in the expose dialog (it appears once you've
+turned certificates on below). Then `jellyfin.alice.mesh.unitylan.com` opens in a browser with no warning page. That name
 goes into public certificate logs permanently, same as your device's own — so it's a separate,
 deliberate tick rather than something naming a service does for you.
 
