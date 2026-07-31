@@ -431,7 +431,9 @@ h3 { margin: 0 0 .45rem; font-size: 1.06rem; font-weight: 650; letter-spacing: -
 .two-col p { color: var(--muted); }
 .two-col h2 { margin-bottom: 1rem; }
 .two-col .cta { justify-content: flex-start; margin: 1.8rem 0 0; }
-.two-col .cta-note { margin: -.9rem 0 0; font-size: .85rem; }
+/* A positive gap: `.two-col .cta` above drops the base 3rem bottom margin, so pulling this up would
+   run the note through the buttons rather than tightening it against them. */
+.two-col .cta-note { margin: .6rem 0 0; font-size: .85rem; }
 .two-col.flip > figure { order: -1; }
 @media (max-width: 820px) {
   .two-col { grid-template-columns: 1fr; }
