@@ -350,6 +350,13 @@ h3 { margin: 0 0 .45rem; font-size: 1.06rem; font-weight: 650; letter-spacing: -
   display: grid; gap: 1.1rem;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
+/* The two four-card grids: at the 260px minimum they lay out three-then-one, stranding the last
+   card alone in a row it fills a third of — and in `#what` that orphan is also the longest of the
+   four, so it stands twice as tall as the row above it. A wider minimum caps the row at two, so
+   both read as a 2x2 block. `min()` keeps that minimum from outgrowing a phone and pushing the
+   page sideways. The three-card grids are left alone: three across is already even. */
+#what .cards,
+#security .cards { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
 
 .card {
   padding: 1.5rem;
