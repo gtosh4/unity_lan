@@ -834,6 +834,26 @@ impl App {
         }
     }
 
+    /// A **copy** button for a service row, handing over exactly the address the row displays.
+    ///
+    /// Typing `factorio.carol.unity.internal:34197` into a server browser by hand, off a screen, is
+    /// where this app was asking the most of people for the least reason — the name is the whole
+    /// point of naming a port, and it was the one thing they could not take with them.
+    fn service_copy(&self, web: bool, mesh_name: &str, port: Option<u16>) -> Element<'_, Message> {
+        let name = self.browser_name(web, mesh_name);
+        let certified = self
+            .status
+            .as_ref()
+            .is_some_and(|s| s.cert.domain.is_some());
+        button(text("copy").size(13))
+            .style(button::text)
+            .padding([0, 4])
+            .on_press(Message::CopyText(service_address(
+                &name, web, certified, port,
+            )))
+            .into()
+    }
+
     fn my_services_section(&self) -> Element<'_, Message> {
         // From the *hostname*, not `identity` — that is the Discord handle, which may carry a
         // discriminator or characters DNS refuses, while the `<user>` label was allocated by the
@@ -904,18 +924,33 @@ impl App {
                 } else {
                     ports.join(", ")
                 };
-                let web_port = self
+                // The port to hand out: a web service's backend is reached through the proxy, so it
+                // is the one the certificate names; anything else is dialled directly. A service on
+                // several ports names none of them — see [`service_address`].
+                let mut own_ports: Vec<u16> = self
                     .exposed
                     .iter()
-                    .find(|e| {
-                        e.name.as_deref() == Some(name)
-                            && e.kind == common::service::ServiceKind::Web
-                    })
-                    .map(|e| e.port);
+                    .filter(|e| e.name.as_deref() == Some(name))
+                    .map(|e| e.port)
+                    .collect();
+                own_ports.sort_unstable();
+                own_ports.dedup();
+                let port = if web {
+                    self.exposed
+                        .iter()
+                        .find(|e| {
+                            e.name.as_deref() == Some(name)
+                                && e.kind == common::service::ServiceKind::Web
+                        })
+                        .map(|e| e.port)
+                } else {
+                    own_ports.first().copied().filter(|_| own_ports.len() == 1)
+                };
                 let head = row![
-                    column![self.service_link(web, &mesh_name, web_port), muted(detail)]
+                    column![self.service_link(web, &mesh_name, port), muted(detail)]
                         .spacing(2)
                         .width(Length::Fill),
+                    self.service_copy(web, &mesh_name, port),
                     button(text("remove").size(13))
                         .style(button::secondary)
                         .on_press(Message::RemoveService(name.to_string())),
@@ -1096,7 +1131,9 @@ impl App {
                                 reach
                             }),
                         ]
-                        .spacing(2),
+                        .spacing(2)
+                        .width(Length::Fill),
+                        self.service_copy(web, &svc.hostname, Some(svc.port)),
                     ]
                     .spacing(8)
                     .align_y(Vertical::Center);
@@ -1441,6 +1478,16 @@ pub(crate) fn service_url(
         (true, false, Some(port)) => Some(format!("http://{name}:{port}/")),
         (true, false, None) => None,
     }
+}
+
+/// What a service row puts on the clipboard: the URL when a browser is what opens it, else the
+/// `name:port` a client is dialled with — and the bare name when there is no single port to name
+/// (a service running on several, where picking one would be a guess).
+pub(crate) fn service_address(name: &str, web: bool, certified: bool, port: Option<u16>) -> String {
+    service_url(name, web, certified, port).unwrap_or_else(|| match port {
+        Some(port) => format!("{name}:{port}"),
+        None => name.to_string(),
+    })
 }
 
 pub(crate) fn parse_port(s: &str) -> Result<u16, String> {

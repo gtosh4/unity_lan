@@ -459,6 +459,11 @@ impl App {
                 });
             }
             UiAction::Cancel => self.confirm = None,
+            // Through the same message a click sends, so the tour can't drift from what a person
+            // gets — the dialog's own reset of the scope picker and any stale error included.
+            UiAction::OpenAddService(open) => {
+                let _ = self.update(Message::AddServiceOpen(*open));
+            }
         }
     }
 
@@ -1045,6 +1050,34 @@ mod tests {
         assert_eq!(
             service_url("mc.bob.unity.internal", false, true, Some(25565)),
             None
+        );
+    }
+
+    /// Copy hands over the address the row shows, which is not always one you could have guessed
+    /// from its port: a certified web service is reached through the proxy on 443, so pasting its
+    /// exposed port would send someone at a loopback backend that isn't theirs to reach.
+    #[test]
+    fn copy_gives_the_address_the_row_is_reached_at() {
+        use crate::view::service_address;
+
+        assert_eq!(
+            service_address("wiki.alice.mesh.example.com", true, true, Some(8080)),
+            "https://wiki.alice.mesh.example.com/"
+        );
+        // No certificates here, so the backend port is genuinely what answers.
+        assert_eq!(
+            service_address("wiki.alice.unity.internal", true, false, Some(8080)),
+            "http://wiki.alice.unity.internal:8080/"
+        );
+        // A game server: name and port, the pair its own client asks for.
+        assert_eq!(
+            service_address("mc.bob.unity.internal", false, true, Some(25565)),
+            "mc.bob.unity.internal:25565"
+        );
+        // On several ports, so naming one would be a guess — hand over the name alone.
+        assert_eq!(
+            service_address("git.carol.unity.internal", false, true, None),
+            "git.carol.unity.internal"
         );
     }
 

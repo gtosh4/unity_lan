@@ -5,6 +5,13 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ## Unreleased
 
+### Added
+
+- **Copy a service's address from the app.** Every service — yours and everyone else's — has a
+  **copy** button that puts the address you'd actually paste on the clipboard: the `https://` name for
+  a website, `name:port` for anything a client dials. Reading a hostname off the screen and retyping
+  it into a server browser was the one part of naming a port that the name didn't help with.
+
 ### Changed
 
 - **The Services tab now leads with what the mesh is serving.** Finding someone else's Jellyfin or

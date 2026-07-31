@@ -90,10 +90,16 @@ fn demo_script() -> Vec<(u64, UiAction)> {
         // named ports, and what everyone else on the mesh is serving — and it is what `services.png`
         // is cut from.
         (21, UiAction::SelectTab(UiTab::Services)),
+        // Open the expose dialog *after* the 25s mark `services.png` is cut from, so the still keeps
+        // showing the list while the video goes on to show the form that adds to it. Exposing is the
+        // one thing in this app a newcomer has to be talked through, and a screenshot of a list it
+        // was added to never shows it.
+        (27, UiAction::OpenAddService(true)),
+        (31, UiAction::OpenAddService(false)),
         // Manage is still visited so the tour shows the whole app, but it holds only the account
         // and devices now — sharing moved to Services — so nothing is cut from it.
-        (30, UiAction::SelectTab(UiTab::Manage)),
-        (37, UiAction::SelectTab(UiTab::Networks)),
+        (33, UiAction::SelectTab(UiTab::Manage)),
+        (40, UiAction::SelectTab(UiTab::Networks)),
     ]
 }
 

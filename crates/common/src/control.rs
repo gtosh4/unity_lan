@@ -331,6 +331,13 @@ pub enum UiAction {
     ArmBlockPeer(u64),
     /// Dismiss any armed confirm.
     Cancel,
+    /// Open (`true`) or close (`false`) the Services tab's "expose a service" dialog, so the demo
+    /// shows the form people actually type into rather than only the list it adds to.
+    ///
+    /// Added after the variants above: a GUI older than this engine fails to decode a status
+    /// carrying it. That costs nothing in practice — the two ship in one bundle and update in
+    /// lockstep, only `examples/fake-engine` ever sets a directive, and only a debug GUI acts on one.
+    OpenAddService(bool),
 }
 
 /// The GUI's content tabs, in the wire protocol so a directive can name one without the GUI's
