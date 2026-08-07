@@ -60,6 +60,28 @@ To verify a behavior change end-to-end, run the relevant `scripts/*-test.sh` —
 privilege, what timeout: the **`mesh-e2e` skill**. To inspect a running daemon over its control
 socket: the **`debug-engine` skill**. To tag and announce a release: the **`cut-release` skill**.
 
+**Work whose point is performance gets measured before and after — never only after.** Take a
+baseline first, on the unmodified code, with the harness that will judge the change
+(`coordinator-scale-test.sh` for coordinator load; a purpose-built one otherwise). Then implement,
+re-run the *same* harness at the *same* parameters, and report both numbers. Rules that follow from
+having done this:
+
+- **Baseline first, because it is what tells you the change was worth making**, and because a
+  harness written after the fact tends to measure what the fix improved. A first run also routinely
+  finds the harness lying — a warm cache reporting zero cost, a limit that never engaged, a wait that
+  hung on the wrong process. Discovering that *after* you have an improvement to show is how a
+  measurement bug gets published as a result.
+- **Simulate the constraint that actually binds**, not the one that is easy to drive. If the ceiling
+  is an external rate limit, the harness has to impose it (`crates/coordinator/examples/mock_discord.rs`);
+  a fake that answers instantly measures nothing that matters.
+- **Report the table, not an adjective.** Parameters, before, after, at more than one scale — a single
+  ratio hides whether the change fixed a term or just moved it. Say which term left the cost, e.g.
+  "calls per device is 1.0 at every guild count" beats "much faster".
+- **Say what the numbers do not cover.** A synthetic harness on a dev box is not the deployment; name
+  the parameters you did not sweep and the paths no test exercises.
+
+A change whose stated purpose is speed and whose evidence is "should be faster" is unfinished.
+
 ## Architecture
 
 Five crates (`crates/*`), two planes. Each of the four binary crates has its own `CLAUDE.md` with the
