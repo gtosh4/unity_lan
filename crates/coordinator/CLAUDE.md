@@ -31,8 +31,12 @@ Prefer a solution peers carry themselves, or one the coordinator answers once an
 pulls work onto the coordinator or amplifies its traffic, flag it and weigh it against the
 decentralization goal before proceeding.
 
-`coordinator-scale-test.sh` is the probe for this: a fake-Discord coordinator plus N synthetic devices,
-reporting timings rather than pass/fail. Run it directly, unprivileged.
+`coordinator-scale-test.sh` is the probe for this: N synthetic devices against a coordinator whose
+Discord REST is pointed at `examples/mock_discord.rs` (`[discord] api_proxy`, debug-only,
+loopback-only), which rate-limits and delays the way Discord does. Takes `[devices] [guilds]`, because
+**guild count scales the per-request cost as hard as device count does** — `build_snapshot` walks
+every registered network for every device. Reports timings rather than pass/fail; run it directly,
+unprivileged.
 
 ## Discovery mechanics
 

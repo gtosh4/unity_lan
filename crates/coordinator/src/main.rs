@@ -177,7 +177,10 @@ async fn main() -> anyhow::Result<()> {
         }
         (None, Some(d)) => {
             tracing::info!("running with live Discord role source");
-            Arc::new(crate::discord::TwilightRoleSource::new(d.bot_token.clone()))
+            Arc::new(crate::discord::TwilightRoleSource::new(
+                d.bot_token.clone(),
+                d.api_proxy.clone(),
+            ))
         }
         (None, None) => anyhow::bail!("no role source configured; add a [fake] or [discord] block"),
     };
@@ -186,8 +189,10 @@ async fn main() -> anyhow::Result<()> {
     let versions = Arc::new(crate::versions::Versions::default());
     let roleless = Arc::new(crate::roleless::RolelessMemo::default());
 
-    // Live Discord: run the gateway for `/unitylan` slash commands + role-revocation events.
-    if let Some(d) = &discord {
+    // Live Discord: run the gateway for `/unitylan` slash commands + role-revocation events. Skipped
+    // when REST is pointed at the benchmark mock, which serves no gateway — the shard would spend
+    // the run failing to reach the real one.
+    if let Some(d) = discord.as_ref().filter(|d| d.api_proxy.is_none()) {
         let token = d.bot_token.clone();
         let store = store.clone();
         let presence = presence.clone();

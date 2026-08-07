@@ -130,9 +130,28 @@ pub struct TwilightRoleSource {
 }
 
 impl TwilightRoleSource {
-    pub fn new(bot_token: String) -> Self {
+    /// `api_proxy` redirects REST at a local stand-in for Discord (`examples/mock_discord.rs`) for
+    /// the scaling probe. `Config` refuses it outside a debug build and off loopback — see
+    /// `config::validate_api_proxy`.
+    pub fn new(bot_token: String, api_proxy: Option<String>) -> Self {
+        let http = match api_proxy {
+            Some(url) => {
+                // twilight wants a bare `host:port`, not a URL — it builds `http://{proxy}/api/v10/…`
+                // itself. Handing it the `http://` prefix makes a hostname of the scheme, which
+                // resolves nowhere and costs a DNS timeout per call instead of failing outright.
+                // The config field stays a URL because that is what an operator would write.
+                let host = url
+                    .strip_prefix("http://")
+                    .unwrap_or(&url)
+                    .trim_end_matches('/')
+                    .to_string();
+                // `true` = talk plaintext HTTP to it, which is the only thing the mock serves.
+                Client::builder().token(bot_token).proxy(host, true).build()
+            }
+            None => Client::new(bot_token),
+        };
         Self {
-            http: Client::new(bot_token),
+            http,
             role_cache: Mutex::new(HashMap::new()),
             member_cache: Mutex::new(HashMap::new()),
             name_cache: Mutex::new(HashMap::new()),
@@ -292,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn forget_drops_the_cached_membership() {
-        let src = TwilightRoleSource::new("test-token".to_string());
+        let src = TwilightRoleSource::new("test-token".to_string(), None);
         src.member_cache.lock().unwrap().insert(
             (7, 42),
             CachedMember {
