@@ -94,10 +94,23 @@ CFG="$TMP/coordinator.toml"
 warm_start="$(date +%s.%N)"
 for _ in $(seq 1 1800); do
   curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null && break
+  # A coordinator that died during startup will never answer, and waiting out the whole loop for it
+  # hides the reason in a timeout.
+  kill -0 "$CPID" 2>/dev/null || { echo "coordinator exited during startup:" >&2; tail -20 "$TMP/coordinator.log" >&2; exit 1; }
   sleep 0.2
 done
 warm_secs="$(awk -v a="$warm_start" -v b="$(date +%s.%N)" 'BEGIN {printf "%.1f", b-a}')"
 curl -sf "http://127.0.0.1:$PORT/healthz" >/dev/null
+
+# The cache warm hits the mock once per guild, so by now it must have seen traffic. If it hasn't, the
+# coordinator is talking to the real discord.com — a binary predating `api_proxy` ignores the setting
+# rather than rejecting it — and every number below would describe a coordinator that reached no role
+# source at all: a wave of zero Discord calls, which reads exactly like a spectacularly good result.
+if [[ "$(curl -sf "http://127.0.0.1:$MOCK_PORT/stats" | jq -r '.guild_calls + .role_calls')" == "0" ]]; then
+  echo "the coordinator never called the mock — is $COORD stale? rebuild with:" >&2
+  echo "  cargo build -p unitylan-coordinator" >&2
+  exit 1
+fi
 
 # Enrol every device once, sequentially: setup, not measurement.
 token=""
