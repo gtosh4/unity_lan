@@ -97,6 +97,22 @@ The browser flow binds this device to your Discord account, and the background s
 - On a headless box, prefer an enrollment key over the browser flow entirely — see
   [`headless.md`](headless.md).
 
+## You joined a server, but its network doesn't appear
+
+Someone gave you the role — or you joined the server for the first time — and the app still shows
+nothing for that community.
+
+- **Give it a moment, then check the app again.** A role change normally reaches the mesh in seconds.
+- **Confirm you actually hold the role**, and that an admin has registered *that* role as a network
+  (`/unitylan network list` in the server).
+- **If it's a self-hosted coordinator, check its bot has the Server Members Intent enabled** — see
+  [`coordinator-setup.md`](coordinator-setup.md#b-bot-token--intent). The coordinator learns about
+  joins and role changes from the events that intent delivers. Without it nothing breaks, but changes
+  wait out a cache window instead of arriving promptly, and a first-time join can take up to one
+  refresh cycle (≈15 minutes) to show up. The same delay can follow a coordinator restart or a
+  network blip that interrupted its Discord connection.
+- Reconnecting the device (or waiting out that cycle) always picks it up.
+
 ## No HTTPS certificate arrives
 
 Issuance needs three things at once, and whichever is missing is named by

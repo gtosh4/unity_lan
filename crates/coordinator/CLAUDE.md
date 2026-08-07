@@ -26,6 +26,14 @@ under a burst, since the coordinator is a fan-in/fan-out chokepoint.
   bucket) — so N clients in one guild hit the same bucket at once and serialize or 429. Cache/dedup
   shared per-guild data once and reuse it across clients (see `TwilightRoleSource`'s per-guild
   role-name TTL cache in `discord.rs`).
+- **The walk is per-guild, so a per-request call costs `guilds`, not 1.** `resolve_membership` asks
+  about the caller in *every* registered guild, since Discord offers no "which guilds is this user
+  in" for a bot. Left uncached that made the deployment ceiling `devices × guilds` — a shared
+  coordinator getting slower for everyone each time an unrelated community registered a network.
+  `MEMBER_ABSENT_TTL` (`discord.rs`) caches the "not a member" answer for a renewal period, which is
+  what keeps guild count out of the per-request cost. **It is only safe because `Event::MemberAdd`
+  drops the entry** (`commands.rs`); anything that weakens that invalidation makes joins take up to
+  the absent-TTL to appear.
 
 Prefer a solution peers carry themselves, or one the coordinator answers once and caches. When a change
 pulls work onto the coordinator or amplifies its traffic, flag it and weigh it against the
@@ -52,3 +60,10 @@ Behind the `RoleSource` trait (`roles.rs`): `TwilightRoleSource` (live bot token
 `FakeRoleSource` (config-seeded, offline dev/tests). Slash commands + gateway events (role revocation,
 evictions) live in `commands.rs`. The fake source is what every `scripts/*-test.sh` and
 `coordinator.test.toml` run against, so a change to role handling should be exercised through both.
+
+**Membership freshness rests on the gateway, in both directions.** `MemberUpdate`/`MemberRemove` drop
+the cached membership and evict; `MemberAdd` drops the cached *absence*. All three need the
+GUILD_MEMBERS privileged intent (requested in `commands.rs`), and without it a change waits out its
+TTL — 30s for a role change, a renewal period for a join. Note the fake source has no gateway and no
+cache, so **no `scripts/*-test.sh` covers any of this**; the mock-Discord harness and the unit tests
+in `discord.rs` are the only coverage.
