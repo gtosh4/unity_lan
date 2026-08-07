@@ -36,6 +36,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::Config;
 
+/// Days of rolled log file kept when `log_file` is set. Long enough to still hold the failure a
+/// user is only now getting round to reporting; short enough that a chronically flapping peer
+/// can't fill the disk of a box nobody logs into.
+const LOG_FILES_KEPT: usize = 7;
+
 /// UnityLAN engine — headless data-plane daemon.
 #[derive(Parser)]
 #[command(
@@ -358,15 +363,32 @@ fn main() -> anyhow::Result<()> {
         let file_layer = log_file
             .as_deref()
             .map(|path| -> anyhow::Result<_> {
-                let file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
+                // `log_file` names a *pattern*, not one file: the appender rolls daily and keeps
+                // `LOG_FILES_KEPT` days, so `…/engine.log` is written as `…/engine.<date>.log`.
+                // Nothing prunes a log file otherwise, and on Windows this is the only log there is
+                // — the service has no console for stdout to reach.
+                let dir = path
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .with_context(|| format!("log file {} has no file name", path.display()))?;
+                let builder = tracing_appender::rolling::Builder::new()
+                    .rotation(tracing_appender::rolling::Rotation::DAILY)
+                    .filename_prefix(stem)
+                    .max_log_files(LOG_FILES_KEPT);
+                let builder = match path.extension().and_then(|s| s.to_str()) {
+                    Some(ext) => builder.filename_suffix(ext),
+                    None => builder,
+                };
+                let appender = builder
+                    .build(dir)
                     .with_context(|| format!("opening log file {}", path.display()))?;
-                // Dup'd per event (`try_clone`) so the subscriber needs no lock.
                 Ok(tracing_subscriber::fmt::layer()
                     .with_ansi(false)
-                    .with_writer(move || file.try_clone().expect("clone log file handle")))
+                    .with_writer(appender))
             })
             .transpose()?;
         tracing_subscriber::registry()

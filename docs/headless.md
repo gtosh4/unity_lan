@@ -263,8 +263,9 @@ printf '"Watch"\n' | socat -t 86400 UNIX-CONNECT:$sock - \
 ```
 
 For more detail, set `RUST_LOG=debug` (or `RUST_LOG=unitylan_engine=debug`) in the service
-environment and restart. `log_file` in `engine.toml` appends to a file as well as the journal; a
-relative path lands under `state_dir`.
+environment and restart. `log_file` in `engine.toml` writes to a file as well as the journal; a
+relative path lands under `state_dir`. It names a pattern rather than one file — `engine.log` is
+written as `engine.<date>.log`, rolling daily and keeping a week.
 
 ## Removing a box
 

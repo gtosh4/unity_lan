@@ -152,11 +152,19 @@ still usable.
 journalctl -u unitylan-engine -n 300 --no-pager
 ```
 
-**Windows.** The service writes nothing to disk unless you tell it to — there is no log by default.
-Add a `log_file` line to `C:\Program Files\UnityLAN\engine.toml`:
+**Windows.** The service has no console, so it logs to a file instead:
+
+```
+C:\ProgramData\UnityLAN\engine.<date>.log
+```
+
+It rolls daily and keeps a week, so take today's file — or yesterday's, if the problem was then.
+
+Nothing is there on an install that predates v0.6.2, which had no log at all. Add a `log_file` line
+to `C:\Program Files\UnityLAN\engine.toml`:
 
 ```toml
-log_file = 'C:\ProgramData\UnityLAN\engine.log'
+log_file = "engine.log"
 ```
 
 then restart the service and reproduce the problem:
@@ -166,8 +174,7 @@ sc.exe stop UnityLANEngine
 sc.exe start UnityLANEngine
 ```
 
-A relative path lands under `state_dir`; the absolute one above is the same place. The file grows
-without bound, so remove the line again once you're done.
+A relative name lands under `state_dir`, which is the `C:\ProgramData\UnityLAN` above.
 
 **Either platform, running by hand.** `RUST_LOG=debug` raises the level for one run — worth it when
 the default log says nothing useful. Don't set it to an empty string; the engine misbehaves.

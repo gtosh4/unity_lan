@@ -15,6 +15,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **Windows now keeps a log.** The service has no console, so everything it had to say went nowhere:
+  when something went wrong there was nothing to read and nothing to attach to a bug report. It now
+  writes to `C:\ProgramData\UnityLAN\engine.<date>.log`, rolling daily and keeping a week — enough to
+  still hold a failure you're only now getting round to reporting, bounded so a flapping peer can't
+  fill the disk of a box nobody logs into. Only new installs get this; upgrading keeps the config you
+  have, and [troubleshooting](docs/troubleshooting.md) has the one line to add. On Linux the journal
+  was always there and still is. If you had set `log_file` by hand on either platform, it now names a
+  pattern rather than a single file — `engine.log` becomes `engine.<date>.log` — and it is finally
+  pruned, which it never was before.
+
 - **Stopping the engine no longer hangs.** A stop had two ways to stall. If the engine was between
   attempts to reach an unreachable coordinator, it waited out the retry backoff — up to 45 seconds of a
   daemon that had nothing left to do. And if removing the WireGuard interface got stuck (a known wedge

@@ -8,6 +8,11 @@ coordinator = "https://coordinator.unitylan.com"
 # Engine state (WG private key + pinned trust anchor). LocalSystem creates this on first run.
 state_dir = 'C:\ProgramData\UnityLAN'
 
+# Where the log goes. The service has no console, so without this there is no log at all — and the
+# first thing any bug report needs is one. A name pattern rather than a single file: it rolls daily
+# into `engine.<date>.log` beside this, keeping a week. Relative, so it lands under state_dir.
+log_file = "engine.log"
+
 # One-time enrollment key that binds this device to its owner on first register.
 # enrollment_key = "..."
 
