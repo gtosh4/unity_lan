@@ -55,6 +55,42 @@ const _: () = assert!(MIN_ATTESTATION_TTL_SECS == RELEASE_MIN_ATTESTATION_TTL_SE
 const MAX_ATTESTATION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
 const MAX_RELEASE_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Gate on `[discord] api_proxy`, which redirects every Discord REST call — **including the one
+/// carrying the bot token** — at whatever it names. A shipped coordinator has no reason to want
+/// that, so it is refused outright in release builds; a debug one accepts only a plaintext loopback
+/// address, so the worst a stray config can do is talk to something on the same machine.
+fn validate_api_proxy(proxy: &str) -> anyhow::Result<()> {
+    if !cfg!(debug_assertions) {
+        anyhow::bail!(
+            "[discord] api_proxy is a benchmark-only hook and is refused by a release coordinator; \
+             remove it from the config"
+        );
+    }
+    let rest = proxy.strip_prefix("http://").ok_or_else(|| {
+        anyhow::anyhow!("[discord] api_proxy must start with http:// (got {proxy:?})")
+    })?;
+    let host = rest
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(rest);
+    let loopback = host == "localhost"
+        || host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    if !loopback {
+        anyhow::bail!(
+            "[discord] api_proxy must point at loopback — it decides where the bot token is sent \
+             (got host {host:?})"
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     /// Socket address to bind the HTTP API, e.g. "127.0.0.1:8080".
@@ -346,6 +382,15 @@ pub struct CommunitySeed {
 #[derive(Debug, Deserialize)]
 pub struct DiscordConfig {
     pub bot_token: String,
+    /// Send Discord REST at this base URL instead of `discord.com` — the benchmark hook for
+    /// `examples/mock_discord.rs` (see `scripts/coordinator-discord-scale-test.sh`).
+    ///
+    /// This decides where the **bot token** is sent, so it is fenced twice: rejected outright in
+    /// release builds, and restricted to a loopback host in debug ones. Setting it also suppresses
+    /// the gateway task, which would otherwise dial the real `gateway.discord.gg` alongside a mocked
+    /// REST API and log reconnect failures through the whole run.
+    #[serde(default)]
+    pub api_proxy: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -438,6 +483,11 @@ impl Config {
                  debug build for the end-to-end scripts, but a release coordinator will refuse to \
                  start on this config"
             );
+        }
+        if let Some(discord) = &cfg.discord {
+            if let Some(proxy) = &discord.api_proxy {
+                validate_api_proxy(proxy)?;
+            }
         }
         if let Some(admin) = &cfg.admin {
             if admin.token.len() < MIN_ADMIN_TOKEN_BYTES {
@@ -573,6 +623,36 @@ impl DnsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // These run in a debug build, which is the profile that *accepts* `api_proxy` at all — so they
+    // pin the loopback restriction. The release refusal is enforced by the `cfg!` above and can only
+    // be observed under `cargo test --release`, which CI does not run.
+    #[test]
+    fn api_proxy_accepts_loopback_only() {
+        for good in [
+            "http://127.0.0.1:18081",
+            "http://localhost:18081",
+            "http://[::1]:18081",
+            "http://127.0.0.1:18081/",
+        ] {
+            assert!(validate_api_proxy(good).is_ok(), "should accept {good}");
+        }
+    }
+
+    #[test]
+    fn api_proxy_rejects_anything_that_leaves_the_machine() {
+        // The bot token rides on every call this redirects, so a non-loopback host is the whole
+        // hazard the check exists for.
+        for bad in [
+            "http://discord.com",
+            "http://10.0.0.5:8080",
+            "http://example.test:18081",
+            "https://127.0.0.1:18081", // plaintext only — the mock serves nothing else
+            "127.0.0.1:18081",         // no scheme
+        ] {
+            assert!(validate_api_proxy(bad).is_err(), "should reject {bad}");
+        }
+    }
 
     #[test]
     fn release_config_parses_and_builds_manifest() {

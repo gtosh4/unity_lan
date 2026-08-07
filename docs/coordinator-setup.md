@@ -16,6 +16,12 @@ are needed only for the **live** coordinator; `fake` mode (bottom) needs none of
 3. **Privileged Gateway Intents** → enable **Server Members Intent** (required — reads roles +
    nicknames). **Save**. (Leave *Presence Intent* off.)
 
+   This is also what makes membership changes land promptly. The coordinator caches what Discord tells
+   it, and the member events delivered under this intent are what invalidate that cache — a role
+   change, someone leaving, someone joining. Without the intent nothing is wrong, but each change
+   waits out a cache window instead: seconds for a role change, up to one refresh cycle (≈15 min) for
+   somebody joining the server for the first time.
+
 ## C. OAuth2 public client + loopback redirect
 1. Left sidebar → **OAuth2**.
 2. Enable the **Public Client** flag. The engine runs OAuth2 **auth-code + PKCE** as a public

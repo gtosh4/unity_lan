@@ -17,14 +17,37 @@ use crate::roles::{MemberRoles, RoleSource};
 /// on a per-guild bucket).
 const ROLE_NAME_TTL: Duration = Duration::from_secs(300);
 
-/// How long a member's roles/username are trusted before a re-fetch. Kept short because this snapshot is
-/// the *authorization* input (which networks the user's roles grant), so a stale entry lets a poll
-/// (not gateway) revocation linger up to this long — well under the attestation TTL, and only ever
-/// caches a *successful* fetch (a user who left the guild / a failed lookup is never cached, so those
-/// aren't delayed). It collapses a single user's repeated `member()` calls — multiple devices, a
-/// reconnect storm, or several back-to-back version bumps within the window — into one REST call,
-/// easing the per-guild Discord rate-limit bucket that a herd hammers.
+/// How long a member's roles/username are trusted before a re-fetch. Kept short because this snapshot
+/// is the *authorization* input (which networks the user's roles grant), so a stale entry lets a poll
+/// (not gateway) revocation linger up to this long — well under the attestation TTL. It collapses a
+/// single user's repeated `member()` calls — multiple devices, a reconnect storm, or several
+/// back-to-back version bumps within the window — into one REST call, easing the per-guild Discord
+/// rate-limit bucket that a herd hammers.
+///
+/// This governs *present* answers only. A known-absent one is held far longer, and for the opposite
+/// reason — see [`MEMBER_ABSENT_TTL`]. A lookup that merely *failed* is still never cached at all.
 const MEMBER_TTL: Duration = Duration::from_secs(30);
+
+/// How long a **known-absent** member lookup is trusted — this account is not in that guild.
+///
+/// This is the deployment's dominant cost. `build_snapshot` walks *every* registered network for
+/// every device, and a user is in one or two guilds, so nearly every lookup is a 404 that will still
+/// be a 404 an hour later. Without caching those, each device pays one Discord call per guild in the
+/// whole deployment on every renewal, and the coordinator's ceiling becomes `devices × guilds`
+/// against a 50/s global limit — a shared instance getting slower for everyone each time an unrelated
+/// community registers a network.
+///
+/// A window this long is only safe because a *join* is observable: `Event::MemberAdd` drops the entry
+/// (`commands.rs`), so the normal path picks up a real join immediately. The TTL is the fallback for
+/// when the gateway missed it, and it fails **closed** — a user whose join went unseen is told they
+/// hold no networks, rather than being granted anything they shouldn't have. One renewal period is
+/// the natural size: any longer and a gateway gap outlives more than a single snapshot cycle.
+const MEMBER_ABSENT_TTL: Duration = Duration::from_secs(common::LONGPOLL_HOLD_SECS);
+
+/// How often the member cache is swept for expired entries. Sweeping is `O(size)` and the map is
+/// keyed per `(guild, user)`, so a deployment's worth of absent answers is bounded by
+/// `users × guilds` — big enough to be worth pruning, cheap enough to do rarely.
+const MEMBER_PRUNE_EVERY: Duration = MEMBER_ABSENT_TTL;
 
 /// How long a guild's own name is trusted before a re-fetch. This is the community label shown when
 /// no admin slug is set (the default), resolved once per `build_snapshot` per client — so an uncached
@@ -45,10 +68,26 @@ struct CachedName {
     name: String,
 }
 
-/// A member's roles/username with the instant fetched (for TTL expiry).
+/// A member lookup's result with the instant fetched (for TTL expiry). `roles: None` is a
+/// *known-absent* answer — this account is not in that guild — cached under [`MEMBER_ABSENT_TTL`]
+/// rather than [`MEMBER_TTL`].
 struct CachedMember {
     fetched: Instant,
-    roles: MemberRoles,
+    roles: Option<MemberRoles>,
+}
+
+impl CachedMember {
+    /// Absent answers are trusted far longer than present ones, so the TTL depends on which this is.
+    fn ttl(&self) -> Duration {
+        match self.roles {
+            Some(_) => MEMBER_TTL,
+            None => MEMBER_ABSENT_TTL,
+        }
+    }
+
+    fn fresh(&self) -> bool {
+        self.fetched.elapsed() < self.ttl()
+    }
 }
 
 /// Single-flight coalescing for cache-fill fetches. The TTL caches above collapse *repeated* misses
@@ -115,9 +154,11 @@ pub struct TwilightRoleSource {
     /// Per-guild role-name cache. One REST fetch populates every role in the guild, so multiple
     /// networks in the same guild — and a thundering herd of clients — share a single call.
     role_cache: Mutex<HashMap<u64, CachedRoles>>,
-    /// Per-`(guild, user)` member cache. Dedups repeated lookups of the *same* user (see
-    /// [`MEMBER_TTL`]); only positive results are stored.
+    /// Per-`(guild, user)` member cache, holding both present ([`MEMBER_TTL`]) and known-absent
+    /// ([`MEMBER_ABSENT_TTL`]) answers.
     member_cache: Mutex<HashMap<(u64, u64), CachedMember>>,
+    /// When the member cache was last swept — see [`MEMBER_PRUNE_EVERY`].
+    member_pruned: Mutex<Instant>,
     /// Per-guild name cache. Collapses the `guild_name` fetch a herd of clients each runs in
     /// `build_snapshot` into one call per guild per [`GUILD_NAME_TTL`]; only positive results stored.
     name_cache: Mutex<HashMap<u64, CachedName>>,
@@ -130,11 +171,31 @@ pub struct TwilightRoleSource {
 }
 
 impl TwilightRoleSource {
-    pub fn new(bot_token: String) -> Self {
+    /// `api_proxy` redirects REST at a local stand-in for Discord (`examples/mock_discord.rs`) for
+    /// the scaling probe. `Config` refuses it outside a debug build and off loopback — see
+    /// `config::validate_api_proxy`.
+    pub fn new(bot_token: String, api_proxy: Option<String>) -> Self {
+        let http = match api_proxy {
+            Some(url) => {
+                // twilight wants a bare `host:port`, not a URL — it builds `http://{proxy}/api/v10/…`
+                // itself. Handing it the `http://` prefix makes a hostname of the scheme, which
+                // resolves nowhere and costs a DNS timeout per call instead of failing outright.
+                // The config field stays a URL because that is what an operator would write.
+                let host = url
+                    .strip_prefix("http://")
+                    .unwrap_or(&url)
+                    .trim_end_matches('/')
+                    .to_string();
+                // `true` = talk plaintext HTTP to it, which is the only thing the mock serves.
+                Client::builder().token(bot_token).proxy(host, true).build()
+            }
+            None => Client::new(bot_token),
+        };
         Self {
-            http: Client::new(bot_token),
+            http,
             role_cache: Mutex::new(HashMap::new()),
             member_cache: Mutex::new(HashMap::new()),
+            member_pruned: Mutex::new(Instant::now()),
             name_cache: Mutex::new(HashMap::new()),
             name_flight: Flight::new(),
             role_flight: Flight::new(),
@@ -152,14 +213,32 @@ impl TwilightRoleSource {
         Some(entry.name.clone())
     }
 
-    /// The cached member roles for `(guild_id, user_id)` if still fresh, else `None` (fetch).
-    fn cached_member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles> {
+    /// The cached answer for `(guild_id, user_id)` if still fresh, else `None` (fetch). The two
+    /// levels of `Option` differ: the outer is cache hit/miss, the inner is member/not-a-member.
+    fn cached_member(&self, guild_id: u64, user_id: u64) -> Option<Option<MemberRoles>> {
         let cache = self.member_cache.lock().unwrap();
         let entry = cache.get(&(guild_id, user_id))?;
-        if entry.fetched.elapsed() >= MEMBER_TTL {
+        if !entry.fresh() {
             return None; // stale → force a re-fetch
         }
         Some(entry.roles.clone())
+    }
+
+    /// Record a lookup's outcome, sweeping expired entries at most once per [`MEMBER_PRUNE_EVERY`].
+    fn store_member(&self, guild_id: u64, user_id: u64, roles: Option<MemberRoles>) {
+        let mut cache = self.member_cache.lock().unwrap();
+        cache.insert(
+            (guild_id, user_id),
+            CachedMember {
+                fetched: Instant::now(),
+                roles,
+            },
+        );
+        let mut last = self.member_pruned.lock().unwrap();
+        if last.elapsed() >= MEMBER_PRUNE_EVERY {
+            cache.retain(|_, entry| entry.fresh());
+            *last = Instant::now();
+        }
     }
 
     /// Look up `role_id`'s name in the cache if the guild's snapshot is still fresh.
@@ -209,16 +288,36 @@ impl RoleSource for TwilightRoleSource {
         self.member_flight
             .dedup(
                 (guild_id, user_id),
-                || self.cached_member(guild_id, user_id).map(Some),
+                || self.cached_member(guild_id, user_id),
                 || async move {
-                    let member = self
+                    let response = match self
                         .http
                         .guild_member(Id::new(guild_id), Id::new(user_id))
                         .await
-                        .ok()?
-                        .model()
-                        .await
-                        .ok()?;
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            // Only Discord *saying* the member does not exist is an absence worth
+                            // remembering. A timeout, a 5xx or a revoked token says nothing about
+                            // membership, and caching one as "not a member" would lock the user out
+                            // of their networks for the whole absent-TTL over a transient blip.
+                            if matches!(
+                                e.kind(),
+                                twilight_http::error::ErrorType::Response { status, .. }
+                                    if status.get() == 404
+                            ) {
+                                self.store_member(guild_id, user_id, None);
+                            } else {
+                                tracing::debug!(
+                                    guild = guild_id,
+                                    user = user_id,
+                                    "member lookup failed, not cached: {e}"
+                                );
+                            }
+                            return None;
+                        }
+                    };
+                    let member = response.model().await.ok()?;
                     // The *username*, deliberately not `member.nick`. A guild nickname is arbitrary
                     // Unicode and not unique within a guild, so two members could set the same one
                     // and contend for a hostname; a username is globally unique and stable across
@@ -229,15 +328,7 @@ impl RoleSource for TwilightRoleSource {
                         username,
                         role_ids: member.roles.iter().map(|r| r.get()).collect(),
                     };
-                    // Cache only this successful fetch; a miss/failure is never cached, so a departed
-                    // or unresolvable member isn't pinned as absent.
-                    self.member_cache.lock().unwrap().insert(
-                        (guild_id, user_id),
-                        CachedMember {
-                            fetched: Instant::now(),
-                            roles: roles.clone(),
-                        },
-                    );
+                    self.store_member(guild_id, user_id, Some(roles.clone()));
                     Some(roles)
                 },
             )
@@ -292,15 +383,15 @@ mod tests {
 
     #[tokio::test]
     async fn forget_drops_the_cached_membership() {
-        let src = TwilightRoleSource::new("test-token".to_string());
+        let src = TwilightRoleSource::new("test-token".to_string(), None);
         src.member_cache.lock().unwrap().insert(
             (7, 42),
             CachedMember {
                 fetched: Instant::now(),
-                roles: MemberRoles {
+                roles: Some(MemberRoles {
                     username: "n".into(),
                     role_ids: vec![1],
-                },
+                }),
             },
         );
         // A fresh entry is served from cache; forgetting it forces the next lookup to re-fetch.
@@ -309,6 +400,52 @@ mod tests {
         assert!(src.cached_member(7, 42).is_none());
         // Forgetting an absent entry is harmless.
         src.forget(7, 42).await;
+    }
+
+    #[tokio::test]
+    async fn a_known_absence_is_cached_and_a_join_drops_it() {
+        let src = TwilightRoleSource::new("test-token".to_string(), None);
+        src.store_member(7, 42, None);
+        // Cache hit (outer `Some`) carrying "not a member" (inner `None`) — the answer the walk
+        // spends nearly all its Discord calls re-learning.
+        assert!(matches!(src.cached_member(7, 42), Some(None)));
+        // `Event::MemberAdd` routes here, so a real join is visible without waiting out the TTL.
+        src.forget(7, 42).await;
+        assert!(src.cached_member(7, 42).is_none());
+    }
+
+    #[tokio::test]
+    async fn an_absence_is_trusted_longer_than_a_membership() {
+        // The asymmetry is the point: a stale *present* answer keeps a revoked member on the mesh,
+        // while a stale *absent* one only makes a new member wait.
+        let present = CachedMember {
+            fetched: Instant::now(),
+            roles: Some(MemberRoles {
+                username: "n".into(),
+                role_ids: vec![1],
+            }),
+        };
+        let absent = CachedMember {
+            fetched: Instant::now(),
+            roles: None,
+        };
+        assert_eq!(present.ttl(), MEMBER_TTL);
+        assert_eq!(absent.ttl(), MEMBER_ABSENT_TTL);
+        assert!(absent.ttl() > present.ttl());
+    }
+
+    #[tokio::test]
+    async fn an_expired_absence_is_a_miss_not_an_answer() {
+        let src = TwilightRoleSource::new("test-token".to_string(), None);
+        src.member_cache.lock().unwrap().insert(
+            (7, 42),
+            CachedMember {
+                // Older than the absent window, so it must re-fetch rather than keep denying.
+                fetched: Instant::now() - MEMBER_ABSENT_TTL - Duration::from_secs(1),
+                roles: None,
+            },
+        );
+        assert!(src.cached_member(7, 42).is_none());
     }
 
     // Multi-threaded on purpose: the coordinator runs on a multi-thread runtime, and a current-thread

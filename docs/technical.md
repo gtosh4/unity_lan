@@ -45,7 +45,7 @@ unitylan/
 │   │   │   ├── acme.rs    # POST /acme-challenge: publish a device's DNS-01 values (names derived, never supplied)
 │   │   │   └── wake.rs    # per-device targeted wakes and herd jitter
 │   │   ├── roles.rs       # RoleSource trait: guild names + per-guild member roles
-│   │   ├── discord.rs     # twilight: bot-token role/username reads + per-guild role-name TTL cache
+│   │   ├── discord.rs     # twilight: bot-token role/username reads; role-name + member caches (§4.3)
 │   │   ├── commands.rs    # /unitylan network add|remove|list slash handler + gateway-event eviction
 │   │   ├── oauth.rs       # Discord OAuth2 PKCE config + token verify (binds pubkey→user)
 │   │   ├── presence.rs    # in-memory presence table + reaper (PRESENCE_TTL_SECS)
@@ -337,6 +337,20 @@ is never wrongly admitted.
 - `RoleSource` trait: `TwilightRoleSource` (live bot token, GUILD_MEMBERS intent) vs
   `FakeRoleSource` (config-seeded, offline). Per-guild role-name TTL cache in `discord.rs` dedups
   the `GET guild roles` bucket across the herd.
+- **Member lookups are cached asymmetrically**, because `build_snapshot` walks *every* registered
+  network for every device and a user is in one or two guilds — so nearly every lookup asks about a
+  guild the caller has never been in. A **present** answer is trusted 30s (`MEMBER_TTL`): it is the
+  authorization input, so a stale one keeps a revoked member on the mesh. A **known-absent** answer
+  is trusted a full renewal period (`MEMBER_ABSENT_TTL` = `LONGPOLL_HOLD_SECS`): a stale one only
+  makes a new member wait, and it removes guild count from the per-request cost entirely — without it
+  the deployment's ceiling is `devices × guilds` against Discord's 50/s global limit. Only a genuine
+  404 is cached as absence; a timeout or 5xx is not, or a blip would lock a user out for the window.
+- Freshness therefore rests on the gateway. `MemberUpdate`/`MemberRemove` drop the cached membership
+  and evict (`revoke`), and **`MemberAdd` drops the absent entry** — that arm is what lets the absent
+  window be long, so removing it would silently delay every join by up to `MEMBER_ABSENT_TTL`. All
+  three are GUILD_MEMBERS-intent events; without that intent a join or role change is invisible until
+  the relevant TTL lapses. Both directions fail closed: an unseen change denies access rather than
+  granting it.
 - Slash commands `/unitylan network add|remove|list` (Manage-Guild gated); role-loss eviction is an
   internal gateway-event handler (`revoke`), not a subcommand. `@everyone` is rejected as a network.
 
