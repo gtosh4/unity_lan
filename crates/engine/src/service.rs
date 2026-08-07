@@ -466,7 +466,7 @@ fn restart_after() -> Result<()> {
     // the service uses — otherwise a failed post-update restart is completely invisible (there is no
     // installer log and no e2e test for this path), which is exactly how an update that silently left
     // the engine down looked in the field.
-    init_service_logging();
+    init_service_logging(None);
     tracing::info!("post-update restart: waiting for the outgoing engine to exit");
 
     // Wait for the predecessor to fully exit before starting the service. Our stdin is a pipe whose
@@ -637,7 +637,7 @@ fn run_service() -> Result<()> {
         .nth(3)
         .unwrap_or_else(|| default_config_path().to_string_lossy().into_owned());
 
-    init_service_logging();
+    init_service_logging(Some(&cfg_path));
     tracing::info!(config = %cfg_path, "unitylan service starting");
 
     // The SCM launches services with CWD = System32, but defguard loads wireguard-nt by the
@@ -773,17 +773,24 @@ fn run_service() -> Result<()> {
     Ok(())
 }
 
-/// The engine service has no console, so append logs to a file next to the executable.
-fn init_service_logging() {
-    let log_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("unitylan-engine-service.log")))
+/// The engine service has no console, so log to a file. The service never reaches `main`'s
+/// subscriber — it is dispatched ahead of clap — so this is the only place a Windows service log
+/// comes from, and the only place `log_file` can take effect for it.
+///
+/// `config` is the service's own config path (absolute, baked in at install time). Its `log_file`
+/// wins, putting the log with the rest of the engine's state; without one we fall back to a file
+/// beside the executable, which is where every service log lived before `log_file` was honored here.
+/// The restart helper has no config to consult and always takes that fallback.
+fn init_service_logging(config: Option<&str>) {
+    let log_path = config
+        .and_then(|c| crate::config_log_file(Some(c)))
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.join("unitylan-engine-service.log")))
+        })
         .unwrap_or_else(|| PathBuf::from("unitylan-engine-service.log"));
-    if let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-    {
+    if let Ok(appender) = crate::util::rolling_log_appender(&log_path) {
         let _ = tracing_subscriber::fmt()
             .with_ansi(false)
             .with_env_filter(
@@ -791,7 +798,7 @@ fn init_service_logging() {
                     // Silence boringtun's HANDSHAKE(REKEY_TIMEOUT) WARN spam for down peers (see main.rs).
                     .unwrap_or_else(|_| "info,defguard_boringtun::noise::timers=error".into()),
             )
-            .with_writer(move || file.try_clone().expect("clone service log fd"))
+            .with_writer(appender)
             .try_init();
     }
 }

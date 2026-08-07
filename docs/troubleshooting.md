@@ -152,29 +152,29 @@ still usable.
 journalctl -u unitylan-engine -n 300 --no-pager
 ```
 
-**Windows.** The service has no console, so it logs to a file instead:
+**Windows.** The service has no console, so it logs to a file. Where depends on when you installed:
 
 ```
-C:\ProgramData\UnityLAN\engine.<date>.log
+C:\ProgramData\UnityLAN\engine.<date>.log                  installed at v0.6.2 or later
+C:\Program Files\UnityLAN\unitylan-engine-service.<date>.log   upgraded from an earlier version
 ```
 
-It rolls daily and keeps a week, so take today's file — or yesterday's, if the problem was then.
-
-Nothing is there on an install that predates v0.6.2, which had no log at all. Add a `log_file` line
-to `C:\Program Files\UnityLAN\engine.toml`:
+An upgrade keeps the config it has, and that config decides which. Either rolls daily and keeps a
+week, so take today's file — or yesterday's, if that's when the problem was. To move an upgraded
+install's log in with the rest of the engine's state, add to `C:\Program Files\UnityLAN\engine.toml`:
 
 ```toml
 log_file = "engine.log"
 ```
 
-then restart the service and reproduce the problem:
+then restart the service:
 
 ```
 sc.exe stop UnityLANEngine
 sc.exe start UnityLANEngine
 ```
 
-A relative name lands under `state_dir`, which is the `C:\ProgramData\UnityLAN` above.
+A relative name lands under `state_dir`, which is `C:\ProgramData\UnityLAN`.
 
 **Either platform, running by hand.** `RUST_LOG=debug` raises the level for one run — worth it when
 the default log says nothing useful. Don't set it to an empty string; the engine misbehaves.

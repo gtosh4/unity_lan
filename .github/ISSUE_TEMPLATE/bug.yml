@@ -87,7 +87,7 @@ body:
       label: Engine log around the failure
       description: |
         Linux: `journalctl -u unitylan-engine -n 300 --no-pager`
-        Windows: `C:\ProgramData\UnityLAN\engine.<date>.log` — see [collecting the engine log](https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md#collecting-the-engine-log).
+        Windows: under `C:\ProgramData\UnityLAN\` or `C:\Program Files\UnityLAN\`, depending on when you installed — see [collecting the engine log](https://github.com/gtosh4/unity_lan/blob/main/docs/troubleshooting.md#collecting-the-engine-log).
       render: text
     validations:
       required: false

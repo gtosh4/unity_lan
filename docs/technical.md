@@ -110,7 +110,7 @@ Actual crates in use (workspace + per-crate). ⭐ = load-bearing.
 | DNS | `hickory-proto` (engine + coord) | engine builds/serves `.internal` (per-OS hookup in `resolver/`); coordinator serves the `_acme-challenge` zone (`zone.rs`) |
 | ACME | `instant-acme` (engine) | DNS-01 issuance on `ring`, not the default `aws-lc-rs` (C deps the Windows cross-build avoids). Its `rcgen` feature mints the keypair + CSR locally |
 | self-update | `self-replace` · `sha2` · `semver` | verify + swap engine binary from signed manifest |
-| logging | `tracing` ⭐ | all binaries |
+| logging | `tracing` ⭐ · `tracing-appender` (engine) | all binaries; the engine's file sinks (`log_file`, and the Windows service, which has no console) roll daily and keep a week |
 
 ## 3. Shared Types & Wire Formats (`common`)
 

@@ -5,6 +5,43 @@ pub fn hex8(b: &[u8; 32]) -> String {
     b[..4].iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Days of rolled log file kept. Long enough to still hold the failure a user is only now getting
+/// round to reporting; short enough that a chronically flapping peer can't fill the disk of a box
+/// nobody logs into.
+const LOG_FILES_KEPT: usize = 7;
+
+/// A daily-rolling appender for `path`, which names a *pattern* rather than one file: `engine.log`
+/// is written as `engine.<date>.log` beside it, keeping [`LOG_FILES_KEPT`] days.
+///
+/// Both file-logging paths go through here — the `--log-file`/`log_file` sink in `main`, and the
+/// Windows service, which has no console and so has nowhere else to log at all. Nothing prunes
+/// these otherwise: before this they were plain appends that grew for the life of the install.
+pub fn rolling_log_appender(
+    path: &std::path::Path,
+) -> anyhow::Result<tracing_appender::rolling::RollingFileAppender> {
+    use anyhow::Context;
+
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .with_context(|| format!("log file {} has no file name", path.display()))?;
+    let builder = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(stem)
+        .max_log_files(LOG_FILES_KEPT);
+    let builder = match path.extension().and_then(|s| s.to_str()) {
+        Some(ext) => builder.filename_suffix(ext),
+        None => builder,
+    };
+    builder
+        .build(dir)
+        .with_context(|| format!("opening log file {}", path.display()))
+}
+
 /// Capability bits this daemon needs for things the kernel refuses without them. Linux only: nothing
 /// else in the tree has a capability model where root is not enough.
 #[cfg(target_os = "linux")]

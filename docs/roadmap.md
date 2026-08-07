@@ -589,8 +589,10 @@ elevated box. macOS `/etc/resolver` still deferred.
       runs with CWD=System32); `service uninstall` stops + deletes; `service run` is the SCM entry
       (dispatcher → control handler translating Stop/Shutdown into the daemon's shutdown signal). The
       daemon's shutdown was refactored off `ctrl_c()` onto a shared `shutdown::Shutdown` (watch-based,
-      fire-once) so console mode (Ctrl-C) and the service (SCM Stop) share one path. Service logs to
-      `unitylan-engine-service.log` next to the exe (no console). `WINDOWS_SERVICE_NAME` lives in
+      fire-once) so console mode (Ctrl-C) and the service (SCM Stop) share one path. Service logging
+      is `init_service_logging` (no console): the config's `log_file` if set — which is how a
+      packaged install lands in `%ProgramData%\UnityLAN` — else `unitylan-engine-service.log` next
+      to the exe, either way rolled daily by `tracing-appender`. `WINDOWS_SERVICE_NAME` lives in
       `common`. **GUI service control — removed.** M-win2 briefly gave the GUI an "engine" section that
       queried the SCM (`gui/src/svc.rs`) and could **start** the engine, backed by an install-time DACL
       relaxation. It was dropped: the engine is meant to stay **resident** (auto-start service in a
