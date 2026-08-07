@@ -79,6 +79,15 @@ pub async fn run_gateway(
                 )
                 .await;
             }
+            // A member joined. Nothing to evict, but both memos that would otherwise say "this
+            // account is not in that guild" have to go: the per-`(guild, user)` absent entry
+            // (`MEMBER_ABSENT_TTL`, `discord.rs`) and the holds-nothing-anywhere memo. Without this
+            // the join is invisible until those expire, which is the whole reason the absent cache
+            // can afford a long window.
+            Event::MemberAdd(m) => {
+                roleless.forget(m.user.id.get());
+                roles.forget(m.guild_id.get(), m.user.id.get()).await;
+            }
             // A member's roles changed: evict them from any network whose role they no longer hold.
             Event::MemberUpdate(m) => {
                 let held: HashSet<u64> = m.roles.iter().map(|r| r.get()).collect();

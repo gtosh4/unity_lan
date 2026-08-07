@@ -15,6 +15,16 @@ Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking
 
 ### Fixed
 
+- **A busy coordinator no longer gets slower every time an unrelated community joins it.** Working out
+  which networks you belong to meant asking Discord about you once for *every* community registered on
+  that coordinator — not just the ones you're in — on every device, every fifteen minutes. Discord caps
+  how fast anyone may ask, so the coordinator spent its whole allowance re-learning that you are not a
+  member of servers you have never heard of, and everyone's peer list took longer to arrive as more
+  communities signed up. It now remembers a "not a member" answer for as long as one refresh cycle, and
+  drops that memory the moment someone actually joins, so a join still takes effect immediately. On a
+  self-hosted coordinator with one community nothing changes; on a shared one the difference is large —
+  a 25-community deployment now answers a refresh in about a second where it previously took the better
+  part of a minute.
 - **Stopping the engine no longer hangs.** A stop had two ways to stall. If the engine was between
   attempts to reach an unreachable coordinator, it waited out the retry backoff — up to 45 seconds of a
   daemon that had nothing left to do. And if removing the WireGuard interface got stuck (a known wedge
