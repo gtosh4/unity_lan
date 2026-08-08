@@ -125,7 +125,9 @@ obtained by your own device, and a built-in TLS proxy so the app behind it needs
 
 Compared July 2026 from each project's public docs, on architecture rather than pricing or limits,
 which change. Something wrong or out of date? Open an issue and we'll fix it. The engineering-level
-comparison (NAT strategy, relay design, WG backends) is in [`docs/prior-art.md`](docs/prior-art.md).
+comparison (NAT strategy, relay design, WG backends) is in [`docs/prior-art.md`](docs/prior-art.md);
+who each alternative is actually for, split by use case, is in
+[`docs/positioning.md`](docs/positioning.md).
 
 ## How it works (the 60-second version)
 
