@@ -26,6 +26,9 @@ coordinator.toml
 
 # Packaging outputs & host-only tooling irrelevant to the coordinator build.
 /packaging/dist
+# ...except the musl coordinator CI stages here for `--build-arg BINARY_SRC=prebuilt`. Nothing else
+# from dist enters the context, so a stray .deb/.msi still can't be baked into an image layer.
+!/packaging/dist/unitylan-coordinator
 /scripts
 /docs
 /.claude

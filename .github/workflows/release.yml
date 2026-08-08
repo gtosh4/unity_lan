@@ -172,10 +172,43 @@ jobs:
             packaging/dist/SHA256SUMS-windows.txt
 
   # coordinator Docker image -> ghcr.io/<owner>/unitylan-coordinator
+  #
+  # The compile happens *here*, not inside the Dockerfile. An in-image `cargo build` is always cold
+  # on CI — BuildKit cache mounts live in buildkitd state a fresh runner doesn't have, and layer
+  # cache can't help either, since `COPY . .` sits above the build and every tag changes the
+  # context. That cost 7m14s of a 7m52s job. Cross-compiling to musl out here instead reuses the
+  # same warm `release` cache the other jobs restore, and the image build reduces to a file copy.
   image:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        # Restore-only, seeded on main — see the note in `packages` above.
+        with:
+          shared-key: release
+          save-if: false
+      # musl-gcc, for the C in bundled sqlite (libsqlite3-sys) and ring.
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build coordinator (musl)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl -p unitylan-coordinator
+          mkdir -p packaging/dist
+          cp target/x86_64-unknown-linux-musl/release/unitylan-coordinator packaging/dist/
+      # The runtime image is alpine, so a binary needing an absent loader would build a broken image
+      # that only fails when someone runs it. musl targets default to crt-static — assert we still
+      # got that. The test is negative on purpose: a static musl build reports "static-pie linked",
+      # not "statically linked", so matching the positive string fails on a perfectly good binary.
+      - name: Assert the binary needs no dynamic loader
+        run: |
+          file packaging/dist/unitylan-coordinator
+          if file packaging/dist/unitylan-coordinator | grep -q 'dynamically linked'; then
+            echo "::error::coordinator is dynamically linked — it will not run in the alpine image"
+            exit 1
+          fi
       - uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -189,6 +222,10 @@ jobs:
           context: .
           file: packaging/docker/coordinator.Dockerfile
           push: true
+          # Take the binary built above instead of compiling again inside the image. The Dockerfile
+          # still defaults to compiling, so `docker build` off a clean checkout needs no setup.
+          build-args: |
+            BINARY_SRC=prebuilt
           tags: |
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:${{ github.ref_name }}
             ghcr.io/${{ github.repository_owner }}/unitylan-coordinator:latest

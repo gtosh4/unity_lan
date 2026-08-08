@@ -72,10 +72,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # The musl target is for the coordinator image; see the step at the end of this job.
+          targets: ${{ matrix.os == 'ubuntu-latest' && 'x86_64-unknown-linux-musl' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: release
       - run: cargo build --release -p unitylan-engine -p unitylan-gui
+      # The coordinator image used to compile the coordinator inside the Dockerfile, from cold, every
+      # release — roughly seven minutes, and the single longest job in the release. release.yml now
+      # cross-compiles it here-style instead and copies the binary into the image, which only pays
+      # off if the artifacts are in this cache. Same target triple release.yml uses; musl-tools
+      # supplies the musl-gcc that bundled sqlite (libsqlite3-sys) and ring compile their C with.
+      - name: Warm the coordinator's musl build (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update && sudo apt-get install -y musl-tools
+          cargo build --release --target x86_64-unknown-linux-musl -p unitylan-coordinator
 
   # Dependency-vulnerability gate. Reads the ignore-list in .cargo/audit.toml (triaged, non-
   # applicable advisories, all in the GUI's transitive deps) and fails on any new advisory in the
