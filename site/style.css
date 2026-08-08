@@ -357,6 +357,10 @@ h3 { margin: 0 0 .45rem; font-size: 1.06rem; font-weight: 650; letter-spacing: -
    page sideways. The three-card grids are left alone: three across is already even. */
 #what .cards,
 #security .cards { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+/* `#why` is two cards, each carrying three paragraphs rather than one. At the 260px minimum they
+   squeeze to a column of narrow text; the same wider minimum holds them at two across on a desktop
+   and stacks them cleanly on a phone. */
+#why .cards { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
 
 .card {
   padding: 1.5rem;

@@ -158,28 +158,39 @@
 <section class="sec" id="why">
   <div class="wrap">
     <h2>What people use it for</h2>
-    <p class="sub">Three ways it tends to get used.</p>
+    <p class="sub">Two, mostly — and they want different things. Find yours, including the part
+    that might not suit you.</p>
     <div class="cards">
       <article class="card">
-        <h3>A game-server community</h3>
+        <p class="kicker">Playing together</p>
+        <h3>You run a game server for friends</h3>
         <p>Give a role you create — say <code>@regulars</code> — a network, and everyone holding it
-        can hit the Minecraft or Valheim box by name, with no port forwarding and no public
-        exposure. Take the role away and they're off the LAN. Games that only do LAN multiplayer
-        work the way they always did.</p>
+        can hit the Minecraft or Valheim box by name: <code>mc.bob.unity.internal</code>, typed
+        straight into the game. No port forwarding, nothing exposed to the internet, no “what's my
+        IP today?” in chat. Take the role away and they're off the LAN the next time their access
+        renews.</p>
+        <p><strong>Instead of:</strong> Hamachi or Radmin VPN (a network password that gets pasted
+        in Discord once and lives there forever), ZeroTier, or forwarding a port on your router and
+        hoping.</p>
+        <p><strong>The catch:</strong> games that find servers by scanning the local network won't
+        list yours — that discovery doesn't cross the mesh yet. Anything you can connect to by
+        typing an address works, which is most of them.</p>
       </article>
       <article class="card">
-        <h3>A homelab and a few trusted people</h3>
-        <p>Share the NAS, Jellyfin, a git server — with exactly the people who hold a role. No VPN
-        accounts to provision by hand, nothing published to the open internet, and no exit server
-        in the middle slowing traffic down. What a browser opens gets a
-        <a href="#https">real HTTPS certificate</a>: no warning page to click through, and no root
-        certificate to install on everybody's machines.</p>
-      </article>
-      <article class="card">
-        <h3>A small Discord-native project team</h3>
-        <p>You want a private LAN but don't want to stand up an IdP. You already have one: the
-        Discord server everyone's already in. Roles you already maintain become the access
-        control.</p>
+        <p class="kicker">Sharing what you host</p>
+        <h3>You self-host and want a few people on it</h3>
+        <p>Share the NAS, Jellyfin, Audiobookshelf, a git server — with exactly the people holding a
+        role. Nothing published to the open internet, no accounts to provision by hand, and no
+        server in the middle to slow it down or read it. What a browser opens gets a
+        <a href="#https">real HTTPS certificate</a>: no warning page, and no root certificate to
+        install on everybody's machines. Works the same for a project team that wants a private LAN
+        without standing up an identity provider — the Discord server is the directory.</p>
+        <p><strong>Instead of:</strong> Cloudflare Tunnel or Pangolin (both put your app on the
+        internet behind a login, and the traffic crosses their box or your rented VPS), or a reverse
+        proxy you expose and maintain yourself.</p>
+        <p><strong>The catch:</strong> everyone you share with installs the client, so this suits
+        people on laptops and desktops. It won't reach a TV or a streaming stick —
+        <a href="#honest">see below</a>, it's the one limit worth checking before you start.</p>
       </article>
     </div>
   </div>
@@ -341,8 +352,10 @@
 <section class="sec alt" id="compare">
   <div class="wrap">
     <h2>How it compares</h2>
-    <p class="sub">Same family, different answer to one question: who decides who's on the
-    network?</p>
+    <p class="sub">The first group are mesh VPNs — same family as UnityLAN, different answer to one
+    question: who decides who's on the network? The last two solve the neighbouring problem, putting
+    a web app in front of people without a client, and are here because that's the other thing
+    people arrive wanting.</p>
     <div class="table-scroll">
       <table class="cmp">
         <thead>
@@ -386,11 +399,33 @@
             <td>Vendor-hosted, closed source</td>
             <td>Proprietary, and leans heavily on the vendor's relays</td>
           </tr>
+          <tr>
+            <th scope="row">Cloudflare Tunnel</th>
+            <td>A Cloudflare Access policy — an email list, your SSO, or a one-time PIN</td>
+            <td>Vendor-hosted and closed source; free at small scale</td>
+            <td>Not a mesh. Every request crosses Cloudflare's network, where TLS is terminated —
+            so they can read what passes through</td>
+          </tr>
+          <tr>
+            <th scope="row">Pangolin</th>
+            <td>Users and roles in its dashboard, or your own identity provider over OIDC</td>
+            <td>Open source (AGPL, with a paid tier); you host it — on a VPS with a public IP,
+            which is required</td>
+            <td>Not a mesh. A reverse proxy on that VPS carries the traffic; visitors need nothing
+            installed, which is the whole point of it</td>
+          </tr>
         </tbody>
       </table>
     </div>
     <p class="table-hint" aria-hidden="true">Scroll the table sideways for the rest of the
     columns.</p>
+    <p class="aside"><strong>If you just want to share a web app.</strong> Cloudflare Tunnel and
+    Pangolin are built for exactly that, and they beat UnityLAN on one thing that may decide it:
+    your visitor opens a link and installs nothing — so it works on a TV, a games console, a
+    borrowed laptop. The trade is that the traffic goes through someone's box (Cloudflare's, or a
+    VPS you rent and keep patched), and the app ends up published on the internet behind a login.
+    UnityLAN never publishes it at all, and no third machine sees the bytes — but everyone who wants
+    in needs the client. Pick on that, not on features.</p>
     <p class="aside"><strong>Where they're ahead.</strong> Tailscale and NetBird are mature products
     with macOS and mobile clients, audited code, real ACL tooling and actual support behind them.
     UnityLAN is pre-1.0, Linux and Windows only, and maintained by one person. If you need something
@@ -437,6 +472,14 @@
       <dd>Linux and Windows on x86-64 are the current first-class targets — no ARM packages yet, so
       a Raspberry Pi means building from source. The data plane is portable userspace WireGuard by
       design, so the rest is planned — just not here yet.</dd>
+      <dt>Some devices won't ever run it — and that's not a roadmap item.</dt>
+      <dd>Everyone who wants on the mesh installs the client, which rules out hardware that doesn't
+      let you: a smart TV, a Roku or Chromecast, a games console, a printer, a friend's work laptop.
+      That matters most if the plan is sharing something like Jellyfin or Audiobookshelf with people
+      who watch on a TV — a phone or laptop will work once mobile lands, the TV won't. If reaching
+      appliances is the point, a reverse proxy published to the internet (or
+      <a href="#compare">Cloudflare Tunnel or Pangolin</a>) is the right tool, and you can run one
+      alongside this for that one service.</dd>
       <dt>Much of it was written with AI assistance.</dt>
       <dd>With a human in the loop directing the work, reviewing changes, and making the design
       decisions. If that gives you pause, that's fair — especially for software that touches your
