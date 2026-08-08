@@ -406,13 +406,51 @@ question is therefore not *may we reveal LAN addresses* but **to whom, and consi
 
 - **Peer-only (fail-closed).** Restrict ICE gathering to srflx + relay via `candidate_types`, and
   carry host candidates peer-direct per §9.4.2. Coordinator stays blind; the beacon's stated
-  property becomes true again. Costs ICE the host-candidate pair type — which for same-LAN peers is
-  exactly what §9.4.2 replaces, so the loss is small.
+  property becomes true again.
 - **Accept the exposure.** Let host candidates flow through the coordinator as ICE already does,
   drop the beacon's privacy claim, and reuse `IceParams` for non-ICE peers too. Cheaper, but
   concedes topology to the coordinator permanently.
 
 Either is defensible; they must not both be half-true, which is the state today.
+
+**The filter would in fact close it — checked, not assumed.** The obvious way for a
+`candidate_types` restriction to achieve nothing is the related-address field: srflx candidates
+carry `raddr`/`rport`, and if that held the private IP the leak would survive the filter. It
+doesn't. `gather_candidates_srflx` binds its STUN socket to `0.0.0.0:0` and sets
+`rel_addr: laddr.ip()` (`webrtc-ice-0.17.1/src/agent/agent_gather.rs:646,690`); on an unconnected
+`0.0.0.0`-bound socket that is `0.0.0.0`, so the marshaled candidate reads `raddr 0.0.0.0`
+(`candidate/candidate_base.rs:223`). The exposure is exactly the host candidates and nothing else.
+
+**The fail-closed option is cheaper than it sounds, because ICE barely serves this case.**
+`sync_ice` (`engine/src/daemon.rs`) starts an agent **only for peers in the bootstrap-stuck set** —
+`unpunchable && !connected` sustained past `BOOTSTRAP_STUCK_SECS`. A same-LAN peer hairpinning badly
+is *connected*, merely flaky, so it never enters that set and ICE never runs for it; the beacon
+serves those pairs. The host-candidate pair type is therefore **already not being used for same-LAN
+pairs today**, and most of the apparent cost is not being spent.
+
+**What filtering does cost, in descending order of realism:**
+
+1. **LAN-only mesh with no reachable STUN** — the real regression. No STUN and no relay co-member
+   leaves the agent with **zero** candidates, where host candidates alone would today pair two boxes
+   on one switch. This is a supported scenario (`CONTRIBUTING.md`'s local-mesh setup, the offline
+   e2e scripts), not a hypothetical. **It is also the ordering constraint:** filter only *after*
+   §9.4.2 lands, or the least-infrastructure deployment loses its last direct path with nothing
+   replacing it.
+2. **Same-LAN peers stuck for some other reason** — if the hairpin fails outright rather than
+   flapping, both go unpunchable, escalate to ICE, and host candidates are what would have paired
+   them. Filtering sends them to relay: a ciphertext hop through a third peer for two machines on
+   the same switch. Works, but ugly.
+3. **Multi-homed / dual-WAN hosts** — srflx gathering binds one `0.0.0.0` socket per STUN URL, so it
+   surfaces only the default-route path; host candidates are what expose alternate interfaces.
+   Bears on the dual-WAN reflexive churn already on file.
+4. **Unverified: the shared-netns e2e rigs.** Engines in one netns with the coordinator answering
+   STUN *should* get srflx ≈ their real address and still pair — a prediction, not a result. Run the
+   scripts before believing it.
+
+**A third option, weaker than it looks.** Keep host candidates but exchange them peer-direct over
+`p2p.rs` and inject with `add_remote_candidate` — full ICE capability, coordinator blind. It needs
+an established tunnel to carry the exchange, and stuck peers are precisely the ones without one. It
+helps §9.4.2's case (peers that *are* connected) and not ICE's.
 
 ## 10. Action list → roadmap
 
@@ -423,8 +461,11 @@ Either is defensible; they must not both be half-true, which is the state today.
    Scope evidence in §6.4; folds in the single-firewall-port and same-mapping wins of §9.2.1.
 5. **Userspace Windows (Wintun) + macOS/mobile clients** — Post-GA (unlocked by §6.1).
 6. **Peer-direct local-endpoint candidates** (§9.4) — extends the LAN beacon past one L2 segment
-   (cloud VPC, routed home LAN, VLANs). Blocked on the §9.4.3 privacy decision first: ICE already
+   (cloud VPC, routed home LAN, VLANs). Needs the §9.4.3 privacy stance settled first: ICE already
    ships host candidates to the coordinator, so the beacon's stated property is not currently true.
+   If the answer is fail-closed, this work **must land before** the ICE `candidate_types` filter —
+   a LAN-only mesh with no reachable STUN would otherwise be left with no direct path at all
+   (§9.4.3, cost 1).
 7. **Engine `/metrics` + handshake counters** (§9.2.3) — makes flap diagnosis a dashboard read.
 8. Non-data-plane borrows (§7) — tracked separately as they surface.
 
