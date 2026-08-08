@@ -3,6 +3,18 @@
 All notable changes to UnityLAN are documented here. Versions follow [Semantic
 Versioning](https://semver.org/); while on `0.x`, minor bumps may carry breaking changes.
 
+## Unreleased
+
+### Fixed
+
+- **The operator dashboard no longer goes blank once someone joins with no Discord server.** A user
+  who holds no role anywhere is meshed under a reserved personal scope, which the coordinator signs
+  with a key of its own. The dashboard then asked Discord for that scope's *server name* — and there
+  is no such server, so the request died on the spot: `/admin` loaded its shell and then showed
+  nothing, and `/metrics` returned an error to whatever was scraping it. Both now treat the personal
+  scope as what it is, a scope with no server behind it, and report the rest of the deployment
+  normally.
+
 ## v0.6.2
 
 ### Added

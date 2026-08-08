@@ -7,9 +7,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use twilight_http::Client;
+use twilight_model::id::marker::GuildMarker;
 use twilight_model::id::Id;
 
 use crate::roles::{MemberRoles, RoleSource};
+
+/// A guild id as Discord's REST API wants it, or `None` for the reserved personal scope.
+///
+/// [`PERSONAL_SCOPE`](common::attestation::PERSONAL_SCOPE) is `0`: a coordinator-side scope, not a
+/// guild. The deployment holds a signing key under it, so `0` turns up wherever guild ids are
+/// enumerated from the key table — `/admin/stats` and `/metrics` both walk it. Discord has no such
+/// guild, and twilight's `Id` is a `NonZeroU64`, so building one from `0` *panics* rather than
+/// 404ing. Every REST call in this module goes through here, so the personal scope reads as "no such
+/// guild" instead of taking down the request that asked about it.
+fn guild_of(guild_id: u64) -> Option<Id<GuildMarker>> {
+    (guild_id != common::attestation::PERSONAL_SCOPE).then(|| Id::new(guild_id))
+}
 
 /// How long a guild's role-name snapshot is trusted before a re-fetch. Network names track role
 /// renames on this cadence; short enough to feel live, long enough that a version-bump herd of
@@ -256,19 +269,13 @@ impl TwilightRoleSource {
 #[async_trait::async_trait]
 impl RoleSource for TwilightRoleSource {
     async fn guild_name(&self, guild_id: u64) -> Option<String> {
+        let id = guild_of(guild_id)?;
         self.name_flight
             .dedup(
                 guild_id,
                 || self.cached_name(guild_id).map(Some),
                 || async move {
-                    let guild = self
-                        .http
-                        .guild(Id::new(guild_id))
-                        .await
-                        .ok()?
-                        .model()
-                        .await
-                        .ok()?;
+                    let guild = self.http.guild(id).await.ok()?.model().await.ok()?;
                     // Cache only this successful fetch; a miss/failure is never cached, so a
                     // transient error isn't pinned for the whole window.
                     self.name_cache.lock().unwrap().insert(
@@ -285,16 +292,13 @@ impl RoleSource for TwilightRoleSource {
     }
 
     async fn member(&self, guild_id: u64, user_id: u64) -> Option<MemberRoles> {
+        let id = guild_of(guild_id)?;
         self.member_flight
             .dedup(
                 (guild_id, user_id),
                 || self.cached_member(guild_id, user_id),
                 || async move {
-                    let response = match self
-                        .http
-                        .guild_member(Id::new(guild_id), Id::new(user_id))
-                        .await
-                    {
+                    let response = match self.http.guild_member(id, Id::new(user_id)).await {
                         Ok(r) => r,
                         Err(e) => {
                             // Only Discord *saying* the member does not exist is an absence worth
@@ -343,6 +347,7 @@ impl RoleSource for TwilightRoleSource {
     }
 
     async fn role_name(&self, guild_id: u64, role_id: u64) -> Option<String> {
+        let id = guild_of(guild_id)?;
         // Key the gate by guild, not role: one fetch fills every role, so two callers wanting
         // different roles of the same guild coalesce onto it and each reads its own role back.
         self.role_flight
@@ -351,14 +356,7 @@ impl RoleSource for TwilightRoleSource {
                 || self.cached_role(guild_id, role_id),
                 || async move {
                     // Cache miss or stale: fetch the whole guild's roles in one call and repopulate.
-                    let roles = self
-                        .http
-                        .roles(Id::new(guild_id))
-                        .await
-                        .ok()?
-                        .model()
-                        .await
-                        .ok()?;
+                    let roles = self.http.roles(id).await.ok()?.model().await.ok()?;
                     let names: HashMap<u64, String> =
                         roles.into_iter().map(|r| (r.id.get(), r.name)).collect();
                     let name = names.get(&role_id).cloned();
@@ -400,6 +398,23 @@ mod tests {
         assert!(src.cached_member(7, 42).is_none());
         // Forgetting an absent entry is harmless.
         src.forget(7, 42).await;
+    }
+
+    /// The personal scope (`guild_id = 0`) is not a Discord guild, and asking about it must be an
+    /// empty answer rather than a panic: it has a signing key, so it appears in `guild_ids()`, and
+    /// `/admin/stats` and `/metrics` both look up a name for every id they find there. Building a
+    /// twilight `Id` from `0` panics, which took the whole request down as a 502 with the dashboard
+    /// dead for as long as anyone in the deployment held no role. No token or network is needed
+    /// here — a lookup that reached REST at all would already have failed the test's point.
+    #[tokio::test]
+    async fn the_personal_scope_is_no_guild_rather_than_a_panic() {
+        let src = TwilightRoleSource::new("test-token".to_string(), None);
+        let scope = common::attestation::PERSONAL_SCOPE;
+        assert!(src.guild_name(scope).await.is_none());
+        assert!(src.member(scope, 42).await.is_none());
+        assert!(src.role_name(scope, 7).await.is_none());
+        // Refused before any REST call, so nothing about the scope is cached either.
+        assert!(src.cached_member(scope, 42).is_none());
     }
 
     #[tokio::test]
